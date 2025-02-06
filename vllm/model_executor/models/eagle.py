@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -17,14 +19,35 @@ from vllm.sequence import IntermediateTensors
 from .utils import maybe_prefix
 
 
+class DummyInputLayerNorm(nn.Module):
+
+    def __init__(self, weight=None, bias=None):
+        super().__init__()
+        self.weight = nn.Parameter(weight) if weight is not None else None
+        self.bias = nn.Parameter(bias) if bias is not None else None
+
+    def forward(self, x):
+        return x
+
+
+class DummyOutputNorm(nn.Module):
+
+    def forward(self, x, residual):
+        if residual is None:
+            return x
+        else:
+            return x, residual
+
+
 class EAGLE(nn.Module):
     """This class implements the EAGLE draft model from the paper: https://arxiv.org/pdf/2401.15077
     Reference implementation: https://github.com/SafeAILab/EAGLE
     
     Differences from reference implementation:
     1. In reference, LlamaDecoderLayer implementation doesn't have 
-       input_layernorm for 1st decoder layer (https://github.com/SafeAILab/EAGLE/blob/7d065d084443fbfd386f88839efd7193c12be869/eagle/model/cnets.py#L427) 
-       but we do as HF implementation also does.
+       input_layernorm for 1st decoder layer (https://github.com/SafeAILab/EAGLE/blob/7d065d084443fbfd386f88839efd7193c12be869/eagle/model/cnets.py#L427).
+       Following this approach, our implementation also disables
+       the input_layernorm for the first decoder layer.
     2. We allow any decoder layer to be used in EAGLE whereas in reference 
        decoder layer is fixed to be LlamaDecoderLayer.
     3. We have an optional token_map which reduces draft vocab to most 
@@ -36,7 +59,7 @@ class EAGLE(nn.Module):
        in the draft checkpoint (using key token_map). Also, the draft config
        needs to have truncated_vocab_size (=k) as an attribute."""
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.config = config
@@ -46,9 +69,19 @@ class EAGLE(nn.Module):
 
         self.model = model_cls(vllm_config=vllm_config,
                                prefix=maybe_prefix(prefix, "model"))
+
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
                             bias=getattr(self.config, "eagle_fc_bias", False))
+
+        # Modify layer normalization and residual connections as suggested
+        # in the EAGLE framework: https://github.com/SafeAILab/EAGLE
+        # While weights and biases are generally not needed,
+        # they are retained here to support certain unit tests
+        # (e.g., spec_decode/e2e/test_eagle_correctness.py).
+        self.model.model.layers[0].input_layernorm = DummyInputLayerNorm(
+            weight=self.model.model.layers[0].input_layernorm.weight)
+        self.model.model.norm = DummyOutputNorm()
 
         self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size
@@ -78,6 +111,9 @@ class EAGLE(nn.Module):
     def sampler(self):
         return self.model.sampler
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -86,11 +122,14 @@ class EAGLE(nn.Module):
         attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        tok_embeds = self.model.model.embed_tokens(input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings(input_ids)
+
         inputs_embeds = self.fc(
-            torch.cat([tok_embeds, previous_hidden_states], dim=-1))
+            torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
         inputs_embeds[positions == 0] = 0  # masking inputs at position=0
 
@@ -100,7 +139,8 @@ class EAGLE(nn.Module):
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
-            intermediate_tensors=intermediate_tensors)
+            intermediate_tensors=intermediate_tensors,
+        )
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

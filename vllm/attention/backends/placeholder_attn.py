@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type
@@ -11,9 +13,10 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.multimodal import MultiModalPlaceholderMap
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
+    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
+                                          ModelInputForGPUWithSamplingMetadata)
 
-# Placeholder attention backend for models like Mamba and embedding models that
+# Placeholder attention backend for models like Mamba and pooling models that
 # lack attention.
 
 
@@ -139,6 +142,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
+            enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_decode_query_len=0,
@@ -172,6 +176,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_decode_query_len=self.max_decode_query_len,
@@ -186,11 +191,77 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
+        """
+        Update metadata in-place to advance one decode step.
+        """
+        # When using cudagraph, the num_seqs is padded to the next captured
+        # batch sized, but num_queries tracks the actual number of requests in
+        # the batch. For --enforce-eager mode, num_seqs == num_queries
+        if num_seqs != num_queries:
+            assert num_seqs > num_queries
+            assert self.use_cuda_graph
+
+        assert not turn_prefills_into_decodes, \
+            ("Multi-Step + Chunked-Prefill is not supported for attention-free"
+             "models. turn_prefills_into_decodes is a "
+             "Multi-Step + Chunked-Prefill specific parameter.")
+
+        assert self.seq_lens is not None
+        assert self.max_decode_seq_len == max(self.seq_lens)
+
+        assert self.num_prefills == 0
+        assert self.num_prefill_tokens == 0
+        assert self.num_decode_tokens == num_seqs
+
+        assert self.seq_lens is not None
+        assert len(self.seq_lens) == num_seqs
+        assert self.seq_lens_tensor is not None
+        assert self.seq_lens_tensor.shape == (num_seqs, )
+        assert self.max_query_len == 1
+        assert self.max_prefill_seq_len == 0
+
+        assert self.query_start_loc is not None
+        assert self.query_start_loc.shape == (num_queries + 1, )
+        assert self.seq_start_loc is not None
+        assert self.seq_start_loc.shape == (num_seqs + 1, )
+
+        assert self.context_lens_tensor is not None
+        assert self.context_lens_tensor.shape == (num_queries, )
+
+        assert self.block_tables is not None
+
+        # Update query lengths. Note that we update only queries and not seqs,
+        # since tensors may be padded due to captured cuda graph batch size
+        for i in range(num_queries):
+            self.seq_lens[i] += 1
+        self.max_decode_seq_len = max(self.seq_lens)
+
+        # Update sequences, masking off entries greater than num_queries
+        device = self.seq_lens_tensor.device
+        mask = torch.arange(self.seq_lens_tensor.size(0),
+                            device=device) < num_queries
+        self.seq_lens_tensor += mask.to(self.seq_lens_tensor.dtype)
+        if sampled_token_ids is not None:
+            model_input.input_tokens.masked_scatter_(
+                mask, sampled_token_ids[:num_queries])
+
 
 class PlaceholderAttentionMetadataBuilder(
         AttentionMetadataBuilder[PlaceholderAttentionMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+
+    def prepare(self):
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
         self.curr_seq_lens: List[int] = []
@@ -200,9 +271,6 @@ class PlaceholderAttentionMetadataBuilder(
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
-
-        self.input_builder = input_builder
-        self.runner = input_builder.runner
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -316,6 +384,7 @@ class PlaceholderAttentionMetadataBuilder(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=True,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,

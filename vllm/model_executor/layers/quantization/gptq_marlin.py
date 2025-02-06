@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import torch
@@ -11,7 +13,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.kernels import (
+from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -23,6 +25,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -133,6 +136,9 @@ class GPTQMarlinConfig(QuantizationConfig):
         group_size = quant_config.get("group_size")
         sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
+
+        if not current_platform.is_cuda():
+            return False
 
         if quant_method != "gptq":
             return False
@@ -313,16 +319,22 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         num_experts: int,
         hidden_size: int,
-        intermediate_size: int,
+        intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        # Currently assuming is_k_full is always True
-        # (input size per partition is the same as full input size)
-        # Supports only sym for now (no zp)
+        intermediate_size_full = extra_weight_attrs.pop(
+            "intermediate_size_full")
+
+        self.is_k_full = (not self.quant_config.desc_act) or (
+            intermediate_size_per_partition == intermediate_size_full)
+
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
-            scales_size2 = intermediate_size // self.quant_config.group_size
+            w2_scales_size = (intermediate_size_full
+                              if self.quant_config.desc_act else
+                              intermediate_size_per_partition)
+            scales_size2 = (w2_scales_size // self.quant_config.group_size)
             strategy = FusedMoeWeightScaleSupported.GROUP.value
         else:
             scales_size13 = 1
@@ -338,7 +350,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 hidden_size // self.quant_config.pack_factor,
-                2 * intermediate_size,
+                2 * intermediate_size_per_partition,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -349,7 +361,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         w2_qweight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size // self.quant_config.pack_factor,
+                intermediate_size_per_partition //
+                self.quant_config.pack_factor,
                 hidden_size,
                 dtype=torch.int32,
             ),
@@ -361,7 +374,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         w13_scales = torch.nn.Parameter(
             torch.empty(num_experts,
                         scales_size13,
-                        2 * intermediate_size,
+                        2 * intermediate_size_per_partition,
                         dtype=torch.half),
             requires_grad=False,
         )
@@ -377,11 +390,15 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
+        # dont shard the w2 scales when running act order
+        set_weight_attrs(w2_scales,
+                         {"load_full_w2": self.quant_config.desc_act})
         # up_proj scales
         w13_qzeros = torch.nn.Parameter(
             torch.empty(num_experts,
                         scales_size13,
-                        2 * intermediate_size // self.quant_config.pack_factor,
+                        2 * intermediate_size_per_partition //
+                        self.quant_config.pack_factor,
                         dtype=params_dtype),
             requires_grad=False,
         )
@@ -397,6 +414,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
+        # dont shard the w2 scales when running act order
+        set_weight_attrs(w2_qzeros,
+                         {"load_full_w2": self.quant_config.desc_act})
         w13_g_idx = torch.nn.Parameter(
             torch.empty(
                 num_experts,
@@ -410,7 +430,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         w2_g_idx = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size,
+                intermediate_size_per_partition,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -431,7 +451,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size,
+                intermediate_size_per_partition,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -528,11 +548,13 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
-        renormalize: bool = True,
+        renormalize: bool,
         use_grouped_topk: bool = False,
-        num_expert_group: Optional[int] = None,
         topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # The input must currently be float16
         orig_dtype = x.dtype
@@ -546,7 +568,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             renormalize=renormalize,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
-            custom_routing_function=None)
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
 
         return torch.ops.vllm.fused_marlin_moe(
             x,
@@ -562,4 +586,4 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.quant_config.quant_type.size_bits,
-        ).to(orig_dtype)
+            is_k_full=self.is_k_full).to(orig_dtype)

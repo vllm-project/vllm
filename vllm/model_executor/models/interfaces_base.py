@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import (TYPE_CHECKING, List, Optional, Protocol, Type, Union,
                     overload, runtime_checkable)
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
@@ -19,9 +20,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# The type of HF config
-C_co = TypeVar("C_co", bound=PretrainedConfig, covariant=True)
-
 # The type of hidden states
 # Currently, T = torch.Tensor for all models except for Medusa
 # which has T = List[torch.Tensor]
@@ -34,7 +32,8 @@ T_co = TypeVar("T_co", default=torch.Tensor, covariant=True)
 
 
 @runtime_checkable
-class VllmModel(Protocol[C_co, T_co]):
+class VllmModel(Protocol[T_co]):
+    """The interface required for all models in vLLM."""
 
     def __init__(
         self,
@@ -71,7 +70,7 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
                         and issubclass(model, nn.Module)):
         logger.warning(
             "The model (%s) is missing "
-            "vLLM-specific keywords from its initializer: %s",
+            "vLLM-specific keywords from its `forward` method: %s",
             model,
             missing_kws,
         )
@@ -96,7 +95,8 @@ def is_vllm_model(
 
 
 @runtime_checkable
-class VllmModelForTextGeneration(VllmModel[C_co, T], Protocol[C_co, T]):
+class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
+    """The interface required for all generative models in vLLM."""
 
     def compute_logits(
         self,
@@ -141,7 +141,8 @@ def is_text_generation_model(
 
 
 @runtime_checkable
-class VllmModelForEmbedding(VllmModel[C_co, T], Protocol[C_co, T]):
+class VllmModelForPooling(VllmModel[T], Protocol[T]):
+    """The interface required for all pooling models in vLLM."""
 
     def pooler(
         self,
@@ -153,23 +154,22 @@ class VllmModelForEmbedding(VllmModel[C_co, T], Protocol[C_co, T]):
 
 
 @overload
-def is_embedding_model(
-        model: Type[object]) -> TypeIs[Type[VllmModelForEmbedding]]:
+def is_pooling_model(model: Type[object]) -> TypeIs[Type[VllmModelForPooling]]:
     ...
 
 
 @overload
-def is_embedding_model(model: object) -> TypeIs[VllmModelForEmbedding]:
+def is_pooling_model(model: object) -> TypeIs[VllmModelForPooling]:
     ...
 
 
-def is_embedding_model(
+def is_pooling_model(
     model: Union[Type[object], object],
-) -> Union[TypeIs[Type[VllmModelForEmbedding]], TypeIs[VllmModelForEmbedding]]:
+) -> Union[TypeIs[Type[VllmModelForPooling]], TypeIs[VllmModelForPooling]]:
     if not is_vllm_model(model):
         return False
 
     if isinstance(model, type):
-        return isinstance(model, VllmModelForEmbedding)
+        return isinstance(model, VllmModelForPooling)
 
-    return isinstance(model, VllmModelForEmbedding)
+    return isinstance(model, VllmModelForPooling)

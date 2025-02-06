@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 import dataclasses
 from contextlib import contextmanager
@@ -5,6 +7,7 @@ from contextlib import contextmanager
 
 @dataclasses.dataclass
 class CompilationCounter:
+    num_models_seen: int = 0
     num_graphs_seen: int = 0
     # including the splitting ops
     num_piecewise_graphs_seen: int = 0

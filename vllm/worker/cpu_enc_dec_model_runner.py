@@ -1,9 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, cast
 
 import torch
 
 from vllm.attention import AttentionMetadata
+from vllm.forward_context import set_forward_context
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
@@ -34,6 +37,7 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
             "input_positions": self.input_positions,
             "encoder_input_tokens": self.encoder_input_tokens,
             "encoder_input_positions": self.encoder_input_positions,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -303,7 +307,9 @@ class CPUEncoderDecoderModelRunner(
             intermediate_tensors,
         }
 
-        hidden_states = model_executable(**execute_model_kwargs)
+        with set_forward_context(model_input.attn_metadata, self.vllm_config,
+                                 model_input.virtual_engine):
+            hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states,

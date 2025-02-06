@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM for BART models using greedy sampling.
 
 Run `pytest tests/models/encoder_decoder/language/test_bart.py`.
@@ -13,8 +14,6 @@ from ....conftest import (DecoderPromptType, ExplicitEncoderDecoderPrompt,
                           HfRunner, VllmRunner)
 from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
-
-MODELS = ["facebook/bart-base", "facebook/bart-large-cnn"]
 
 
 def vllm_to_hf_output(
@@ -170,7 +169,14 @@ def run_test(
     )
 
 
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param("facebook/bart-base",
+                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param("facebook/bart-large-cnn"),
+    ],
+)
 @pytest.mark.parametrize("dtype", ["float", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])

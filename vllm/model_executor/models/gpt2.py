@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
 # Copyright 2023 The vLLM team.
@@ -16,7 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-2 model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -84,7 +86,8 @@ class GPT2Attention(nn.Module):
                               self.head_dim,
                               scale=self.scale,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -197,7 +200,10 @@ class GPT2Model(nn.Module):
         assert not config.scale_attn_by_inverse_layer_idx
         assert not config.reorder_and_upcast_attn
         self.embed_dim = config.hidden_size
-        self.wte = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
+        self.wte = VocabParallelEmbedding(config.vocab_size,
+                                          self.embed_dim,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.wte")
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
@@ -208,6 +214,9 @@ class GPT2Model(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.n_embd))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.wte(input_ids)
 
     def forward(
         self,
@@ -220,7 +229,7 @@ class GPT2Model(nn.Module):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
-                inputs_embeds = self.wte(input_ids)
+                inputs_embeds = self.get_input_embeddings(input_ids)
             position_embeds = self.wpe(position_ids)
             hidden_states = inputs_embeds + position_embeds
         else:
@@ -242,11 +251,7 @@ class GPT2Model(nn.Module):
 
 class GPT2LMHeadModel(nn.Module, SupportsPP):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -255,18 +260,20 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         self.transformer = GPT2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(
                                          prefix, "transformer"))
+        self.lm_head = ParallelLMHead(self.config.vocab_size,
+                                      self.config.hidden_size,
+                                      quant_config=quant_config,
+                                      prefix=f"{prefix}.lm_head")
         if self.config.tie_word_embeddings:
-            self.lm_head = self.transformer.wte
-        else:
-            self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                          self.config.hidden_size)
+            self.lm_head = self.lm_head.tie_weights(self.transformer.wte)
+
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.wte(input_ids)
+        return self.transformer.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -299,18 +306,17 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if "lm_head.weight" in name:
-                # GPT-2 ties the weights of the embedding layer and the final
-                # linear layer.
-                continue
             if ".attn.bias" in name or ".attn.masked_bias" in name:
                 # Skip attention mask.
                 # NOTE: "c_attn.bias" should not be skipped.
                 continue
-            if not name.startswith("transformer."):
+            if not name.startswith("transformer.") and not name.startswith(
+                    "lm_head"):
                 name = "transformer." + name
 
             if is_pp_missing_parameter(name, self):
@@ -329,3 +335,5 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
 # intel-openmp provides additional performance improvement vs. openmp
 # tcmalloc provides better memory allocation efficiency, e.g, holding memory in caches to speed up access of commonly-used objects.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install intel-openmp
+    pip install intel-openmp==2025.0.1
 
 ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/lib/libiomp5.so"
 
@@ -61,5 +61,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 WORKDIR /workspace/
 
 RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
+
+# install development dependencies (for testing)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -e tests/vllm_test_utils
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]

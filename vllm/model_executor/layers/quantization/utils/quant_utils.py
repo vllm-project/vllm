@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 """This file is used for /tests and /benchmarks"""
-from typing import List, Optional
+from types import MappingProxyType
+from typing import List, Mapping, Optional, Tuple
 
 import numpy
 import torch
@@ -11,13 +13,119 @@ from vllm.scalar_type import ScalarType, scalar_types
 SUPPORTED_GPTQ_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
 SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
-# Note: this is a hack. We should update each model to register the
-# stacked params and get it from there instead in a future PR.
-# fused_name: List[shard_name]
-FUSED_LAYER_NAME_MAPPING = {
-    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    "gate_up_proj": ["gate_proj", "up_proj"]
-}
+
+# Normalize the group_shape to the full extent for any dims that are -1
+def _normalize_quant_group_shape(x: torch.Tensor, group_shape: Tuple[int,
+                                                                     int]):
+    # -1 means full extent
+    return (group_shape[0] if group_shape[0] > 0 else x.shape[-2],
+            group_shape[1] if group_shape[1] > 0 else x.shape[-1])
+
+
+# Useful when treating N-dimensional group scaling as extended numpy-style
+# broadcasting in numpy simply stretches dimensions with an extent of 1 to match
+# the target shape by repeating the data along that dimension (broadcasting)
+# , we extend these semantics to say if the extent of a dimension in the
+# source shape is not 1 and does not match the target shape we repeat each
+# element along that dimension src_shape[dim] // target_shape[dim] times
+# example if we have:
+#       a = [[1, 2], and target_shape = (2, 4)
+#            [3, 4]]
+# then we would expand a to:
+#       a = [[1, 1, 2, 2],
+#            [3, 3, 4, 4]]
+# NOTE this function this function does not explicitly broadcast dimensions
+# with an extent of 1, since this can be done implicitly by pytorch
+def group_broadcast(t, shape):
+    for i, s in enumerate(shape):
+        if t.shape[i] != s and t.shape[i] != 1:
+            assert s % t.shape[i] == 0
+            t = t.unsqueeze(i + 1)\
+                .expand(*t.shape[:i+1], s // t.shape[i], *t.shape[i+1:])\
+                .flatten(i, i + 1)
+    return t
+
+
+# Quantize assuming once scale per group of elements with shape group_shape,
+# example group shapes:
+#  * (-1, -1)   for per-tensor quantization
+#  * (1, -1)    for per-row quantization
+#  * (-1, 1)    for per-column quantization
+#  * (128, 128) for 128x128 deepseek style block quantization
+#  * (1, 128)   for deepseek style activation quantization
+#               (i.e. per-token-per-group)
+def scaled_quantize(
+    x: torch.Tensor,
+    group_shape: Tuple[int, int],
+    quant_dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    group_shape = _normalize_quant_group_shape(x, group_shape)
+    assert quant_dtype.is_floating_point, \
+        "currently `scaled_quantize` only supports floating point dtypes " \
+        "but could be extended to support other dtypes"
+
+    finfo = torch.finfo(quant_dtype)
+
+    # Reshape (M, N) into (BLK_M, BLOCK_SIZE_M, BLK_N, BLOCK_SIZE_N)
+    assert x.ndim == 2
+    assert x.shape[0] % group_shape[0] == 0 and x.shape[1] % group_shape[1] == 0
+    blk_m, blk_n = x.shape[0] // group_shape[0], x.shape[1] // group_shape[1]
+    x_blkd = x.reshape(blk_m, group_shape[0], blk_n, group_shape[1])
+
+    # Permute to (BLK_M, BLK_N, BLOCK_SIZE_M, BLOCK_SIZE_N)
+    x_blkd_permd = x_blkd.permute(0, 2, 1, 3)
+    # Flatten to (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N)
+    x_blkd_permd = x_blkd_permd.flatten(start_dim=2)
+
+    # Compute scales
+    min_val, max_val = x_blkd_permd.aminmax(dim=-1)
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
+    scale = finfo.max / amax
+
+    # Apply scale and convert form:
+    # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
+    x_scl_sat = (x_blkd_permd * scale.unsqueeze(-1))\
+        .clamp(min=finfo.min, max=finfo.max)\
+        .reshape(blk_m, blk_n, group_shape[0], group_shape[1])\
+        .permute(0, 2, 1, 3)\
+        .reshape(x.shape)
+
+    return x_scl_sat.to(quant_dtype).contiguous(), scale.float().reciprocal()
+
+
+# inverses `scaled_quantize`
+def scaled_dequantize(
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    group_shape: Optional[Tuple[int, int]] = None,
+    out_dtype: torch.dtype = torch.float32,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if group_shape is not None:
+        group_shape = _normalize_quant_group_shape(x_q, group_shape)
+
+    if x_s.ndim == 0:  # scalar
+        x_s = x_s.unsqueeze(-1).unsqueeze(-1)  # convert to (1, 1) tensor
+    if x_s.ndim == 1:
+        if group_shape is None:
+            raise AssertionError(
+                "if x_s is 1D tensor, group_shape must be provided otherwise "
+                "its ambiguous which dimension to broadcast x_s to")
+        # unsqueeze the scales for the dimension where we want to broadcast
+        # across the full extent
+        if group_shape[0] == x_q.shape[-2]:
+            x_s = x_s.unsqueeze(-2)
+        elif group_shape[1] == x_q.shape[-1]:
+            x_s = x_s.unsqueeze(-1)
+        else:
+            raise AssertionError(
+                "if x_s is a vector we should be broadcasting it to the full "
+                "extent of one of the dimensions")
+
+    if group_shape is not None:
+        assert x_s.shape[-1] == x_q.shape[-1] // group_shape[1]
+        assert x_s.shape[-2] == x_q.shape[-2] // group_shape[0]
+    x_s = group_broadcast(x_s.to(torch.float32), x_q.shape)
+    return (x_q.to(torch.float32) * x_s).to(out_dtype)
 
 
 def pack_quantized_values_into_int32(w_q: torch.Tensor,
@@ -63,14 +171,23 @@ def unpack_quantized_values_into_int32(w_q: torch.Tensor,
     return res.permute(inv_perm)
 
 
-def is_layer_skipped(prefix: str, ignored_layers: List[str]) -> bool:
+def is_layer_skipped(
+    prefix: str,
+    ignored_layers: List[str],
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
+) -> bool:
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
     proj_name = prefix.split(".")[-1]
-    if proj_name in FUSED_LAYER_NAME_MAPPING:
+
+    # Fused layers like gate_up_proj or qkv_proj will not be fused
+    # in the safetensors checkpoint. So, we convert the name
+    # from the fused version to unfused + check to make sure that
+    # each shard of the fused layer has the same scheme.
+    if proj_name in fused_mapping:
         shard_prefixes = [
             prefix.replace(proj_name, shard_proj_name)
-            for shard_proj_name in FUSED_LAYER_NAME_MAPPING[proj_name]
+            for shard_proj_name in fused_mapping[proj_name]
         ]
 
         is_skipped = None
@@ -126,11 +243,14 @@ def permute_rows(q_w: torch.Tensor,
 
 def quantize_weights(w: torch.Tensor,
                      quant_type: ScalarType,
-                     group_size: int,
+                     group_size: Optional[int],
                      zero_points: bool = False,
                      ref_zero_points_after_scales: bool = False):
     assert quant_type.is_integer(), \
         "Floating point quantization may work but has not been tested"
+    assert not zero_points or group_size is not None, \
+        "to have group zero points, group_size must be provided "\
+        "(-1 group_size is channelwise)"
 
     orig_device = w.device
     orig_type = w.dtype
@@ -140,10 +260,9 @@ def quantize_weights(w: torch.Tensor,
 
     if group_size == -1:
         group_size = size_k
-    assert group_size <= size_k
 
     # Reshape to [groupsize, -1]
-    if group_size < size_k:
+    if group_size is not None and group_size < size_k:
         w = w.reshape((-1, group_size, size_n))
         w = w.permute(1, 0, 2)
         w = w.reshape((group_size, -1))
@@ -155,18 +274,20 @@ def quantize_weights(w: torch.Tensor,
     max_q_val = quant_type.max()
     min_q_val = quant_type.min()
 
-    if zero_points:
-        assert not quant_type.is_signed() and quant_type.max() > 0
-        w_s = (max_val - min_val).clamp(min=1e-5) / quant_type.max()
-        maybe_w_zp = torch.round(torch.abs(min_val / w_s)) \
-            .clamp(min_q_val, max_q_val).int()
-    else:
-        # If the bias is such that there are no possible negative/positive
-        #  values, set the max value to inf to avoid divide by 0
-        w_s = torch.max(
-            abs(max_val / (max_q_val if max_q_val != 0 else torch.inf)),
-            abs(min_val / (min_q_val if min_q_val != 0 else torch.inf)))
-        maybe_w_zp = None
+    w_s = torch.Tensor([1.0]).to(w.device)  # unscaled case
+    maybe_w_zp = None
+    if group_size is not None:
+        if zero_points:
+            assert not quant_type.is_signed() and quant_type.max() > 0
+            w_s = (max_val - min_val).clamp(min=1e-5) / quant_type.max()
+            maybe_w_zp = torch.round(torch.abs(min_val / w_s)) \
+                .clamp(min_q_val, max_q_val).int()
+        else:
+            # If the bias is such that there are no possible negative/positive
+            #  values, set the max value to inf to avoid divide by 0
+            w_s = torch.max(
+                abs(max_val / (max_q_val if max_q_val != 0 else torch.inf)),
+                abs(min_val / (min_q_val if min_q_val != 0 else torch.inf)))
 
     # Quantize
     w_q = torch.round(w / w_s).int() + (maybe_w_zp if zero_points else 0)
@@ -176,7 +297,7 @@ def quantize_weights(w: torch.Tensor,
     # For some kernels (namely Machete) the zero-points are applied after the
     # scales are applied, for this case computing the reference in similar way
     # allows us to use tighter error tolerances in our unit tests.
-    if ref_zero_points_after_scales and zero_points:
+    if ref_zero_points_after_scales and maybe_w_zp is not None:
         w_ref = w_q.to(orig_type) * w_s - maybe_w_zp.to(orig_type) * w_s
     else:
         w_ref = (w_q - (maybe_w_zp if zero_points else 0)).to(orig_type) * w_s
@@ -185,7 +306,7 @@ def quantize_weights(w: torch.Tensor,
         w_q += quant_type.bias
 
     # Restore original shapes
-    if group_size < size_k:
+    if group_size is not None and group_size < size_k:
 
         def reshape_w(w):
             w = w.reshape((group_size, -1, size_n))
@@ -195,17 +316,16 @@ def quantize_weights(w: torch.Tensor,
 
         w_q = reshape_w(w_q)
         w_ref = reshape_w(w_ref)
+        w_s = w_s.reshape((-1, size_n)).contiguous()
 
-    w_s = w_s.reshape((-1, size_n)).contiguous()
-
-    if zero_points:
+    if maybe_w_zp is not None:
         maybe_w_zp = maybe_w_zp.reshape((-1, size_n)).contiguous()
         maybe_w_zp = maybe_w_zp.to(device=orig_device)
 
     return (
         w_ref.to(device=orig_device),
         w_q.to(device=orig_device),
-        w_s.to(device=orig_device),
+        w_s if group_size is not None else None,
         maybe_w_zp,
     )
 

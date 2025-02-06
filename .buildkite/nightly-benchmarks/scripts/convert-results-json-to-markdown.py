@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import os
 from pathlib import Path
@@ -156,6 +158,18 @@ if __name__ == "__main__":
     processed_results_json = results_to_json(latency_results,
                                              throughput_results,
                                              serving_results)
+
+    for df in [latency_results, serving_results, throughput_results]:
+        if df.empty:
+            continue
+
+        # Sort all dataframes by their respective "Test name" columns
+        df.sort_values(by="Test name", inplace=True)
+
+        # The GPUs sometimes come in format of "GPUTYPE\nGPUTYPE\n...",
+        # we want to turn it into "8xGPUTYPE"
+        df["GPU"] = df["GPU"].apply(
+            lambda x: f"{len(x.split('\n'))}x{x.split('\n')[0]}")
 
     # get markdown tables
     latency_md_table = tabulate(latency_results,

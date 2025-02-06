@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -8,10 +10,10 @@ if TYPE_CHECKING:
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
-    VLLM_INSTANCE_ID: Optional[str] = None
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
@@ -29,9 +31,10 @@ if TYPE_CHECKING:
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
+    VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
-    VLLM_USE_FLASHINFER_SAMPLER: bool = False
+    VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
     VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
     VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
@@ -46,10 +49,11 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL: bool = True
+    VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
-    VLLM_VIDEO_FETCH_TIMEOUT: int = 15
+    VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -67,12 +71,22 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_TORCH_COMPILE_LEVEL: int = 0
-    VLLM_TORCH_COMPILE_CONFIG: Optional[str] = None
-    VLLM_CUSTOM_OPS: List[str] = []
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
-    VLLM_ENABLE_V1_MULTIPROCESSING: bool = False
+    VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
+    VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
+    VLLM_DISABLE_COMPILE_CACHE: bool = False
+    K_SCALE_CONSTANT: int = 200
+    V_SCALE_CONSTANT: int = 100
+    VLLM_SERVER_DEV_MODE: bool = False
+    VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
+    VLLM_MLA_DISABLE: bool = False
+    VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
+    VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
+    VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
+    VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
+    VLLM_RAY_PER_WORKER_GPUS: float = 1.0
+    VLLM_RAY_BUNDLE_INDICES: str = ""
 
 
 def get_default_cache_root():
@@ -87,6 +101,12 @@ def get_default_config_root():
         "XDG_CONFIG_HOME",
         os.path.join(os.path.expanduser("~"), ".config"),
     )
+
+
+def maybe_convert_int(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    return int(value)
 
 
 # The begin-* and end* here are used by the documentation generator
@@ -116,7 +136,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
-    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")),
+    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
+        os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
@@ -156,7 +177,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If you are using multi-node inference, you should set this differently
     # on each node.
     'VLLM_HOST_IP':
-    lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
+    lambda: os.getenv('VLLM_HOST_IP', ""),
 
     # used in distributed environment to manually set the communication port
     # Note: if VLLM_PORT is set, and some code asks for multiple ports, the
@@ -176,11 +197,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE":
     lambda: os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true",
-
-    # Instance id represents an instance of the VLLM. All processes in the same
-    # instance should have the same instance id.
-    "VLLM_INSTANCE_ID":
-    lambda: os.environ.get("VLLM_INSTANCE_ID", None),
 
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL":
@@ -206,28 +222,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
 
+    # Force vllm to use a specific flash-attention version (2 or 3), only valid
+    # when using the flash-attention backend.
+    "VLLM_FLASH_ATTN_VERSION":
+    lambda: maybe_convert_int(os.environ.get("VLLM_FLASH_ATTN_VERSION", None)),
+
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
-    "VLLM_TORCH_COMPILE_LEVEL":
-    lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
-
-    # Path to the config file for torch compile
-    "VLLM_TORCH_COMPILE_CONFIG":
-    lambda: os.environ.get("VLLM_TORCH_COMPILE_CONFIG", None),
-
-    # Fine-grained control over which custom ops to enable/disable.
-    # Use 'all' to enable all, 'none' to disable all.
-    # Also specify a list of custom op names to enable (prefixed with a '+'),
-    # or disable (prefixed with a '-').
-    # Examples:
-    # - 'all,-op1' to enable all except op1
-    # - 'none,+op1,+op2' to enable only op1 and op2
-    # By default, all custom ops are enabled when running without Inductor
-    # and disabled when running with Inductor (compile_level >= Inductor).
-    "VLLM_CUSTOM_OPS":
-    lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -282,6 +285,14 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_PREFIX":
     lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
 
+    # if set, vllm will call logits processors in a thread pool with this many
+    # threads. This is useful when using custom logits processors that either
+    # (a) launch additional CUDA kernels or (b) do significant CPU-bound work
+    # while not holding the python GIL, or both.
+    "VLLM_LOGITS_PROCESSOR_THREADS":
+    lambda: int(os.getenv("VLLM_LOGITS_PROCESSOR_THREADS", "0"))
+    if "VLLM_LOGITS_PROCESSOR_THREADS" in os.environ else None,
+
     # Trace function calls
     # If set to 1, vllm will trace function calls
     # Useful for debugging
@@ -300,7 +311,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER":
-    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_SAMPLER", "0"))),
+    lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
+    if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ else None,
 
     # If set, vllm will force flashinfer to use tensor cores;
     # otherwise will use heuristic based on model architecture.
@@ -360,6 +372,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
+                 ),
+
+    # If the env var is set, it enables GPU communication overlap
+    # (experimental feature) in Ray's compiled DAG. This flag is ignored if
+    # VLLM_USE_RAY_COMPILED_DAG is not set.
+    "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
                  ),
 
     # Use dedicated multiprocess context for workers.
@@ -475,9 +494,84 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 
+    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
+    "K_SCALE_CONSTANT":
+    lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
+
+    # Divisor for dynamic value scale factor calculation for FP8 KV Cache
+    "V_SCALE_CONSTANT":
+    lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0"))),
+    lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))),
+    "VLLM_LOG_BATCHSIZE_INTERVAL":
+    lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
+    "VLLM_DISABLE_COMPILE_CACHE":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
+
+    # If set, vllm will run in development mode, which will enable
+    # some additional endpoints for developing and debugging,
+    # e.g. `/reset_prefix_cache`
+    "VLLM_SERVER_DEV_MODE":
+    lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
+
+    # Controls the maximum number of requests to handle in a
+    # single asyncio task when processing per-token outputs in the
+    # V1 AsyncLLM interface. It is applicable when handling a high
+    # concurrency of streaming requests.
+    # Setting this too high can result in a higher variance of
+    # inter-message latencies. Setting it too low can negatively impact
+    # TTFT and overall throughput.
+    "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "128")),
+
+    # If set, vLLM will disable the MLA attention optimizations.
+    "VLLM_MLA_DISABLE":
+    lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+
+    # Flag that can control whether or not we perform matrix-absorption for MLA
+    # decode, i.e. absorb W_UK into W_Q/W_UK and W_UV into W_O, absorbing the
+    # matrices reduces the runtime FLOPs needed to compute MLA but requires
+    # storing more weights, W_Q_UK and W_UV_O, so can increase memory usage,
+    # the is enabled by default
+    "VLLM_MLA_PERFORM_MATRIX_ABSORPTION":
+    lambda: bool(int(os.getenv("VLLM_MLA_PERFORM_MATRIX_ABSORPTION", "1"))),
+
+    # When running MLA with matrix-absorption enabled and fp8 quantized weights
+    # we perform the matrix-absorption in float32 precision, after the matrices
+    # are absorbed we requantize the weights back to fp8, this flag can be used
+    # to disable the requantization step, and instead convert the absorbed
+    # matrices to match the activation type. This can lead to higher memory and
+    # compute usage but better preserves the accuracy of the original model.
+    "VLLM_MLA_DISABLE_REQUANTIZATION":
+    lambda: bool(int(os.getenv("VLLM_MLA_DISABLE_REQUANTIZATION", "0"))),
+
+    # If set, vLLM will use the Triton implementation of moe_align_block_size,
+    # i.e. moe_align_block_size_triton in fused_moe.py.
+    "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
+                 ),
+
+    # Number of GPUs per worker in Ray, if it is set to be a fraction,
+    # it allows ray to schedule multiple actors on a single GPU,
+    # so that users can colocate other actors on the same GPUs as vLLM.
+    "VLLM_RAY_PER_WORKER_GPUS":
+    lambda: float(os.getenv("VLLM_RAY_PER_WORKER_GPUS", "1.0")),
+
+    # Bundle indices for Ray, if it is set, it can control precisely
+    # which indices are used for the Ray bundle, for every worker.
+    # Format: comma-separated list of integers, e.g. "0,1,2,3"
+    "VLLM_RAY_BUNDLE_INDICES":
+    lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
+
+    # When on a Nvidia GPU aligns single entries (within a page) so they are 256
+    # byte aligned for better performance, this increases the memory usage of
+    # the cache. Currently this only affects MLA that results in non-256
+    # byte aligned entries. This matches the alignment the CUDA runtime uses
+    # for all allocations. Currently this primarily affects MLA, for most other
+    # models the alignment is already naturally aligned to 256 bytes.
+    "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
+    lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
 }
 
 # end-env-vars-definition

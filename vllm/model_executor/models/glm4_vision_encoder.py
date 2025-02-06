@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/THUDM/GLM-4
 """Inference-only GLM-4v model visual encoder compatible with THUDM weights."""
@@ -8,6 +10,7 @@ import torch
 from torch import nn
 from torch.nn import LayerNorm
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -41,7 +44,8 @@ class PatchEmbedding(nn.Module):
         torch.Tensor
             Transformed tensor with shape (B, L, D)
         """
-        images = images.to(self.proj.weight.device)
+        images = images.to(device=self.proj.weight.device,
+                           dtype=self.proj.weight.dtype)
         x = self.proj(images)
         x = x.flatten(2).transpose(1, 2)
         cls_token = self.cls_embedding.expand(x.shape[0], -1, -1)
@@ -56,6 +60,7 @@ class Attention(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -69,34 +74,25 @@ class Attention(nn.Module):
             self.head_dim,
             config.num_heads,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
 
+        self.attn = MultiHeadAttention(self.num_heads_per_rank, self.head_dim,
+                                       self.scale)
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, L, _ = x.shape
         qkv, _ = self.query_key_value(x)  # B, L, 3 * H * D
         q, k, v = qkv.chunk(3, dim=-1)
-        q = q.reshape(B, L, self.num_heads_per_rank,
-                      self.head_dim).permute(0, 2, 1, 3)  # B, H, L, D
-        k = k.reshape(B, L, self.num_heads_per_rank,
-                      self.head_dim).permute(0, 2, 1, 3)  # B, H, L, D
-        v = v.reshape(B, L, self.num_heads_per_rank,
-                      self.head_dim).permute(0, 2, 1, 3)  # B, H, L, D
 
-        out = torch.nn.functional.scaled_dot_product_attention(q,
-                                                               k,
-                                                               v,
-                                                               attn_mask=None,
-                                                               dropout_p=0.,
-                                                               is_causal=False)
-
-        output, _ = self.dense(out.transpose(1, 2).view(B, L, -1))
+        out = self.attn(q, k, v)
+        output, _ = self.dense(out)
         output = self.output_dropout(output)
         return output
 
@@ -107,6 +103,7 @@ class MLP(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         super().__init__()
         self.config = config
@@ -115,11 +112,13 @@ class MLP(nn.Module):
             config.hidden_size,
             config.intermediate_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc2",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -135,12 +134,17 @@ class TransformerLayer(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         super().__init__()
         self.input_layernorm = LayerNorm(config.hidden_size,
                                          eps=config.layer_norm_eps)
-        self.attention = Attention(config, quant_config=quant_config)
-        self.mlp = MLP(config, quant_config=quant_config)
+        self.attention = Attention(config,
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.attention")
+        self.mlp = MLP(config,
+                       quant_config=quant_config,
+                       prefix=f"{prefix}.mlp")
         self.post_attention_layernorm = LayerNorm(config.hidden_size,
                                                   eps=config.layer_norm_eps)
 
@@ -161,11 +165,14 @@ class Transformer(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         super().__init__()
         self.layers = nn.ModuleList([
-            TransformerLayer(config, quant_config=quant_config)
-            for _ in range(config.num_hidden_layers)
+            TransformerLayer(config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(config.num_hidden_layers)
         ])
 
     def forward(self, hidden_states):
@@ -181,6 +188,7 @@ class GLU(nn.Module):
         config,
         in_features,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         """
         The original implementation is the same as:
@@ -222,7 +230,8 @@ class GLU(nn.Module):
         self.linear_proj = ReplicatedLinear(in_features,
                                             config.hidden_size,
                                             bias=False,
-                                            quant_config=quant_config)
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.linear_proj")
         self.norm1 = nn.LayerNorm(config.hidden_size)
         self.act1 = nn.GELU()
         self.act2 = SiluAndMul()
@@ -230,12 +239,15 @@ class GLU(nn.Module):
         self.merged_proj = MergedColumnParallelLinear(
             config.hidden_size, [config.ffn_hidden_size] * 2,
             bias=False,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.merged_proj")
 
-        self.dense_4h_to_h = RowParallelLinear(config.ffn_hidden_size,
-                                               config.hidden_size,
-                                               bias=False,
-                                               quant_config=quant_config)
+        self.dense_4h_to_h = RowParallelLinear(
+            config.ffn_hidden_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h")
 
     def forward(self, x):
         x, _ = self.linear_proj(x)
@@ -252,15 +264,18 @@ class EVA2CLIPModel(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         super().__init__()
         vision_config = Namespace(**config.vision_config)
         self.patch_embedding = PatchEmbedding(vision_config)
         self.transformer = Transformer(vision_config,
-                                       quant_config=quant_config)
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.transformer")
         self.linear_proj = GLU(config,
                                in_features=config.hidden_size,
-                               quant_config=quant_config)
+                               quant_config=quant_config,
+                               prefix=f"{prefix}.linear_proj")
         self.conv = nn.Conv2d(in_channels=vision_config.hidden_size,
                               out_channels=config.hidden_size,
                               kernel_size=2,

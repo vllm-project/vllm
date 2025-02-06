@@ -5,73 +5,61 @@
 
 #include "machete_mm_kernel.cuh"
 #include "cutlass_extensions/torch_utils.hpp"
+#include "core/scalar_type.hpp"
 
 namespace machete {
 
-struct PyTorchArguments {
+struct MMArgs {
   torch::Tensor const& A;
   torch::Tensor const& B;
-  c10::optional<torch::Tensor> const& scales;
-  c10::optional<torch::Tensor> const& zeros;
-  c10::optional<int64_t> group_size;
-  c10::optional<torch::Tensor> const& C;
-  c10::optional<double> alpha;
-  c10::optional<double> beta;
-  c10::optional<std::string> schedule;
+  vllm::ScalarType const& b_type;
+  std::optional<at::ScalarType> const& maybe_out_type;
+  std::optional<torch::Tensor> const& maybe_group_scales;
+  std::optional<torch::Tensor> const& maybe_group_zeros;
+  std::optional<int64_t> maybe_group_size;
+  std::optional<torch::Tensor> const& maybe_channel_scales;
+  std::optional<torch::Tensor> const& maybe_token_scales;
+  std::optional<std::string> maybe_schedule;
 };
 
+struct SupportedSchedulesArgs {
+  at::ScalarType a_type;
+  vllm::ScalarType b_type;
+  std::optional<at::ScalarType> maybe_group_scales_type;
+  std::optional<at::ScalarType> maybe_group_zeros_type;
+  std::optional<at::ScalarType> maybe_channel_scales_type;
+  std::optional<at::ScalarType> maybe_token_scales_type;
+  std::optional<at::ScalarType> maybe_out_type;
+};
+
+torch::Tensor mm_dispatch(MMArgs args);
+
+std::vector<std::string> supported_schedules_dispatch(
+    SupportedSchedulesArgs args);
+
 template <typename MacheteKernel>
-torch::Tensor run_impl(PyTorchArguments args) {
+torch::Tensor run_impl(MMArgs args) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(args.A));
 
   auto device = args.A.device();
   auto stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  using EleA = typename MacheteKernel::ElementA;
-  using EleB = typename MacheteKernel::ElementB;
-  using EleC = typename MacheteKernel::ElementC;
-  using EleD = typename MacheteKernel::ElementD;
-  using EleScale = typename MacheteKernel::ElementS;
-  using EleZero = typename MacheteKernel::ElementZ;
-
-  using StrideA = typename MacheteKernel::StrideA;
-  using StrideC = typename MacheteKernel::StrideC;
-  using StrideD = typename MacheteKernel::StrideD;
-  using StrideS = typename MacheteKernel::StrideS;
-  using StrideZ = typename MacheteKernel::StrideZ;
 
   int M = args.A.size(0);
   int N = args.B.size(1);
   int K = args.A.size(1);
 
   // Allocate output
-  torch::Tensor D =
-      torch::empty({M, N}, torch::TensorOptions()
-                               .dtype(equivalent_scalar_type_v<EleD>)
-                               .device(device));
-
-  auto const &A = args.A, &B = args.B;
-  auto const &C = args.C, &scales = args.scales, &zeros = args.zeros;
-
-  auto layout_A = make_cute_layout<StrideA>(A, "A");
-  auto layout_D = make_cute_layout<StrideD>(D, "D");
-  auto layout_C = maybe_make_cute_layout<StrideC>(C, "C");
-  auto layout_S = maybe_make_cute_layout<StrideS>(scales, "scales");
-  auto layout_Z = maybe_make_cute_layout<StrideZ>(zeros, "zeros");
-
-  auto A_ptr = static_cast<EleA const*>(A.const_data_ptr());
-  auto B_ptr = static_cast<EleB const*>(B.const_data_ptr());
-  auto D_ptr = static_cast<EleD*>(D.mutable_data_ptr());
-  auto C_ptr = static_cast<EleC const*>(C ? C->const_data_ptr() : nullptr);
-  auto S_ptr =
-      static_cast<EleScale const*>(scales ? scales->const_data_ptr() : nullptr);
-  auto Z_ptr =
-      static_cast<EleZero const*>(zeros ? zeros->const_data_ptr() : nullptr);
+  torch::Tensor D = torch::empty(
+      {M, N},
+      torch::TensorOptions()
+          .dtype(equivalent_scalar_type_v<typename MacheteKernel::ElementD>)
+          .device(device));
 
   auto arguments = MacheteKernel::create_arguments(
-      stream, A_ptr, layout_A, B_ptr, D_ptr, layout_D, C_ptr, layout_C, S_ptr,
-      layout_S, Z_ptr, layout_Z, args.alpha.value_or(1), args.beta.value_or(0),
-      args.group_size);
+      stream,  //
+      args.A, args.B, D, args.maybe_group_scales, args.maybe_group_zeros,
+      args.maybe_group_size, args.maybe_channel_scales,
+      args.maybe_token_scales);
   TORCH_CHECK(MacheteKernel::can_implement(arguments),
               "Machete kernel cannot be run with these arguments");
 
@@ -82,14 +70,6 @@ torch::Tensor run_impl(PyTorchArguments args) {
   MacheteKernel::run(arguments, workspace.mutable_data_ptr(), stream);
 
   return D;
-};
-
-template <typename ElementA, typename ElementB, typename ElementD = ElementA,
-          typename AccumulatorT = float, typename ScaleT = ElementA,
-          typename ZeroT = ElementA>
-struct GemmDispatcher {
-  static torch::Tensor dispatch(PyTorchArguments args);
-  static std::vector<std::string> supported_schedules();
 };
 
 };  // namespace machete

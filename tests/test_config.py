@@ -1,15 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+
+from dataclasses import asdict
+
 import pytest
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, PoolerConfig
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
 
-@pytest.mark.parametrize(("model_id", "expected_task"), [
-    ("facebook/opt-125m", "generate"),
-    ("intfloat/e5-mistral-7b-instruct", "embedding"),
-])
-def test_auto_task(model_id, expected_task):
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_task"),
+    [
+        ("facebook/opt-125m", "generate", "generate"),
+        ("intfloat/e5-mistral-7b-instruct", "pooling", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
+    ],
+)
+def test_auto_task(model_id, expected_runner_type, expected_task):
     config = ModelConfig(
         model_id,
         task="auto",
@@ -20,12 +30,12 @@ def test_auto_task(model_id, expected_task):
         dtype="float16",
     )
 
+    assert config.runner_type == expected_runner_type
     assert config.task == expected_task
 
 
 @pytest.mark.parametrize(("model_id", "bad_task"), [
-    ("facebook/opt-125m", "embedding"),
-    ("intfloat/e5-mistral-7b-instruct", "generate"),
+    ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
 ])
 def test_incorrect_task(model_id, bad_task):
     with pytest.raises(ValueError, match=r"does not support the .* task"):
@@ -108,7 +118,7 @@ def test_get_sliding_window():
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    minilm_model_config = ModelConfig(
+    model_config = ModelConfig(
         model_id,
         task="auto",
         tokenizer=model_id,
@@ -119,39 +129,31 @@ def test_get_pooling_config():
         revision=None,
     )
 
-    minilm_pooling_config = minilm_model_config._init_pooler_config(
-        pooling_type=None,
-        pooling_norm=None,
-        pooling_returned_token_ids=None,
-        pooling_softmax=None,
-        pooling_step_tag_id=None)
+    pooling_config = model_config._init_pooler_config(None)
+    assert pooling_config is not None
 
-    assert minilm_pooling_config.pooling_norm
-    assert minilm_pooling_config.pooling_type == PoolingType.MEAN.name
+    assert pooling_config.normalize
+    assert pooling_config.pooling_type == PoolingType.MEAN.name
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    minilm_model_config = ModelConfig(model_id,
-                                      task="auto",
-                                      tokenizer=model_id,
-                                      tokenizer_mode="auto",
-                                      trust_remote_code=False,
-                                      seed=0,
-                                      dtype="float16",
-                                      revision=None)
+    model_config = ModelConfig(model_id,
+                               task="auto",
+                               tokenizer=model_id,
+                               tokenizer_mode="auto",
+                               trust_remote_code=False,
+                               seed=0,
+                               dtype="float16",
+                               revision=None)
 
-    minilm_pooling_config = minilm_model_config._init_pooler_config(
-        pooling_type='CLS',
-        pooling_norm=True,
-        pooling_returned_token_ids=None,
-        pooling_softmax=None,
-        pooling_step_tag_id=None)
+    override_config = PoolerConfig(pooling_type='CLS', normalize=True)
 
-    assert minilm_pooling_config.pooling_norm
-    assert minilm_pooling_config.pooling_type == PoolingType.CLS.name
+    pooling_config = model_config._init_pooler_config(override_config)
+    assert pooling_config is not None
+    assert asdict(pooling_config) == asdict(override_config)
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
@@ -281,3 +283,73 @@ def test_uses_mrope(model_id, uses_mrope):
     )
 
     assert config.uses_mrope == uses_mrope
+
+
+def test_generation_config_loading():
+    model_id = "Qwen/Qwen2.5-1.5B-Instruct"
+
+    # When set generation_config to None, the default generation config
+    # will not be loaded.
+    model_config = ModelConfig(model_id,
+                               task="auto",
+                               tokenizer=model_id,
+                               tokenizer_mode="auto",
+                               trust_remote_code=False,
+                               seed=0,
+                               dtype="float16",
+                               generation_config=None)
+    assert model_config.get_diff_sampling_param() == {}
+
+    # When set generation_config to "auto", the default generation config
+    # should be loaded.
+    model_config = ModelConfig(model_id,
+                               task="auto",
+                               tokenizer=model_id,
+                               tokenizer_mode="auto",
+                               trust_remote_code=False,
+                               seed=0,
+                               dtype="float16",
+                               generation_config="auto")
+
+    correct_generation_config = {
+        "repetition_penalty": 1.1,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+    }
+
+    assert model_config.get_diff_sampling_param() == correct_generation_config
+
+    # The generation config could be overridden by the user.
+    override_generation_config = {"temperature": 0.5, "top_k": 5}
+
+    model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        generation_config="auto",
+        override_generation_config=override_generation_config)
+
+    override_result = correct_generation_config.copy()
+    override_result.update(override_generation_config)
+
+    assert model_config.get_diff_sampling_param() == override_result
+
+    # When generation_config is set to None and override_generation_config
+    # is set, the override_generation_config should be used directly.
+    model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        generation_config=None,
+        override_generation_config=override_generation_config)
+
+    assert model_config.get_diff_sampling_param() == override_generation_config

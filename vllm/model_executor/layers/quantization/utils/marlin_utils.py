@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Tuple
 
 import numpy
@@ -303,7 +305,8 @@ def apply_gptq_marlin_linear(
                                   size_k=input_size_per_partition,
                                   is_k_full=is_k_full,
                                   has_zp=False,
-                                  use_fp32_reduce=use_fp32_reduce)
+                                  use_fp32_reduce=use_fp32_reduce,
+                                  is_zp_float=False)
 
     if bias is not None:
         output.add_(bias)  # In-place add
@@ -340,7 +343,8 @@ def apply_awq_marlin_linear(
                                   size_k=input_size_per_partition,
                                   is_k_full=True,
                                   has_zp=True,
-                                  use_fp32_reduce=use_fp32_reduce)
+                                  use_fp32_reduce=use_fp32_reduce,
+                                  is_zp_float=False)
 
     if bias is not None:
         output.add_(bias)  # In-place add

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -20,7 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GraniteMoe model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -164,7 +166,8 @@ class GraniteMoeAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -277,6 +280,9 @@ class GraniteMoeModel(nn.Module):
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -284,9 +290,13 @@ class GraniteMoeModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
-            hidden_states = self.embed_tokens(input_ids)
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
             hidden_states *= self.embedding_multiplier
             residual = None
         else:
@@ -340,6 +350,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.config = config
         self.lora_config = lora_config
+        self.quant_config = quant_config  # Required by MixtralForCausalLM
 
         self.model = GraniteMoeModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
@@ -366,6 +377,9 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.sampler = get_sampler()
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -373,9 +387,11 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+                                   attn_metadata, intermediate_tensors,
+                                   inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -407,17 +423,18 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         new_weights = {}
         for n, p in weights:
             if n.endswith('.block_sparse_moe.input_linear.weight'):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
                         '.block_sparse_moe.input_linear.weight',
-                        ".block_sparse_moe.experts.%d.w1.weight" % e)
+                        f".block_sparse_moe.experts.{e}.w1.weight")
                     w3_name = n.replace(
                         '.block_sparse_moe.input_linear.weight',
-                        ".block_sparse_moe.experts.%d.w3.weight" % e)
+                        f".block_sparse_moe.experts.{e}.w3.weight")
                     w1_param, w3_param = p[e].chunk(2, dim=0)
                     assert w1_name not in new_weights
                     assert w3_name not in new_weights
@@ -427,7 +444,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
                         '.block_sparse_moe.output_linear.weight',
-                        ".block_sparse_moe.experts.%d.w2.weight" % e)
+                        f".block_sparse_moe.experts.{e}.w2.weight")
                     w2_param = p[e]
                     assert w2_name not in new_weights
                     new_weights[w2_name] = w2_param
@@ -440,4 +457,5 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 pass
             else:
                 new_weights[n] = p
-        mixtral.MixtralForCausalLM.load_weights(self, new_weights.items())
+        return mixtral.MixtralForCausalLM.load_weights(self,
+                                                       new_weights.items())

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 These types are defined in this file to avoid importing vllm.engine.metrics
 and therefore importing prometheus_client.
@@ -16,6 +17,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Protocol
 
+from vllm.config import VllmConfig
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -77,7 +79,7 @@ class SupportsMetricsInfo(Protocol):
 class StatLoggerBase(ABC):
     """Base class for StatLogger."""
 
-    def __init__(self, local_interval: float) -> None:
+    def __init__(self, local_interval: float, vllm_config: VllmConfig) -> None:
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: List[int] = []
         self.num_generation_tokens: List[int] = []

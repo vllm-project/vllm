@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import random
 from collections import defaultdict
 from types import SimpleNamespace
@@ -595,8 +597,8 @@ def test_init_device(acceptance_sampler_method: str):
 
     target_worker.init_device.assert_called_once()
 
-    metrics_collector.init_gpu_tensors.assert_called_once()
-    spec_decode_sampler.init_gpu_tensors.assert_called_once()
+    metrics_collector.init_tensors.assert_called_once()
+    spec_decode_sampler.init_tensors.assert_called_once()
 
 
 @pytest.mark.parametrize("acceptance_sampler_method",
@@ -754,6 +756,7 @@ def test_populate_seq_ids_with_bonus_tokens():
         seq_group_metadata_list=seq_group_metadata_list,
         accepted_token_ids=accepted_token_ids,
         target_logprobs=target_token_logprobs,
+        prompt_logprobs=None,
         k=k,
         stage_times=(0, 0, 0))
     # Verify that _seq_with_bonus_token_in_last_step contains the following:
@@ -867,7 +870,8 @@ def test_chunked_prefill_flow(k: int, batch_size: int, batch_composition: str):
     target_group_metadata_list = prefill + decodes
     execute_model_req = ExecuteModelRequest(
         seq_group_metadata_list=target_group_metadata_list,
-        num_lookahead_slots=k)
+        # For prefill only batches we expect num_lookahead_slots = 0.
+        num_lookahead_slots=k if n_decodes > 0 else 0)
 
     target_token_ids = torch.randint(low=0,
                                      high=vocab_size,
