@@ -536,7 +536,7 @@ class MultiModalInputs(TypedDict):
     """
 
 
-class MultiModalEncDecInputs(MultiModalInputsV2):
+class MultiModalEncDecInputs(MultiModalInputs):
     """
     Represents the outputs of :class:`vllm.multimodal.EncDecMultiModalProcessor`
     ready to be passed to vLLM internals.
@@ -545,8 +545,8 @@ class MultiModalEncDecInputs(MultiModalInputsV2):
     encoder_prompt: str
     """The processed encoder prompt text."""
 
-    encoder_prompt_token_ids: List[int]
+    encoder_prompt_token_ids: list[int]
     """The processed token IDs of the encoder prompt."""
 
-    encoder_token_type_ids: NotRequired[List[int]]
+    encoder_token_type_ids: NotRequired[list[int]]
     """The token type IDs of the encoder prompt."""

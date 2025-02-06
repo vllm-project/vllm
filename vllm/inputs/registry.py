@@ -322,7 +322,8 @@ class InputRegistry:
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
         from vllm.multimodal import MultiModalKwargs
-        from vllm.multimodal.profiling import MultiModalProfiler
+        from vllm.multimodal.profiling import (EncDecMultimodalProfiler,
+                                               MultiModalProfiler)
         from vllm.multimodal.utils import cached_get_tokenizer
 
         if mm_registry.has_processor(model_config):
@@ -331,8 +332,10 @@ class InputRegistry:
                 trust_remote_code=model_config.trust_remote_code,
             )
             processor = mm_registry.create_processor(model_config, tokenizer)
-            profiler = MultiModalProfiler(processor)
-            dummy_data = profiler.get_dummy_data(seq_len)
+            # profiler = MultiModalProfiler(processor)
+            profiler = EncDecMultimodalProfiler(processor)
+            dummy_data = profiler.get_dummy_data(
+                seq_len, is_encoder_data=is_encoder_data)
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:

@@ -52,9 +52,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.processing import (EncDecMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
-                                        PromptReplacement)
+from vllm.multimodal.processing import (BaseProcessingInfo,
+                                        EncDecMultiModalProcessor,
+                                        MultiModalDataItems, PromptReplacement)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal
@@ -86,25 +87,65 @@ def get_max_mllama_image_tokens(ctx: InputContext) -> int:
     return hf_config.vision_config.max_num_tiles * token_per_chunk
 
 
-class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
+class MllamaProcessingInfo(BaseProcessingInfo):
 
-    def _get_hf_processor(self) -> MllamaProcessor:
+    def get_hf_config(self) -> MllamaConfig:
+        return self.ctx.get_hf_config(MllamaConfig)
+
+    def get_hf_processor(self) -> MllamaProcessor:
         return self.ctx.get_hf_processor(MllamaProcessor)
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        hf_config = self.get_hf_config()
+        token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
+        return hf_config.vision_config.max_num_tiles * token_per_chunk
+
+
+class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts["image"]
+        hf_processor = self.info.get_hf_processor()
+        image_token: str = hf_processor.image_token
+
+        width = height = 1024
+        image = Image.new("RGB", (width, height), color=0)
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data={"image": image},
+            mm_processor_kwargs={},
+        )
+
+
+class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
+                                ):
 
     def _call_hf_processor(
         self,
-        hf_processor: MllamaProcessor,
         prompt: str,
-        processor_data: Mapping[str, object],
-        mm_processor_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # The MllamaProcessor calling drop `num_tiles` from image_processor,
         # while `num_tiles` is essential for forwarding in vLLM implementation.
         # Therefore, we use image_processor calling to keep `num_tiles`.
+        hf_processor = self.info.get_hf_processor()
         image_processor = hf_processor.image_processor
-        image_features = image_processor(**processor_data)
+        image_features = image_processor(**mm_data)
 
-        tokenizer = self._get_tokenizer()
+        tokenizer = self.info.get_tokenizer()
         encoding = tokenizer(prompt,
                              add_special_tokens=False,
                              return_tensors="pt")
@@ -113,7 +154,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
         return BatchFeature(data=data, tensor_type="pt")
 
     def _create_encoder_prompt(self, prompt: str):
-        hf_processor = self._get_hf_processor()
+        hf_processor = self.info.get_hf_processor()
         image_token = hf_processor.image_token
         num_images = prompt.count(image_token)
         return image_token * num_images
@@ -124,11 +165,11 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
         hf_inputs: BatchFeature,
         mm_processor_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
-        vision_config = self.ctx.get_hf_config(MllamaConfig).vision_config
+        vision_config = self.info.get_hf_config().vision_config
         assert vision_config.image_size % 14 == 0, (
             "chunk size should be multiple of 14")
         token_per_chunk = (vision_config.image_size // 14)**2 + 1
-        hf_processor = self._get_hf_processor()
+        hf_processor = self.info.get_hf_processor()
         image_token_id = hf_processor.image_token_id
 
         def get_replacement_mllama(item_idx):
@@ -143,23 +184,6 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
                 replacement=get_replacement_mllama,
             )
         ]
-
-    def _get_dummy_mm_inputs(
-        self,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        num_images = mm_counts["image"]
-        hf_processor = self._get_hf_processor()
-        image_token: str = hf_processor.image_token
-
-        width = height = 1024
-        image = Image.new("RGB", (width, height), color=0)
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data={"image": image},
-            mm_processor_kwargs={},
-        )
 
 
 def _prepare_aspect_ratio_attention_mask(

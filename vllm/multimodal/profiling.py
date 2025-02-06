@@ -207,3 +207,76 @@ class MultiModalProfiler(Generic[_I]):
             multi_modal_data=mm_inputs["mm_kwargs"],
             multi_modal_placeholders=placeholders_by_modality,
         )
+
+
+class EncDecMultimodalProfiler(MultiModalProfiler[_I]):
+    """
+    Contains code for running memory profiling for encoder-decoder
+    multi-modal models.
+    """
+
+    def get_dummy_data(self,
+                       seq_len: int,
+                       is_encoder_data: bool = False) -> DummyData:
+        # Avoid circular import
+        from vllm.sequence import SequenceData
+
+        mm_counts = self.get_mm_limits()
+
+        info = self.processing_info
+        mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(
+            seq_len, mm_counts)
+
+        if mm_counts.keys() != mm_max_tokens_per_item.keys():
+            raise AssertionError(
+                "The keys returned by `get_supported_mm_limits`"
+                f"({set(mm_counts.keys())}) should be the same as those "
+                "returned by `get_mm_max_tokens_per_item` "
+                f"({set(mm_max_tokens_per_item.keys())})")
+
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        prompt_token_ids = mm_inputs["prompt_token_ids"]
+        placeholders_by_modality = mm_inputs["mm_placeholders"]
+
+        total_placeholders_by_modality = {
+            modality: sum(item["length"] for item in placeholders)
+            for modality, placeholders in placeholders_by_modality.items()
+        }
+        expected_placeholders_by_modality = {
+            modality: mm_max_tokens_per_item[modality] * mm_counts[modality]
+            for modality in placeholders_by_modality
+        }
+        if total_placeholders_by_modality != expected_placeholders_by_modality:
+            raise AssertionError(
+                f"The processed dummy data has a total of "
+                f"{total_placeholders_by_modality} placeholder tokens, which "
+                f"is not the expected {expected_placeholders_by_modality} "
+                "tokens.")
+
+        total_len = len(prompt_token_ids)
+
+        # V0 does not support chunked prefill.
+        if total_len > seq_len and not envs.VLLM_USE_V1 or is_encoder_data:
+            logger.warning(
+                "The context length (%d) of the model is too short "
+                "to hold the multi-modal embeddings in the worst case "
+                "(%d tokens in total, out of which %s are reserved for "
+                "multi-modal embeddings). This may cause certain multi-modal "
+                "inputs to fail during inference, even when the input text is "
+                "short. To avoid this, you should increase `max_model_len`, "
+                "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
+                total_len, total_placeholders_by_modality)
+
+            return DummyData(
+                seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),
+                multi_modal_data=None,
+                multi_modal_placeholders=None,
+            )
+
+        prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
+
+        return DummyData(
+            seq_data=SequenceData.from_seqs(prompt_token_ids),
+            multi_modal_data=mm_inputs["mm_kwargs"],
+            multi_modal_placeholders=placeholders_by_modality,
+        )
