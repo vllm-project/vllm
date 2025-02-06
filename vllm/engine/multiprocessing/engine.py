@@ -26,6 +26,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
+from vllm.worker.model_runner import InputProcessingError
 
 logger = init_logger(__name__)
 
@@ -209,6 +210,16 @@ class MQLLMEngine:
             return self.engine.step()
         except SystemExit:
             raise
+        except InputProcessingError as e:
+            # Special case where we handle an error preparing the inputs for
+            # a single request in the batch
+            rpc_err = RPCError(request_id=e.request_id,
+                               is_engine_errored=False,
+                               exception=e.__cause__)
+            self._send_outputs(rpc_err)
+            # We must abort the request immediately so that the engine does not
+            # try to continue to process it in the next step
+            self.engine.abort_request(e.request_id)
         except BaseException as e:
             self._set_errored(e)
             rpc_err = RPCError(request_id=None,
@@ -262,6 +273,7 @@ class MQLLMEngine:
             self._send_outputs(rpc_err)
 
         try:
+            print("\n Running add_request \n")
             self.engine.add_request(
                 request_id=request_id,
                 prompt=request.prompt,
@@ -275,6 +287,8 @@ class MQLLMEngine:
                 logger.info("Added request %s.", request.request_id)
 
         except Exception as e:
+            print("\n Caught add_request failure\n")
+
             # We do not set self._errored = True here, since the error
             # is due to an issue adding this request to the engine,
             # rather than an issue with the engine itself.

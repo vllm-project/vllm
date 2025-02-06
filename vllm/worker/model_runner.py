@@ -75,6 +75,24 @@ torch._dynamo.config.cache_size_limit = 128
 torch._dynamo.config.accumulated_cache_size_limit = 128
 
 
+class InputProcessingError(Exception):
+    """This exception is raised when an error occurs preparing the inputs for
+    a single sequence group.
+    This allows the engine to gracefully handle errors with a single sequence
+    group without having to fail the entire batch.
+    """
+
+    def __init__(self, request_id, message):
+        """request_id is the id of the offending sequence group"""
+        self.request_id = request_id
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return "Failed to prepare inputs for sequence group with request id: " \
+                f"{self.request_id}, Error: {self.message}"
+
+
 @dataclass(frozen=True)
 class ModelInputForGPU(ModelRunnerInputBase):
     """
@@ -683,9 +701,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if not mm_data:
             return
 
+        print("FOOOOOOOO")
+
         if self.runner.mm_registry.has_processor(self.runner.model_config):
             mm_kwargs = mm_data
+            print("just used mm_data")
         else:
+            print("calling mapper")
             mm_kwargs = self.multi_modal_input_mapper(
                 mm_data,
                 seq_group_metadata.mm_processor_kwargs,
@@ -731,36 +753,44 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         """Add a sequence group to the builder."""
-        seq_ids = seq_group_metadata.seq_data.keys()
-        n_seqs = len(seq_ids)
-        is_prompt = seq_group_metadata.is_prompt
 
-        if is_prompt:
-            assert n_seqs == 1
-            self.decode_only = False
+        print("Adding seq group!")
+        try:
+            seq_ids = seq_group_metadata.seq_data.keys()
+            n_seqs = len(seq_ids)
+            is_prompt = seq_group_metadata.is_prompt
 
-        encoder_seq_len = 0
+            if is_prompt:
+                assert n_seqs == 1
+                self.decode_only = False
 
-        if self.runner.model_config.is_encoder_decoder:
-            encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
+            encoder_seq_len = 0
 
-        inter_data = self.init_cached_inter_data(
-            request_id=seq_group_metadata.request_id,
-            seq_ids=seq_ids,
-            is_prompt=is_prompt,
-            block_tables=seq_group_metadata.block_tables,
-            computed_block_nums=seq_group_metadata.computed_block_nums,
-            reinit=True,
-            reinit_use_defaults=True,
-            encoder_seq_len=encoder_seq_len)
+            if self.runner.model_config.is_encoder_decoder:
+                encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
 
-        self.inter_data_list.append(inter_data)
+            inter_data = self.init_cached_inter_data(
+                request_id=seq_group_metadata.request_id,
+                seq_ids=seq_ids,
+                is_prompt=is_prompt,
+                block_tables=seq_group_metadata.block_tables,
+                computed_block_nums=seq_group_metadata.computed_block_nums,
+                reinit=True,
+                reinit_use_defaults=True,
+                encoder_seq_len=encoder_seq_len)
 
-        for seq_idx in range(n_seqs):
-            for per_seq_fn in self.per_seq_compute_fns:
-                per_seq_fn(inter_data, seq_idx, seq_group_metadata)
-        for per_seq_group_fn in self.per_seq_group_compute_fns:
-            per_seq_group_fn(inter_data, seq_group_metadata)
+            self.inter_data_list.append(inter_data)
+
+            for seq_idx in range(n_seqs):
+                for per_seq_fn in self.per_seq_compute_fns:
+                    per_seq_fn(inter_data, seq_idx, seq_group_metadata)
+            for per_seq_group_fn in self.per_seq_group_compute_fns:
+                print(f"calling {per_seq_group_fn}")
+                per_seq_group_fn(inter_data, seq_group_metadata)
+        except Exception as e:
+            # Raise an exception that tracks the ID of the bad request
+            raise InputProcessingError(seq_group_metadata.request_id,
+                                       str(e)) from e
 
     def _use_captured_graph(self,
                             batch_size: int,
@@ -1628,6 +1658,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
+
+        print("\n\n\n preparing model input \n\n\n\n ")
+
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:
