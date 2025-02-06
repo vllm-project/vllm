@@ -215,12 +215,6 @@ class Metrics:
             "Histogram of time spent per prefill token request in ms.",
             labelnames=labelnames,
             buckets=request_latency_buckets)
-        self.gauge_model_load_time_request = self._gauge_cls(
-            name="vllm:model_load_time_seconds",
-            documentation=
-            "Time spent in model loading in seconds (disk + device).",
-            labelnames=labelnames,
-            multiprocess_mode="sum")
 
         # Metadata
         self.histogram_num_prompt_tokens_request = self._histogram_cls(
@@ -645,21 +639,11 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.model_forward_time_requests)
         self._log_histogram(self.metrics.histogram_model_execute_time_request,
                             stats.model_execute_time_requests)
-        # Model load time
-        model_load_time = sum(stats.model_load_time_requests
-                              ) if stats.model_load_time_requests else 0
-        self._log_gauge(self.metrics.gauge_model_load_time_request,
-                        model_load_time)
-        # Total tokens metrics in current batch
-        if stats.total_tokens_in_current_batch_requests:
-            self._log_gauge(
+        self._log_gauge(
                 self.metrics.gauge_total_tokens_in_current_batch_request,
                 sum(stats.total_tokens_in_current_batch_requests))
-        # Total tokens metrics in queue
-        if stats.total_tokens_in_queue_requests:
-            self._log_gauge(self.metrics.gauge_total_tokens_in_queue_request,
+        self._log_gauge(self.metrics.gauge_total_tokens_in_queue_request,
                             sum(stats.total_tokens_in_queue_requests))
-        # Token eviction metrics
         num_requests_with_evictions = len(
             [x for x in stats.request_with_evicted_tokens_requests
              if x]) if stats.request_with_evicted_tokens_requests else 0

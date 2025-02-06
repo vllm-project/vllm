@@ -1617,7 +1617,6 @@ class LLMEngine:
         time_per_prefill_token_requests: List[float] = []
         model_forward_time_requests: List[float] = []
         model_execute_time_requests: List[float] = []
-        model_load_time_requests: List[float] = []
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
@@ -1835,15 +1834,6 @@ class LLMEngine:
         else:
             spec_decode_metrics = None
 
-        # Time to load a model
-        if hasattr(self.model_executor, 'model_loader'):
-            model_disk_load_time = getattr(self.model_executor.model_loader,
-                                           'model_disk_load_time', 0.0)
-            model_device_load_time = getattr(self.model_executor.model_loader,
-                                             'model_device_load_time', 0.0)
-            total_load_time = model_disk_load_time + model_device_load_time
-            model_load_time_requests.append(total_load_time)
-
         return Stats(
             now=now,
             # System stats
@@ -1878,7 +1868,6 @@ class LLMEngine:
             time_per_prefill_token_requests=time_per_prefill_token_requests,
             model_forward_time_requests=model_forward_time_requests,
             model_execute_time_requests=model_execute_time_requests,
-            model_load_time_requests=model_load_time_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
