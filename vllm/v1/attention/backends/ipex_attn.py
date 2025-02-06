@@ -90,8 +90,7 @@ class IPEXAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
 
-    # TODO(gc): implement this logic...
-    # Where to invoke this logic? what is attn_metadata?
+    # TODO(gc): Refine this logic..., because of bad performance...
     def forward(
         self,
         query: torch.Tensor,
@@ -272,7 +271,7 @@ def ipex_llm_chunked_prefill(
         # Otherwise, by default use v2 attention forward kernel...
         out = vllm._C.ops.context_attention_forward_v2(query[:num_actual_tokens], key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens_tensor, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
     else:
-        out = vllm._C.ops.context_attention_forward_v1(query, key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens_tensor, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
+        out = vllm._C.ops.context_attention_forward_v1(query[:num_actual_tokens], key_cache, value_cache, attn_metadata.block_table, attn_metadata.query_start_loc, seq_len, context_len, attn_metadata.max_seq_len, torch.amax(context_len).item())
     
     # output[:num_actual_tokens] = out
     output[:num_actual_tokens] = out.view(out.shape[0], -1)

@@ -279,6 +279,7 @@ class XPUModelRunner(GPUModelRunner):
             cu_prefix_kv_lens = None
             cu_suffix_kv_lens = None
 
+        # TODO(gc): remove this context_lens and seq_lens
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
@@ -293,6 +294,8 @@ class XPUModelRunner(GPUModelRunner):
             cu_prefix_query_lens=cu_prefix_query_lens,
             cu_prefix_kv_lens=cu_prefix_kv_lens,
             cu_suffix_kv_lens=cu_suffix_kv_lens,
+            context_lens=None,
+            seq_lens=None,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this

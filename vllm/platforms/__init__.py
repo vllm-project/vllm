@@ -81,7 +81,7 @@ def hpu_platform_plugin() -> Optional[str]:
 
 
 def xpu_platform_plugin() -> Optional[str]:
-    # TODO(gc): fix this later
+    # TODO(gc): we will see if we can get another method to get over this...
     is_xpu = True
 
     try:
