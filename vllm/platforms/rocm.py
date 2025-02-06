@@ -74,7 +74,7 @@ class RocmPlatform(Platform):
                             == _Backend.FLASH_ATTN else selected_backend)
         if "VLLM_USE_V1" in os.environ:
             logger.info("Using Flash Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+            return "vllm.v1.attention.backends.rocm_attn.ROCmAttentionBackend"
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.
