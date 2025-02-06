@@ -487,7 +487,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         q: torch.Tensor,
         k_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
+        query_start_loc: torch.Tensor,
         seq_start_loc: torch.Tensor,
+        max_query_len: int,
         max_prefill_seq_len: int,
     ) -> torch.Tensor:
 
@@ -507,9 +509,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             q=q,
             k=k,
             v=v_padded,
-            cu_seqlens_q=seq_start_loc,
+            cu_seqlens_q=query_start_loc,
             cu_seqlens_k=seq_start_loc,
-            max_seqlen_q=max_prefill_seq_len,
+            max_seqlen_q=max_query_len,
             max_seqlen_k=max_prefill_seq_len,
             softmax_scale=self.scale,
             causal=True,

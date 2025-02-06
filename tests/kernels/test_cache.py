@@ -703,7 +703,7 @@ def test_swap_blocks_mla(
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("kv_cache_dtype",
                          ["auto"])  # You can also test "fp8" if needed.
-@pytest.mark.parametrize("align_cache", [False])
+@pytest.mark.parametrize("align_cache", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
@@ -714,7 +714,7 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
                                   kv_cache_dtype, device, align_cache)
     _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
 
-    seq_len_tensor = torch.randint(1,
+    seq_len_tensor = torch.randint(0,
                                    max_seq_len + 1, (batch_size, ),
                                    device=device)
 
@@ -741,6 +741,8 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
     expected_batches = []
     for b in range(batch_size):
         s = seq_len_tensor[b]
+        if s == 0:
+            continue
         tot = tot_blocks_tensor[b]
         blocks = block_table[b, :tot].tolist()
 

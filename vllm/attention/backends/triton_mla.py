@@ -6,9 +6,6 @@ from dataclasses import dataclass
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
-import triton
-import triton.language as tl
-
 from vllm.multimodal import MultiModalPlaceholderMap
 
 try:
@@ -30,7 +27,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
-from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.utils import (align_to_256bytes, async_tensor_h2d,
+                        make_tensor_with_pad)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -266,6 +264,9 @@ class TritonMLAMetadata(MLACommonMetadata):
     # The dimension of the attention heads
     head_dim: Optional[int] = None
 
+    chunked_prefill_workspace: Optional[torch.Tensor] = None
+    prefill_seq_len_total: Optional[int] = None
+
     def __post_init__(self):
         supported_head_sizes = TritonMLABackend.get_supported_head_sizes()
         if self.head_dim is not None and self.head_dim \
@@ -323,7 +324,9 @@ class TritonMLAMetadata(MLACommonMetadata):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            head_dim=self.head_dim)
+            head_dim=self.head_dim,
+            chunked_prefill_workspace=self.chunked_prefill_workspace,
+            prefill_seq_len_total=seq_lens_tensor.sum().item())
         return self._cached_prefill_metadata
 
     @property
@@ -454,6 +457,21 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
         self.runner = input_builder.runner
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
+
+        self.chunked_prefill_workspace = None
+
+        scheduler_config = self.runner.vllm_config.scheduler_config
+        model_config = self.runner.model_config
+
+        if scheduler_config.enable_chunked_prefill:
+            head_size = model_config.get_head_size()
+
+            self.chunked_prefill_workspace = torch.empty(
+                (model_config.max_model_len * scheduler_config.max_num_seqs,
+                 align_to_256bytes(head_size, model_config.dtype)),
+                dtype=model_config.dtype,
+                device=self.runner.device,
+            )[..., :head_size]
 
     def prepare(self):
         self.slot_mapping: List[int] = []
@@ -647,64 +665,8 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             use_cuda_graph=use_captured_graph,
             num_kv_splits=4,  # TODO(lucas) add heuristic
             head_dim=self.runner.model_config.get_head_size(),
+            chunked_prefill_workspace=self.chunked_prefill_workspace,
         )
-
-
-@triton.jit
-def _gather_kv_cache(
-    # Pointers to inputs and output
-    seq_start_locs,  # (batch_size + 1,)
-    block_tables,  # (batch_size, max_blocks_per_seq)
-    block_table_stride,
-    kv_cache,  # (num_blocks, block_size, head_size)
-    kv_page_stride,
-    kv_out,
-    CACHE_PAGE_SIZE: tl.constexpr,
-    CACHE_ENTRY_SIZE: tl.constexpr,
-    CACHE_ENTRIES_PER_PAGE: tl.constexpr,
-    CACHE_PAGE_SIZE_POW_2: tl.constexpr,
-    CACHE_ENTRY_SIZE_POW_2: tl.constexpr,
-):
-    """A Triton-accelerated function to perform per-token-group
-    quantization on a tensor.
-    This function converts the tensor values into float8 values.
-    """
-
-    # Map the program id to the row of X and Y it should compute.
-    g_id = tl.program_id(0)
-
-    seq_start_loc = tl.load(seq_start_locs + g_id)
-    seq_len = tl.load(seq_start_locs + g_id + 1) - seq_start_loc
-
-    pages_to_copy = tl.cdiv(seq_len, CACHE_ENTRIES_PER_PAGE)
-    kv_out = kv_out + seq_start_loc * CACHE_ENTRY_SIZE
-    block_table = block_tables + g_id * block_table_stride
-
-    cache_page_range = tl.arange(0, CACHE_PAGE_SIZE_POW_2)
-    cache_page_mask = cache_page_range < CACHE_PAGE_SIZE
-    for i in range(pages_to_copy - 1):
-        page = tl.load(block_table + i)
-        page_start = kv_cache + page * kv_page_stride
-        page_data = tl.load(page_start + cache_page_range,
-                            mask=cache_page_mask)
-        tl.store(kv_out + i * CACHE_PAGE_SIZE + cache_page_range,
-                 page_data,
-                 mask=cache_page_mask)
-
-    last_page_len = seq_len % CACHE_ENTRIES_PER_PAGE
-    last_page = tl.load(block_table + pages_to_copy - 1)
-    last_page_start = kv_cache + last_page * kv_page_stride
-
-    cache_entry_range = tl.arange(0, CACHE_ENTRY_SIZE_POW_2)
-    cache_entry_mask = cache_entry_range < CACHE_ENTRY_SIZE
-    kv_out_page = kv_out + (pages_to_copy - 1) * CACHE_PAGE_SIZE
-    for i in range(last_page_len):
-        last_page_data = tl.load(last_page_start + \
-            i * CACHE_ENTRY_SIZE + cache_entry_range,
-            mask=cache_entry_mask)
-        tl.store(kv_out_page + i * CACHE_ENTRY_SIZE + cache_entry_range,
-                 last_page_data,
-                 mask=cache_entry_mask)
 
 
 class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
@@ -753,36 +715,39 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
     ) -> torch.Tensor:
         assert isinstance(attn_metadata, TritonMLAMetadata)
 
-        if attn_metadata.prefill_metadata.context_lens_tensor is not None and \
-            max(attn_metadata.prefill_metadata.context_lens_tensor) > 0:
-            entries_total = attn_metadata.prefill_metadata.seq_start_loc[-1]
-            kv_c_k_pe_cache = torch.empty(
-                (entries_total, kv_c_and_k_pe_cache.shape[-1]),
-                dtype=kv_c_and_k_pe_cache.dtype,
-                device=kv_c_and_k_pe_cache.device,
+        prefill_metadata = attn_metadata.prefill_metadata
+
+        if prefill_metadata.context_lens_tensor is not None \
+            and kv_c_and_k_pe_cache.numel() > 0:
+            print("******** running chunked prefill")
+            print("prefill_metadata.seq_start_loc[-1]",
+                  prefill_metadata.seq_start_loc[-1])
+
+            workspace = attn_metadata.chunked_prefill_workspace
+            print("workspace", workspace.shape)
+
+            print(kv_c_and_k_pe_cache.shape)
+            print(workspace.shape)
+            print(prefill_metadata.block_tables.shape)
+            print(prefill_metadata.seq_start_loc.shape)
+
+            ops.gather_cache(
+                src_cache=kv_c_and_k_pe_cache,
+                dst=workspace,
+                block_table=prefill_metadata.block_tables,
+                cu_seq_lens=prefill_metadata.seq_start_loc,
+                batch_size=attn_metadata.num_prefills,
             )
 
-            assert kv_c_and_k_pe_cache.shape[-1] == 576
-            assert kv_c_and_k_pe_cache.shape[-2] == 16
-            _gather_kv_cache[(attn_metadata.num_prefills, )](
-                attn_metadata.prefill_metadata.seq_start_loc,
-                attn_metadata.prefill_metadata.block_tables,
-                attn_metadata.prefill_metadata.block_tables.stride(0),
-                kv_c_and_k_pe_cache,
-                kv_c_and_k_pe_cache.stride(0),
-                kv_c_k_pe_cache,
-                CACHE_PAGE_SIZE=576 * 16,
-                CACHE_ENTRY_SIZE=576,
-                CACHE_ENTRIES_PER_PAGE=16,
-                CACHE_ENTRY_SIZE_POW_2=triton.next_power_of_2(576),
-                CACHE_PAGE_SIZE_POW_2=triton.next_power_of_2(576 * 16),
-            )
-
-            kv_c = kv_c_k_pe_cache[..., :self.kv_lora_rank].unsqueeze(1)
-            k_pe = kv_c_k_pe_cache[..., self.kv_lora_rank:].unsqueeze(1)
+            toks = prefill_metadata.prefill_seq_len_total
+            print("toks", toks)
+            kv_c = workspace[:toks][..., :self.kv_lora_rank].unsqueeze(1)
+            k_pe = workspace[:toks][..., self.kv_lora_rank:].unsqueeze(1)
 
         return self._forward_prefill_flash(q, kv_c, k_pe,
+                                           attn_metadata.query_start_loc,
                                            attn_metadata.seq_start_loc,
+                                           attn_metadata.max_query_len,
                                            attn_metadata.max_prefill_seq_len)
 
     def _forward_decode(
