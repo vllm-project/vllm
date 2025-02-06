@@ -45,6 +45,14 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
 
 
+@dataclass
+class ForwardMetadata:
+    """
+    Forward metadata for each forward pass
+    """
+    num_input_tokens: int
+
+
 _forward_context: Optional[ForwardContext] = None
 
 
@@ -59,7 +67,8 @@ def get_forward_context() -> ForwardContext:
 @contextmanager
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
-                        virtual_engine: int = 0):
+                        virtual_engine: int = 0,
+                        forward_metadata: Optional[ForwardMetadata] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -79,13 +88,14 @@ def set_forward_context(attn_metadata: Any,
     finally:
         global last_logging_time, batchsize_logging_interval
         if need_to_track_batchsize:
-            if hasattr(attn_metadata, "num_prefill_tokens"):
+            if not envs.VLLM_USE_V1:
                 # for v0 attention backends
                 batchsize = attn_metadata.num_prefill_tokens + \
                     attn_metadata.num_decode_tokens
             else:
                 # for v1 attention backends
-                batchsize = attn_metadata.num_input_tokens
+                assert forward_metadata is not None
+                batchsize = forward_metadata.num_input_tokens
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch

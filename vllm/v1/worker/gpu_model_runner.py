@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import ForwardMetadata, set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -751,8 +751,17 @@ class GPUModelRunner:
         # Prepare the decoder inputs.
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        num_input_tokens = self.maybe_pad_for_cudagraph(
-            num_scheduled_tokens, attn_metadata)
+        if (self.use_cuda_graph
+                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
+            # Use piecewise CUDA graphs.
+            # Add padding to the batch size.
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                num_scheduled_tokens)
+        else:
+            # Eager mode.
+            num_input_tokens = num_scheduled_tokens
+
+        forward_metadata = ForwardMetadata(num_input_tokens=num_input_tokens)
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -778,7 +787,9 @@ class GPUModelRunner:
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
+                                 forward_metadata=forward_metadata):
             positions = self.mrope_positions[:, :num_input_tokens] \
                 if self.model_config.uses_mrope \
                 else self.positions[:num_input_tokens]
