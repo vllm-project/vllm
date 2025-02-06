@@ -3072,15 +3072,6 @@ class VllmConfig:
         the final hidden states.
         """
         factors: List[Any] = []
-        # summarize system state
-        from torch._inductor.codecache import CacheBase
-        system_factors = CacheBase.get_system()
-        factors.append(system_factors)
-
-        # summarize pytorch state
-        from torch._inductor.codecache import torch_key
-        torch_factors = torch_key()
-        factors.append(torch_factors)
 
         # summarize vllm config
         vllm_factors: List[Any] = []
