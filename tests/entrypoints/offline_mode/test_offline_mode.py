@@ -28,6 +28,15 @@ MODEL_CONFIGS = [
         "tensor_parallel_size": 1,
         "tokenizer_mode": "mistral",
     },
+    {
+        "model": "sentence-transformers/all-MiniLM-L12-v2",
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.20,
+        "max_model_len": 64,
+        "max_num_batched_tokens": 64,
+        "max_num_seqs": 64,
+        "tensor_parallel_size": 1,
+    },
 ]
 
 

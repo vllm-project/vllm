@@ -345,7 +345,12 @@ def get_pooling_config(model: str, revision: Optional[str] = 'main'):
     """
 
     modules_file_name = "modules.json"
-    modules_dict = get_hf_file_to_dict(modules_file_name, model, revision)
+
+    modules_dict = None
+    if file_or_path_exists(model=model,
+                           config_name=modules_file_name,
+                           revision=revision):
+        modules_dict = get_hf_file_to_dict(modules_file_name, model, revision)
 
     if modules_dict is None:
         return None
