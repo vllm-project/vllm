@@ -12,7 +12,7 @@ The pre-built image includes:
 
 - ROCm™ 6.3.1
 - vLLM 0.6.6
-- PyTorch 2.6dev (nightly)
+- PyTorch 2.7dev (nightly)
 
 ## Pull latest Docker Image
 
@@ -20,6 +20,10 @@ Pull the most recent validated docker image with `docker pull rocm/vllm-dev:main
 
 ## What is New
 
+20250205_aiter:
+- [AITER](https://github.com/ROCm/aiter) support
+- Performance improvement for custom paged attention
+- Reduced memory overhead bug fix
 20250124:
 - Fix accuracy issue with 405B FP8 Triton FA
 - Fixed accuracy issue with TP8
@@ -475,8 +479,9 @@ To reproduce the release docker:
 ```bash
     git clone https://github.com/ROCm/vllm.git
     cd vllm
-    git checkout 8e87b08c2a284c1a20eb3d8e0fbdc84918bf27dc
+    git checkout 9dc3394c9ee4da250be28d7bd08babf098d51081
     docker build -f Dockerfile.rocm -t <your_tag> --build-arg BUILD_HIPBLASLT=1 --build-arg USE_CYTHON=1 .
+    export VLLM_USE_AITER=0
 ```
 
 ### AITER
