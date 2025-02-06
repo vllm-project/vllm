@@ -280,10 +280,9 @@ def try_get_local_file(model: Union[str, Path],
     return None
 
 
-def get_hf_file_to_dict(
-        file_name: str,
-        model: Union[str, Path],
-        revision: Optional[str] = 'main') -> Optional[Dict[str, Any]]:
+def get_hf_file_to_dict(file_name: str,
+                        model: Union[str, Path],
+                        revision: Optional[str] = 'main'):
     """
     Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
@@ -393,9 +392,9 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
     return None
 
 
-def get_sentence_transformer_tokenizer_config(
-        model: str,
-        revision: Optional[str] = 'main') -> Optional[Dict[str, Any]]:
+def get_sentence_transformer_tokenizer_config(model: str,
+                                              revision: Optional[str] = 'main'
+                                              ):
     """
     Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
