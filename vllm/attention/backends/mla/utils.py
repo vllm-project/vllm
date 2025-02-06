@@ -352,8 +352,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             # latter otherwise
             # basically if q_lora_rank is none we are absorbing into q_proj
             # instead of UQ
-            W_Q_UK = torch.einsum("qnd,lnd -> qnl", W_Q, W_UK)\
-                .flatten(start_dim=1).contiguous()
+            W_Q_UK = torch.einsum("qnd,lnd -> qnl", W_Q.bfloat16(), W_UK.bfloat16())\
+                .flatten(start_dim=1).contiguous().float()
 
             if is_fp8(weight_dtype) and requantization_enabled:
                 W_Q_UK, W_Q_UK_scales = scaled_quantize(
@@ -369,8 +369,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
             W_O = get_and_maybe_dequant_weights(self.o_proj)\
                 .view(-1, self.num_heads, self.v_head_dim)
-            W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV, W_O)\
-                .flatten(start_dim=0, end_dim=1).contiguous()
+            W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV.bfloat16(), W_O.bfloat16())\
+                .flatten(start_dim=0, end_dim=1).contiguous().float()
 
             if is_fp8(weight_dtype) and requantization_enabled:
                 W_UV_O, W_UV_O_scales = scaled_quantize(
