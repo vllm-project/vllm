@@ -8,7 +8,7 @@ from triton import cdiv
 
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import BlockIDList, FullAttentionSpec, KVCacheConfig, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -122,9 +122,10 @@ class GroupedBlockTable:
 
     def _make_grouped_func_with_block_ids(self, f_name):
 
-        def grouped_func(block_ids: List[List[int]], *args, **kwargs):
+        def grouped_func(block_ids: BlockIDList, *args, **kwargs):
             for i, block_table in enumerate(self.block_tables):
-                getattr(block_table, f_name)(block_ids[i], *args, **kwargs)
+                getattr(block_table, f_name)(block_ids.get_group(i), *args,
+                                             **kwargs)
 
         return grouped_func
 

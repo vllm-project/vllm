@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import TYPE_CHECKING, Dict, List
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv, get_dtype_size
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_utils import ReqKVCacheBlocks
 
 logger = init_logger(__name__)
 
@@ -118,3 +120,30 @@ class KVCacheConfig:
     window attention layers: three groups, (full * 2), (sw * 2), (sw * 2).
     """
     groups: List[KVCacheGroup]
+
+
+@dataclass
+class BlockIDList:
+    # A list of block IDs for each group of KV cache blocks
+    _block_ids: List[List[int]]
+
+    def __init__(self, block_ids: List[List[int]]):
+        self._block_ids = block_ids
+
+    @classmethod
+    def from_kv_cache_blocks(cls, kv_cache_blocks: "ReqKVCacheBlocks"):
+        return cls(
+            block_ids=[[blk.block_id for blk in kv_cache_blocks_one_group]
+                       for kv_cache_blocks_one_group in kv_cache_blocks])
+
+    def extend(self, new_block_ids: "BlockIDList") -> None:
+        for i, block_ids in enumerate(new_block_ids._block_ids):
+            self._block_ids[i].extend(block_ids)
+
+    def __add__(self, other: "BlockIDList") -> "BlockIDList":
+        return BlockIDList(block_ids=[
+            a + b for a, b in zip(self._block_ids, other._block_ids)
+        ])
+
+    def get_group(self, group_idx: int) -> List[int]:
+        return self._block_ids[group_idx]

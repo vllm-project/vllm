@@ -305,9 +305,7 @@ class GPUModelRunner:
             req_state.num_computed_tokens = req_data.num_computed_tokens
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for group_id, new_block_ids in enumerate(
-                        req_data.new_block_ids):
-                    req_state.block_ids[group_id].extend(new_block_ids)
+                req_state.block_ids.extend(req_data.new_block_ids)
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
@@ -328,8 +326,6 @@ class GPUModelRunner:
             # Update the block table.
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
-            for group_id, new_block_ids in enumerate(req_data.new_block_ids):
-                req_state.block_ids[group_id].extend(new_block_ids)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
