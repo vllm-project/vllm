@@ -20,6 +20,7 @@ from vllm.platforms.interface import CpuArchEnum
 
 if VLLM_USE_AITER_MOE:
     from aiter.fused_moe_bf16_asm import asm_moe
+    from aiter.ops.shuffle import shuffle_weight
 
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
@@ -95,6 +96,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        
+        if envs.VLLM_USE_AITER_MOE:
+            layer.w13_weight = torch.nn.Parameter(shuffle_weight(layer.w13_weight.data),
+                                          requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(shuffle_weight(layer.w2_weight.data),
+                                                 requires_grad=False)
 
         if envs.VLLM_MOE_PADDING:
             layer.w13_weight = torch.nn.Parameter(F.pad(
