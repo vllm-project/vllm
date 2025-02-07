@@ -13,9 +13,9 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import VLLM_FLASH_ATTN_VERSION
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-# from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
-#                                   flash_attn_varlen_func,
-#                                   is_fa_version_supported)
+from vllm.platforms import current_platform
+if current_platform.is_cuda():
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 logger = init_logger(__name__)
 

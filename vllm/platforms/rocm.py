@@ -99,7 +99,7 @@ class RocmPlatform(Platform):
     @classmethod
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        return torch.cuda.get_device_name(device_id)
+        return "AMD"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
