@@ -17,7 +17,8 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
+from vllm.outputs import (PoolingOutput, PoolingRequestOutput,
+                          ScoringRequestOutput)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                PreTrainedTokenizer,
@@ -134,6 +135,7 @@ class OpenAIServingScores(OpenAIServing):
         try:
             pooling_params = request.to_pooling_params()
 
+            #maneges the encoding generators for each pair
             for i, engine_prompt in enumerate(engine_prompts):
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -146,6 +148,7 @@ class OpenAIServingScores(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
+                #generator_0 is for the first of the pair
                 generator_0 = self.engine_client.encode(
                     engine_prompt[0],
                     pooling_params,
@@ -163,6 +166,7 @@ class OpenAIServingScores(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
+                #generator_1 is for the second of the pair
                 generator_1 = self.engine_client.encode(
                     engine_prompt[1],
                     pooling_params,
@@ -183,11 +187,15 @@ class OpenAIServingScores(OpenAIServing):
 
         # Non-streaming response
         final_res_batch: List[Optional[PoolingRequestOutput]] = []
+        embeddings: List[PoolingRequestOutput[PoolingOutput]]
+
+        num_embeddings = len(engine_prompts) * 2
 
         try:
-            embeddings = []
+            embeddings = [None] * num_embeddings
+
             async for i, res in result_generator:
-                embeddings.append(res)
+                embeddings[i] = res
 
             scorer = torch.nn.CosineSimilarity(0)
 
