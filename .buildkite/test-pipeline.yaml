@@ -339,6 +339,16 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
+- label: Transcription API correctness
+  working_dir: "/vllm-workspace/.buildkite/asr-eval"
+  source_file_dependencies:
+  - csrc/
+  - vllm/entrypoints/openai/serving_transcription.py
+  - vllm/model_executor/models/whisper.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh
+
 - label: Encoder Decoder tests # 5min
   source_file_dependencies:
   - vllm/
