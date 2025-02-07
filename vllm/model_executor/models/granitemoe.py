@@ -32,9 +32,11 @@ from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (QKVParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -182,6 +184,42 @@ class GraniteMoeAttention(nn.Module):
         return output
 
 
+class GraniteMoeSharedMLP(nn.Module):
+
+    def __init__(
+        self,
+        config: GraniteMoeConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+
+        self.input_size = config.hidden_size
+        self.hidden_size = config.shared_intermediate_size
+        self.input_linear = ColumnParallelLinear(
+            self.input_size,
+            self.hidden_size * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.input_linear")
+        self.output_linear = RowParallelLinear(
+            self.hidden_size,
+            self.input_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.output_linear")
+        if config.hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {config.hidden_act}. "
+                             "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states, _ = self.input_linear(hidden_states)
+        hidden_states = self.act_fn(hidden_states)
+        hidden_states, _ = self.output_linear(hidden_states)
+        return hidden_states
+
+
 class GraniteMoeDecoderLayer(nn.Module):
 
     def __init__(
@@ -212,6 +250,12 @@ class GraniteMoeDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.block_sparse_moe")
+        self.shared_mlp = None if config.shared_intermediate_size == 0 \
+            else GraniteMoeSharedMLP(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.shared_mlp"
+            )
 
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -235,7 +279,13 @@ class GraniteMoeDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states * self.residual_multiplier
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.block_sparse_moe(hidden_states)
+        if self.shared_mlp is None:
+            hidden_states = self.block_sparse_moe(hidden_states)
+        else:
+            # create a copy since block_sparse_moe modifies in-place
+            moe_hidden_states = hidden_states.clone()
+            moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
+            hidden_states = moe_hidden_states + self.shared_mlp(hidden_states)
         hidden_states = residual + hidden_states * self.residual_multiplier
 
         return hidden_states
@@ -436,5 +486,6 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 pass
             else:
                 new_weights[n] = p
+
         return mixtral.MixtralForCausalLM.load_weights(self,
                                                        new_weights.items())
