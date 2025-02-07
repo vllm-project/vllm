@@ -1,6 +1,4 @@
-import itertools
 import math
-import os
 from functools import lru_cache
 import re
 from typing import (
@@ -20,7 +18,6 @@ import scipy.signal
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
-from safetensors.torch import load_file
 from transformers import PretrainedConfig
 from PIL import Image
 
@@ -33,11 +30,11 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE
+    ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE
 )
-from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
+from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs)
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalInputs, NestedTensors
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
@@ -46,8 +43,7 @@ from transformers.utils import logging
 from .interfaces import SupportsMultiModal, SupportsPP, SupportsLoRA
 from .vision_siglip_navit import get_siglip_vision_model
 from .phi4o_utils import AudioEmbedding
-from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+from .utils import PPMissingLayer
 
 
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010  # <|endoftext10|> (see vocab.json in hf model)
@@ -538,19 +534,19 @@ class PhiOImageEncoder(nn.Module):
         return img_set_tensor
 
 
-class Phi3SAudioFeatureInputs(TypedDict):
+class Phi4OAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: Tuple[NestedTensors]
     """Shape: `((batch_size, num_audios, 80, M), )"""
 
 
-class Phi3SAudioEmbeddingInputs(TypedDict):
+class Phi4OAudioEmbeddingInputs(TypedDict):
     type: Literal["audio_embeds"]
     data: NestedTensors
     """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)"""
 
 
-Phi3SAudioInputs = Union[Phi3SAudioFeatureInputs, Phi3SAudioEmbeddingInputs]
+Phi4OAudioInputs = Union[Phi4OAudioFeatureInputs, Phi4OAudioEmbeddingInputs]
 
 
 def speechlib_mel(sample_rate, n_fft, n_mels, fmin=None, fmax=None):
@@ -850,6 +846,17 @@ def compute_logfbank_output_size(wav_length: int, fs: int) -> Tuple[int, int]:
 
 
 def _get_audio_embed_sizes(audios, ctx: InputContext):
+    """
+    Get the audio embedding sizes for each audio file.
+
+    Args:
+        audios (List[Tuple[np.ndarray, int]]): List of audio files as tuples of
+            waveform and sample rate.
+        ctx (InputContext): Input context.
+    
+    Returns:
+        List[int]: List of audio embedding sizes.
+    """
     audio_embed_sizes = []
     for audio in audios:
        audio_data, sf = audio
@@ -862,14 +869,25 @@ def _get_audio_embed_sizes(audios, ctx: InputContext):
 
 
 def _get_audio_id_to_input_ids(audios, ctx: InputContext, prompt_str=""):
+    """
+    The following will search for `<|audio_{idx}|>` tokens and
+    return a mapping of audio placeholder tokens to audio placeholder token ids
+    based on the size of the audio embeddings.
+
+    Args:
+        audios (List[Tuple[np.ndarray, int]]): List of audio files as tuples of
+            waveform and sample rate.
+        ctx (InputContext): Input context.
+        prompt_str (str): The prompt string.
+    
+    Returns:
+        Dict[str, List[int]]: Mapping of audio placeholder tokens to audio placeholder token ids.
+    
+    """
     if len(audios) == 0:
         return {}
 
     audio_embed_sizes = _get_audio_embed_sizes(audios, ctx)
-
-    # The following logic will search for `<|audio_{idx}|>` tokens and
-    # insert the placeholder audio tokens that will be overwritten by the
-    # embedding in the audio tower
     audio_ids = re.findall(AUDIO_TOKEN_PATTERN, prompt_str)
     audio_ids = [int(audio_id) for audio_id in audio_ids]
     assert len(audio_ids) == len(audio_embed_sizes), "Number of audio tokens and audio features do not match"
@@ -944,11 +962,10 @@ def input_processor_for_phio(
         TokenInputs: Processed inputs
     """
     multi_modal_data = inputs.get("multi_modal_data")
-    # Check if audio is being used as a modality
     if (multi_modal_data is None
             or ("audio" not in multi_modal_data
                 and "image" not in multi_modal_data)):
-        # pure text input
+        # pure text input, so no need to do pre-processing
         return inputs
 
     prompt_str = inputs.get("prompt")
@@ -1070,8 +1087,11 @@ def input_processor_for_phio(
 
 
 def _compute_audio_embed_size(hf_config, audio_frames):
+    """
+    Compute the audio embedding size based on the audio frames and compression rate.    
+    """
     compression_rate = hf_config.embd_layer['audio_embd_layer']['compression_rate']
-    # TODO: update this hard-coded value?
+    # NOTE: this is a hard-coded value but might be configurable in the future
     qformer_compression_rate = 1
     integer = audio_frames // compression_rate
     remainder = audio_frames % compression_rate
@@ -1085,15 +1105,12 @@ def _compute_audio_embed_size(hf_config, audio_frames):
     return result
 
 
-def get_max_phi3s_audio_tokens(ctx: InputContext):
-    # TODO
+def get_max_phi4o_audio_tokens(ctx: InputContext) -> int:
     return 10000
-    # return math.ceil(feature_extractor.chunk_length * _AUDIO_TOKENS_PER_SECOND)
 
-
-def dummy_audio_for_phi3s(audio_count: int) -> dict:
+def dummy_audio_for_phi4o(audio_count: int) -> dict:
     """
-    Create dummy audio data for the Phi-3.5-Speech model, which is used for profiling.
+    Create dummy audio data for the Phi-4O model, which is used for profiling.
 
     Args:
         audio_count (int): Number of audio samples.
@@ -1110,11 +1127,11 @@ def dummy_image_for_phi3v(width: int, height: int):
     return image
 
 
-def dummy_data_for_phi3s(
+def dummy_data_for_phi4o(
     ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
 ) -> DummyData:
     """
-    Create dummy sequence (input_ids) and audio data for the Phi-3.5-Speech model, which is used for
+    Create dummy sequence (input_ids) and audio data for the Phi-4O model, which is used for
     profiling.
 
     In this case, the sequence data is a bunch of 0s with a number of audio tokens that correspond
@@ -1143,7 +1160,7 @@ def dummy_data_for_phi3s(
 
     if seq_len - audio_feature_size * audio_count - total_image_tokens < 0:
         raise RuntimeError(
-            f"Phi3O cannot process {audio_count} audios and {image_count} images in a prompt,"
+            f"Phi4O cannot process {audio_count} audios and {image_count} images in a prompt,"
             f"please increase max_model_len to be at larger than {audio_feature_size * audio_count + total_image_tokens}"
              " or reduce audio/image limit by --limit-mm-per-prompt.")
     
@@ -1153,7 +1170,7 @@ def dummy_data_for_phi3s(
             (0, seq_len - audio_feature_size * audio_count),
         )
         mm_data = {
-            "audio": dummy_audio_for_phi3s(audio_count),
+            "audio": dummy_audio_for_phi4o(audio_count),
         }
     else:
         seq_data = SequenceData.from_prompt_token_counts(
@@ -1166,9 +1183,9 @@ def dummy_data_for_phi3s(
     return DummyData(seq_data, mm_data)
 
 
-def input_mapper_for_phi3s(ctx: InputContext, data: object) -> MultiModalInputs:
+def input_mapper_for_phi4o_audio(ctx: InputContext, data: object) -> MultiModalInputs:
     """
-    This function is used to create the MultiModalInputs for the Phi-3.5-Speech model.
+    This function is used to create the MultiModalInputs for the Phi-4O (audio) model.
     Specifically, for audio, we extract the audio features from the sound file and create
     pairs of audio features and audio embed lengths (the latter of which is used to repeat
     the audio placeholder token in the input prompt IDs).
@@ -1269,19 +1286,19 @@ def cat_with_pad(tensors, dim, padding_value=0):
     return output
 
 
-@MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_phi3s)
+@MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_phi4o_audio)
 @MULTIMODAL_REGISTRY.register_input_mapper("image", input_mapper_for_phi3v)
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "audio", get_max_phi3s_audio_tokens
+    "audio", get_max_phi4o_audio_tokens
 )
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
     "image", get_max_phi3v_image_tokens
 )
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3s)  # TODO dummy data for vision?
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4o)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phio)
 class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
     """
-    Implements the Phi-3.5-Omni model in VLLM.
+    Implements the Phi-4-Omni model in VLLM.
 
     Args:
         config (PretrainedConfig): Pretrained model configuration.
@@ -1407,7 +1424,7 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
-    ) -> Optional[Phi3SAudioInputs]:
+    ) -> Optional[Phi4OAudioInputs]:
         """
         Parse and validate the audio input to the model.  This handles both audio features and
         audio embeddings, but only the former is used for now.
@@ -1416,7 +1433,7 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
             kwargs (object): Keyword arguments.
 
         Returns:
-            Optional[Phi3SAudioInputs]: Parsed and validated audio inputs.
+            Optional[Phi4OAudioInputs]: Parsed and validated audio inputs.
         """
         audio_features = kwargs.pop("audio_features", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
@@ -1431,7 +1448,7 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
                     f"Got type: {type(audio_features)}"
                 )
 
-            return Phi3SAudioFeatureInputs(
+            return Phi4OAudioFeatureInputs(
                 type="audio_features", data=audio_features
             )
 
@@ -1442,24 +1459,24 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
                     f"Got type: {type(audio_embeds)}"
                 )
 
-            return Phi3SAudioEmbeddingInputs(
+            return Phi4OAudioEmbeddingInputs(
                 type="audio_embeds", data=audio_embeds
             )
 
         raise AssertionError("This line should be unreachable.")
 
     def _process_audio_input(
-        self, input_ids: torch.Tensor, audio_input: Phi3SAudioInputs, audio_projection_mode: str
+        self, input_ids: torch.Tensor, audio_input: Phi4OAudioInputs, audio_projection_mode: str
     ) -> NestedTensors:
         """
         Create the audio embeddings from the audio input, where the audio input is pairs of
         audio features and audio embed lengths.  The audio input is created by
-        `input_mapper_for_phi3s`.
+        `input_mapper_for_phi4o_audio`.
 
         Args:
             input_ids (torch.Tensor): Input IDs (the prompt in this case, before the audio token
                 replication).
-            audio_input (Phi3SAudioInputs): Audio input.
+            audio_input (Phi4OAudioInputs): Audio input.
 
         Returns:
             NestedTensors: Audio embeddings
@@ -1576,7 +1593,6 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
                 name = name.replace(audio_proj_4v, "embed_tokens_extend.audio_projection_for_vision")
 
             name = (
-                # name.replace("model.embed_tokens.", "embed_tokens.")
                 name.replace(
                     "model.embed_tokens_extend.audio_embed.audio_projection.speech.",
                     "embed_tokens_extend.audio_projection.",
@@ -1592,11 +1608,6 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
             if name.endswith(".base_layer.weight"):
                 name = name.replace(".base_layer.weight", ".weight")
             adjusted_weights[name] = weight
-
-            # if name == "model.embed_tokens.weight":
-            #     adjusted_weights["embed_tokens.weight"] = (
-            #         weight
-            #     )
 
         missing_keys, unexpected_keys = self.load_state_dict(
             adjusted_weights, strict=False

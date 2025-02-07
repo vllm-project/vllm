@@ -3,7 +3,6 @@
 # Code copied from Microsoft/MoE by Jacob Platin (jacobplatin@microsoft.com)
 # but implemented by the Phi-Speech team
 #!/usr/bin/env python3
-"""ConformerEncoder Module"""
 import abc
 import backoff
 from functools import partial
