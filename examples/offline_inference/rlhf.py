@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 a simple demonstration of RLHF with vLLM, inspired by
 the OpenRLHF framework https://github.com/OpenRLHF/OpenRLHF .

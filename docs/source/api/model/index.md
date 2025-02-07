@@ -2,10 +2,10 @@
 
 ## Submodules
 
-```{toctree}
+:::{toctree}
 :maxdepth: 1
 
 interfaces_base
 interfaces
 adapters
-```
+:::

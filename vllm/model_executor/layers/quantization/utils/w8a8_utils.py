@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -28,6 +30,20 @@ def cutlass_fp8_supported() -> bool:
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
     return ops.cutlass_scaled_mm_supports_fp8(capability)
+
+
+def cutlass_block_fp8_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_scaled_mm_supports_block_fp8(capability)
+
+
+CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
+CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
 
 def per_tensor_dequantize(
@@ -73,8 +89,8 @@ def requantize_with_max_scale(
     # from disk in this case. Skip requantization in this case (since)
     # we already are quantized with the single scale.
     # * Sample Model: nm-testing/Phi-3-mini-128k-instruct-FP8
-    unfused_module_in_checkpoint = (weight_scale[-1] > torch.finfo(
-        torch.float8_e4m3fn).min)
+    unfused_module_in_checkpoint = (weight_scale[-1]
+                                    > torch.finfo(torch.float8_e4m3fn).min)
 
     # If unfused checkpoint, need requanize with the single scale.
     if unfused_module_in_checkpoint:
@@ -97,7 +113,7 @@ def apply_fp8_linear(
     input_scale: Optional[torch.Tensor] = None,
     input_scale_ub: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    cutlass_fp8_supported: bool = True,
+    cutlass_fp8_supported: bool = CUTLASS_FP8_SUPPORTED,
     use_per_token_if_dynamic: bool = False,
 ) -> torch.Tensor:
     # ops.scaled_fp8_quant supports both dynamic and static quant.

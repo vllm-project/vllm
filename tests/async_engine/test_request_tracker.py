@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from vllm.engine.async_llm_engine import RequestTracker

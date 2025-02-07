@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import dataclasses
 import json
@@ -11,10 +13,10 @@ import vllm.envs as envs
 from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          DecodingConfig, DeviceConfig, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig)
+                         ModelConfig, ModelImpl, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
+                         SchedulerConfig, SpeculativeConfig, TaskOption,
+                         TokenizerPoolConfig, VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -195,7 +197,9 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
+    model_impl: str = "auto"
 
     calculate_kv_scales: Optional[bool] = None
 
@@ -375,6 +379,18 @@ class EngineArgs:
             'qualified names that can be passed with the `logits_processors` '
             'extra completion argument. Defaults to None, which allows no '
             'processors.')
+        parser.add_argument(
+            '--model-impl',
+            type=str,
+            default=EngineArgs.model_impl,
+            choices=[f.value for f in ModelImpl],
+            help='Which implementation of the model to use.\n\n'
+            '* "auto" will try to use the vLLM implementation if it exists '
+            'and fall back to the Transformers implementation if no vLLM '
+            'implementation is available.\n'
+            '* "vllm" will use the vLLM model implementation.\n'
+            '* "transformers" will use the Transformers model '
+            'implementation.\n')
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',
@@ -930,18 +946,28 @@ class EngineArgs:
             type=str,
             default="auto",
             help='The worker class to use for distributed execution.')
-
         parser.add_argument(
             "--generation-config",
             type=nullable_str,
             default=None,
             help="The folder path to the generation config. "
-            "Defaults to None, will use the default generation config in vLLM. "
-            "If set to 'auto', the generation config will be automatically "
-            "loaded from model. If set to a folder path, the generation config "
-            "will be loaded from the specified folder path. If "
-            "`max_new_tokens` is specified, then it sets a server-wide limit "
-            "on the number of output tokens for all requests.")
+            "Defaults to None, no generation config is loaded, vLLM defaults "
+            "will be used. If set to 'auto', the generation config will be "
+            "loaded from model path. If set to a folder path, the generation "
+            "config will be loaded from the specified folder path. If "
+            "`max_new_tokens` is specified in generation config, then "
+            "it sets a server-wide limit on the number of output tokens "
+            "for all requests.")
+
+        parser.add_argument(
+            "--override-generation-config",
+            type=json.loads,
+            default=None,
+            help="Overrides or sets generation config in JSON format. "
+            "e.g. ``{\"temperature\": 0.5}``. If used with "
+            "--generation-config=auto, the override parameters will be merged "
+            "with the default config from the model. If generation-config is "
+            "None, only the override parameters are used.")
 
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",
@@ -1002,7 +1028,9 @@ class EngineArgs:
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
+            override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            model_impl=self.model_impl,
         )
 
     def create_load_config(self) -> LoadConfig:

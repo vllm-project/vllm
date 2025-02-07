@@ -245,7 +245,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        GIT_TAG v3.6.0
+        GIT_TAG v3.7.0
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
@@ -275,7 +275,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Only build Marlin kernels if we are building for at least some compatible archs.
   # Keep building Marlin for 9.0 as there are some group sizes and shapes that
   # are not supported by Machete yet.
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.7;8.9;9.0" ${CUDA_ARCHS})
+  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
   if (MARLIN_ARCHS)
     set(MARLIN_SRCS
        "csrc/quantization/fp8/fp8_marlin.cu"
@@ -296,10 +296,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
-  # CUDA 12.0 or later (and only work on Hopper, 9.0/9.0a for now).
-  cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0;9.0a" "${CUDA_ARCHS}")
+  # CUDA 12.0 or later (and only work on Hopper, 9.0a for now).
+  cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
+    set(SRCS 
+       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
+       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_fp8.cu"
+       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_int8.cu"
+       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_azp_sm90_int8.cu"
+       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm90_fp8.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
@@ -351,7 +356,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # 2:4 Sparse Kernels
 
   # The 2:4 sparse kernels cutlass_scaled_sparse_mm and cutlass_compressor
-  # require CUDA 12.2 or later (and only work on Hopper, 9.0/9.0a for now).
+  # require CUDA 12.2 or later (and only work on Hopper, 9.0a for now).
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_3X_ARCHS)
     set(SRCS "csrc/sparse/cutlass/sparse_compressor_c3x.cu"
              "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
@@ -446,9 +451,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 message(STATUS "Enabling C extension.")
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_C_LIBS cuda)
-endif()
 define_gpu_extension_target(
   _C
   DESTINATION vllm
@@ -457,7 +459,6 @@ define_gpu_extension_target(
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-  LIBRARIES ${VLLM_C_LIBS}
   USE_SABI 3
   WITH_SOABI)
 
