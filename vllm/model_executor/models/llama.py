@@ -602,7 +602,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             item = modules[i]
             next_item = modules[i + 1] if i < num_modules - 1 else None
 
-            combined_item = f"{item}.{next_item}" if next_item is not None else None
+            combined_item = (f"{item}.{next_item}"
+                             if next_item is not None else None)
 
             if combined_item in mapping:
                 name = name.replace(combined_item, mapping[combined_item])
