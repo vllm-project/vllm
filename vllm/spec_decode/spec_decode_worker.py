@@ -178,13 +178,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
-                    if current_platform.is_cuda_alike():
+                    if current_platform.is_cuda_alike() and not draft_model_config.use_mla:
                         draft_worker_kwargs[
                             "model_runner_cls"] = TP1DraftModelRunner
                 else:
-                    if draft_model_config.hf_config.model_type == "eagle":
-                        raise NotImplementedError(
-                            "EAGLE does not support TP > 1 yet")
+                    # if draft_model_config.hf_config.model_type == "eagle":
+                    #     raise NotImplementedError(
+                    #         "EAGLE does not support TP > 1 yet")
 
                     allow_zero_draft_token_step = False
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)

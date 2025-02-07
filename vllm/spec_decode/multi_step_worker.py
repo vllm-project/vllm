@@ -96,11 +96,21 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
             for _ in range(sample_len):
+                if expanded_request.previous_hidden_states is not None:
+                    self.worker.model_runner.return_hidden_states = True
                 model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
                 model_output = model_output[0]
+
+                if expanded_request.previous_hidden_states is not None:
+                    assert hasattr(model_output, 'hidden_states')
+                    seq_group_meta_with_hidden = [
+                        sg for sg in expanded_request.seq_group_metadata_list
+                        if sg.do_sample
+                    ]
+                    expanded_request.previous_hidden_states = HiddenStates(model_output.hidden_states, seq_group_meta_with_hidden, expanded_request.previous_hidden_states.hidden_states)
 
                 self._append_new_tokens(
                     model_output, expanded_request.seq_group_metadata_list,

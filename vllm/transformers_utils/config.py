@@ -176,6 +176,11 @@ def get_config(
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
 
+    if model == "DeepSeekV3MTP":
+        model_base_name = "deepseek-ai/DeepSeek-R1"
+    else:
+        model_base_name = model
+
     is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
@@ -183,9 +188,9 @@ def get_config(
 
     if config_format == ConfigFormat.AUTO:
         if is_gguf or file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision):
+                model_base_name, HF_CONFIG_NAME, revision=revision):
             config_format = ConfigFormat.HF
-        elif file_or_path_exists(model, MISTRAL_CONFIG_NAME,
+        elif file_or_path_exists(model_base_name, MISTRAL_CONFIG_NAME,
                                  revision=revision):
             config_format = ConfigFormat.MISTRAL
         else:
@@ -193,7 +198,7 @@ def get_config(
             # raise an offline mode error to indicate to the user that they
             # don't have files cached and may need to go online.
             # This is conveniently triggered by calling file_exists().
-            file_exists(model,
+            file_exists(model_base_name,
                         HF_CONFIG_NAME,
                         revision=revision,
                         token=HF_TOKEN)
@@ -202,12 +207,17 @@ def get_config(
 
     if config_format == ConfigFormat.HF:
         config_dict, _ = PretrainedConfig.get_config_dict(
-            model,
+            model_base_name,
             revision=revision,
             code_revision=code_revision,
             token=HF_TOKEN,
             **kwargs,
         )
+
+        if model == "DeepSeekV3MTP":
+            config_dict["model_type"] = "eagle"
+            config_dict["num_hidden_layers"] = 1
+            config_dict["architectures"] = ["DeepseekV3MTPModel"]
 
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")

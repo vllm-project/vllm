@@ -383,6 +383,8 @@ class DefaultModelLoader(BaseModelLoader):
                 model = _initialize_model(vllm_config=vllm_config)
 
             weights_to_load = {name for name, _ in model.named_parameters()}
+            if hasattr(model_config.hf_config, 'model_type') and model_config.hf_config.model_type == 'eagle':
+                model_config.model = 'deepseek-ai/DeepSeek-R1'
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))
             # We only enable strict check for non-quantized models

@@ -1650,6 +1650,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        previous_hidden_states: Optional[torch.Tensor] = None,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
@@ -1681,6 +1682,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
+            if previous_hidden_states is not None:
+                previous_hidden_states = torch.cat([
+                    previous_hidden_states,
+                    torch.empty([
+                        graph_batch_size - previous_hidden_states.shape[0],
+                        *previous_hidden_states.shape[1:]
+                    ],
+                    dtype=previous_hidden_states.dtype,
+                    device=previous_hidden_states.device)
+                ])
         else:
             model_executable = self.model
 
@@ -1707,6 +1718,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
+
+        if previous_hidden_states is not None:
+            seqlen_agnostic_kwargs["previous_hidden_states"] = (previous_hidden_states)
+
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start = torch.cuda.Event(enable_timing=True)

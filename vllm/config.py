@@ -313,8 +313,7 @@ class ModelConfig:
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.encoder_config = self._get_encoder_config()
-        self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, revision)
+        self.hf_image_processor_config = {}# get_hf_image_processor_config(self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
@@ -420,6 +419,8 @@ class ModelConfig:
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
     ) -> Optional["MultiModalConfig"]:
+        return None
+    
         architectures = getattr(self.hf_config, "architectures", [])
         if ModelRegistry.is_multimodal_model(architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
@@ -756,7 +757,7 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return (hasattr(self.hf_text_config, "model_type")) \
                 and (self.hf_text_config.model_type in \
-                    ('deepseek_v2', 'deepseek_v3'))\
+                    ('deepseek_v2', 'deepseek_v3', 'eagle'))\
                 and (self.hf_text_config.kv_lora_rank is not None)
 
     def get_head_size(self) -> int:

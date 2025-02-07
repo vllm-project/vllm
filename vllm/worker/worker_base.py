@@ -316,11 +316,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             return None
 
         worker_input = WorkerInput.from_broadcasted_tensor_dict(broadcast_data)
+        
+        kwargs = extract_previous_hidden_states(broadcast_data)
+        broadcast_data.pop("previous_hidden_states", None)
+
         model_input = (
             self.model_runner.make_model_input_from_broadcasted_tensor_dict(
                 broadcast_data))
-
-        kwargs = extract_previous_hidden_states(broadcast_data)
 
         return model_input, worker_input, kwargs
 

@@ -640,8 +640,8 @@ class DeepseekV2Model(nn.Module):
                 "residual": residual
             })
 
-        hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        # hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states + residual
 
 
 class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
@@ -684,7 +684,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
+        logits = self.logits_processor(self.lm_head, self.model.norm(hidden_states),
                                        sampling_metadata)
         return logits
 
