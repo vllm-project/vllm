@@ -5,17 +5,12 @@
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from typing import (Iterable, List, Mapping, Optional, Sequence, Set, Tuple,
-                    TypedDict, Union)
+                    TypedDict,Union)
 
 import torch
 from torch import nn
 from torch.nn import LayerNorm
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
-from transformers import PreTrainedTokenizer, TensorType
 from transformers.image_utils import ImageInput
-from transformers.tokenization_utils_base import TextInput
-
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -47,7 +42,12 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
+from transformers.tokenization_utils_base import TextInput
+from transformers import (PreTrainedTokenizer,
+                          TensorType)
 
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -55,6 +55,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
 
 IMAGE_TOKEN_ID = 151329
 logger = init_logger(__name__)
+
 
 
 def build_normalization_transform(image_size: int) -> transforms.Compose:
@@ -69,26 +70,33 @@ def build_normalization_transform(image_size: int) -> transforms.Compose:
         Callable transform for normalizing and resizing one RGB image.
     """
 
-    return transforms.Compose([
-        transforms.Resize(
-            (image_size, image_size),
-            interpolation=InterpolationMode.BICUBIC,
-        ),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            (0.48145466, 0.4578275, 0.40821073),
-            (0.26862954, 0.26130258, 0.27577711),
-        ),
-    ])
+    return transforms.Compose(
+        [
+            transforms.Resize(
+                (image_size, image_size),
+                interpolation=InterpolationMode.BICUBIC,
+            ),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                (0.48145466, 0.4578275, 0.40821073),
+                (0.26862954, 0.26130258, 0.27577711),
+            ),
+        ]
+    )
 
 
 def calculate_image_placeholder(vision_config):
     return (vision_config["image_size"] // vision_config["patch_size"] // 2)**2
 
 
+
+
+
 class GLMImagePixelInputs(TypedDict):
     pixel_values: torch.Tensor
     """Shape: `(batch_size, num_channels, height, width)`"""
+
+
 
 
 class GLM4VProcessor:
@@ -107,7 +115,7 @@ class GLM4VProcessor:
 
         self.config = config
         self.tokenizer = tokenizer
-
+        
         if hasattr(self.config, "vision_config"):
             self.image_transform = build_normalization_transform(
                 config.vision_config["image_size"])
@@ -146,7 +154,6 @@ class GLM4VProcessor:
             tensor_type=return_tensors,
         )
 
-
 class GLM4VProcessingInfo(BaseProcessingInfo):
 
     def __init__(self, ctx):
@@ -168,7 +175,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         self.image_token_num = calculate_image_placeholder(vision_config)
-        self.image_szie = vision_config["image_size"]
+        self.image_size = vision_config["image_size"]
 
     def get_num_image_tokens(
         self,
@@ -181,7 +188,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
 
     def get_image_size(self) -> ImageSize:
 
-        return ImageSize(height=self.image_szie, width=self.image_szie)
+        return ImageSize(height=self.image_size, width=self.image_size)
 
     def get_hf_processor(self) -> GLM4VProcessor:
         return GLM4VProcessor(
@@ -221,6 +228,7 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"), )
+
 
     def _get_prompt_replacements(
         self,
@@ -267,7 +275,6 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
             ]
             for modality, ps in placeholders.items()
         }
-
         return token_ids, text, placeholders
 
 
