@@ -5,11 +5,16 @@
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from typing import (Iterable, List, Mapping, Optional, Sequence, Set, Tuple,
-                    TypedDict)
+                    TypedDict, Union)
 
 import torch
 from torch import nn
 from torch.nn import LayerNorm
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
+from transformers import PreTrainedTokenizer, TensorType
+from transformers.image_utils import ImageInput
+from transformers.tokenization_utils_base import TextInput
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
@@ -52,6 +57,31 @@ IMAGE_TOKEN_ID = 151329
 logger = init_logger(__name__)
 
 
+def build_normalization_transform(image_size: int) -> transforms.Compose:
+    """
+    Build a normalization transform which can be applied to one or
+    more input images from which we want to extract visual features.
+
+    Args:
+        image_size: size of the image to be processed for visual embeddings.
+    
+    Returns:
+        Callable transform for normalizing and resizing one RGB image.
+    """
+
+    return transforms.Compose([
+        transforms.Resize(
+            (image_size, image_size),
+            interpolation=InterpolationMode.BICUBIC,
+        ),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            (0.48145466, 0.4578275, 0.40821073),
+            (0.26862954, 0.26130258, 0.27577711),
+        ),
+    ])
+
+
 def calculate_image_placeholder(vision_config):
     return (vision_config["image_size"] // vision_config["patch_size"] // 2)**2
 
@@ -59,6 +89,62 @@ def calculate_image_placeholder(vision_config):
 class GLMImagePixelInputs(TypedDict):
     pixel_values: torch.Tensor
     """Shape: `(batch_size, num_channels, height, width)`"""
+
+
+class GLM4VProcessor:
+    """
+    This model doesn't define its own HF processor,
+    so we implement our own one here.
+
+    """
+
+    def __init__(
+        self,
+        config: ChatGLMConfig,
+        tokenizer: PreTrainedTokenizer,
+    ) -> None:
+        super().__init__()
+
+        self.config = config
+        self.tokenizer = tokenizer
+
+        if hasattr(self.config, "vision_config"):
+            self.image_transform = build_normalization_transform(
+                config.vision_config["image_size"])
+        else:
+            self.image_transform = None
+
+    def __call__(
+        self,
+        text: Optional[Union[TextInput, list[TextInput]]] = None,
+        images: Optional[Union[ImageInput, list[ImageInput]]] = None,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+    ) -> BatchFeature:
+        if text is None:
+            text = []
+        if not isinstance(text, list):
+            text = [text]
+        if images is None:
+            images = []
+        if not isinstance(images, list):
+            images = [images]
+        text_inputs = self.tokenizer(text)
+        if len(images) == 0:
+            image_inputs = {}
+        else:
+            if self.image_transform is None:
+                raise ValueError("This model does not support image inputs")
+
+            pixel_values = [self.image_transform(image) for image in images]
+            image_inputs = {"pixel_values": torch.stack(pixel_values)}
+
+        return BatchFeature(
+            {
+                **text_inputs,
+                **image_inputs,
+            },
+            tensor_type=return_tensors,
+        )
 
 
 class GLM4VProcessingInfo(BaseProcessingInfo):
@@ -97,6 +183,12 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
 
         return ImageSize(height=self.image_szie, width=self.image_szie)
 
+    def get_hf_processor(self) -> GLM4VProcessor:
+        return GLM4VProcessor(
+            self.get_hf_config(),
+            self.get_tokenizer(),
+        )
+
 
 class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
 
@@ -114,7 +206,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
                                    height=target_height,
                                    num_images=num_images)
         }
-        text = ""
+        text = "<|begin_of_image|><|endoftext|><|end_of_image|>"
         return ProcessorInputs(
             prompt_text=text,
             mm_data=mm_data,
@@ -129,57 +221,6 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"), )
-
-    def _apply_hf_processor_text_only(self, prompt_text: str) -> list[int]:
-        """
-        Apply the HF processor on the prompt text only.
-
-        Since HF processor requires that text and multi-modal items
-        correspond to each other, we create dummy multi-modal items
-        to go along with the text.
-        """
-        mm_counts = self.info.get_supported_mm_limits()
-        dummy_inputs = self.dummy_inputs.get_dummy_processor_inputs(
-            self.info.ctx.model_config.max_model_len,
-            mm_counts,
-        )
-        prompt_ids, _ = self._apply_hf_processor_text_mm(
-            prompt_text=prompt_text,
-            mm_items=self._to_mm_items(dummy_inputs.mm_data),
-            hf_processor_mm_kwargs={},
-        )
-
-        return prompt_ids
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        try:
-            tokenizer = self.info.get_tokenizer()
-            img = mm_data.get("images", None)[0] if mm_data else None
-            raw_batch_data = tokenizer.apply_chat_template(
-                conversation=[{
-                    "role": "user",
-                    "image": img,
-                    "content": prompt,
-                }],
-                add_generation_prompt=True,
-                tokenize=True,
-                return_tensors="pt",
-                return_dict=True,
-            ).data
-        except Exception:
-            logger.error("Failed to process content (%s)", prompt)
-
-        return BatchFeature(
-            dict(
-                input_ids=raw_batch_data["input_ids"],
-                pixel_values=[raw_batch_data["images"][0]]
-                if mm_data else None,
-            ))
 
     def _get_prompt_replacements(
         self,

@@ -164,6 +164,7 @@ def _test_processing_correctness(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "fixie-ai/ultravox-v0_3",
+    "THUDM/glm-4v-9b"
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
