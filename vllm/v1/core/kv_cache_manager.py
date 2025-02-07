@@ -92,10 +92,10 @@ class KVCacheManager:
                       self.num_gpu_blocks)
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats:
-        """Get (and reset) the prefix cache query and hit counts.
+        """Get (and reset) the prefix cache stats.
 
         Returns:
-            The prefix caching stats - query count, and hit count.
+            The current prefix caching stats.
         """
         stats = self.prefix_cache_stats
         self.prefix_cache_stats = PrefixCacheStats()

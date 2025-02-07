@@ -40,7 +40,7 @@ class PrefixCachingMetrics:
 
     def __init__(self, interval: int = 1000):
         self.interval = interval
-        # The current aggregated query total and hit.
+        # The current aggregated values.
         self.aggregated_requests = 0
         self.aggregated_query_total = 0
         self.aggregated_query_hit = 0
@@ -56,20 +56,21 @@ class PrefixCachingMetrics:
         When there are more than `interval` requests, the oldest set of
         requestsare removed from the metrics.
 
-        Stats:
-            reset: Whether reset_prefix_cache was invoked.
-            requests: The number of requests in this update.
-            queries: The number of queries in these requests.
-            hits: The number of hits in these requests.
+        Args:
+            stats: The prefix cache stats.
         """
+        # reset_prefix_cache was invoked before the current update.
+        # Reset the metrics before aggregating the current stats.
         if stats.reset:
             self.reset()
 
+        # Update the metrics.
         self.query_queue.append((stats.requests, stats.queries, stats.hits))
         self.aggregated_requests += stats.requests
         self.aggregated_query_total += stats.queries
         self.aggregated_query_hit += stats.hits
 
+        # Remove the oldest stats if the number of requests exceeds.
         if self.aggregated_requests > self.interval:
             old_requests, old_queries, old_hits = self.query_queue.popleft()
             self.aggregated_requests -= old_requests

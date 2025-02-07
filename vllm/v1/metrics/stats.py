@@ -12,10 +12,14 @@ if TYPE_CHECKING:
 @dataclass
 class PrefixCacheStats:
     """Stores prefix cache hit statistics."""
+    # Whether reset_prefix_cache was invoked.
     reset: bool = False
+    # The number of requests in this update.
     requests: int = 0
-    hits: int = 0
+    # The number of queries in these requests.
     queries: int = 0
+    # The number of hits in these requests.
+    hits: int = 0
 
 
 @dataclass
