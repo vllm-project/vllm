@@ -4,7 +4,7 @@ import asyncio
 import signal
 import weakref
 from abc import ABC, abstractmethod
-from typing import List, Optional, Type
+from typing import List, Optional, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -286,13 +286,36 @@ class AsyncMPClient(MPClient):
         )
 
         self.queue_task: Optional[asyncio.Task] = None
+        self.outputs_queue: Optional[asyncio.Queue[Union[EngineCoreOutputs,
+                                                         Exception]]] = None
+
+    async def _process_outputs_socket_loop(self):
+        """
+        ZMQ IO background loop. This helps performance because
+        ZMQ IO releases the GIL so we can overlap with output_handler_loop.
+        """
+
+        assert self.outputs_queue is not None
+        try:
+            while True:
+                (frame, ) = await self.output_socket.recv_multipart(copy=False)
+                outputs = self.decoder.decode(frame.buffer)
+                self.outputs_queue.put_nowait(outputs)
+        except Exception as e:
+            self.outputs_queue.put_nowait(e)
 
     async def get_output_async(self) -> EngineCoreOutputs:
-        try:
-            (frame, ) = await self.output_socket.recv_multipart(copy=False)
-            return self.decoder.decode(frame.buffer)
-        except Exception as e:
-            raise self._format_exception(e) from None
+
+        if self.outputs_queue is None:
+            self.outputs_queue = asyncio.Queue()
+            self.queue_task = asyncio.create_task(
+                self._process_outputs_socket_loop())
+
+        outputs = await self.outputs_queue.get()
+        if isinstance(outputs, Exception):
+            raise self._format_exception(outputs) from None
+
+        return outputs
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:

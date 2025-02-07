@@ -236,10 +236,8 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s aborted.", request_id)
             raise
 
-        # EngineCore or output_handler pushed error.
+        # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
-            # NOTE: we do not abort, since the EngineCore is dead
-            # and we will shut down anyways (unrecoverable).
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise
@@ -299,15 +297,7 @@ class AsyncLLM(EngineClient):
         except Exception as e:
             logger.error("AsyncLLM output_handler got an Exception:",
                          exc_info=e)
-            self._propagate_error()
-
-    def _propagate_error(self):
-        """Propagate to all generate() tasks."""
-
-        # Put EngineDeadError() into each generate() task's queue,
-        # each of which will raise it in their own context.
-        for _, q in self.rid_to_queue.items():
-            q.put_nowait(EngineDeadError())
+            self.output_processor.propagate_error(EngineDeadError())
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
