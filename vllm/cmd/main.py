@@ -7,15 +7,11 @@ import signal
 import sys
 from typing import List, Optional
 
-import uvloop
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
+import vllm.cmd.serve
 import vllm.version
-from vllm.engine.arg_utils import EngineArgs
-from vllm.entrypoints.openai.api_server import run_server
-from vllm.entrypoints.openai.cli_args import (make_arg_parser,
-                                              validate_parsed_serve_args)
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
 
@@ -29,19 +25,6 @@ def register_signal_handlers():
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTSTP, signal_handler)
-
-
-def serve(args: argparse.Namespace) -> None:
-    # The default value of `--model`
-    if args.model != EngineArgs.model:
-        raise ValueError(
-            "With `vllm serve`, you should provide the model as a "
-            "positional argument instead of via the `--model` option.")
-
-    # EngineArgs expects the model name to be passed as --model.
-    args.model = args.model_tag
-
-    uvloop.run(run_server(args))
 
 
 def interactive_cli(args: argparse.Namespace) -> None:
@@ -150,28 +133,16 @@ def main():
                         '--version',
                         action='version',
                         version=vllm.version.__version__)
-
     subparsers = parser.add_subparsers(required=True, dest="subparser")
 
-    serve_parser = subparsers.add_parser(
-        "serve",
-        help="Start the vLLM OpenAI Compatible API server",
-        usage="vllm serve <model_tag> [options]")
-    serve_parser.add_argument("model_tag",
-                              type=str,
-                              help="The model tag to serve")
-    serve_parser.add_argument(
-        "--config",
-        type=str,
-        default='',
-        required=False,
-        help="Read CLI options from a config file."
-        "Must be a YAML with the following options:"
-        "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference"
-    )
-
-    serve_parser = make_arg_parser(serve_parser)
-    serve_parser.set_defaults(dispatch_function=serve)
+    cmd_modules = [
+        vllm.cmd.serve,
+    ]
+    cmds = {}
+    for cmd_module in cmd_modules:
+        cmd = cmd_module.cmd_init()
+        cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
+        cmds[cmd.name] = cmd
 
     complete_parser = subparsers.add_parser(
         "complete",
@@ -196,8 +167,8 @@ def main():
     chat_parser.set_defaults(dispatch_function=interactive_cli, command="chat")
 
     args = parser.parse_args()
-    if args.subparser == "serve":
-        validate_parsed_serve_args(args)
+    if args.subparser in cmds:
+        cmds[args.subparser].validate(args)
 
     # One of the sub commands should be executed.
     if hasattr(args, "dispatch_function"):
