@@ -53,8 +53,9 @@ from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
 
-IMAGE_TOKEN_ID = 151329
 logger = init_logger(__name__)
+
+IMAGE_TOKEN_ID = 151329
 
 
 def build_normalization_transform(image_size: int) -> transforms.Compose:
@@ -220,7 +221,7 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(pixel_values=MultiModalFieldConfig.batched("image"), )
+        return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
     def _get_prompt_replacements(
         self,
