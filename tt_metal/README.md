@@ -55,19 +55,19 @@ To run Meta-Llama-3.1/3.2, it is required to have access to the model on Hugging
 
 To generate tokens (Llama70B) for sample prompts (with batch size 32):
 ```python
-MESH_DEVICE=T3K_LINE WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py
+MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py
 ```
 
 To measure performance (Llama70B) for a single batch of 32 prompts (with the default prompt length of 128 tokens):
 ```python
-MESH_DEVICE=T3K_LINE WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --measure_perf
+MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --measure_perf
 ```
 
 **Note 1 (Llama70B)**: To run Llama70B on Galaxy, set `MESH_DEVICE=TG` and do not set `WH_ARCH_YAML=...`.
 
-**Note 2 (Llama70B)**: By default, this will run the newer tt-metal implementation of Llama70B from the [Llama3 demo](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3). To run with the [old Llama70B implemenentation](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000/llama3_70b), set `MESH_DEVICE=T3K_RING` and modify the `TtLlamaForCausalLM` model import in [offline_inference_tt.py](https://github.com/tenstorrent/vllm/blob/dev/examples/offline_inference_tt.py) to `from models.demos.t3000.llama2_70b.tt.generator_vllm import TtLlamaForCausalLM`.
+**Note 2 (Llama70B)**: By default, this will run the newer tt-metal implementation of Llama70B from the [Llama3 demo](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3). To run with the [old Llama70B implemenentation](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000/llama3_70b), modify the `TtLlamaForCausalLM` model import in [offline_inference_tt.py](https://github.com/tenstorrent/vllm/blob/dev/examples/offline_inference_tt.py) to `from models.demos.t3000.llama2_70b.tt.generator_vllm import TtLlamaForCausalLM`.
 
-**Note 3 (Other Models)**: By default, the inference example will run with Llama-3.1-70B. To run with other Llama models, or Qwen-2.5, ensure that the apprioriate environment variables are set as per the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3), then set `MESH_DEVICE=<device>` (valid options for `<device>` are `N150`, `N300`, `T3K_LINE`, or `TG`) and one of the following:
+**Note 3 (Other Models)**: By default, the inference example will run with Llama-3.1-70B. To run with other Llama models, or Qwen-2.5, ensure that the apprioriate environment variables are set as per the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3), then set `MESH_DEVICE=<device>` (valid options for `<device>` are `N150`, `N300`, `T3K`, or `TG`) and one of the following:
 - Llama-3.1-8B: `--model "meta-llama/Meta-Llama-3.1-8B"`
 - Llama-3.2-1B: `--model "meta-llama/Llama-3.2-1B"`
 - Llama-3.2-3B: `--model "meta-llama/Llama-3.2-3B"`
@@ -87,12 +87,12 @@ To measure performance for a single batch (with the default prompt length of 128
 MESH_DEVICE=N300 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --model "meta-llama/Llama-3.2-11B-Vision-Instruct" --measure_perf --multi_modal --max_seqs_in_batch 16
 ```
 
-**Note**: To run on T3000, set `MESH_DEVICE=T3K_LINE` and `--max_seqs_in_batch 32`.
+**Note**: To run on T3000, set `MESH_DEVICE=T3K` and `--max_seqs_in_batch 32`.
 
 ## Running the server example
 
 ```python
-VLLM_RPC_TIMEOUT=100000 MESH_DEVICE=T3K_LINE WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/server_example_tt.py
+VLLM_RPC_TIMEOUT=100000 MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/server_example_tt.py
 ```
 
 **Note**: By default, the server will run with Llama-3.1-70B. To run with other models, set `MESH_DEVICE` and `--model` as described in [Running the offline inference example](#running-the-offline-inference-example).
