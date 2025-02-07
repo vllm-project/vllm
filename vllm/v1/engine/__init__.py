@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
 
 import msgspec
@@ -39,7 +38,6 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-@dataclass
 class EngineCoreRequest(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
