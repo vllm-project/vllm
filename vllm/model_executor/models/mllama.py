@@ -53,7 +53,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
-from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
+from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
+                                   MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement)
@@ -118,6 +119,13 @@ class MllamaProcessingInfo(BaseProcessingInfo):
         num_tiles_width = tiled_width // image_size
         return num_tiles_height * num_tiles_width
 
+    def get_image_size_with_most_features(self) -> ImageSize:
+        vision_config = self.get_hf_config().vision_config
+        image_size = vision_config.image_size
+        max_num_tiles = vision_config.max_num_tiles
+        # Result in the max possible feature size (h:w = 16:1)
+        return ImageSize(height=max_num_tiles * image_size, width=image_size)
+
 
 class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
 
@@ -127,19 +135,19 @@ class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_images = mm_counts["image"]
-        hf_processor = self.info.get_hf_processor()
-        image_token: str = hf_processor.image_token
 
-        vision_config = self.info.get_hf_config().vision_config
-        image_size = vision_config.image_size
-        max_num_tiles = vision_config.max_num_tiles
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
 
         mm_data = {
             "image":
-            self._get_dummy_images(width=image_size * max_num_tiles,
-                                   height=image_size,
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
                                    num_images=num_images)
         }
+
+        hf_processor = self.info.get_hf_processor()
+        image_token: str = hf_processor.image_token
 
         return ProcessorInputs(
             prompt_text=image_token * num_images,
