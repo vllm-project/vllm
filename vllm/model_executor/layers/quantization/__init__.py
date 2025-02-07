@@ -11,6 +11,7 @@ QUANTIZATION_METHODS: List[str] = [
     "deepspeedfp",
     "tpu_int8",
     "fp8",
+    "ptpc_fp8",
     "fbgemm_fp8",
     "modelopt",
     # The order of gptq methods is important for config.py iteration over
@@ -99,6 +100,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .modelopt import ModelOptFp8Config
     from .moe_wna16 import MoeWNA16Config
     from .neuron_quant import NeuronQuantConfig
+    from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
 
@@ -120,6 +122,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
+        "ptpc_fp8": PTPCFp8Config,
         "qqq": QQQConfig,
         "hqq": HQQMarlinConfig,
         "experts_int8": ExpertsInt8Config,
