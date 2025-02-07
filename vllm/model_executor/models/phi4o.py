@@ -66,9 +66,9 @@ VISION_ENCODER_TO_PROCESSING_CONFIG = {
     },
 }
 logger = logging.get_logger(__name__)
-# This is a workaround to prevent text (user input) + audio + image from being used in 
+# This is a workaround to prevent text (user input) + audio + image from being used in
 # the same prompt.
-# It includes token ids for "/n" and tokens in added_tokens_decoder from the 
+# It includes token ids for "/n" and tokens in added_tokens_decoder from the
 # tokenizer_confg.json file.
 NON_USER_INPUT_TOKENS = {198, 200010, 200011, 199999, 200018, 200019, 200020, 200021, 200022, 200023, 200024, 200025, 200026, 200027, 200028}
 
@@ -82,12 +82,12 @@ def get_max_dummy_image(ctx: InputContext):
     vit_image_size = prepro_config['vit_image_size']
 
     max_side = vit_image_size * dynamic_hd_size
-    dummy_image = dummy_image_for_phi3v(vit_image_size, max_side)
+    dummy_image = dummy_image_for_phi4o(vit_image_size, max_side)
     return dummy_image
 
 
 # image token length
-def get_max_phi3v_image_tokens(ctx: InputContext):
+def get_max_phi4o_image_tokens(ctx: InputContext):
     dummy_image = get_max_dummy_image(ctx)
 
     hf_config = ctx.get_hf_config()
@@ -288,11 +288,7 @@ def preprocess(images, dynamic_hd_size, vit_resolution, vit_patch_size):
         "image_attention_mask": returned_image_attention_mask,
         "num_img_tokens": returned_num_img_tokens,
     }
-    # data = [returned_input_image_embeds, returned_image_sizes, returned_image_attention_mask, returned_num_img_tokens]
     return data
-
-    # return BatchFeature(data=data, tensor_type=return_tensors)
-
 
 
 class PhiOImageEncoder(nn.Module):
@@ -313,8 +309,6 @@ class PhiOImageEncoder(nn.Module):
         else:
             self.drop = None
 
-        # logger.info(f"create image tower {config.img_processor}")
-
         # layer_idx to output the img features
         if isinstance(config.img_processor, dict):
             self.layer_idx = config.img_processor.get('layer_idx', -2)
@@ -329,7 +323,7 @@ class PhiOImageEncoder(nn.Module):
         L, D = pe_weight.size()
         H = int(math.sqrt(L))
         assert H**2 == L, f'position embedding size {L} is not square'
-        if H % 2 != 0: #and kwargs.get('image_token_compression_cls', None) is None:
+        if H % 2 != 0:
             self.img_processor_padding = nn.ReflectionPad2d((0, 1, 0, 1))
             H += 1
         image_dim_out = D
@@ -344,15 +338,14 @@ class PhiOImageEncoder(nn.Module):
 
 
         # global_gn and sub_gn for hd transform, serves as line separator
-        self.use_hd_transform = True # kwargs.get('use_hd_transform', False)
-        self.with_learnable_separator = True # kwargs.get('with_learnable_separator', False)
-        self.hd_transform_order = "sub_glb" # kwargs.get('hd_transform_order', 'glb_sub')
-        self.freeze_img_processor = False # kwargs.get('freeze_img_processor', False)
-        self.crop_size = 448 # kwargs.get('crop_size', 336)
-        # logger.info(f'freeze_img_processor = {self.freeze_img_processor}')
+        self.use_hd_transform = True
+        self.with_learnable_separator = True
+        self.hd_transform_order = "sub_glb"
+        self.freeze_img_processor = False
+        self.crop_size = 448
 
         # image token compression
-        self.image_token_compression_cls = 'avg_pool_2d' # kwargs.get('image_token_compression_cls', None)
+        self.image_token_compression_cls = 'avg_pool_2d'
         self.image_token_compression = nn.AvgPool2d(kernel_size=2, stride=2)
         self.base_feat_height_reduction = 1
         self.base_feat_height_target = self.base_feat_height_target // 2
@@ -363,9 +356,7 @@ class PhiOImageEncoder(nn.Module):
         # 1024 * 4, merge spatial to channel dimension
         self.glb_GN = nn.Parameter(torch.zeros([1, 1, self.image_dim_out * self.base_feat_height_reduction**2]))
         self.sub_GN = nn.Parameter(torch.zeros([1, 1, 1, self.image_dim_out * self.base_feat_height_reduction**2]))
-        # logger.info(f'learnable separator enabled for hd transform, hd_transform_order = {self.hd_transform_order}')
 
-        projection_cls = "mlp" # kwargs.get('projection_cls', 'linear')
         dim_projection = hidden_size
         depth = 2
         layers = [nn.Linear(image_dim_out * self.base_feat_height_reduction**2, dim_projection)]
@@ -378,7 +369,7 @@ class PhiOImageEncoder(nn.Module):
         self.vocab_size = config.vocab_size
         self.img_features = None
 
-        self.use_out_place_operations = False # kwargs.get('use_out_place_operations', False)
+        self.use_out_place_operations = False
 
     def get_img_features(self,
                          img_embeds: torch.FloatTensor,
@@ -414,8 +405,6 @@ class PhiOImageEncoder(nn.Module):
 
             return patch_feature
 
-
-        # logger.info(f'processed img feature size = {img_feature.size()}')
         raise NotImplementedError
 
     def forward(self,
@@ -451,10 +440,6 @@ class PhiOImageEncoder(nn.Module):
 
         img_features = self.get_img_features(pixel_values,
                                              image_attention_mask.type(torch.BoolTensor).flatten(0,1).to(target_device))
-
-        fake_image_forward = False
-        select = False
-        hd_transform = False
 
         base_feat_height_target = self.base_feat_height_target
         base_resolution = self.crop_size
@@ -525,7 +510,6 @@ class PhiOImageEncoder(nn.Module):
             assert temp_len == output_imgs[-1].shape[1], f'temp_len: {temp_len}, output_imgs[-1].shape[1]: {output_imgs[-1].shape[1]}'
             output_len.append(temp_len)
 
-        num_img_tokens = output_len
         img_set_tensor = []
         for _output_img in output_imgs:
             img_feature_proj = self.img_projection(_output_img.to(target_device).to(target_dtype))
@@ -790,7 +774,7 @@ def _compute_num_image_tokens(
         feat_width += 1
     if non_pad_feat_height % token_compression_factor != 0:
         feat_height += 1
-    num_hd_patch_tokens = feat_width * feat_height  # FIXME bug: 1504, should be 1536
+    num_hd_patch_tokens = feat_width * feat_height
     num_hd_newline_tokens = feat_height
     vit_feature_size = vit_image_size // vit_patch_size
     num_global_image_tokens = (vit_feature_size // token_compression_factor) ** 2
@@ -853,7 +837,7 @@ def _get_audio_embed_sizes(audios, ctx: InputContext):
         audios (List[Tuple[np.ndarray, int]]): List of audio files as tuples of
             waveform and sample rate.
         ctx (InputContext): Input context.
-    
+
     Returns:
         List[int]: List of audio embedding sizes.
     """
@@ -879,10 +863,10 @@ def _get_audio_id_to_input_ids(audios, ctx: InputContext, prompt_str=""):
             waveform and sample rate.
         ctx (InputContext): Input context.
         prompt_str (str): The prompt string.
-    
+
     Returns:
         Dict[str, List[int]]: Mapping of audio placeholder tokens to audio placeholder token ids.
-    
+
     """
     if len(audios) == 0:
         return {}
@@ -1088,7 +1072,7 @@ def input_processor_for_phio(
 
 def _compute_audio_embed_size(hf_config, audio_frames):
     """
-    Compute the audio embedding size based on the audio frames and compression rate.    
+    Compute the audio embedding size based on the audio frames and compression rate.
     """
     compression_rate = hf_config.embd_layer['audio_embd_layer']['compression_rate']
     # NOTE: this is a hard-coded value but might be configurable in the future
@@ -1122,7 +1106,7 @@ def dummy_audio_for_phi4o(audio_count: int) -> dict:
     return [(dummy_audio, DUMMY_SAMPLING_FREQUENCY)] * audio_count
 
 
-def dummy_image_for_phi3v(width: int, height: int):
+def dummy_image_for_phi4o(width: int, height: int):
     image = Image.new('RGB', (width, height), color='black')
     return image
 
@@ -1155,7 +1139,7 @@ def dummy_data_for_phi4o(
 
     image_count = mm_counts["image"]
     dummy_image = get_max_dummy_image(ctx)
-    max_image_tokens = get_max_phi3v_image_tokens(ctx)
+    max_image_tokens = get_max_phi4o_image_tokens(ctx)
     total_image_tokens = image_count * max_image_tokens
 
     if seq_len - audio_feature_size * audio_count - total_image_tokens < 0:
@@ -1163,7 +1147,7 @@ def dummy_data_for_phi4o(
             f"Phi4O cannot process {audio_count} audios and {image_count} images in a prompt,"
             f"please increase max_model_len to be at larger than {audio_feature_size * audio_count + total_image_tokens}"
              " or reduce audio/image limit by --limit-mm-per-prompt.")
-    
+
     if audio_feature_size * audio_count > total_image_tokens:
         seq_data = SequenceData.from_prompt_token_counts(
             (_AUDIO_PLACEHOLDER_TOKEN_ID, audio_feature_size * audio_count),
@@ -1235,11 +1219,10 @@ def input_mapper_for_phi4o_audio(ctx: InputContext, data: object) -> MultiModalI
     return MultiModalInputs({"audio_features": audio_features})
 
 
-def input_mapper_for_phi3v(ctx: InputContext, data: object):
-    # data: list of PIL images
-    # assert isinstance(data, list), "Data must be a list of PIL images"
+def input_mapper_for_phi4o_image(ctx: InputContext, data: object):
     if not isinstance(data, list):
         data = [data]
+    # data: list of PIL images
     if len(data) == 0:
         return MultiModalInputs()
     hf_config = ctx.get_hf_config()
@@ -1287,12 +1270,12 @@ def cat_with_pad(tensors, dim, padding_value=0):
 
 
 @MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_phi4o_audio)
-@MULTIMODAL_REGISTRY.register_input_mapper("image", input_mapper_for_phi3v)
+@MULTIMODAL_REGISTRY.register_input_mapper("image", input_mapper_for_phi4o_image)
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
     "audio", get_max_phi4o_audio_tokens
 )
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "image", get_max_phi3v_image_tokens
+    "image", get_max_phi4o_image_tokens
 )
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4o)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phio)
@@ -1324,7 +1307,7 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         assert multimodal_config, "multimodal_config is required"
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        
+
         self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
@@ -1379,7 +1362,7 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                                                 config.vocab_size,
                                                 logit_scale)
         self.sampler = Sampler()
-        
+
     def _audio_features_to_embeddings(
         self,
         input_ids: torch.Tensor,
