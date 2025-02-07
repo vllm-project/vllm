@@ -572,7 +572,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # models the alignment is already naturally aligned to 256 bytes.
     "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
     lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
-
     "VLLM_CAPTURE_ADDITIONAL_SMALL_GRAPHS":
     lambda: bool(int(os.getenv("VLLM_CAPTURE_ADDITIONAL_SMALL_GRAPHS", "0"))),
 }
