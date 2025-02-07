@@ -2,9 +2,9 @@
 
 from dataclasses import dataclass
 
+import numpy as np
 import neuronxcc.nki.isa as nisa
 import neuronxcc.nki.language as nl
-import numpy as np
 from neuronxcc import nki
 from neuronxcc.nki.language import par_dim
 
@@ -25,34 +25,27 @@ class FlashConfig:
 
 
 @nki.jit
-def transpose_p_local(p_local_transposed,
-                      p_local,
-                      LARGE_TILE_SZ,
-                      forward_mask,
-                      B_F_SIZE=512):
+def transpose_p_local(p_local_transposed, p_local, LARGE_TILE_SZ, B_F_SIZE=512):
     for i in nl.affine_range(LARGE_TILE_SZ // B_F_SIZE):
         if nisa.get_nc_version() == nisa.nc_version.gen3:
-            p_local_t_tmp = nl.ndarray((par_dim(128), B_F_SIZE),
-                                       buffer=nl.sbuf,
-                                       dtype=p_local.dtype)
+            p_local_t_tmp = nl.ndarray(
+                (par_dim(128), B_F_SIZE), buffer=nl.sbuf, dtype=p_local.dtype
+            )
         else:
-            p_local_t_tmp = nl.ndarray((par_dim(128), B_F_SIZE),
-                                       buffer=nl.psum,
-                                       dtype=np.float32)
+            p_local_t_tmp = nl.ndarray((par_dim(128), B_F_SIZE), buffer=nl.psum, dtype=np.float32)
 
         for j in nl.affine_range(B_F_SIZE // 128):
             j_128_slice = nl.ds(j * 128, 128)
             i_j_128_slice = nl.ds(i * B_F_SIZE + j * 128, 128)
 
             if nisa.get_nc_version() == nisa.nc_version.gen3:
-                p_local_t_tmp[:, j_128_slice] = nisa.dma_transpose(
-                    p_local[:, i_j_128_slice], mask=forward_mask)
+                p_local_t_tmp[:, j_128_slice] = nisa.dma_transpose(p_local[:, i_j_128_slice])
             else:
-                p_local_t_tmp[:, j_128_slice] = nisa.nc_transpose(
-                    p_local[:, i_j_128_slice], mask=forward_mask)
+                p_local_t_tmp[:, j_128_slice] = nisa.nc_transpose(p_local[:, i_j_128_slice])
 
         p_local_transposed[:, nl.ds(i * B_F_SIZE, B_F_SIZE)] = nl.copy(
-            p_local_t_tmp, dtype=p_local_transposed.dtype, mask=forward_mask)
+            p_local_t_tmp, dtype=p_local_transposed.dtype
+        )
 
 
 @nki.jit
@@ -60,36 +53,25 @@ def _flash_attention_core(
     q_local_tile,
     k,
     v,
-    q_h_per_k_h,
-    seqlen_q,
-    nheads,
     o_buffer,
     l_buffer,
     m_buffer,
-    batch_id,
-    head_id,
-    gqa_head_idx,
     q_tile_idx,
-    local_k_large_tile_idx,
     kernel_dtype,
     acc_type,
     flash_config: FlashConfig,
-    use_causal_mask=False,
-    continuous_batching_mask=None,
+    use_causal_mask,
+    tile_mask,
     initialize=False,
     B_P_SIZE=128,
     B_F_SIZE=512,
     B_D_SIZE=128,
-    dropout_p=0.0,
-    dropout_p_tensor=None,
-    seed_tensor=None,
-    logit_bias_tile=None,
     qk_res_buffer=None,
 ):
     """
     The flash attention core function to calculate self attention between a tile
     of q and a block of K and V.
-    The q_local_tile has (B_P_SIZE, B_F_SIZE), which is loaded into the SBUF 
+    The q_local_tile has (B_P_SIZE, B_F_SIZE), which is loaded into the SBUF
     already. The block size of K and V
     is defined in the seq_tile_size of the flash_config. The results are stored
     in the following three buffers
@@ -99,55 +81,42 @@ def _flash_attention_core(
     """
     LARGE_TILE_SZ = flash_config.seq_tile_size
     num_k_tile_per_large_tile = LARGE_TILE_SZ // B_F_SIZE
-    seqlen_k = k.shape[-1]
-    seqlen_q // B_P_SIZE
-    seqlen_k // B_F_SIZE
-
-    # TODO : support logit_bias with continuous_batching_mask
-    assert not use_causal_mask, "causal mask is not supported."
-    assert (continuous_batching_mask
-            is not None), "continuous_batching_mask input is required."
-    if continuous_batching_mask is not None:
-        assert (
-            logit_bias_tile
-            is None), "continuous_batching_mask does not support logit_bias!"
 
     # mask are used to only apply computation to the lower half of the matrix,
     # which reduce the arithmetic intensity by half
-    forward_mask = (q_tile_idx * B_P_SIZE >= local_k_large_tile_idx *
-                    LARGE_TILE_SZ if use_causal_mask else None)
-
-    qk_res_buf = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ),
-                            buffer=nl.sbuf,
-                            dtype=acc_type)
-    max_local = nl.ndarray((par_dim(B_P_SIZE), num_k_tile_per_large_tile),
-                           dtype=acc_type)
+    qk_res_buf = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ), buffer=nl.sbuf, dtype=acc_type)
+    max_local = nl.ndarray((par_dim(B_P_SIZE), num_k_tile_per_large_tile), dtype=acc_type)
     for k_i in nl.affine_range(num_k_tile_per_large_tile):
         k_i_b_f_slice = nl.ds(k_i * B_F_SIZE, B_F_SIZE)
 
-        qk_psum = nl.zeros((par_dim(B_P_SIZE), B_F_SIZE),
-                           dtype=np.float32,
-                           buffer=nl.psum)  # (128, 512)
-        qk_psum[:, :] = nl.matmul(q_local_tile,
-                                  k[:, k_i_b_f_slice],
-                                  transpose_x=True,
-                                  mask=None)  # (p(128), 512)
+        if use_causal_mask:
+            multiplication_required_selection = q_tile_idx * B_P_SIZE >= k_i * B_F_SIZE
+        else:
+            multiplication_required_selection = True
 
-        qk_res_buf[:, k_i_b_f_slice] = nl.where(
-            continuous_batching_mask[:, k_i_b_f_slice],
-            qk_psum[:, nl.ds(0, B_F_SIZE)],
-            -9984.0,
-            dtype=acc_type,
-        )
+        if multiplication_required_selection:
+            qk_psum = nl.ndarray(
+                (par_dim(B_P_SIZE), B_F_SIZE), dtype=np.float32, buffer=nl.psum
+            )  # (128, 512)
+            qk_psum[:, :] = nl.matmul(
+                q_local_tile, k[:, k_i_b_f_slice], transpose_x=True
+            )  # (p(128), 512)
+            qk_res_buf[:, k_i_b_f_slice] = nl.where(
+                tile_mask[:, k_i_b_f_slice],
+                qk_psum[:, nl.ds(0, B_F_SIZE)],
+                -9984.0,
+                dtype=acc_type,
+            )
+        else:
+            qk_res_buf[:, k_i_b_f_slice] = -9984.0
 
         # Calculate max of the current tile
         max_local[:, k_i] = nisa.tensor_reduce(
             np.max,
             qk_res_buf[:, k_i_b_f_slice],
-            axis=(1, ),
+            axis=(1,),
             dtype=acc_type,
             negate=False,
-            mask=forward_mask,
         )
 
     if qk_res_buffer is not None:
@@ -156,22 +125,19 @@ def _flash_attention_core(
     max_ = nisa.tensor_reduce(
         np.max,
         max_local[:, :],
-        axis=(1, ),
+        axis=(1,),
         dtype=acc_type,
         negate=False,
-        mask=forward_mask,
     )
 
-    o_previous_scaled = nl.ndarray((par_dim(B_P_SIZE), B_D_SIZE),
-                                   dtype=o_buffer.dtype)
+    o_previous_scaled = nl.ndarray((par_dim(B_P_SIZE), B_D_SIZE), dtype=o_buffer.dtype)
 
     if initialize:
         m_buffer[:, 0] = nl.copy(max_)
         m_current = max_
     else:
         m_previous = nl.copy(m_buffer[:, 0])
-        m_buffer[:, 0] = nl.maximum(m_previous, max_,
-                                    mask=forward_mask)  # (128,1)
+        m_buffer[:, 0] = nl.maximum(m_previous, max_)  # (128,1)
 
         m_current = m_buffer[:, 0]
         # Compute scaling factor
@@ -180,18 +146,13 @@ def _flash_attention_core(
             m_previous,
             bias=-1 * m_current,
             scale=1.0,
-            mask=forward_mask,
         )
-        o_previous_scaled[...] = nl.multiply(o_buffer[:, :],
-                                             alpha,
-                                             mask=forward_mask)
+        o_previous_scaled[...] = nl.multiply(o_buffer[:, :], alpha)
 
-    p_local = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ),
-                         dtype=kernel_dtype)
+    p_local = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ), dtype=kernel_dtype)
     REDUCTION_TILE = min(2048, LARGE_TILE_SZ // 2)
 
-    p_partial_sum = nl.ndarray(
-        (par_dim(B_P_SIZE), LARGE_TILE_SZ // REDUCTION_TILE), dtype=acc_type)
+    p_partial_sum = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ // REDUCTION_TILE), dtype=acc_type)
 
     for k_r_i in nl.affine_range(LARGE_TILE_SZ // REDUCTION_TILE):
         k_r_i_reduce_slice = nl.ds(k_r_i * REDUCTION_TILE, REDUCTION_TILE)
@@ -207,50 +168,38 @@ def _flash_attention_core(
             reduce_op=nl.add,
             reduce_res=p_partial_sum[:, k_r_i],
             dtype=kernel_dtype,
-            mask=forward_mask,
         )
 
-    ps = nl.sum(p_partial_sum, axis=1, dtype=acc_type, mask=forward_mask)
+    ps = nl.sum(p_partial_sum, axis=1, dtype=acc_type)
 
-    p_local_transposed = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ),
-                                    dtype=kernel_dtype)
+    p_local_transposed = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ), dtype=kernel_dtype)
     transpose_p_local(
         p_local_transposed=p_local_transposed,
         p_local=p_local,
         LARGE_TILE_SZ=LARGE_TILE_SZ,
-        forward_mask=forward_mask,
         B_F_SIZE=B_F_SIZE,
     )
 
-    pv_psum = nl.zeros((par_dim(B_P_SIZE), B_D_SIZE),
-                       dtype=np.float32,
-                       buffer=nl.psum)
+    pv_psum = nl.zeros((par_dim(B_P_SIZE), B_D_SIZE), dtype=np.float32, buffer=nl.psum)
     for k_i in nl.affine_range(LARGE_TILE_SZ // B_P_SIZE):
         pv_psum[:, :] += nl.matmul(
             p_local_transposed[:, nl.ds(k_i * B_P_SIZE, B_P_SIZE)],
             v[k_i, :, :],
             transpose_x=True,
-            mask=forward_mask,
         )  # (128, 128) (p(Br), d)
 
     if initialize:
         o_buffer[:, :] = nl.copy(pv_psum[:, :])
         l_buffer[:, 0] = nl.add(nl.log(ps), max_)
     else:
-        o_buffer[:, :] = nl.add(o_previous_scaled, pv_psum, mask=forward_mask)
+        o_buffer[:, :] = nl.add(o_previous_scaled, pv_psum)
 
         l_prev = l_buffer[:, 0]
         l_exp = nl.add(
-            nl.exp(
-                nl.subtract(l_prev, m_current, mask=forward_mask),
-                mask=forward_mask,
-            ),
+            nl.exp(nl.subtract(l_prev, m_current)),
             ps,
-            mask=forward_mask,
         )
-        l_buffer[:, 0] = nl.add(m_current,
-                                nl.log(l_exp, mask=forward_mask),
-                                mask=forward_mask)
+        l_buffer[:, 0] = nl.add(m_current, nl.log(l_exp))
 
 
 @nki.jit
@@ -267,10 +216,9 @@ def load_v_tile(v_hbm_tile, cur_v_tile, j, v_i, config):
 
     if nisa.get_nc_version() == nisa.nc_version.gen3:
         cur_v_tile_transposed = nisa.dma_transpose(
-            v_hbm_tile[:,
-                       nl.ds(j * LARGE_TILE_SZ + B_P_SIZE * v_i, B_P_SIZE)])
-        cur_v_tile[v_i, :, :] = nisa.tensor_copy(cur_v_tile_transposed,
-                                                 dtype=cur_v_tile.dtype)
+            v_hbm_tile[:, nl.ds(j * LARGE_TILE_SZ + B_P_SIZE * v_i, B_P_SIZE)]
+        )
+        cur_v_tile[v_i, :, :] = nisa.tensor_copy(cur_v_tile_transposed, dtype=cur_v_tile.dtype)
         return
 
     cur_v_tile[v_i, :, :] = nl.load_transpose2d(
@@ -316,24 +264,24 @@ def flash_paged_attention(
       - We use paged cache blocks (key_cache, value_cache) to store KV cache.
 
     IO tensor dtypes:
-      - This kernel assumes all IO tensors have the same dtype except for 
+      - This kernel assumes all IO tensors have the same dtype except for
         block_tables (int32) and mask (int32)
-      - If mixed_percision is True, then all Tensor Engine operation will be 
-        performed in bfloat16 and accumulation will be performed in float32. 
+      - If mixed_percision is True, then all Tensor Engine operation will be
+        performed in bfloat16 and accumulation will be performed in float32.
         Otherwise the intermediates will be in the same type as the inputs.
 
     Compile-time Constants:
       - softmax_scale: scaling for softmax, is None, default is `1.0/(d**0.5)`
       - mixed_precision: flag to set non-matmul ops in fp32 precision, default
-        is set to `true`, if false, we use same precision as input types 
+        is set to `true`, if false, we use same precision as input types
       - config: Instance of dataclass :class:`nki.kernels.attention.FlashConfig`
           with Performance config parameters for flash attention with default
           values
-        seq_tile_size: `default=2048`, size of the kv tile size for attention 
+        seq_tile_size: `default=2048`, size of the kv tile size for attention
           computation reduction
 
     GQA support Notes:
-      the spmd kernel for launching kernel should be on kv_heads instead of 
+      the spmd kernel for launching kernel should be on kv_heads instead of
       nheads
 
     Example usage:
@@ -368,9 +316,7 @@ def flash_paged_attention(
     kernel_dtype = nl.bfloat16 if mixed_precision else query.dtype
     acc_type = np.dtype(np.float32) if mixed_precision else kernel_dtype
 
-    o = nl.ndarray((b, h, seqlen_q, d),
-                   dtype=query.dtype,
-                   buffer=nl.shared_hbm)
+    o = nl.ndarray((b, h, seqlen_q, d), dtype=query.dtype, buffer=nl.shared_hbm)
     hbm_l_buffer, hbm_m_buffer, hbm_qk_res, qk_res_buffer = (
         None,
         None,
@@ -378,15 +324,9 @@ def flash_paged_attention(
         None,
     )
     if return_debug_tensors:
-        hbm_l_buffer = nl.ndarray((b, h, seqlen_q),
-                                  dtype=acc_type,
-                                  buffer=nl.shared_hbm)
-        hbm_m_buffer = nl.ndarray((b, h, seqlen_q),
-                                  dtype=acc_type,
-                                  buffer=nl.shared_hbm)
-        hbm_qk_res = nl.ndarray((b, h, B_P_SIZE, seqlen_q),
-                                dtype=acc_type,
-                                buffer=nl.shared_hbm)
+        hbm_l_buffer = nl.ndarray((b, h, seqlen_q), dtype=acc_type, buffer=nl.shared_hbm)
+        hbm_m_buffer = nl.ndarray((b, h, seqlen_q), dtype=acc_type, buffer=nl.shared_hbm)
+        hbm_qk_res = nl.ndarray((b, h, B_P_SIZE, seqlen_q), dtype=acc_type, buffer=nl.shared_hbm)
         qk_res_buffer = nl.zeros(
             (n_tile_q, q_h_per_k_h, par_dim(B_P_SIZE), seqlen_q),
             dtype=acc_type,
@@ -402,31 +342,35 @@ def flash_paged_attention(
 
     softmax_scale = softmax_scale or (1.0 / (d**0.5))
 
-    (num_active_blocks, ) = block_tables.shape
+    (num_active_blocks,) = block_tables.shape
     context_kv_len = num_active_blocks * block_size
-    assert (config.seq_tile_size >= 512
-            ), f" seq tile_size {config.seq_tile_size} cannot be less than 512"
-    assert (context_kv_len % LARGE_TILE_SZ == 0
-            ), f"Need {context_kv_len=} to be divisible by {LARGE_TILE_SZ=}"
+    assert (
+        config.seq_tile_size >= 512
+    ), f" seq tile_size {config.seq_tile_size} cannot be less than 512"
+    assert (
+        context_kv_len % LARGE_TILE_SZ == 0
+    ), f"Need {context_kv_len=} to be divisible by {LARGE_TILE_SZ=}"
     assert (
         LARGE_TILE_SZ % B_P_SIZE == 0
     ), f"Need LARGE_TILE_SZ ({LARGE_TILE_SZ}) to be divisible by {B_P_SIZE=}"
-    assert (B_P_SIZE % block_size == 0
-            ), f"Need B_P_SIZE ({B_P_SIZE}) to be divisible by {block_size=}"
+    assert (
+        B_P_SIZE % block_size == 0
+    ), f"Need B_P_SIZE ({B_P_SIZE}) to be divisible by {block_size=}"
     num_large_k_tile = context_kv_len // LARGE_TILE_SZ
     num_blocks_per_large_tile = LARGE_TILE_SZ // block_size
-    assert (num_blocks_per_large_tile <= B_P_SIZE
-    ), f"The number of blocks in each large tile " \
-    f"({num_blocks_per_large_tile}) shouldn't exceed partition size {B_P_SIZE}"
+    assert num_blocks_per_large_tile <= B_P_SIZE, (
+        f"The number of blocks in each large tile "
+        f"({num_blocks_per_large_tile}) shouldn't exceed partition size {B_P_SIZE}"
+    )
 
-    block_tables_sbuf = nl.full((par_dim(B_P_SIZE), num_large_k_tile),
-                                0,
-                                dtype=np.int32,
-                                buffer=nl.sbuf)
+    block_tables_sbuf = nl.full(
+        (par_dim(B_P_SIZE), num_large_k_tile), 0, dtype=np.int32, buffer=nl.sbuf
+    )
     for j in nl.affine_range(num_large_k_tile):
         i_p = nl.arange(num_blocks_per_large_tile)[:, None]
         block_tables_sbuf[i_p, j] = nl.load(
-            block_tables[j * num_blocks_per_large_tile + i_p], dtype=np.int32)
+            block_tables[j * num_blocks_per_large_tile + i_p], dtype=np.int32
+        )
 
     # Global Flash Attention accumulators
     o_buffer = nl.zeros(
@@ -449,39 +393,33 @@ def flash_paged_attention(
     )
 
     for j in nl.sequential_range(0, num_large_k_tile):
-        cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_TILE_SZ),
-                                dtype=kernel_dtype)
+        cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_TILE_SZ), dtype=kernel_dtype)
         cur_v_tile = nl.ndarray(
             (LARGE_TILE_SZ // B_P_SIZE, par_dim(B_P_SIZE), B_D_SIZE),
             dtype=kernel_dtype,
         )
 
         for k_i in nl.affine_range(num_blocks_per_large_tile):
-            loaded = nl.load(key_cache[block_tables_sbuf[k_i, j], :,
-                                       head_id, :])
-            cur_k_tile[:, nl.ds(k_i *
-                                block_size, block_size)] = nl.transpose(loaded)
+            loaded = nl.load(key_cache[block_tables_sbuf[k_i, j], :, head_id, :])
+            cur_k_tile[:, nl.ds(k_i * block_size, block_size)] = nl.transpose(loaded)
 
         load_tile_size = B_P_SIZE
         num_blocks_per_partition = load_tile_size // block_size
         for partition_idx in nl.affine_range(LARGE_TILE_SZ // load_tile_size):
-            for block_in_partition in nl.affine_range(
-                    num_blocks_per_partition):
-                v_i = (partition_idx * num_blocks_per_partition +
-                       block_in_partition)
-                loaded_v = nl.load(value_cache[block_tables_sbuf[v_i, j], :,
-                                               head_id, :])
+            for block_in_partition in nl.affine_range(num_blocks_per_partition):
+                v_i = partition_idx * num_blocks_per_partition + block_in_partition
+                loaded_v = nl.load(value_cache[block_tables_sbuf[v_i, j], :, head_id, :])
                 cur_v_tile[
                     partition_idx,
                     nl.ds(block_in_partition * block_size, block_size),
                     :,
                 ] = loaded_v
 
-        cur_mask = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ),
-                              dtype=mask.dtype)
+        cur_mask = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ), dtype=mask.dtype)
         for m_i in nl.affine_range(LARGE_TILE_SZ // B_F_SIZE):
             cur_mask[:, nl.ds(m_i * B_F_SIZE, B_F_SIZE)] = nl.load(
-                mask[:, nl.ds(j * LARGE_TILE_SZ + m_i * B_F_SIZE, B_F_SIZE)])
+                mask[:, nl.ds(j * LARGE_TILE_SZ + m_i * B_F_SIZE, B_F_SIZE)]
+            )
 
         for i_q_h in nl.affine_range(q_h_per_k_h):
             for i in nl.affine_range(n_tile_q):
@@ -497,30 +435,19 @@ def flash_paged_attention(
                     q_local_tile=q_tile,
                     k=cur_k_tile,
                     v=cur_v_tile,
-                    q_h_per_k_h=q_h_per_k_h,
-                    seqlen_q=seqlen_q,
-                    nheads=h,
                     o_buffer=o_buffer[i, i_q_h],
                     l_buffer=l_buffer[:, i, i_q_h],
                     m_buffer=m_buffer[i, i_q_h],
-                    batch_id=batch_id,
-                    head_id=head_id,
-                    gqa_head_idx=i_q_h,
                     q_tile_idx=i,
-                    local_k_large_tile_idx=j,
                     kernel_dtype=kernel_dtype,
                     acc_type=acc_type,
                     flash_config=config,
                     use_causal_mask=False,
-                    continuous_batching_mask=cur_mask,
+                    tile_mask=cur_mask,
                     initialize=j == 0,
                     B_P_SIZE=B_P_SIZE,
                     B_F_SIZE=B_F_SIZE,
                     B_D_SIZE=B_D_SIZE,
-                    dropout_p=0.0,
-                    dropout_p_tensor=None,
-                    seed_tensor=None,
-                    logit_bias_tile=None,
                 )
 
     # compute attention between input query, key and value
@@ -532,8 +459,7 @@ def flash_paged_attention(
             should_transpose_v=config.should_transpose_v,
         )
 
-        cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_TILE_SZ),
-                                dtype=kernel_dtype)
+        cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_TILE_SZ), dtype=kernel_dtype)
         cur_v_tile = nl.ndarray(
             (LARGE_TILE_SZ // B_P_SIZE, par_dim(B_P_SIZE), B_D_SIZE),
             dtype=kernel_dtype,
@@ -568,32 +494,20 @@ def flash_paged_attention(
                     q_local_tile=q_tile,
                     k=cur_k_tile,
                     v=cur_v_tile,
-                    q_h_per_k_h=q_h_per_k_h,
-                    seqlen_q=seqlen_q,
-                    nheads=h,
                     o_buffer=o_buffer[i, i_q_h],
                     l_buffer=l_buffer[:, i, i_q_h],
                     m_buffer=m_buffer[i, i_q_h],
-                    batch_id=batch_id,
-                    head_id=head_id,
-                    gqa_head_idx=i_q_h,
                     q_tile_idx=i,
-                    local_k_large_tile_idx=0,
                     kernel_dtype=kernel_dtype,
                     acc_type=acc_type,
                     flash_config=active_config,
-                    use_causal_mask=False,
-                    continuous_batching_mask=cur_mask,
+                    use_causal_mask=True,
+                    tile_mask=cur_mask,
                     initialize=False,
                     B_P_SIZE=B_P_SIZE,
                     B_F_SIZE=B_F_SIZE,
                     B_D_SIZE=B_D_SIZE,
-                    dropout_p=0.0,
-                    dropout_p_tensor=None,
-                    seed_tensor=None,
-                    logit_bias_tile=None,
-                    qk_res_buffer=qk_res_buffer[i, i_q_h]
-                    if qk_res_buffer is not None else None,
+                    qk_res_buffer=(qk_res_buffer[i, i_q_h] if qk_res_buffer is not None else None),
                 )
 
     # -- -- -- -- write output to buffer on HBM -- -- -- -- -- -- #
