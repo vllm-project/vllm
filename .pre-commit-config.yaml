@@ -110,7 +110,10 @@ repos:
     pass_filenames: false
   - id: check-filenames
     name: Check for spaces in all filenames
-    entry: bash -c 'git ls-files | grep " " && echo "Filenames should not contain spaces!" && exit 1 || exit 0'
+    entry: bash
+    args:
+      - -c
+      - 'git ls-files | grep " " && echo "Filenames should not contain spaces!" && exit 1 || exit 0'
     language: system
     always_run: true
     pass_filenames: false
