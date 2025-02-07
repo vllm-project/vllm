@@ -1,17 +1,12 @@
 """Attention layer with PagedAttention on rocm"""
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
-import numpy as np
 import torch
-import triton
-import triton.language as tl
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.envs import VLLM_FLASH_ATTN_VERSION
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.attention.ops.paged_attn import PagedAttention
 logger = init_logger(__name__)
@@ -27,11 +22,11 @@ class ROCmAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_VLLM_V1"
+        return "ROCM_ATTN_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashAttentionImpl"]:
-        return FlashAttentionImpl
+    def get_impl_cls() -> Type["ROCmAttentionImpl"]:
+        return ROCmAttentionImpl
 
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
@@ -52,37 +47,7 @@ class ROCmAttentionBackend(AttentionBackend):
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 
-
-@dataclass
-class FlashAttentionMetadata:
-    # NOTE(sang): Definition of context_len, query_len, and seq_len.
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
-    # |-------------------- seq_len ---------------------|
-    #                                   |-- query_len ---|
-
-    num_actual_tokens: int  # Number of tokens excluding padding.
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    seq_lens: torch.Tensor
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
-
-    # For cascade attention.
-    use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: Optional[torch.Tensor]
-    prefix_kv_lens: Optional[torch.Tensor]
-    suffix_kv_lens: Optional[torch.Tensor]
-
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
-
-class FlashAttentionImpl(AttentionImpl):
+class ROCmAttentionImpl(AttentionImpl):
 
     def __init__(
         self,
@@ -99,7 +64,7 @@ class FlashAttentionImpl(AttentionImpl):
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
-                "FlashAttention does not support block-sparse attention.")
+                "ROCmAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -123,27 +88,15 @@ class FlashAttentionImpl(AttentionImpl):
         support_head_sizes = ROCmAttentionBackend.get_supported_head_sizes()
         if head_size not in support_head_sizes:
             raise ValueError(
-                f"Head size {head_size} is not supported by FlashAttention. "
+                f"Head size {head_size} is not supported by ROCmAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "FlashAttentionImpl")
+                                      "ROCmAttentionImpl")
 
-        # if hopper default to FA3, otherwise stick to FA2 for now
-        # TODO(lucas): profile FA3 on ampere to see if it makes sense to
-        #  use FA3 as default for both
-        if current_platform.get_device_capability()[0] >= 9:
-            # self.fa_version = 3 if is_fa_version_supported(3) else 2
-            self.fa_version = 2
-        else:
-            self.fa_version = 2
-
-        if VLLM_FLASH_ATTN_VERSION is not None:
-            assert VLLM_FLASH_ATTN_VERSION in [2, 3]
-            self.fa_version = VLLM_FLASH_ATTN_VERSION
 
     def forward(
         self,
@@ -171,6 +124,8 @@ class FlashAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
+        
+        assert attn_metadata.use_cascade is False
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
