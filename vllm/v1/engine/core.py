@@ -13,6 +13,7 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
@@ -141,6 +142,9 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        self.model_executor.add_lora(lora_request)
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -257,6 +261,8 @@ class EngineCoreProc(EngineCore):
             self.reset_prefix_cache()
         elif request_type == EngineCoreRequestType.PROFILE:
             self.model_executor.profile(request)
+        elif request_type == EngineCoreRequestType.ADD_LORA:
+            self.model_executor.add_lora(request)
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
