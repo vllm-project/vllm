@@ -40,7 +40,11 @@ class FinishReason(enum.IntEnum):
 
 
 @dataclass
-class EngineCoreRequest:
+class EngineCoreRequest(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        gc=False):  # type: ignore[call-arg]
 
     # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
     # but this object is currently not playing well with msgspec
@@ -94,16 +98,6 @@ class EngineCoreOutputs(
     scheduler_stats: SchedulerStats
 
 
-@dataclass
-class EngineCoreProfile:
-    is_start: bool
-
-
-@dataclass
-class EngineCoreResetPrefixCache:
-    pass
-
-
 class EngineCoreRequestType(enum.Enum):
     """
     Request types defined as hex byte strings, so it can be sent over sockets
@@ -113,7 +107,3 @@ class EngineCoreRequestType(enum.Enum):
     ABORT = b'\x01'
     PROFILE = b'\x02'
     RESET_PREFIX_CACHE = b'\x03'
-
-
-EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile,
-                               EngineCoreResetPrefixCache, List[str]]

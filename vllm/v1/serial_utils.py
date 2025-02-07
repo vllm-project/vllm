@@ -1,21 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pickle
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from msgspec import msgpack
 
 CUSTOM_TYPE_CODE_PICKLE = 1
-
-
-class PickleEncoder:
-
-    def encode(self, obj: Any):
-        return pickle.dumps(obj)
-
-    def decode(self, data: Any):
-        return pickle.loads(data)
 
 
 class MsgpackEncoder:
@@ -34,8 +25,9 @@ class MsgpackEncoder:
 class MsgpackDecoder:
     """Decoder with custom torch tensor serialization."""
 
-    def __init__(self, t: Any):
-        self.decoder = msgpack.Decoder(t, ext_hook=custom_ext_hook)
+    def __init__(self, t: Optional[Any] = None):
+        args = () if t is None else (t, )
+        self.decoder = msgpack.Decoder(args, ext_hook=custom_ext_hook)
 
     def decode(self, obj: Any):
         return self.decoder.decode(obj)
