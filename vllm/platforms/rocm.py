@@ -5,7 +5,7 @@ from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
-from amdsmi import (AmdSmiException, amdsmi_get_gpu_board_info,
+from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
                     amdsmi_get_processor_handles, amdsmi_init,
                     amdsmi_shut_down, amdsmi_topo_get_link_type)
 
@@ -167,9 +167,8 @@ class RocmPlatform(Platform):
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
-        # Note: this may not be exactly the same as the torch device name
-        # E.g. `AMD Instinct MI300X OAM` vs `AMD Instinct MI300X`
-        return amdsmi_get_gpu_board_info(handle)["product_name"]
+        # Using market_name to distinguish MI300 & MI308
+        return amdsmi_get_gpu_asic_info(handle)["market_name"]
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
