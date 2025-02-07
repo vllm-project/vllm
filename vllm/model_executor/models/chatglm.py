@@ -81,8 +81,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
     def _pre_calculate(self):
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
-        self.image_token_num = (vision_config["image_size"] //
-                                vision_config["patch_size"] // 2)**2
+        self.image_token_num = calculate_image_placeholder(vision_config)
         self.image_szie = vision_config["image_size"]
 
     def get_num_image_tokens(
@@ -158,7 +157,6 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-
         try:
             tokenizer = self.info.get_tokenizer()
             img = mm_data.get("images", None)[0] if mm_data else None
