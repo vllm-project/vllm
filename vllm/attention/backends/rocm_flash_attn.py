@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer ROCm GPUs."""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
@@ -551,7 +552,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
-        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -601,7 +601,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        q_scale, prob_scale, fp8_out_scale = (None, None, None)
+        fp8_out_scale = None
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
             assert value is not None
@@ -682,10 +682,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             seq_lens,
                             make_attn_mask=False)  # type: ignore
                     full_scales = (
-                        1.0 / q_scale.item(), 1.0 / k_scale.item(),
-                        1.0 / v_scale.item(), 1.0 / prob_scale.item(),
+                        layer._q_scale.item(), layer._k_scale.item(),
+                        layer._v_scale.item(), layer._prob_scale.item(),
                         fp8_out_scale.item()) if (
-                            fp8_out_scale and q_scale and prob_scale
+                            fp8_out_scale and layer._q_scale
+                            and layer._prob_scale
                             and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
                     out, _ = self.attn_func(
                         query,
@@ -781,9 +782,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 decode_query.dtype, head_size, block_size, gqa_ratio,
                 decode_meta.max_decode_seq_len)
             if use_custom:
-                max_seq_len = (decode_meta.max_decode_seq_len if
-                               self.attn_type != AttentionType.ENCODER_DECODER
-                               else decode_meta.max_encoder_seq_len)
+                max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
+                               != AttentionType.ENCODER_DECODER else
+                               decode_meta.max_encoder_seq_len)
                 assert max_seq_len is not None
                 max_num_partitions = (
                     (max_seq_len + _PARTITION_SIZE_ROCM - 1) //
@@ -898,4 +899,5 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16)
+            and max_seq_len <= 128 * 1024)
