@@ -376,6 +376,7 @@ def flash_paged_attention(
     assert is_power_of_2(
         num_blocks_per_large_tile
     ), "The number of blocks in each large tile is expected of be power of 2"
+    assert is_power_of_2(seqlen_q), "seqlen_q is expected to be power of 2"
 
     block_tables_sbuf = load_block_tables(block_tables, num_large_k_tile)
 
@@ -422,14 +423,16 @@ def flash_paged_attention(
                     :,
                 ] = loaded_v
 
-        cur_mask = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ), dtype=mask.dtype)
-        for m_i in nl.affine_range(LARGE_TILE_SZ // B_F_SIZE):
-            cur_mask[:, nl.ds(m_i * B_F_SIZE, B_F_SIZE)] = nl.load(
-                mask[:, nl.ds(j * LARGE_TILE_SZ + m_i * B_F_SIZE, B_F_SIZE)]
-            )
-
-        for i_q_h in nl.affine_range(q_h_per_k_h):
-            for i in nl.affine_range(n_tile_q):
+        for i in nl.affine_range(n_tile_q):
+            cur_mask = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ), dtype=mask.dtype)
+            for m_i in nl.affine_range(LARGE_TILE_SZ // B_F_SIZE):
+                cur_mask[:, nl.ds(m_i * B_F_SIZE, B_F_SIZE)] = nl.load(
+                    mask[
+                        nl.ds(i * B_P_SIZE, B_P_SIZE),
+                        nl.ds(j * LARGE_TILE_SZ + m_i * B_F_SIZE, B_F_SIZE),
+                    ]
+                )
+            for i_q_h in nl.affine_range(q_h_per_k_h):
                 q_tile = nl.ndarray((B_D_SIZE, B_P_SIZE), dtype=kernel_dtype)
                 q_hbm_tile = query[batch_id, head_id * q_h_per_k_h + i_q_h]
                 q_sbuf_tile = nl.load(
@@ -459,7 +462,7 @@ def flash_paged_attention(
 
     # compute attention between input query, key and value
     if key is not None and value is not None:
-        B_F_SIZE = seqlen_q
+        B_F_SIZE = min(seqlen_q, B_F_SIZE)
         LARGE_TILE_SZ = seqlen_q
         active_config = FlashConfig(
             seq_tile_size=LARGE_TILE_SZ,
@@ -485,11 +488,13 @@ def flash_paged_attention(
                 config=active_config,
             )
 
-        cur_mask = nl.ndarray((par_dim(B_P_SIZE), B_F_SIZE), dtype=mask.dtype)
-        cur_mask[:, :] = nl.load(mask[:, nl.ds(context_kv_len, B_F_SIZE)])
+        for i in nl.affine_range(n_tile_q):
+            cur_mask = nl.load(
+                mask[nl.ds(i * B_P_SIZE, B_P_SIZE), nl.ds(context_kv_len, LARGE_TILE_SZ)],
+                dtype=mask.dtype,
+            )
+            for i_q_h in nl.affine_range(q_h_per_k_h):
 
-        for i_q_h in nl.affine_range(q_h_per_k_h):
-            for i in nl.affine_range(n_tile_q):
                 q_tile = nl.ndarray((B_D_SIZE, B_P_SIZE), dtype=kernel_dtype)
                 q_hbm_tile = query[batch_id, head_id * q_h_per_k_h + i_q_h]
                 q_sbuf_tile = nl.load(
