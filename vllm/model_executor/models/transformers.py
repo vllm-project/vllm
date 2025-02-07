@@ -182,7 +182,7 @@ class TransformersModel(nn.Module, SupportsPP):
                     quant_config=None,
                 ))
 
-        # Transformer layers (this must happen after pipeline parallelisation)
+        # Attention layers
         self.attention_instances = self.create_attention_instances(
             config, cache_config, quant_config=None)
 
@@ -204,10 +204,10 @@ class TransformersModel(nn.Module, SupportsPP):
                                                     config.vocab_size,
                                                     logit_scale)
 
-        # Initialize buffers
+        # Initialize buffers (e.g. rotary embedding inverse frequency)
         self.init_buffers(self.model)
 
-        # Move remaining meta tensors to device
+        # Move remaining meta tensors to device (should happen last)
         self.meta_to_empty(self.model)
 
         self.sampler = get_sampler()
