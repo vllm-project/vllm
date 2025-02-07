@@ -8,7 +8,7 @@ from vllm.logger import init_logger
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_ids_list_to_tokens)
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 logger = init_logger(__name__)
@@ -187,8 +187,11 @@ class LogprobsProcessor:
                 logprob_token_ids, logprobs, ranks, decoded_tokens)
         }
 
-    def update_from_output(self, output: EngineCoreOutput) -> None:
-        if output.new_logprobs is not None:
+    def update_from_output(self,
+                           new_logprobs: List[Optional[LogprobsLists]],
+                           new_prompt_logprobs_tensors: List[Optional[LogprobsTensors]],
+                           ) -> None:
+        if len(new_logprobs) > 0:
             self._update_sample_logprobs(output.new_logprobs)
-        if output.new_prompt_logprobs_tensors is not None:
+        if len(new_prompt_logprobs_tensors) > 0:
             self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
