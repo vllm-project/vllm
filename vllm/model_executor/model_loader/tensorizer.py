@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import dataclasses
 import io
@@ -288,7 +290,8 @@ class TensorizerAgent:
         model_args.torch_dtype = self.tensorizer_config.dtype
         assert self.tensorizer_config.model_class is not None
         # TODO: Do we need to consider old-style model class?
-        with no_init_or_tensor(), set_current_vllm_config(self.vllm_config):
+        with no_init_or_tensor(), set_current_vllm_config(self.vllm_config,
+                                                          check_compile=True):
             return self.tensorizer_config.model_class(
                 vllm_config=self.vllm_config, )
 
@@ -297,8 +300,8 @@ class TensorizerAgent:
         to allow for adapter added tokens."""
         for child in self.model.modules():
             if (isinstance(child, VocabParallelEmbedding)
-                    and child.weight.shape[0] <
-                    child.num_embeddings_per_partition):
+                    and child.weight.shape[0]
+                    < child.num_embeddings_per_partition):
                 new_weight = torch.empty(child.num_embeddings_per_partition,
                                          child.embedding_dim,
                                          dtype=child.weight.dtype,
@@ -459,16 +462,7 @@ def tensorize_vllm_model(engine_args: EngineArgs,
             stream.write(encryption_params.key)
 
     engine = LLMEngine.from_engine_args(engine_args)
-    if tensorizer_config._is_sharded:
-        # if the engine is a distributed engine (for tensor parallel) then each
-        # worker shard needs to serialize its part of the model.
-        engine.model_executor._run_workers(
-            "save_tensorized_model",
-            tensorizer_config=tensorizer_config,
-        )
-    else:
-        # with a single worker, we can get to the underlying model directly
-        serialize_vllm_model(
-            engine.model_executor.driver_worker.model_runner.model,
-            tensorizer_config,
-        )
+    engine.model_executor.collective_rpc(
+        "save_tensorized_model",
+        kwargs=dict(tensorizer_config=tensorizer_config),
+    )

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Minimal implementation of CLIPVisionModel intended to be only used
 within a vision language model."""
 from typing import Iterable, List, Optional, Set, Tuple, Union

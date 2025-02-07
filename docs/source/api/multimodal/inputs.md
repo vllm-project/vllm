@@ -43,7 +43,7 @@
 ```
 
 ```{eval-rst}
-.. autoclass:: vllm.multimodal.inputs.MultiModalInputsV2
+.. autoclass:: vllm.multimodal.inputs.MultiModalInputs
     :members:
     :show-inheritance:
 ```

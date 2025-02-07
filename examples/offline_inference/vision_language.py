@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This example shows how to use vLLM for running offline inference with
 the correct prompt format on vision language models for text generation.
@@ -26,14 +27,12 @@ def run_aria(question: str, modality: str):
 
     # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(model=model_name,
-              tokenizer_mode="slow",
-              dtype="bfloat16",
               max_model_len=4096,
               max_num_seqs=2,
-              trust_remote_code=True,
+              dtype="bfloat16",
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
-    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"
+    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
               "<|im_end|>\n<|im_start|>assistant\n")
 
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
@@ -267,8 +266,9 @@ def run_mantis(question: str, modality: str):
 
 
 # MiniCPM-V
-def run_minicpmv(question: str, modality: str):
-    assert modality == "image"
+def run_minicpmv_base(question: str, modality: str, model_name):
+    assert modality in ["image", "video"]
+    # If you want to use `MiniCPM-o-2_6` with audio inputs, check `audio_language.py` # noqa
 
     # 2.0
     # The official repo doesn't work yet, so we need to use a fork for now
@@ -279,7 +279,15 @@ def run_minicpmv(question: str, modality: str):
     # model_name = "openbmb/MiniCPM-Llama3-V-2_5"
 
     # 2.6
-    model_name = "openbmb/MiniCPM-V-2_6"
+    # model_name = "openbmb/MiniCPM-V-2_6"
+    # o2.6
+
+    # modality supports
+    # 2.0: image
+    # 2.5: image
+    # 2.6: image, video
+    # o2.6: image, video, audio
+    # model_name = "openbmb/MiniCPM-o-2_6"
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
     llm = LLM(
@@ -296,18 +304,31 @@ def run_minicpmv(question: str, modality: str):
     # 2.5
     # stop_token_ids = [tokenizer.eos_id, tokenizer.eot_id]
 
-    # 2.6
+    # 2.6 / o2.6
     stop_tokens = ['<|im_end|>', '<|endoftext|>']
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
+    modality_placeholder = {
+        "image": "(<image>./</image>)",
+        "video": "(<video>./</video>)",
+    }
+
     messages = [{
         'role': 'user',
-        'content': f'(<image>./</image>)\n{question}'
+        'content': f'{modality_placeholder[modality]}\n{question}'
     }]
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
     return llm, prompt, stop_token_ids
+
+
+def run_minicpmo(question: str, modality: str):
+    return run_minicpmv_base(question, modality, "openbmb/MiniCPM-o-2_6")
+
+
+def run_minicpmv(question: str, modality: str):
+    return run_minicpmv_base(question, modality, "openbmb/MiniCPM-V-2_6")
 
 
 # LLama 3.2
@@ -525,6 +546,7 @@ model_example_map = {
     "llava-next-video": run_llava_next_video,
     "llava-onevision": run_llava_onevision,
     "mantis": run_mantis,
+    "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
     "mllama": run_mllama,
     "molmo": run_molmo,

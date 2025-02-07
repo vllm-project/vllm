@@ -1,7 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from abc import ABC, abstractmethod
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
                     Union)
+
+import torch.nn as nn
+from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -11,8 +16,11 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import make_async
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
+
+_R = TypeVar("_R", default=Any)
 
 
 class ExecutorBase(ABC):
@@ -41,25 +49,41 @@ class ExecutorBase(ABC):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self._init_executor()
+        self.is_sleeping = False
 
     @abstractmethod
     def _init_executor(self) -> None:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def collective_rpc(self,
-                       method: Union[str, Callable],
+                       method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
         """
-        The main interface of the executor to run a method on all workers,
-        with homogeneous arguments.
-        If the args are heterogeneous, then we can pack them into a list,
-        and unpack them in the method of every worker, because every worker
-        knows their own rank.
+        Execute an RPC call on all workers.
+
+        Args:
+            method: Name of the worker method to execute, or a callable that
+                is serialized and sent to all workers to execute.
+
+                If the method is a callable, it should accept an additional
+                `self` argument, in addition to the arguments passed in `args`
+                and `kwargs`. The `self` argument will be the worker object.
+            timeout: Maximum time in seconds to wait for execution. Raises a
+                :exc:`TimeoutError` on timeout. `None` means wait indefinitely.
+            args: Positional arguments to pass to the worker method.
+            kwargs: Keyword arguments to pass to the worker method.
+
+        Returns:
+            A list containing the results from each worker.
+        
+        Note:
+            It is recommended to use this API to only pass control messages,
+            and set up data-plane communication to pass data.
         """
-        pass
+        raise NotImplementedError
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
@@ -96,6 +120,17 @@ class ExecutorBase(ABC):
 
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
+
+    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+        """
+        Run a function directly on the model inside each worker,
+        returning the result for each of them.
+        """
+
+        def rpc_func(worker: WorkerBase) -> _R:
+            return func(worker.get_model())
+
+        return self.collective_rpc(rpc_func)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
@@ -160,6 +195,20 @@ class ExecutorBase(ABC):
 
     def stop_profile(self) -> None:
         self.collective_rpc("stop_profile")
+
+    def sleep(self, level: int = 1):
+        if self.is_sleeping:
+            logger.warning("Executor is already sleeping.")
+            return
+        self.collective_rpc("sleep", kwargs=dict(level=level))
+        self.is_sleeping = True
+
+    def wake_up(self):
+        if not self.is_sleeping:
+            logger.warning("Executor is not sleeping.")
+            return
+        self.collective_rpc("wake_up")
+        self.is_sleeping = False
 
     def save_sharded_state(
         self,

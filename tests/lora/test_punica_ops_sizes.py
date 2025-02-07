@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This script is mainly used to tests various hidden_sizes. We have collected the
 hidden_sizes included in the LoRA models currently supported by vLLM. It tests

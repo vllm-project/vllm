@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 from typing import List, Tuple, Type
 
@@ -74,6 +76,7 @@ def test_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
         multi_modal_placeholder_index_maps=None,
+        enable_kv_scales_calculation=True,
     )
     model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),
@@ -126,6 +129,7 @@ def test_embedding_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
         multi_modal_placeholder_index_maps=None,
+        enable_kv_scales_calculation=True,
     )
     model_input = ModelInputForGPUWithPoolingMetadata(
         input_tokens=torch.ones(10),
@@ -177,6 +181,7 @@ def test_multi_step_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
         multi_modal_placeholder_index_maps=None,
+        enable_kv_scales_calculation=True,
     )
     frozen_model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),

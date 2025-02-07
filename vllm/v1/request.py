@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 
@@ -58,16 +60,20 @@ class Request:
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
-        assert len(self.mm_inputs) == len(self.mm_hashes)
+        if self.mm_hashes:
+            assert len(self.mm_inputs) == len(self.mm_hashes)
 
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
-        # Different KV cache groups may have different block_size, so save their
-        # hash separately. Each element of the outer list represents a group,
-        # and each inner list contains the hashes of blocks with that group's
-        # block_size.
-        # See KVCacheConfig class for the meaning of "KV cache group".
         self._kv_block_hashes: List[List[BlockHashType]] = []
+        self.kv_block_hashes = ConstantList(
+            [ConstantList(x) for x in self._kv_block_hashes])
+
+        # Read-only views
+        # Prevent directly appending to the these lists since
+        # they should also be updated simultaneously.
+        self.output_token_ids = ConstantList(self._output_token_ids)
+        self.all_token_ids = ConstantList(self._all_token_ids)
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -83,18 +89,6 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
         )
-
-    @property
-    def output_token_ids(self) -> ConstantList[int]:
-        # Prevent directly appending to the output_token_ids since
-        # all_token_ids should also be updated simultaneously.
-        return ConstantList(self._output_token_ids)
-
-    @property
-    def all_token_ids(self) -> ConstantList[int]:
-        # Prevent directly appending to the all_token_ids since
-        # output_token_ids should also be updated simultaneously
-        return ConstantList(self._all_token_ids)
 
     def append_output_token_ids(
         self,
@@ -131,16 +125,13 @@ class Request:
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
 
-    @property
-    def kv_block_hashes(self) -> ConstantList[ConstantList["BlockHashType"]]:
-        # Prevent directly appending to the kv_block_hashes.
-        return ConstantList([
-            ConstantList(kv_block_hashes_one_group)
-            for kv_block_hashes_one_group in self._kv_block_hashes
-        ])
-
     def set_kv_block_hashes(self, value: List[List["BlockHashType"]]) -> None:
         self._kv_block_hashes = value
+        # NOTE: self.kv_block_hashes._x is not self._kv_block_hashes, but
+        # self.kv_block_hashes[0]._x is self._kv_block_hashes[0]. This is
+        # correct because we never need to update the outer list.
+        self.kv_block_hashes = ConstantList(
+            [ConstantList(x) for x in self._kv_block_hashes])
 
     def append_kv_block_hashes(self, group_id: int,
                                block_hash: "BlockHashType") -> None:

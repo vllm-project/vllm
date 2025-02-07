@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import threading
 from concurrent import futures
@@ -100,32 +102,32 @@ def test_traces(trace_service):
 
     attributes = decode_attributes(
         request.resource_spans[0].scope_spans[0].spans[0].attributes)
-    assert attributes.get(SpanAttributes.LLM_RESPONSE_MODEL) == model
+    assert attributes.get(SpanAttributes.GEN_AI_RESPONSE_MODEL) == model
     assert attributes.get(
-        SpanAttributes.LLM_REQUEST_ID) == outputs[0].request_id
+        SpanAttributes.GEN_AI_REQUEST_ID) == outputs[0].request_id
+    assert attributes.get(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE
+                          ) == sampling_params.temperature
     assert attributes.get(
-        SpanAttributes.LLM_REQUEST_TEMPERATURE) == sampling_params.temperature
+        SpanAttributes.GEN_AI_REQUEST_TOP_P) == sampling_params.top_p
     assert attributes.get(
-        SpanAttributes.LLM_REQUEST_TOP_P) == sampling_params.top_p
-    assert attributes.get(
-        SpanAttributes.LLM_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
-    assert attributes.get(SpanAttributes.LLM_REQUEST_N) == sampling_params.n
-    assert attributes.get(SpanAttributes.LLM_USAGE_PROMPT_TOKENS) == len(
+        SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
+    assert attributes.get(SpanAttributes.GEN_AI_REQUEST_N) == sampling_params.n
+    assert attributes.get(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS) == len(
         outputs[0].prompt_token_ids)
     completion_tokens = sum(len(o.token_ids) for o in outputs[0].outputs)
     assert attributes.get(
-        SpanAttributes.LLM_USAGE_COMPLETION_TOKENS) == completion_tokens
+        SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS) == completion_tokens
     metrics = outputs[0].metrics
     assert attributes.get(
-        SpanAttributes.LLM_LATENCY_TIME_IN_QUEUE) == metrics.time_in_queue
+        SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE) == metrics.time_in_queue
     ttft = metrics.first_token_time - metrics.arrival_time
     assert attributes.get(
-        SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN) == ttft
+        SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN) == ttft
     e2e_time = metrics.finished_time - metrics.arrival_time
-    assert attributes.get(SpanAttributes.LLM_LATENCY_E2E) == e2e_time
+    assert attributes.get(SpanAttributes.GEN_AI_LATENCY_E2E) == e2e_time
     assert metrics.scheduler_time > 0
-    assert attributes.get(
-        SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER) == metrics.scheduler_time
+    assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_SCHEDULER
+                          ) == metrics.scheduler_time
     # Model forward and model execute should be none, since detailed traces is
     # not enabled.
     assert metrics.model_forward_time is None
@@ -166,37 +168,37 @@ def test_traces_with_detailed_steps(trace_service):
 
     attributes = decode_attributes(
         request.resource_spans[0].scope_spans[0].spans[0].attributes)
-    assert attributes.get(SpanAttributes.LLM_RESPONSE_MODEL) == model
+    assert attributes.get(SpanAttributes.GEN_AI_RESPONSE_MODEL) == model
     assert attributes.get(
-        SpanAttributes.LLM_REQUEST_ID) == outputs[0].request_id
+        SpanAttributes.GEN_AI_REQUEST_ID) == outputs[0].request_id
+    assert attributes.get(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE
+                          ) == sampling_params.temperature
     assert attributes.get(
-        SpanAttributes.LLM_REQUEST_TEMPERATURE) == sampling_params.temperature
+        SpanAttributes.GEN_AI_REQUEST_TOP_P) == sampling_params.top_p
     assert attributes.get(
-        SpanAttributes.LLM_REQUEST_TOP_P) == sampling_params.top_p
-    assert attributes.get(
-        SpanAttributes.LLM_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
-    assert attributes.get(SpanAttributes.LLM_REQUEST_N) == sampling_params.n
-    assert attributes.get(SpanAttributes.LLM_USAGE_PROMPT_TOKENS) == len(
+        SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
+    assert attributes.get(SpanAttributes.GEN_AI_REQUEST_N) == sampling_params.n
+    assert attributes.get(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS) == len(
         outputs[0].prompt_token_ids)
     completion_tokens = sum(len(o.token_ids) for o in outputs[0].outputs)
     assert attributes.get(
-        SpanAttributes.LLM_USAGE_COMPLETION_TOKENS) == completion_tokens
+        SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS) == completion_tokens
     metrics = outputs[0].metrics
     assert attributes.get(
-        SpanAttributes.LLM_LATENCY_TIME_IN_QUEUE) == metrics.time_in_queue
+        SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE) == metrics.time_in_queue
     ttft = metrics.first_token_time - metrics.arrival_time
     assert attributes.get(
-        SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN) == ttft
+        SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN) == ttft
     e2e_time = metrics.finished_time - metrics.arrival_time
-    assert attributes.get(SpanAttributes.LLM_LATENCY_E2E) == e2e_time
+    assert attributes.get(SpanAttributes.GEN_AI_LATENCY_E2E) == e2e_time
     assert metrics.scheduler_time > 0
-    assert attributes.get(
-        SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER) == metrics.scheduler_time
+    assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_SCHEDULER
+                          ) == metrics.scheduler_time
     assert metrics.model_forward_time > 0
     assert attributes.get(
-        SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_FORWARD) == pytest.approx(
+        SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD) == pytest.approx(
             metrics.model_forward_time / 1000)
     assert metrics.model_execute_time > 0
-    assert attributes.get(SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE
+    assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE
                           ) == metrics.model_execute_time
     assert metrics.model_forward_time < 1000 * metrics.model_execute_time

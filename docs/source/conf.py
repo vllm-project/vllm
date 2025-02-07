@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
@@ -70,6 +72,7 @@ copybutton_prompt_is_regexp = True
 html_title = project
 html_theme = 'sphinx_book_theme'
 html_logo = 'assets/logos/vllm-logo-text-light.png'
+html_favicon = 'assets/logos/vllm-logo-only-light.ico'
 html_theme_options = {
     'path_to_docs': 'docs/source',
     'repository_url': 'https://github.com/vllm-project/vllm',

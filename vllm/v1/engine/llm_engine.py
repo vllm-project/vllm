@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List, Mapping, Optional, Type, Union
 
 from typing_extensions import TypeVar
@@ -161,6 +163,9 @@ class LLMEngine:
 
     def stop_profile(self):
         self.engine_core.profile(False)
+
+    def reset_prefix_cache(self):
+        self.engine_core.reset_prefix_cache()
 
     def get_tokenizer_group(
         self,

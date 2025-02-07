@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import pickle
 import signal
@@ -94,22 +96,12 @@ class MultiprocExecutor(Executor):
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
-        """
-        Execute an RPC call on workers.
-        
-        Args:
-            method: Name of the worker method to execute
-            timeout: Maximum time in seconds to wait for execution. Rases a
-                     TimeoutError on timeout. None means wait indefinitely.
-            args: Positional arguments to pass to the worker method
-            kwargs: Keyword arguments to pass to the worker method
-
-        Returns:
-            List of results from each worker
-        """
         start_time = time.monotonic()
         kwargs = kwargs or {}
 
+        # NOTE: If the args are heterogeneous, then we pack them into a list,
+        # and unpack them in the method of every worker, because every worker
+        # knows their own rank.
         try:
             if isinstance(method, str):
                 send_method = method

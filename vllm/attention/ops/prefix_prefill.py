@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
@@ -133,7 +135,7 @@ if triton.__version__ >= "2.1.0":
                              other=0.0)  # [D,N]
 
             if k_load.dtype.is_fp8():
-                k = (k_load.to(tl.float32) * k_scale).to(q.dtype)
+                k = (k_load.to(tl.float32) * tl.load(k_scale)).to(q.dtype)
             else:
                 k = k_load
 
@@ -181,7 +183,7 @@ if triton.__version__ >= "2.1.0":
                              ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                              other=0.0)  # [N,D]
             if v_load.dtype.is_fp8():
-                v = (v_load.to(tl.float32) * v_scale).to(q.dtype)
+                v = (v_load.to(tl.float32) * tl.load(v_scale)).to(q.dtype)
             else:
                 v = v_load
             p = p.to(v.dtype)
@@ -219,8 +221,8 @@ if triton.__version__ >= "2.1.0":
                           float("-inf"))
             if SLIDING_WINDOW > 0:
                 qk = tl.where(
-                    offs_m[:, None] -
-                    (start_n + offs_n[None, :]) < SLIDING_WINDOW, qk, -10000)
+                    offs_m[:, None] - (start_n + offs_n[None, :])
+                    < SLIDING_WINDOW, qk, -10000)
 
             # -- compute m_ij, p, l_ij
             m_ij = tl.max(qk, 1)
@@ -324,10 +326,10 @@ if triton.__version__ >= "2.1.0":
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs +
             cur_head * stride_qh + offs_d[None, :] * stride_qd)
 
-        q = tl.load(
-            Q + off_q,
-            mask=offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len,
-            other=0.0)
+        q = tl.load(Q + off_q,
+                    mask=offs_m[:, None]
+                    < cur_batch_seq_len - cur_batch_ctx_len,
+                    other=0.0)
 
         # # initialize pointer to m and l
         m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
@@ -402,8 +404,8 @@ if triton.__version__ >= "2.1.0":
             # -- compute qk ----
             k = tl.load(k_ptrs +
                         (cur_batch_in_all_start_index + start_n) * stride_kbs,
-                        mask=(start_n + offs_n[None, :]) <
-                        cur_batch_seq_len - cur_batch_ctx_len,
+                        mask=(start_n + offs_n[None, :])
+                        < cur_batch_seq_len - cur_batch_ctx_len,
                         other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -430,8 +432,8 @@ if triton.__version__ >= "2.1.0":
             # update acc
             v = tl.load(v_ptrs +
                         (cur_batch_in_all_start_index + start_n) * stride_vbs,
-                        mask=(start_n + offs_n[:, None]) <
-                        cur_batch_seq_len - cur_batch_ctx_len,
+                        mask=(start_n + offs_n[:, None])
+                        < cur_batch_seq_len - cur_batch_ctx_len,
                         other=0.0)
 
             p = p.to(v.dtype)
@@ -564,7 +566,7 @@ if triton.__version__ >= "2.1.0":
                              other=0.0)  # [D,N]
 
             if k_load.dtype.is_fp8():
-                k = (k_load.to(tl.float32) * k_scale).to(q.dtype)
+                k = (k_load.to(tl.float32) * tl.load(k_scale)).to(q.dtype)
             else:
                 k = k_load
 
@@ -604,7 +606,7 @@ if triton.__version__ >= "2.1.0":
                              ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                              other=0.0)
             if v_load.dtype.is_fp8():
-                v = (v_load.to(tl.float32) * v_scale).to(q.dtype)
+                v = (v_load.to(tl.float32) * tl.load(v_scale)).to(q.dtype)
             else:
                 v = v_load
             p = p.to(v.dtype)
@@ -639,8 +641,8 @@ if triton.__version__ >= "2.1.0":
             k = tl.load(k_ptrs +
                         (cur_batch_in_all_start_index + start_n) * stride_kbs,
                         mask=dim_mask[:, None] &
-                        ((start_n + offs_n[None, :]) <
-                         cur_batch_seq_len - cur_batch_ctx_len),
+                        ((start_n + offs_n[None, :])
+                         < cur_batch_seq_len - cur_batch_ctx_len),
                         other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -677,8 +679,8 @@ if triton.__version__ >= "2.1.0":
             v = tl.load(v_ptrs +
                         (cur_batch_in_all_start_index + start_n) * stride_vbs,
                         mask=dim_mask[None, :] &
-                        ((start_n + offs_n[:, None]) <
-                         cur_batch_seq_len - cur_batch_ctx_len),
+                        ((start_n + offs_n[:, None])
+                         < cur_batch_seq_len - cur_batch_ctx_len),
                         other=0.0)
             p = p.to(v.dtype)
 
@@ -713,8 +715,8 @@ if triton.__version__ >= "2.1.0":
                               b_seq_len,
                               b_ctx_len,
                               max_input_len,
-                              k_scale: float = 1.0,
-                              v_scale: float = 1.0,
+                              k_scale: torch.Tensor,
+                              v_scale: torch.Tensor,
                               alibi_slopes=None,
                               sliding_window=None):
 

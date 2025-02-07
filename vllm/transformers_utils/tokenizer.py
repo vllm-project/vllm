@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import contextlib
 import os
 import warnings
@@ -67,9 +69,10 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     tokenizer_all_special_tokens_extended = (
         tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
+    tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
 
-    max_token_id = max(tokenizer.get_vocab().values())
+    max_token_id = max(tokenizer_vocab.values())
     # Some tokenizers (e.g., QwenTokenizer) have special tokens that
     # are added and included in the implementation of the vocab_size
     # property, but not in get_vocab(); if there is an implementation
@@ -95,6 +98,9 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         @property
         def max_token_id(self):
             return max_token_id
+
+        def get_vocab(self):
+            return tokenizer_vocab
 
         def __len__(self):
             return tokenizer_len

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import os
 from typing import Any, Callable, List, Optional, Union
@@ -148,7 +150,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
-    ) -> Any:
+    ) -> List[Any]:
         """Runs the given method on all workers.
 
         Args:

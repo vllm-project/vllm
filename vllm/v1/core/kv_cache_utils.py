@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
 import math
 from collections import defaultdict
@@ -295,9 +296,20 @@ def hash_block_tokens(
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
+    if not parent_block_hash:
+        # Note that we use 'None' as a string here instead of None because
+        # as of Python 3.12, hash(None) returns a constant predictable value.
+        # This could possibly make it easier to find and exploit hash
+        # collisions. 'None' as a string will be hashed differently per process,
+        # but consistently within the same process. This is the same as the
+        # behavior of None prior to Python 3.12.
+        parent_block_hash = hash('None')
+
+    curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHashType(
-        hash((parent_block_hash, kv_cache_group_id, *curr_block_token_ids)),
-        tuple(curr_block_token_ids), kv_cache_group_id, extra_keys)
+        hash((parent_block_hash, curr_block_token_ids_tuple, kv_cache_group_id,
+              extra_keys)), curr_block_token_ids_tuple, kv_cache_group_id,
+        extra_keys)
 
 
 def hash_request_tokens(block_size: int, request: Request,
@@ -473,6 +485,10 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         num_blocks = num_gpu_blocks_override
 
     logger.info("# GPU blocks: %d", num_blocks)
+    max_concurrency = (num_blocks * vllm_config.cache_config.block_size /
+                       vllm_config.model_config.max_model_len)
+    logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                vllm_config.model_config.max_model_len, max_concurrency)
 
     per_layer_size = page_size * num_blocks
     grouped_layers = [[layer_name for layer_name in kv_cache_spec]]

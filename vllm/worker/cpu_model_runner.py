@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import weakref
 from collections import defaultdict
@@ -144,9 +146,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                  runner: "CPUModelRunner",
                  finished_requests_ids: Optional[List[str]] = None) -> None:
         super().__init__()
-        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
         self.runner = runner
-
         self.chunked_prefill = (runner.scheduler_config.chunked_prefill_enabled
                                 or runner.cache_config.enable_prefix_caching)
         self.model_input_cls = self.runner._model_input_cls
@@ -156,10 +156,17 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.device = self.runner.device
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.enable_lora = self.runner.lora_config is not None
+        if self.runner.attn_backend is not None:
+            # spec decode (e.g. Medusa) does not have atten backend
+            attn_backend = self.runner.attn_backend
+            self.att_metadata_builder = attn_backend.get_builder_cls()(self)
+
+    def prepare(self,
+                finished_requests_ids: Optional[List[str]] = None) -> None:
+        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
         self.input_data = ModelInputForCPUBuilder.ModelInputData(
             self.runner.model_config.uses_mrope)
-        self.att_metadata_builder = self.runner.attn_backend.get_builder_cls()(
-            self)
+        self.att_metadata_builder.prepare()
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
@@ -431,6 +438,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
     """
     _model_input_cls: Type[TModelInputForCPU]
     _builder_cls: Type[ModelInputForCPUBuilder]
+    builder: ModelInputForCPUBuilder
 
     def __init__(
         self,
@@ -477,6 +485,10 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
+        if hasattr(self, "_builder_cls"):
+            # multi-step model runner does not have `_builder_cls`
+            self.builder = self._builder_cls(weakref.proxy(self))
+
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
 
@@ -509,6 +521,9 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             )
             self.model = self.lora_manager.create_lora_manager(self.model)
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -519,10 +534,10 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         metadata for possible additional steps, e.g., sampling.
 
         """
-        builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
-        builder.set_seq_group_list(seq_group_metadata_list)
+        self.builder.prepare(finished_requests_ids)
+        self.builder.set_seq_group_list(seq_group_metadata_list)
 
-        return builder.build()  # type: ignore
+        return self.builder.build()  # type: ignore
 
     # sampler property will be used by spec_decode_worker
     @property

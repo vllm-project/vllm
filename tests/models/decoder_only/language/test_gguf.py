@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Tests gguf models against unquantized models generations
 Note: To pass the test, quantization higher than Q4 should be used
@@ -66,12 +67,16 @@ STARCODER_CONFIG = GGUFTestConfig(
     gguf_filename="starcoder2-3b.Q6_K.gguf",
 )
 
+DOLPHIN_CONFIG = GGUFTestConfig(
+    # Test VocabParallelEmbedding sharding issue.
+    original_model="cognitivecomputations/TinyDolphin-2.8-1.1b",
+    gguf_repo="tsunemoto/TinyDolphin-2.8-1.1b-GGUF",
+    gguf_filename="tinydolphin-2.8-1.1b.Q6_K.gguf",
+)
+
 MODELS = [
-    LLAMA_CONFIG,
-    QWEN2_CONFIG,
-    PHI3_CONFIG,
-    GPT2_CONFIG,
-    STABLELM_CONFIG,
+    LLAMA_CONFIG, QWEN2_CONFIG, PHI3_CONFIG, GPT2_CONFIG, STABLELM_CONFIG,
+    DOLPHIN_CONFIG
     # STARCODER_CONFIG, # broken
 ]
 
@@ -106,15 +111,18 @@ def test_models(
             messages, tokenize=False, add_generation_prompt=True)
 
     # Run unquantized model.
-    with vllm_runner(model_name=model.original_model,
-                     dtype=dtype,
-                     max_model_len=MAX_MODEL_LEN,
-                     tensor_parallel_size=tp_size) as original_model:
+    with vllm_runner(
+            model_name=model.original_model,
+            enforce_eager=True,  # faster tests
+            dtype=dtype,
+            max_model_len=MAX_MODEL_LEN,
+            tensor_parallel_size=tp_size) as original_model:
         original_outputs = original_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 
     # Run gguf model.
     with vllm_runner(model_name=model.gguf_model,
+                     enforce_eager=True,
                      tokenizer_name=model.original_model,
                      dtype=dtype,
                      max_model_len=MAX_MODEL_LEN,

@@ -2,6 +2,10 @@
 
 vLLM supports AMD GPUs with ROCm 6.2.
 
+:::{attention}
+There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
+:::
+
 ## Requirements
 
 - GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
@@ -39,9 +43,9 @@ Currently, there are no pre-built ROCm wheels.
     cd ../..
     ```
 
-    ```{note}
-    - If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
-    ```
+    :::{note}
+    If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
+    :::
 
 2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/ROCm/flash-attention/tree/ck_tile)
 
@@ -59,9 +63,9 @@ Currently, there are no pre-built ROCm wheels.
     cd ..
     ```
 
-    ```{note}
-    - You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
-    ```
+    :::{note}
+    You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
+    :::
 
 3. Build vLLM. For example, vLLM on ROCM 6.2 can be built with the following steps:
 
@@ -87,23 +91,30 @@ Currently, there are no pre-built ROCm wheels.
 
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
 
-    ```{tip}
+<!--- pyml disable-num-lines 5 ul-indent-->
+    :::{tip}
     - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
     - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
     - To use CK flash-attention or PyTorch naive attention, please use this flag `export VLLM_USE_TRITON_FLASH_ATTN=0` to turn off triton flash attention.
     - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
-    ```
+    :::
 
-```{tip}
+:::{tip}
 - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.
   For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization).
-```
+:::
 
 ## Set up using Docker
 
 ### Pre-built images
 
-Currently, there are no pre-built ROCm images.
+The [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
+docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
+
+:::{tip}
+Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
+for instructions on how to use this prebuilt docker image.
+:::
 
 ### Build image from source
 
@@ -123,11 +134,10 @@ It is important that the user kicks off the docker build using buildkit. Either 
 <gh-file:Dockerfile.rocm> uses ROCm 6.2 by default, but also supports ROCm 5.7, 6.0 and 6.1 in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
 
-- `BASE_IMAGE`: specifies the base image used when running `docker build`, specifically the PyTorch on ROCm base image.
-- `BUILD_FA`: specifies whether to build CK flash-attention. The default is 1. For [Radeon RX 7900 series (gfx1100)](https://rocm.docs.amd.com/projects/radeon/en/latest/index.html), this should be set to 0 before flash-attention supports this target.
-- `FX_GFX_ARCHS`: specifies the GFX architecture that is used to build CK flash-attention, for example, `gfx90a;gfx942` for MI200 and MI300. The default is `gfx90a;gfx942`
-- `FA_BRANCH`: specifies the branch used to build the CK flash-attention in [ROCm's flash-attention repo](https://github.com/ROCmSoftwarePlatform/flash-attention). The default is `ae7928c`
-- `BUILD_TRITON`: specifies whether to build triton flash-attention. The default value is 1.
+- `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using <gh-file:Dockerfile.rocm_base>
+- `USE_CYTHON`: An option to run cython compilation on a subset of python files upon docker build
+- `BUILD_RPD`: Include RocmProfileData profiling tool in the image
+- `ARG_PYTORCH_ROCM_ARCH`: Allows to override the gfx architecture values from the base docker image
 
 Their values can be passed in when running `docker build` with `--build-arg` options.
 
@@ -137,10 +147,10 @@ To build vllm on ROCm 6.2 for MI200 and MI300 series, you can use the default:
 DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
 ```
 
-To build vllm on ROCm 6.2 for Radeon RX7900 series (gfx1100), you should specify `BUILD_FA` as below:
+To build vllm on ROCm 6.2 for Radeon RX7900 series (gfx1100), you should pick the alternative base image:
 
 ```console
-DOCKER_BUILDKIT=1 docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
+DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" -f Dockerfile.rocm -t vllm-rocm .
 ```
 
 To run the above docker image `vllm-rocm`, use the below command:

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/THUDM/GLM-4
 """Inference-only GLM-4v model visual encoder compatible with THUDM weights."""

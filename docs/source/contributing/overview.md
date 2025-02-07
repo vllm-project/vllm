@@ -25,25 +25,27 @@ Check out the [building from source](#build-from-source) documentation for detai
 ```bash
 pip install -r requirements-dev.txt
 
-# linting and formatting
-bash format.sh
-# Static type checking
-mypy
+# Linting, formatting and static type checking
+pre-commit install --hook-type pre-commit --hook-type commit-msg
+
+# You can manually run pre-commit with
+pre-commit run --all-files
+
 # Unit tests
 pytest tests/
 ```
 
-```{note}
+:::{note}
 Currently, the repository is not fully checked by `mypy`.
-```
+:::
 
 ## Issues
 
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
-```{important}
+:::{important}
 If you discover a security vulnerability, please follow the instructions [here](gh-file:SECURITY.md#reporting-a-vulnerability).
-```
+:::
 
 ## Pull Requests & Code Reviews
 
@@ -79,16 +81,17 @@ appropriately to indicate the type of change. Please use one of the following:
 - `[Misc]` for PRs that do not fit the above categories. Please use this
   sparingly.
 
-```{note}
+:::{note}
 If the PR spans more than one category, please include all relevant prefixes.
-```
+:::
 
 ### Code Quality
 
 The PR needs to meet the following code quality standards:
 
 - We adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
-- Pass all linter checks. Please use <gh-file:format.sh> to format your code.
+- Pass all linter checks. Please use `pre-commit` to format your code. See
+  <https://pre-commit.com/#usage> if `pre-commit` is new to you.
 - The code needs to be well-documented to ensure future contributors can easily
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This

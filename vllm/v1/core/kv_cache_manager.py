@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import DefaultDict, Dict, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -94,7 +96,13 @@ class KVCacheManager:
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: Dict[str, ReqKVCacheBlocks] = {}
+        self.req_to_blocks: DefaultDict[str,
+                                        ReqKVCacheBlocks] = defaultdict(list)
+
+    @property
+    def usage(self) -> float:
+        return 1.0 - (self.free_block_queue.num_free_blocks /
+                      self.num_gpu_blocks)
 
     def get_computed_blocks(self,
                             request: Request) -> Tuple[ReqKVCacheBlocks, int]:
@@ -148,46 +156,97 @@ class KVCacheManager:
             computed_blocks[i] = computed_blocks[i][:num_computed_tokens //
                                                     manager.block_size]
 
-        # Free the blocks that are not needed.
-        self._free_useless_blocks(computed_blocks, num_computed_tokens)
+        # Free the blocks that are not needed. (?????)
+        # self._free_useless_blocks(computed_blocks, num_computed_tokens)
         return computed_blocks, num_computed_tokens
 
-    def append_slots(
+    def allocate_slots(
         self,
         request: Request,
         num_tokens: int,
+        new_computed_blocks: Optional[ReqKVCacheBlocks] = None,
+        num_new_computed_tokens: int = 0,
     ) -> Optional[ReqKVCacheBlocks]:
-        """Append slots to the block table of the request.
-        We first append slots to already allocated blocks. If the allocated
-        blocks are not enough, we allocate new blocks.
+        """Add slots for a request with new tokens to append.
 
         Args:
-            request: The request to append slots.
-            num_tokens: The number of tokens to append.
+            request: The request to allocate slots.
+            num_tokens: The number of tokens to allocate. Note that this does
+                not include the tokens that have already been computed.
+            new_computed_blocks_all_groups: A list of new computed blocks 
+                just hitting the prefix caching.
+
+        Blocks layout:
+        -----------------------------------------------------------------------
+        | < computed > | < new computed > |    < new >    | < pre-allocated > |
+        -----------------------------------------------------------------------
+        |                  < required >                   |
+        --------------------------------------------------
+        |                    < full >                  |
+        ------------------------------------------------
+                                          | <new full> |
+                                          --------------
+        The following *_blocks are illustrated in this layout.
 
         Returns:
-            The new blocks if new blocks are allocated, or None if new blocks
-            are required but cannot be allocated.
+            A list of new allocated blocks.
         """
+        if num_tokens == 0:
+            raise ValueError("num_tokens must be greater than 0")
+
         # We can free blocks that are no longer needed even if we cannot
         # schedule this request due to the limit of free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
         self._free_useless_blocks(self.req_to_blocks[request.request_id],
                                   request.num_computed_tokens)
+
+        new_computed_blocks = new_computed_blocks if new_computed_blocks is not None else [
+            [] for _ in self.num_kv_cache_groups
+        ]
+
+        # The number of computed tokens is the number of computed tokens plus
+        # the new prefix caching hits
+        num_computed_tokens = (request.num_computed_tokens +
+                               num_new_computed_tokens)
         req_blocks = self.req_to_blocks[request.request_id]
 
         num_new_blocks = [
-            manager.get_num_new_blocks(request.num_computed_tokens, num_tokens,
-                                       len(req_blocks_of_group))
-            for manager, req_blocks_of_group in zip(self.managers, req_blocks)
+            manager.get_num_new_blocks(
+                num_computed_tokens, num_tokens,
+                len(req_blocks[i]) + len(new_computed_blocks[i]))
+            for i, manager in enumerate(self.managers)
         ]
+
         total_new_blocks = sum(max(x, 0) for x in num_new_blocks)
 
-        if total_new_blocks > self.free_block_queue.num_free_blocks:
-            # Need to allocate new blocks due to insufficient pre-allocated
-            # slots, but we cannot allocate new blocks due to the limit.
+        # If a computed block of a request is an eviction candidate (in the
+        # free queue and ref_cnt == 0), it cannot be counted as a free block
+        # when allocating this request.
+        num_evictable_computed_blocks = sum(
+            1 for blk_group in new_computed_blocks for blk in blk_group
+            if blk.ref_cnt == 0)
+
+        if (total_new_blocks > self.free_block_queue.num_free_blocks -
+                num_evictable_computed_blocks):
+            # Cannot allocate new blocks.
             return None
+
+        # Touch the computed blocks to make sure they won't be evicted.
+        if self.enable_caching:
+            self._touch(new_computed_blocks)
+        else:
+            assert all(len(blks) == 0 for blks in new_computed_blocks), (
+                "Computed blocks should be empty when "
+                "prefix caching is disabled")
+
+        # Append the new computed blocks to the request blocks until now to
+        # avoid the case where the new blocks cannot be allocated.
+        for i, new_computed_blocks_of_group in enumerate(new_computed_blocks):
+            req_blocks[i].extend(new_computed_blocks_of_group)
+
+        # Start to handle new blocks
+        new_blocks: ReqKVCacheBlocks = []
 
         # Truncate the number of pre-allocated blocks to ensure that we can
         # have at least `num_new_blocks` free blocks for each group.
@@ -195,8 +254,6 @@ class KVCacheManager:
             self.num_preallocate_blocks,
             (self.free_block_queue.num_free_blocks - total_new_blocks) //
             len(self.managers))
-
-        new_blocks: ReqKVCacheBlocks = []
 
         for i in range(self.num_kv_cache_groups):
             if num_new_blocks[i] <= 0:
@@ -228,136 +285,26 @@ class KVCacheManager:
             return new_blocks
 
         for i, manager in enumerate(self.managers):
-            num_computed_full_blocks = (request.num_computed_tokens //
-                                        manager.block_size)
-
-            # NOTE(rickyx): We are assuming the `num_tokens` are actual  tokens
-            # rather than lookahead slots (e.g. for speculative decoding).
-            # TODO(rickyx): When supporting speculative decoding, we will need
-            # to differentiate between them so that we can know how many blocks
-            # are full after appending the actual tokens.
-            num_full_blocks_after_append = (request.num_computed_tokens +
-                                            num_tokens) // manager.block_size
-            assert num_full_blocks_after_append <= len(req_blocks[i])
+            # NOTE(rickyx): We are assuming the `num_tokens` are actual
+            # tokens rather than lookahead slots (e.g. for speculative decoding).
+            # TODO(rickyx): When supporting speculative decoding, we will need to
+            # differentiate between them so that we can know how many blocks are
+            # full after appending the actual tokens.
+            num_full_blocks = (num_computed_tokens +
+                               num_tokens) // manager.block_size
+            num_computed_full_blocks = num_computed_tokens // self.block_size
 
             new_full_blocks = req_blocks[i][
-                num_computed_full_blocks:num_full_blocks_after_append]
+                num_computed_full_blocks:num_full_blocks]
             if new_full_blocks:
                 self._cache_full_blocks(
                     request=request,
                     blk_start_idx=num_computed_full_blocks,
-                    full_blocks=new_full_blocks,
-                    prev_block=req_blocks[i][num_computed_full_blocks - 1]
-                    if num_computed_full_blocks >= 1 else None,
-                    kv_cache_group_id=i,
-                )
-
-        return new_blocks
-
-    def allocate_slots(
-        self,
-        request: Request,
-        num_tokens: int,
-        computed_blocks: ReqKVCacheBlocks,
-        num_computed_tokens: int,
-    ) -> Optional[ReqKVCacheBlocks]:
-        """Allocate slots for a new request.
-
-        Args:
-            request: The request to allocate slots.
-            num_tokens: The number of tokens to allocate. Note that this does
-                not include the tokens that have already been computed.
-            computed_blocks: The computed blocks.
-            num_computed_tokens: The number of computed tokens.
-
-        Returns:
-           The new blocks if new blocks are allocated, or None if new blocks
-            are required but cannot be allocated.
-        """
-        if num_tokens == 0:
-            raise ValueError(
-                f"num_tokens must be greater than 0, got {num_tokens}")
-
-        # If a computed block of a request is an eviction candidate (in the
-        # free queue and ref_cnt == 0), it cannot be counted as a free block
-        # when allocating this request.
-        num_evictable_computed_blocks = sum(1 for blk_group in computed_blocks
-                                            for blk in blk_group
-                                            if blk.ref_cnt == 0)
-
-        num_new_blocks = [
-            manager.get_num_new_blocks(num_computed_tokens, num_tokens,
-                                       len(computed_blocks_of_group))
-            for manager, computed_blocks_of_group in zip(
-                self.managers, computed_blocks)
-        ]
-
-        total_new_blocks = sum(max(x, 0) for x in num_new_blocks)
-
-        if (total_new_blocks > self.free_block_queue.num_free_blocks -
-                num_evictable_computed_blocks):
-            # Cannot allocate new blocks.
-            return None
-
-        # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
-            self._touch(computed_blocks)
-        else:
-            assert all(len(blks) == 0 for blks in computed_blocks), (
-                "Computed blocks should be empty when "
-                "prefix caching is disabled")
-
-        # Truncate the number of pre-allocated blocks to ensure that we can
-        # have at least `num_new_blocks` free blocks for each group.
-        num_preallocate_blocks = min(
-            self.num_preallocate_blocks,
-            (self.free_block_queue.num_free_blocks - total_new_blocks) //
-            len(self.managers))
-
-        new_blocks = []
-        req_to_blocks = []
-
-        for i in range(len(self.managers)):
-            # Determine the number of new blocks to allocate considering
-            # preallocated blocks.
-            num_block_to_allocate = min(
-                num_new_blocks[i] + num_preallocate_blocks,
-                # Should not exceed the maximum number of blocks per request.
-                # This is especially because the block table has the shape
-                # [..., max_num_blocks_per_req].
-                # TODO(woosuk): Check and reject requests if
-                # num_prompt_tokens + max_tokens > max_model_len.
-                self.max_num_blocks_per_req[i] - len(computed_blocks[i]),
-            )
-            assert num_block_to_allocate >= 0
-            assert num_block_to_allocate <= \
-                self.free_block_queue.num_free_blocks
-
-            new_blocks_of_group = self._get_new_blocks(num_block_to_allocate)
-            new_blocks.append(new_blocks_of_group)
-            # Concatenate the computed block IDs and the new block IDs.
-            req_to_blocks.append(computed_blocks[i] + new_blocks_of_group)
-
-        self.req_to_blocks[request.request_id] = req_to_blocks
-
-        if not self.enable_caching:
-            return new_blocks
-        for i, manager in enumerate(self.managers):
-            num_computed_tokens = len(computed_blocks[i]) * manager.block_size
-            num_full_blocks = (num_computed_tokens +
-                               num_tokens) // manager.block_size
-
-            new_full_blocks = req_to_blocks[i][len(computed_blocks[i]
-                                                   ):num_full_blocks]
-            if new_full_blocks:
-                self._cache_full_blocks(
-                    request=request,
-                    blk_start_idx=len(computed_blocks[i]),
                     # The new full blocks are the full blocks that are not
                     # computed.
                     full_blocks=new_full_blocks,
-                    prev_block=computed_blocks[i][-1]
-                    if computed_blocks[i] else None,
+                    prev_block=(req_blocks[i][num_computed_full_blocks - 1]
+                                if num_computed_full_blocks > 0 else None),
                     kv_cache_group_id=i,
                 )
 
@@ -425,6 +372,33 @@ class KVCacheManager:
             # Reverse the blocks so that the tail blocks can have higher
             # eviction priority.
             self._free_blocks([list(reversed(blks)) for blks in blocks])
+
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache. This function may be used in RLHF
+        flows to invalid prefix caching after the weights are updated,
+        or used for resetting prefix caching status for benchmarking.
+
+        Returns:
+            bool: True if the prefix cache is successfully reset,
+            False otherwise.
+        """
+        num_used_blocks = (self.num_gpu_blocks -
+                           self.free_block_queue.num_free_blocks)
+        if num_used_blocks > 0:
+            logger.warning(
+                "Failed to reset prefix cache because some "
+                "blocks (%d) are not freed yet", num_used_blocks)
+            return False
+
+        # Remove all hashes so that no new blocks will hit.
+        self.cached_block_hash_to_block = defaultdict(dict)
+
+        # Remove all hashes from all blocks.
+        for block in self.block_pool:
+            block.reset_hash()
+
+        logger.info("Successfully reset prefix cache")
+        return True
 
     def get_num_common_prefix_blocks(
         self,
@@ -503,7 +477,7 @@ class KVCacheManager:
 
             # If the block is cached, evict it.
             if self.enable_caching:
-                self._evict_cached_block(curr_block)
+                self._maybe_evict_cached_block(curr_block)
 
             curr_block.incr_ref()
             ret.append(curr_block)
@@ -511,13 +485,16 @@ class KVCacheManager:
 
         return ret
 
-    def _evict_cached_block(self, block: KVCacheBlock) -> None:
+    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
+
+        Returns:
+            True if the block is evicted, False otherwise.
         """
         block_hash = block.block_hash
         if block_hash and block_hash in self.cached_block_hash_to_block:
@@ -526,6 +503,9 @@ class KVCacheManager:
 
             if len(self.cached_block_hash_to_block[block_hash]) == 0:
                 del self.cached_block_hash_to_block[block_hash]
+
+            return True
+        return False
 
     def _get_cached_block(self,
                           block_hash: BlockHashType) -> Optional[KVCacheBlock]:
@@ -597,8 +577,22 @@ class KVCacheManager:
 
         block_size = self.kv_cache_config.groups[
             kv_cache_group_id].kv_cache_spec.block_size
-        for i, blk in enumerate(full_blocks):
-            blk_idx = blk_start_idx + i
+        # Find the first uncached block. This case should only happen when
+        # speculative decoding is used.
+        offset = 0
+        for blk in full_blocks:
+            if blk.block_hash is None:
+                break
+            else:
+                prev_block_hash_value = blk.block_hash.hash_value
+                offset += 1
+        else:
+            # All blocks are cached.
+            return
+
+        for i, blk in enumerate(full_blocks[offset:]):
+            blk_idx = blk_start_idx + offset + i
+            assert blk.block_hash is None
 
             if blk_idx < num_cached_block_hashes:
                 # The block hash may already be computed in

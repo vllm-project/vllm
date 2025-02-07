@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import defaultdict
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -83,6 +85,9 @@ class OpenVINOModelRunner(ModelRunnerBase):
                                device_config=self.device_config,
                                kv_cache_dtype=self.kv_cache_dtype,
                                ov_core=self.ov_core)
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     def _prepare_model_input(
         self,
@@ -279,6 +284,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
             block_indices_begins=block_indices_begins_tensor,
             max_context_len=max_context_len_tensor,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=False,
         )
 
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
