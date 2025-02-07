@@ -241,7 +241,7 @@ class OpenAIServingScores(OpenAIServing):
         request_id=str,
         created_time=int,
         truncate_prompt_tokens: Optional[int] = None,
-        lora_request: Optional[Union[LoRARequest | None]] = None,
+        lora_request: Optional[Union[LoRARequest, None]] = None,
         prompt_adapter_request: Optional[Union[PromptAdapterRequest,
                                                None]] = None,
         raw_request: Optional[Request] = None,
