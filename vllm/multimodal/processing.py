@@ -1318,8 +1318,9 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         2. Apply the HF processor on encoder prompt.
         3. Copy the input prompt text as decoder prompt inputs.
         """
+        tokenizer = self.info.get_tokenizer()
         if isinstance(prompt, list):
-            prompt_text = decode_tokens(self.info.get_tokenizer(), prompt)
+            prompt_text = decode_tokens(tokenizer, prompt)
         else:
             prompt_text = prompt
 
@@ -1332,7 +1333,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         # We assumed the decoder prompt text is copied from
         # the original encoder prompt without extra process
-        tokenizer = self.info.get_tokenizer()
         if isinstance(prompt, str):
             decoder_prompt = prompt
             decoder_prompt_ids = encode_tokens(tokenizer, prompt)

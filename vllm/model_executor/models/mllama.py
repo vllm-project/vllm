@@ -162,7 +162,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=True,
+                                          add_special_tokens=False,
                                           return_tensors="pt")
         return processed_outputs
 
