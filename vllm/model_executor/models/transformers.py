@@ -322,6 +322,19 @@ class TransformersModel(nn.Module, SupportsPP):
         }
 
     def init_buffers(self, module: nn.Module):
+        """
+        If a `buffer` is on the `meta` device, then its parent
+        `module` is the original module created by:
+
+        ```python
+        with torch.device("meta"):
+            self.model: PreTrainedModel = AutoModel.from_config(...)
+        ```
+
+        This means that:
+        - `type(module)` is a class from `transformers`
+        - This class is constructed using a `PretrainedConfig`
+        """
         for name, buffer in module.named_buffers(recurse=False):
             if buffer.device == torch.device("meta"):
                 new_buffer = getattr(type(module)(self.config), name)
