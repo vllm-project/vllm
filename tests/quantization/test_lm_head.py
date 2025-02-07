@@ -17,10 +17,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 
 PROMPT = "On the surface of Mars, we found"
 
-MODELS_QUANT = [(
-    "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse",
-    True), ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", False),
-                ("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", False)]
+MODELS_QUANT = [
+    ("ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bits-dynamic-cfg-with-lm_head",
+     True),
+    ("ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-10-25-2024", False),
+    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", False),
+    ("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", False)
+]
 
 
 @pytest.mark.parametrize("model_lm_head_quant", MODELS_QUANT)
@@ -35,7 +38,8 @@ def test_lm_head(
 
         def check_model(model):
             lm_head_layer = model.lm_head
-
+            print("lm_head_layer.quant_method", model,
+                  lm_head_layer.quant_method)
             if lm_head_quantized:
                 assert isinstance(lm_head_layer.quant_method,
                                   (GPTQLinearMethod, GPTQMarlinLinearMethod,

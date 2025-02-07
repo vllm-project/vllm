@@ -2,7 +2,6 @@
 
 import re
 from copy import deepcopy
-
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import torch
@@ -23,7 +22,8 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, marlin_moe_permute_scales,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, UnquantizedEmbeddingMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, UnquantizedEmbeddingMethod)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
                                            PackedColumnParameter,
@@ -58,25 +58,28 @@ class GPTQMarlinConfig(QuantizationConfig):
             # (since we have only one group per output channel)
             desc_act = False
 
-        # GPTQModel use `dynamic_cfg` to allow per module quantization config so each module
-        # can be optmized for its own unique quant errors. Format is Dict[str, Dict] where key
-        # is a regex string that can both positive ("+:" prefixed) or negative ("-:" prefixed) match
-        # a module. Default to postiive match (override base quant config mode) if no prefix. 
-        # Value is in dict format of field key and override value. Negative matching will skip  
-        # quantization init for this module entirely (non-quantized inference).
-        # More details and quantize examples can be found at: https://github.com/ModelCloud/GPTQModel
+        # GPTQModel use `dynamic_cfg` to allow per module quantization config
+        # so each module can be optimized for its own unique quant errors.
+        # Format is Dict[str, Dict] where key is a regex string that can both
+        # positive ("+:" prefixed) or negative ("-:" prefixed) match a module.
+        # Default to positive match (override base quant config mode) if no
+        # prefix. Value is in dict format of field key and override value.
+        # Negative matching will skip quantization init for this module entirely
+        # (non-quantized inference). More details and quantize examples can be
+        # found at: https://github.com/ModelCloud/GPTQModel
         # Example:
         #  # last 1/2 of the layers 10-21 has 8bit vs 4bit for 0-9
         #  # last 1/4 of the layers 16-21 has 8bit and group_size 64
         # dynamic_cfg = {
         #  #`.*\.` matches the layers_node prefix
-        #  r"+:.*\.(?:1[0-5])\..*": {"bits": 8,}, # positive match layer 10-15
-        #  r"+:.*\.(?:1[6-9]|20|21)\..*": {"bits": 8, "group_size": 64,}, # positive match layer 16-21
+        #  # positive match layer 10-15
+        #  r"+:.*\.(?:1[0-5])\..*": {"bits": 8,},
+        #  # positive match layer 16-21
+        #  r"+:.*\.(?:1[6-9]|20|21)\..*": {"bits": 8, "group_size": 64,},
         #  r"-:.*\.moe\..*": {}, # negative match all `moe` layers
-        #}
+        # }
         self.dynamic_cfg = dynamic_cfg
 
-        
         self.weight_bits = weight_bits
         self.is_sym = is_sym
 
@@ -91,7 +94,8 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
 
-    # match dynamic rules with module name (prefix) and apply quantize config overrides if matched
+    # match dynamic rules with module name (prefix) and apply to quantize
+    # config overrides if matched
     def override_config(self, prefix: str):
         bits = self.weight_bits
 
@@ -142,6 +146,8 @@ class GPTQMarlinConfig(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlinConfig":
         dynamic_cfg = cls.get_from_keys_or(config, ["dynamic"], default={})
+        if dynamic_cfg is None:
+            dynamic_cfg = {}
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
@@ -196,12 +202,14 @@ class GPTQMarlinConfig(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod",
                         UnquantizedLinearMethod, UnquantizedEmbeddingMethod]]:
-        lm_head_quantized = isinstance(layer, ParallelLMHead) and self.lm_head_quantized
+        lm_head_quantized = isinstance(
+            layer, ParallelLMHead) and self.lm_head_quantized
         if isinstance(layer, LinearBase) or lm_head_quantized:
             if len(self.dynamic_cfg) > 0:
                 result = self.get_dynamic_config(layer_name=prefix)
                 if result is not None and not result:
-                    return UnquantizedEmbeddingMethod() if lm_head_quantized else UnquantizedLinearMethod()
+                    return UnquantizedEmbeddingMethod(
+                    ) if lm_head_quantized else UnquantizedLinearMethod()
 
             return GPTQMarlinLinearMethod(self, prefix=prefix)
         elif isinstance(layer, FusedMoE):
