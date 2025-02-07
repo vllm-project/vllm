@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.kv_transfer_params import KVTransferParams
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -142,6 +143,13 @@ class OpenAIServingCompletion(OpenAIServing):
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
+                # Create KVTransferParams based on input from request
+                kv_transfer_params = KVTransferParams(
+                    prefix_prompt_ids = request.prefix_prompt_ids,
+                    kvcache_load_keys = request.kvcache_load_keys,
+                    kvcache_store_keys = request.kvcache_store_keys,
+                )
+
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
                         prompt=engine_prompt,
@@ -156,6 +164,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         prompt_adapter_request=prompt_adapter_request,
                         trace_headers=trace_headers,
+                        kv_transfer_params=kv_transfer_params,
                         priority=request.priority,
                     )
 

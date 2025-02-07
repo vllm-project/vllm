@@ -38,6 +38,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
+from vllm.kv_transfer_params import KVTransferParams
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -441,6 +442,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
@@ -456,6 +458,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
@@ -472,6 +475,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED

@@ -240,6 +240,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
 
+    # kv transfer params
+    prefix_prompt_ids: Optional[List[int]] = None
+    kvcache_load_keys: Optional[List[str]] = None
+    kvcache_store_keys: Optional[List[str]] = None
+
     # doc: begin-chat-completion-sampling-params
     best_of: Optional[int] = None
     use_beam_search: bool = False
@@ -655,6 +660,11 @@ class CompletionRequest(OpenAIBaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     user: Optional[str] = None
+
+    # kv transfer params
+    prefix_prompt_ids: Optional[Union[List[int], List[List[int]]]] = None
+    kvcache_load_keys: Optional[Union[List[str], List[List[str]]]] = None
+    kvcache_store_keys: Optional[Union[List[str], List[List[str]]]] = None
 
     # doc: begin-completion-sampling-params
     use_beam_search: bool = False

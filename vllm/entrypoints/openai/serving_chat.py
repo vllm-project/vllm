@@ -228,6 +228,13 @@ class OpenAIServingChat(OpenAIServing):
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
+                # Create KVTransferParams based on input from request
+                kv_transfer_params = KVTransferParams(
+                    prefix_prompt_ids = request.prefix_prompt_ids,
+                    kvcache_load_keys = request.kvcache_load_keys,
+                    kvcache_store_keys = request.kvcache_store_keys,
+                )
+
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
                         prompt=engine_prompt,
@@ -242,6 +249,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         prompt_adapter_request=prompt_adapter_request,
+                        kv_transfer_params=kv_transfer_params,
                         priority=request.priority,
                     )
 
