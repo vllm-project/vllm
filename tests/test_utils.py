@@ -391,7 +391,7 @@ def test_bind_kv_cache_encoder_decoder():
 
 
 def test_bind_kv_cache_pp():
-    with patch("vllm.utils.cuda_device_count_stateless", lambda: 2):
+    with patch("vllm.utils.device_count_stateless", lambda: 2):
         # this test runs with 1 GPU, but we simulate 2 GPUs
         cfg = VllmConfig(
             parallel_config=ParallelConfig(pipeline_parallel_size=2))

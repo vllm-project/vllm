@@ -33,7 +33,7 @@ from vllm.transformers_utils.config import (
     try_get_generation_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3
-from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
+from vllm.utils import (GiB_bytes, LayerBlockType, device_count_stateless,
                         get_cpu_memory, random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
@@ -1382,7 +1382,7 @@ class ParallelConfig:
                 # neuron uses single process to control multiple devices
                 backend = "uni"
             elif (current_platform.is_cuda()
-                  and cuda_device_count_stateless() < self.world_size):
+                  and device_count_stateless() < self.world_size):
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
                                      "required for multi-node inference, "

@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import pytest
 
 from vllm.config import CompilationLevel
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils import device_count_stateless
 
 from ..utils import compare_all_settings
 
@@ -101,7 +101,7 @@ def test_compile_correctness(test_setting: TestSetting):
     attn_backend = test_setting.attn_backend
     method = test_setting.method
     fullgraph = test_setting.fullgraph
-    if cuda_device_count_stateless() != pp_size * tp_size:
+    if device_count_stateless() != pp_size * tp_size:
         pytest.skip("Not correct CUDA devices for the test.")
     import os
     os.environ["VLLM_ATTENTION_BACKEND"] = attn_backend

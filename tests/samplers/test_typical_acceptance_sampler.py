@@ -7,8 +7,9 @@ import torch
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.model_executor.utils import set_random_seed
+from vllm.platforms import current_platform
 
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1)]
+CUDA_DEVICES = [f"{current_platform.device_type}:0"]
 
 
 def get_zero_temperature_prob_dist(batch_size, k, vocab_size):

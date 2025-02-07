@@ -577,6 +577,35 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 # end-env-vars-definition
 
 
+def overwrite_env_vars(name: str,
+                       default_value: Optional[Any],
+                       getter: Optional[Callable[[], Any]]):
+    """Overwrite the existed environment variance in `environment_variables`.
+
+    Args:
+        name: name of env var
+        default_value: default value of env var, will be used when env var
+            is not set
+        getter: Optional function to get the value. If not provided, os.getenv
+            is used by default
+    """
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
+
+    if name in environment_variables:
+        logger.warning(
+            "Environment variable %s is already exists."
+            "This operation will overwrite it.", name)
+    else:
+        raise ValueError(
+            "No environment variable named %s found."
+            "Use `overwrite_env_vars` if attempt to create one.", name)
+    if getter is None:
+        getter = lambda: os.getenv(name, default_value)
+
+    environment_variables[name] = getter
+
+
 def __getattr__(name: str):
     # lazy evaluation of environment variables
     if name in environment_variables:

@@ -179,6 +179,12 @@ class Platform:
         return current_capability.to_int() >= capability
 
     @classmethod
+    def get_device_count_stateless(cls,
+                                   visible_devices: Optional[str] = None
+                                   ) -> int:
+        raise NotImplementedError
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         """Get the name of a device."""
         raise NotImplementedError

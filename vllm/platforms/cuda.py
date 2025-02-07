@@ -82,6 +82,34 @@ class CudaPlatformBase(Platform):
         raise NotImplementedError
 
     @classmethod
+    @lru_cache(maxsize=8)
+    def get_device_count_stateless(cls,
+                                   visible_devices: Optional[str] = None
+                                   ) -> int:
+        # Note: cuda_visible_devices is not used, but we keep it as an
+        # argument for LRU Cache purposes.
+
+        # Code below is based on
+        # https://github.com/pytorch/pytorch/blob/
+        # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+        # torch/cuda/__init__.py#L831C1-L831C17
+        import torch.cuda
+        import torch.version
+
+        from vllm.platforms import current_platform
+        if not torch.cuda._is_compiled():
+            return 0
+        if current_platform.is_rocm():
+            # ROCm uses amdsmi instead of nvml for stateless device count
+            # This requires a sufficiently modern version of Torch 2.4.0
+            raw_count = torch.cuda._device_count_amdsmi() if (hasattr(
+                torch.cuda, "_device_count_amdsmi")) else -1
+        else:
+            raw_count = torch.cuda._device_count_nvml()
+        r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+        return r
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         raise NotImplementedError
 

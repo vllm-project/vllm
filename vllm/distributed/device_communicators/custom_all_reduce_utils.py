@@ -16,8 +16,7 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
-from vllm.utils import (cuda_device_count_stateless,
-                        update_environment_variables)
+from vllm.utils import device_count_stateless, update_environment_variables
 
 logger = init_logger(__name__)
 
@@ -189,7 +188,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
 
     is_distributed = dist.is_initialized()
 
-    num_dev = cuda_device_count_stateless()
+    num_dev = device_count_stateless()
     cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
     if cuda_visible_devices is None:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
