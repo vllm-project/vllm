@@ -176,7 +176,9 @@ class InputBatch:
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
-        self.prompt_logprob_reqs: Set[str] = set()
+        # NOTE(rob): num_prompt_logprobs only includes reqs
+        # that are currently in the prefill phase.
+        self.num_prompt_logprobs: Dict[str, int] = {}
 
     def add_request(
         self,
@@ -238,11 +240,10 @@ class InputBatch:
         if request.generator is not None:
             self.generators[req_index] = request.generator
 
-        num_logprobs = sampling_params.logprobs
-        if num_logprobs is not None and num_logprobs > 0:
-            self.num_logprobs[req_id] = num_logprobs
-        if sampling_params.prompt_logprobs:
-            self.prompt_logprob_reqs.add(req_id)
+        if sampling_params.logprobs is not None:
+            self.num_logprobs[req_id] = sampling_params.logprobs
+        if sampling_params.prompt_logprobs is not None:
+            self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
 
         # Add request lora ID
         if request.lora_request:
@@ -272,7 +273,7 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
-        self.prompt_logprob_reqs.discard(req_id)
+        self.num_prompt_logprobs.pop(req_id, None)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -297,7 +298,7 @@ class InputBatch:
         self.repetition_penalties_reqs.clear()
         self.generators.clear()
         self.num_logprobs.clear()
-        self.prompt_logprob_reqs.clear()
+        self.num_prompt_logprobs.clear()
         self.request_lora_mapping.fill(0)
         self.lora_id_to_lora_request.clear()
         self.lora_id_to_request_ids.clear()
@@ -489,13 +490,9 @@ class InputBatch:
                 and len(self.repetition_penalties_reqs) == 0)
 
     @property
-    def max_num_logprobs(self) -> int:
-        return max(self.num_logprobs.values()) if self.num_logprobs else 0
-
-    @property
-    def no_logprob(self) -> bool:
-        return len(self.num_logprobs) == 0
+    def max_num_logprobs(self) -> Optional[int]:
+        return max(self.num_logprobs.values()) if self.num_logprobs else None
 
     @property
     def no_prompt_logprob(self) -> bool:
-        return len(self.prompt_logprob_reqs) == 0
+        return not self.num_prompt_logprobs
