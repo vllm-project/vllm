@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List, Type
 
 from vllm.model_executor.layers.quantization.base_config import (

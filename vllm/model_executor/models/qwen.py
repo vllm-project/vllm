@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
 # Copyright (c) Alibaba Cloud.
@@ -777,7 +779,11 @@ class QWenVLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {"image": self.get_num_image_tokens()}
 
     def get_num_image_tokens(self) -> int:
@@ -797,13 +803,13 @@ class QWenVLDummyInputsBuilder(BaseDummyInputsBuilder[QWenVLProcessingInfo]):
 
         vision_config = hf_config.visual
 
-        max_image_size = vision_config["image_size"]
+        target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
         mm_data = {
             "image":
-            self._get_dummy_images(width=max_image_size,
-                                   height=max_image_size,
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
                                    num_images=num_images)
         }
 
@@ -1129,6 +1135,7 @@ class QWenLMHeadModel(QWenBaseModel, SupportsMultiModal, SupportsLoRA):
     """
     # Ensure that the LoRA support check passes when the class is not
     # initialized, but set all these attributes to empty.
+    # These will be updated when an instance class is selected
     packed_modules_mapping = {}
     supported_lora_modules = []
     embedding_modules = {}
@@ -1140,9 +1147,18 @@ class QWenLMHeadModel(QWenBaseModel, SupportsMultiModal, SupportsLoRA):
         prefix: str = "",
     ) -> QWenBaseModel:
         config = vllm_config.model_config.hf_config
+
         # Initialize VL
-        if hasattr(config, "visual"):
-            return QWenVL(vllm_config=vllm_config, prefix=prefix)
+        if hasattr(config, "visual"):  # noqa: SIM108
+            instance_cls = QWenVL
         # Initialize LLM
         else:
-            return QWenLLM(vllm_config=vllm_config, prefix=prefix)
+            instance_cls = QWenLLM
+
+        # quant_config references base class members,
+        # so update values before init is called
+        cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
+        cls.supported_lora_modules += instance_cls.supported_lora_modules
+        cls.embedding_modules.update(instance_cls.embedding_modules)
+        cls.embedding_padding_modules += instance_cls.embedding_padding_modules
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)

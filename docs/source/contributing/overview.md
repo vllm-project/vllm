@@ -26,7 +26,7 @@ Check out the [building from source](#build-from-source) documentation for detai
 pip install -r requirements-dev.txt
 
 # Linting, formatting and static type checking
-pre-commit install
+pre-commit install --hook-type pre-commit --hook-type commit-msg
 
 # You can manually run pre-commit with
 pre-commit run --all-files

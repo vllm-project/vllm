@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import time
 from collections import defaultdict
@@ -212,7 +214,10 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
         logger.info(
             "Waiting for creating a placement group of specs for "
             "%d seconds. specs=%s. Check "
-            "`ray status` to see if you have enough resources.",
+            "`ray status` to see if you have enough resources,"
+            " and make sure the IP addresses used by ray cluster"
+            " are the same as VLLM_HOST_IP environment variable"
+            " specified in each node if you are running on a multi-node.",
             int(time.time() - s), placement_group_specs)
 
     try:

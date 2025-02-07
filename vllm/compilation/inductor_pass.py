@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import hashlib
 import inspect
 import types
@@ -11,7 +13,6 @@ from torch import fx
 class InductorPass(ABC):
     """
     General custom inductor pass interface.
-    TODO(torch==2.6) use torch._inductor.custom_graph_pass.CustomGraphPass
     """
 
     @abstractmethod

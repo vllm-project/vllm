@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -6,7 +8,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 
 logger = init_logger(__name__)
 
@@ -16,7 +18,7 @@ class DetokenizerOutput:
     output_text: str
     token_ids: List[int]
     finished: bool
-    finish_reason: Optional[str] = None
+    finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
 
 
@@ -145,13 +147,13 @@ class IncrementalDetokenizer:
                 stop_str, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
-                finish_reason = "stop"  # TODO: use constant
+                finish_reason = FinishReason.STOP
                 stop_reason = stop_str
 
         # TODO: handle stop_token_ids here too?
 
         # 3) Update the RequestOutput object with the new text.
-        finished = bool(finish_reason)
+        finished = finish_reason is not None
         if self.output_kind == RequestOutputKind.FINAL_ONLY \
             and not finished:
             return None

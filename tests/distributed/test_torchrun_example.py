@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # unit test for `examples/offline_inference/torchrun_example.py`
 
 import random
