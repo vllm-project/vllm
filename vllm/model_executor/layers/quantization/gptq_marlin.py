@@ -51,14 +51,14 @@ class GPTQMarlinConfig(QuantizationConfig):
         desc_act: bool,
         is_sym: bool,
         lm_head_quantized: bool,
-        dynamic_cfg: Dict[str, Dict[str, Union[int, bool]]],
+        dynamic: Dict[str, Dict[str, Union[int, bool]]],
     ) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
             desc_act = False
 
-        # GPTQModel use `dynamic_cfg` to allow per module quantization config
+        # GPTQModel use `dynamic` to allow per module quantization config
         # so each module can be optimized for its own unique quant errors.
         # Format is Dict[str, Dict] where key is a regex string that can both
         # positive ("+:" prefixed) or negative ("-:" prefixed) match a module.
@@ -70,7 +70,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         # Example:
         #  # last 1/2 of the layers 10-21 has 8bit vs 4bit for 0-9
         #  # last 1/4 of the layers 16-21 has 8bit and group_size 64
-        # dynamic_cfg = {
+        # dynamic = {
         #  #`.*\.` matches the layers_node prefix
         #  # positive match layer 10-15
         #  r"+:.*\.(?:1[0-5])\..*": {"bits": 8,},
@@ -78,7 +78,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         #  r"+:.*\.(?:1[6-9]|20|21)\..*": {"bits": 8, "group_size": 64,},
         #  r"-:.*\.moe\..*": {}, # negative match all `moe` layers
         # }
-        self.dynamic_cfg = dynamic_cfg
+        self.dynamic = dynamic
 
         self.weight_bits = weight_bits
         self.is_sym = is_sym
@@ -99,17 +99,17 @@ class GPTQMarlinConfig(QuantizationConfig):
     def override_config(self, prefix: str):
         bits = self.weight_bits
 
-        b = self.get_dynamic_config(prefix, "bits", bits)
+        b = self.get_dynamic_value(prefix, "bits", bits)
         if isinstance(b, int):
             bits = b
-        group_size = self.get_dynamic_config(prefix, "group_size",
-                                             self.group_size)
+        group_size = self.get_dynamic_value(prefix, "group_size",
+                                            self.group_size)
         if isinstance(group_size, int):
             self.group_size = group_size
-        desc_act = self.get_dynamic_config(prefix, "desc_act", self.desc_act)
+        desc_act = self.get_dynamic_value(prefix, "desc_act", self.desc_act)
         if isinstance(desc_act, bool):
             self.desc_act = desc_act
-        is_sym = self.get_dynamic_config(prefix, "sym", self.is_sym)
+        is_sym = self.get_dynamic_value(prefix, "sym", self.is_sym)
         if isinstance(is_sym, bool):
             self.is_sym = is_sym
 
@@ -125,7 +125,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                 f"group_size={self.group_size}, "
                 f"desc_act={self.desc_act}, "
                 f"lm_head_quantized={self.lm_head_quantized}), "
-                f"dynamic_cfg={self.dynamic_cfg}")
+                f"dynamic={self.dynamic}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -145,9 +145,9 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlinConfig":
-        dynamic_cfg = cls.get_from_keys_or(config, ["dynamic"], default={})
-        if dynamic_cfg is None:
-            dynamic_cfg = {}
+        dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
+        if dynamic is None:
+            dynamic = {}
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
@@ -155,7 +155,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
         return cls(weight_bits, group_size, desc_act, is_sym,
-                   lm_head_quantized, dynamic_cfg)
+                   lm_head_quantized, dynamic)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -178,13 +178,13 @@ class GPTQMarlinConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def get_dynamic_config(
+    def get_dynamic_value(
         self,
         layer_name: str,
         key: Optional[str] = None,
         default_value: Union[int, bool, None] = None
     ) -> Union[Dict, int, bool, None]:
-        for pattern, pattern_dict in self.dynamic_cfg.items():
+        for pattern, pattern_dict in self.dynamic.items():
             # negative match: matched modules are excluded from quantization
             if pattern.startswith("-:"):
                 if re.match(pattern.removeprefix("-:"), layer_name):
@@ -205,8 +205,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         lm_head_quantized = isinstance(
             layer, ParallelLMHead) and self.lm_head_quantized
         if isinstance(layer, LinearBase) or lm_head_quantized:
-            if len(self.dynamic_cfg) > 0:
-                result = self.get_dynamic_config(layer_name=prefix)
+            if len(self.dynamic) > 0:
+                result = self.get_dynamic_value(layer_name=prefix)
                 if result is not None and not result:
                     return UnquantizedEmbeddingMethod(
                     ) if lm_head_quantized else UnquantizedLinearMethod()
@@ -256,8 +256,8 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         self.quant_config = deepcopy(quant_config)
         self.prefix = prefix
 
-        if len(self.quant_config.dynamic_cfg) > 0 and self.prefix:
-            # gptqmodel per module/layer dynamic_cfg my override/change base
+        if len(self.quant_config.dynamic) > 0 and self.prefix:
+            # gptqmodel per module/layer dynamic my override/change base
             # model quant config
             self.quant_config.override_config(prefix=self.prefix)
 

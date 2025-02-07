@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests whether gptq models with dynamic_cfg quantized can be loaded.
+"""Tests whether gptq models with dynamic quantized can be loaded.
 
-Run `pytest tests/quantization/test_gptq_dynamic_cfg.py --forked`.
+Run `pytest tests/quantization/test_gptq_dynamic.py --forked`.
 """
 
 import pytest
@@ -22,7 +22,7 @@ MODEL_QUANT = [
 
 
 @pytest.mark.parametrize("model_id", MODEL_QUANT)
-def test_gptq_with_dynamic_cfg(vllm_runner, model_id: str):
+def test_gptq_with_dynamic(vllm_runner, model_id: str):
     vllm_model = vllm_runner(model_id, dtype=torch.float16, max_model_len=2048)
 
     for name, submodule in (vllm_model.model.llm_engine.model_executor.
@@ -42,11 +42,11 @@ def test_gptq_with_dynamic_cfg(vllm_runner, model_id: str):
             # desc_act=False
             assert isinstance(submodule.quant_method, GPTQMarlinLinearMethod)
             config = submodule.quant_method.quant_config
-            assert config.get_dynamic_config(layer_name=name, key="bits") == 8
-            assert config.get_dynamic_config(layer_name=name,
-                                             key="group_size") == 32
-            assert not config.get_dynamic_config(layer_name=name,
-                                                 key="desc_act")
+            assert config.get_dynamic_value(layer_name=name, key="bits") == 8
+            assert config.get_dynamic_value(layer_name=name,
+                                            key="group_size") == 32
+            assert not config.get_dynamic_value(layer_name=name,
+                                                key="desc_act")
         elif (name == 'model.layers.2.self_attn.qkv_proj'
               or name == 'model.layers.2.mlp.gate_up_proj'):
             # All other layers (layer index >= 2) are not quantized
