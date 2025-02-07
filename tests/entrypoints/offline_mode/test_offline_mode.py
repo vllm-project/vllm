@@ -4,6 +4,7 @@ import importlib
 import sys
 
 import pytest
+import urllib3
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -28,6 +29,15 @@ MODEL_CONFIGS = [
         "tensor_parallel_size": 1,
         "tokenizer_mode": "mistral",
     },
+    {
+        "model": "sentence-transformers/all-MiniLM-L12-v2",
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.20,
+        "max_model_len": 64,
+        "max_num_batched_tokens": 64,
+        "max_num_seqs": 64,
+        "tensor_parallel_size": 1,
+    },
 ]
 
 
@@ -47,6 +57,16 @@ def test_offline_mode(monkeypatch):
     # Set HF to offline mode and ensure we can still construct an LLM
     try:
         monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+        monkeypatch.setenv("VLLM_NO_USAGE_STATS", "1")
+
+        def disable_connect(*args, **kwargs):
+            raise RuntimeError("No http calls allowed")
+
+        monkeypatch.setattr(urllib3.connection.HTTPConnection, "connect",
+                            disable_connect)
+        monkeypatch.setattr(urllib3.connection.HTTPSConnection, "connect",
+                            disable_connect)
+
         # Need to re-import huggingface_hub and friends to setup offline mode
         _re_import_modules()
         # Cached model files should be used in offline mode
@@ -56,6 +76,7 @@ def test_offline_mode(monkeypatch):
         # Reset the environment after the test
         # NB: Assuming tests are run in online mode
         monkeypatch.delenv("HF_HUB_OFFLINE")
+        monkeypatch.delenv("VLLM_NO_USAGE_STATS")
         _re_import_modules()
         pass
 
