@@ -27,8 +27,8 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
+        needs_logprobs = sampling_metadata.max_num_logprobs > 0
         if sampling_metadata.rejection_sampling:
-            needs_logprobs = sampling_metadata.max_num_logprobs > 0
             if needs_logprobs:
                 raise NotImplementedError(
                     "Rejection sampling does not support logprobs.")

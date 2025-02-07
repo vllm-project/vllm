@@ -41,7 +41,8 @@ class NgramProposer:
         # improve the efficiency
         return self._find_subarray_kmp(context_token_ids, n, k)
 
-    def _kmp_lps_array(self, pattern: List[int]) -> List[int]:
+    @staticmethod
+    def _kmp_lps_array(pattern: List[int]) -> List[int]:
         """
         Build the lps (longest proper prefix which is also suffix) 
         array for the pattern.
@@ -64,14 +65,15 @@ class NgramProposer:
 
         return lps
 
-    def _find_subarray_kmp(self, context_token_ids: ConstantList[int], n: int,
+    @staticmethod
+    def _find_subarray_kmp(context_token_ids: ConstantList[int], n: int,
                            k: int) -> Optional[List[int]]:
         context_len = len(context_token_ids)
         assert n > 0
 
         pattern = context_token_ids[-n:]
         # Precompute lps array for Y
-        lps = self._kmp_lps_array(pattern)
+        lps = NgramProposer._kmp_lps_array(pattern)
 
         i = 0
         j = 0

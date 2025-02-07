@@ -5,8 +5,6 @@ from typing import Dict, List, Optional, Set
 
 import torch
 
-from vllm.v1.utils import ConstantList
-
 
 @dataclass
 class SamplingMetadata:
@@ -15,7 +13,7 @@ class SamplingMetadata:
     all_greedy: bool
     all_random: bool
     rejection_sampling: bool
-    spec_token_ids: List[ConstantList[int]]
+    spec_token_ids: List[List[int]]
 
     top_p: torch.Tensor
     top_k: torch.Tensor

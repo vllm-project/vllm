@@ -32,7 +32,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
-from vllm.v1.utils import ConstantList, bind_kv_cache
+from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -376,7 +376,7 @@ class GPUModelRunner:
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
-        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+        for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)
@@ -424,16 +424,14 @@ class GPUModelRunner:
         # Get spec decode logits indices.
         spec_query_end_loc = 0
         spec_decode_logits_indices: List[int] = []
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            if i == num_reqs:
-                break
+        for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
             req_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             num_compute_tokens = self.input_batch.num_computed_tokens_cpu[i]
             spec_query_end_loc += req_num_scheduled_tokens
-            spec_token_ids: ConstantList = scheduler_output.\
-                scheduled_spec_decode_tokens.get(req_id, ConstantList([]))
+            spec_token_ids = (
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
             for j, spec_token_id in enumerate(spec_token_ids):
                 # +1 here because the input for verification is
                 # [last_output_token_id] + spec_token_ids
@@ -598,10 +596,10 @@ class GPUModelRunner:
             logits_indices = torch.tensor(spec_decode_logits_indices,
                                           device=self.device)
         else:
-            # NOTE(woosuk): Due to chunked prefills, there can be at most 1
-            # partial request in the batch. While we should not sample any
-            # token from this partial request, we do so for simplicity.
-            # We will ignore the sampled token from the partial request.
+            # NOTE(woosuk): Due to chunked prefills, the batch may contain
+            # partial requests. While we should not sample any token
+            # from these partial requests, we do so for simplicity.
+            # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             logits_indices = query_start_loc[1:] - 1
         return attn_metadata, logits_indices
@@ -664,7 +662,7 @@ class GPUModelRunner:
     def _prepare_sampling(
         self,
         batch_changed: bool,
-        req_id_spec_token_ids: Dict[str, ConstantList[int]],
+        req_id_spec_token_ids: Dict[str, List[int]],
     ) -> SamplingMetadata:
         # Create the sampling metadata.
         req_id_output_token_ids: Dict[str, List[int]] = \

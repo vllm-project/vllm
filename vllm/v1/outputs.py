@@ -9,7 +9,7 @@ import torch
 @dataclass
 class SamplerOutput:
 
-    # num_reqs x [max_num_generated_tokens]
+    # [num_reqs, max_num_generated_tokens]
     sampled_token_ids: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]
