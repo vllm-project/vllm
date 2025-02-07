@@ -17,7 +17,6 @@ TEST_AUDIO_URLS = [
 ]
 
 
-# TODO rename to test chat audio or multimodal
 @pytest.fixture(scope="module")
 def server():
     args = [
