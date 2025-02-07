@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
 from typing import Optional
 
@@ -759,7 +761,6 @@ def test_resolve_content_format_hf_defined(model, expected_format):
      ("template_falcon.jinja", "string"),
      ("template_inkbot.jinja", "string"),
      ("template_llava.jinja", "string"),
-     ("template_pixtral_hf.jinja", "openai"),
      ("template_vlm2vec.jinja", "openai"),
      ("tool_chat_template_granite_20b_fc.jinja", "string"),
      ("tool_chat_template_hermes.jinja", "string"),

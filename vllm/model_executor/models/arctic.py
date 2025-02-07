@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Inference-only Snowflake Arctic model."""
 from typing import Iterable, List, Optional, Set, Tuple, Union
 

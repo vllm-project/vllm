@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024 The vLLM team.
 # Copyright 2024 Microsoft and the HuggingFace Inc. team. All rights reserved.
 #
@@ -320,7 +322,11 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         target_width, target_height = self.get_image_size_with_most_features()
 
         max_image_tokens = self.get_num_image_tokens(

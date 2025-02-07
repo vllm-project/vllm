@@ -1,7 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/ssd_chunk_scan.py
 
 # ruff: noqa: E501,SIM102
+
+import math
 
 import torch
 import triton
@@ -217,9 +221,9 @@ def _chunk_scan_fwd_kernel(
     if HAS_SEQ_IDX:
         seq_idx_ptr += pid_b * stride_seq_idx_batch + c_idx * chunk_size * stride_seq_idx_seqlen
 
-        # - seq_idx_prev points to be previous (possibly logical) chunk.
+        # - we only need seq_idx_prev to be aligned to chunk boundary
         seq_idx_prev = tl.load(seq_idx_ptr - stride_seq_idx_seqlen,
-                               mask=pid_c >= 1,
+                               mask=c_idx >= 1,
                                other=0)
 
         if HAS_INITSTATES:
@@ -437,6 +441,37 @@ def _chunk_scan_fwd_kernel(
              (offs_out_n[None, :] < hdim))
 
 
+def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
+
+    # convert seq_idx to chunk indices and offsets
+    # - derive the cu_seqlens
+    _, cu_seqlens = torch.where(seq_idx.diff())
+    cu_seqlens += 1
+
+    # outputs will have length expansion of chunks that do not divide
+    # chunk_size
+    N = math.ceil(seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size
+                                                     > 0).sum()
+    chunk_indices = torch.arange(N, dtype=torch.int, device=seq_idx.device)
+    chunk_offsets = torch.zeros((N, ), dtype=torch.int, device=seq_idx.device)
+
+    cu_seqlens = cu_seqlens.tolist() + [seq_idx.shape[-1]]
+    p = 0  # num of insertions
+    for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+
+        # if does not divide chunk_size, then there is one chunk insertion
+        p += (s % chunk_size > 0)
+
+        # get the dimensions
+        _s, _e = s // chunk_size + p, e // chunk_size + p + 1
+
+        # adjust inidces and offsets
+        chunk_indices[_s:_e] -= p
+        chunk_offsets[_s] = s % chunk_size
+
+    return chunk_indices, chunk_offsets
+
+
 def _chunk_scan_fwd(
     cb,
     x,
@@ -478,26 +513,8 @@ def _chunk_scan_fwd(
                 # no in this case no point to use initial states
                 initial_states = None
             else:
-                p = 0
-                chunk_indices, chunk_offsets = [], []
-                for i, idx in enumerate(seq_idx[0]):
-                    o = i % chunk_size
-                    c = idx > p
-                    if o == 0 or c:
-                        # this means we have a change in sequence
-                        # - that does not accur on the chunk boundary
-                        chunk_indices.append(i // chunk_size)
-                        chunk_offsets.append(o)
-
-                        if c:
-                            p = idx  # new sequence
-
-                chunk_indices = torch.tensor(chunk_indices,
-                                             dtype=torch.int,
-                                             device=seq_idx.device)
-                chunk_offsets = torch.tensor(chunk_offsets,
-                                             dtype=torch.int,
-                                             device=seq_idx.device)
+                chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
+                    seq_idx, chunk_size)
 
     # Allocates output.
     out = torch.empty(batch,

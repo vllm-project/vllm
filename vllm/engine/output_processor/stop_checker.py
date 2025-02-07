@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Callable, List, Optional, Tuple
 
 from vllm.lora.request import LoRARequest

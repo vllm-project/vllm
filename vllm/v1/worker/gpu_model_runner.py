@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import gc
 import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
@@ -31,6 +33,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -38,7 +41,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class GPUModelRunner:
+class GPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -171,7 +174,8 @@ class GPUModelRunner:
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
-                                       self.max_model_len),
+                                       self.max_model_len,
+                                       self.max_num_tokens),
                                    dtype=np.int32)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
@@ -202,12 +206,32 @@ class GPUModelRunner:
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        # Remove stopped requests from the cached states.
-        # Keep the states of the pre-empted requests.
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
+        """Update the cached states and the persistent batch with the scheduler
+        output.
+
+        The updated states are used by the `_prepare_inputs` function to create
+        the input GPU tensors for the model.
+
+        Returns:
+            True if there is a new/resumed/paused/finished request in the batch.
+            If False, we can skip copying SamplingMetadata to the GPU.
+        """
+        # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)
+        # Remove the finished requests from the persistent batch.
+        # NOTE(woosuk): There could be an edge case where finished_req_ids and
+        # scheduled_req_ids overlap. This happens when a request is aborted and
+        # then resubmitted with the same ID. In this case, we treat them as two
+        # distinct requests - clearing the cached states for the first request
+        # and handling the second as a new request.
+        removed_req_indices: List[int] = []
+        for req_id in scheduler_output.finished_req_ids:
+            req_index = self.input_batch.remove_request(req_id)
+            if req_index is not None:
+                removed_req_indices.append(req_index)
 
         # Free the cached encoder outputs.
         for req_id, input_id in scheduler_output.free_encoder_input_ids:
@@ -217,36 +241,22 @@ class GPUModelRunner:
                 if not encoder_outputs:
                     self.encoder_cache.pop(req_id, None)
 
-        # Remove the requests from the persistent batch.
-        stopped_req_ids = set().union(
-            scheduler_output.preempted_req_ids,
-            scheduler_output.finished_req_ids,
-        )
-        removed_req_indices: List[int] = []
-        for req_id in stopped_req_ids:
+        # Remove the unscheduled requests from the persistent batch.
+        # NOTE(woosuk): The unscheduled requests are either preempted requests
+        # or running requests that are not scheduled in this step. We remove
+        # them from the persistent batch but keep their cached states since
+        # they will be scheduled again sometime in the future.
+        scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
+        cached_req_ids = self.input_batch.req_id_to_index.keys()
+        unscheduled_req_ids = cached_req_ids - scheduled_req_ids
+        # NOTE(woosuk): The persistent batch optimization assumes that
+        # consecutive batches contain mostly the same requests. If batches
+        # have low request overlap (e.g., alternating between two distinct
+        # sets of requests), this optimization becomes very inefficient.
+        for req_id in unscheduled_req_ids:
             req_index = self.input_batch.remove_request(req_id)
-            if req_index is not None:
-                removed_req_indices.append(req_index)
-
-        # Update the states of the running requests.
-        for req_data in scheduler_output.scheduled_running_reqs:
-            req_id = req_data.req_id
-            req_state = self.requests[req_id]
-            req_index = self.input_batch.req_id_to_index[req_id]
-
-            # Update the num_computed_tokens.
-            req_state.num_computed_tokens = req_data.num_computed_tokens
-            self.input_batch.num_computed_tokens_cpu[req_index] = (
-                req_data.num_computed_tokens)
-
-            # Update the block table.
-            num_new_blocks = len(req_data.new_block_ids)
-            if num_new_blocks == 0:
-                continue
-            start_index = len(req_state.block_ids)
-            req_state.block_ids.extend(req_data.new_block_ids)
-            self.input_batch.block_table.append_row(req_index, start_index,
-                                                    req_data.new_block_ids)
+            assert req_index is not None
+            removed_req_indices.append(req_index)
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -270,12 +280,14 @@ class GPUModelRunner:
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
+                lora_request=new_req_data.lora_request,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.model_config.uses_mrope:
                 image_grid_thw = []
                 video_grid_thw = []
+                second_per_grid_ts = []
                 for mm_input in self.requests[req_id].mm_inputs:
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.extend(
@@ -283,6 +295,9 @@ class GPUModelRunner:
                     if mm_input.get("video_grid_thw") is not None:
                         video_grid_thw.extend(
                             mm_input["video_grid_thw"].tolist())
+                    if mm_input.get("second_per_grid_ts") is not None:
+                        second_per_grid_ts.extend(
+                            mm_input["second_per_grid_ts"])
 
                 hf_config = self.model_config.hf_config
 
@@ -290,26 +305,44 @@ class GPUModelRunner:
                     self.requests[req_id].mrope_position_delta = \
                     MRotaryEmbedding.get_input_positions_tensor(
                         self.requests[req_id].prompt_token_ids,
+                        hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
-                        image_token_id=hf_config.image_token_id,
-                        video_token_id=hf_config.video_token_id,
-                        vision_start_token_id=hf_config.vision_start_token_id,
-                        vision_end_token_id=hf_config.vision_end_token_id,
-                        spatial_merge_size=hf_config.vision_config.
-                        spatial_merge_size,
+                        second_per_grid_ts=second_per_grid_ts,
                     )
 
             req_ids_to_add.append(req_id)
 
-        # Update the cached states of the resumed requests.
-        for res_req_data in scheduler_output.scheduled_resumed_reqs:
-            req_id = res_req_data.req_id
+        # Update the states of the running/resumed requests.
+        for req_data in scheduler_output.scheduled_cached_reqs:
+            req_id = req_data.req_id
             req_state = self.requests[req_id]
 
-            req_state.block_ids = res_req_data.block_ids
-            req_state.num_computed_tokens = res_req_data.num_computed_tokens
-            req_ids_to_add.append(req_id)
+            # Update the cached states.
+            req_state.num_computed_tokens = req_data.num_computed_tokens
+            if not req_data.resumed_from_preemption:
+                # Append the new blocks to the existing block IDs.
+                req_state.block_ids.extend(req_data.new_block_ids)
+            else:
+                # The request is resumed from preemption.
+                # Replace the existing block IDs with the new ones.
+                req_state.block_ids = req_data.new_block_ids
+
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is None:
+                # The request is not in the persistent batch.
+                # The request was either preempted and resumed later, or was not
+                # scheduled in the previous step and needs to be added again.
+                req_ids_to_add.append(req_id)
+                continue
+
+            # Update the persistent batch.
+            self.input_batch.num_computed_tokens_cpu[req_index] = (
+                req_data.num_computed_tokens)
+            start_index = len(req_state.block_ids) - len(
+                req_data.new_block_ids)
+            self.input_batch.block_table.append_row(req_index, start_index,
+                                                    req_data.new_block_ids)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -327,6 +360,7 @@ class GPUModelRunner:
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
+        return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -340,15 +374,16 @@ class GPUModelRunner:
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = []
+        num_scheduled_tokens_list: List[int] = []
         max_num_scheduled_tokens = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens.append(num_tokens)
+            num_scheduled_tokens_list.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
-        num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
+        num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
+                                                    dtype=np.int32)
         assert max_num_scheduled_tokens > 0
 
         # Get request indices.
@@ -358,8 +393,15 @@ class GPUModelRunner:
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange = np.concatenate(
-            [self.arange_np[:n] for n in num_scheduled_tokens])
+        # Equivalent to but faster than:
+        # np.concatenate([np.arange(n) for n in num_scheduled_tokens])
+        # Step 1. [2, 5, 3] -> [2, 7, 10]
+        cu_num_tokens = np.cumsum(num_scheduled_tokens)
+        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
+        cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
+                                    num_scheduled_tokens)
+        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
         # Get positions.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
@@ -406,8 +448,7 @@ class GPUModelRunner:
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens,
-                  out=self.query_start_loc_np[1:num_reqs + 1])
+        self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
 
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -527,10 +568,15 @@ class GPUModelRunner:
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
         )
-        # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
-        # request in the batch. While we should not sample any token from this
-        # partial request, we do so for simplicity. We will ignore the sampled
-        # token from the partial request.
+
+        # Hot-Swap lora model
+        if self.lora_config:
+            self.set_active_loras(self.input_batch, num_scheduled_tokens)
+
+        # NOTE(woosuk): Due to chunked prefills, the batch may contain partial
+        # requests. While we should not sample any token from these partial
+        # requests, we do so for simplicity. We will ignore the sampled
+        # tokens from the partial requests.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
         return attn_metadata, logits_indices
@@ -592,22 +638,15 @@ class GPUModelRunner:
 
     def _prepare_sampling(
         self,
-        scheduler_output: "SchedulerOutput",
+        batch_changed: bool,
     ) -> SamplingMetadata:
-        skip_copy = True
-        if (scheduler_output.finished_req_ids
-                or scheduler_output.preempted_req_ids):
-            skip_copy = False
-        if (scheduler_output.scheduled_new_reqs
-                or scheduler_output.scheduled_resumed_reqs):
-            skip_copy = False
         # Create the sampling metadata.
         req_id_output_token_ids: Dict[str, List[int]] = \
             {req_id: req.output_token_ids \
                 for req_id, req in self.requests.items()}
 
         sampling_metadata = self.input_batch.make_sampling_metadata(
-            req_id_output_token_ids, skip_copy)
+            req_id_output_token_ids, skip_copy=not batch_changed)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -706,7 +745,7 @@ class GPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        self._update_states(scheduler_output)
+        batch_changed = self._update_states(scheduler_output)
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -769,7 +808,7 @@ class GPUModelRunner:
         logits = self.model.compute_logits(hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
-        sampling_metadata = self._prepare_sampling(scheduler_output)
+        sampling_metadata = self._prepare_sampling(batch_changed)
         sampler_output = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
@@ -836,6 +875,12 @@ class GPUModelRunner:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
+            if self.lora_config:
+                self.model = self.load_lora_model(self.model,
+                                                  self.model_config,
+                                                  self.scheduler_config,
+                                                  self.lora_config,
+                                                  self.device)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
@@ -974,14 +1019,32 @@ class GPUModelRunner:
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens, dummy_kv_caches)
-        logits = self.model.compute_logits(hidden_states, None)
-        logits = logits[:self.max_num_tokens]
-        # TODO(woosuk): Consider the memory usage of the sampler.
-        torch.cuda.synchronize()
-        del hidden_states, logits
-        self.encoder_cache.clear()
+        # For profile, have maximum num_reqs and that collectively have
+        # maximum num_tokens.
+        num_reqs = self.scheduler_config.max_num_seqs
+        num_tokens = self.max_num_tokens
+        min_tokens_per_req: int = num_tokens // num_reqs
+
+        num_scheduled_tokens_list: List[int] = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        assert sum(num_scheduled_tokens_list) == num_tokens
+        assert len(num_scheduled_tokens_list) == num_reqs
+
+        num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
+                                                    dtype=np.int32)
+        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+
+        with self.maybe_profile_with_lora(self.lora_config,
+                                          num_scheduled_tokens):
+            # Trigger compilation for general shape.
+            hidden_states = self._dummy_run(self.max_num_tokens,
+                                            dummy_kv_caches)
+            hidden_states = hidden_states[logit_indices]
+            logits = self.model.compute_logits(hidden_states, None)
+            # TODO(woosuk): Consider the memory usage of the sampler.
+            torch.cuda.synchronize()
+            del hidden_states, logits
+            self.encoder_cache.clear()
         gc.collect()
 
     def capture_model(self) -> None:

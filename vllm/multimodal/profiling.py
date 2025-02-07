@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -149,7 +151,8 @@ class MultiModalProfiler(Generic[_I]):
         mm_counts = self.get_mm_limits()
 
         info = self.processing_info
-        mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(seq_len)
+        mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(
+            seq_len, mm_counts)
 
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(

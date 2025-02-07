@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List
 
 import numpy as np
@@ -44,6 +46,8 @@ class BlockTable:
         start: int,
         block_ids: List[int],
     ) -> None:
+        if not block_ids:
+            return
         num_blocks = len(block_ids)
         self.block_table_np[row_idx, start:start + num_blocks] = block_ids
         self.num_blocks_per_row[row_idx] = start + num_blocks

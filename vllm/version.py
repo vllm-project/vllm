@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 try:
     from ._version import __version__, __version_tuple__
 except Exception as e:
