@@ -5,10 +5,12 @@ import pytest
 import torch
 
 import vllm.lora.ops.triton_ops  # noqa: F401
+import vllm.lora.v1.ops.triton_ops  # noqa: F401
 from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
                                      bgmv_shrink, sgmv_expand,
                                      sgmv_expand_slice, sgmv_shrink)
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
+from vllm.lora.v1.punica_wrapper.punica_gpu_v1 import V1KernelMeta
 from vllm.platforms import current_platform
 
 from .utils import (PunicaTensors, assert_close, generate_data,
@@ -309,6 +311,111 @@ def check_bgmv_expand_slice(batches: int, num_loras: int, rank: int,
         )
 
         slice_offset += hidden_size
+    assert_close(data.our_out_tensor, data.ref_out_tensor)
+
+
+def check_v1_shrink(batches: int, num_loras: int, rank: int, hidden_size: int,
+                    nslices: int, dtype: torch.dtype, device: str,
+                    seq_length: int, scaling: float):
+    """
+    Compare vllm.v1_shrink against a reference implementation.
+    """
+    data: PunicaTensors = generate_data_for_nslices(
+        batches,
+        hidden_size,
+        num_loras,
+        rank,
+        seq_length,
+        nslices,
+        dtype,
+        "shrink",
+        device,
+    )
+    max_seq_length, token_nums = data.meta()
+
+    # Setup metadata information for reference sgmv kernels
+    sgmv_meta_args = (data.b_seq_start_loc, data.seq_len_tensor,
+                      data.prompt_lora_mapping, batches, max_seq_length,
+                      token_nums)
+
+    # Setup metadata information for the kernel.
+    v1_meta = V1KernelMeta.make(max_loras=num_loras,
+                                max_num_tokens=token_nums,
+                                device='cuda')
+    v1_meta.reset()
+    v1_meta.prepare_tensors(data.token_lora_mapping)
+
+    # Preventing cache error pointer.
+    with _dict_lock:
+        _LORA_A_PTR_DICT.clear()
+        torch.ops.vllm.v1_shrink(
+            data.inputs_tensor,
+            data.lora_weights,
+            data.our_out_tensor,
+            *v1_meta.meta_args(num_tokens=token_nums),
+            scaling,
+        )
+
+    sgmv_shrink_for_nslices(
+        nslices,
+        data.inputs_tensor,
+        data.lora_weights,
+        data.ref_out_tensor,
+        *sgmv_meta_args,
+        scaling,
+    )
+
+    assert_close(data.our_out_tensor, data.ref_out_tensor)
+
+
+def check_v1_expand(batches: int, num_loras: int, rank: int, hidden_size: int,
+                    nslices: int, dtype: torch.dtype, device: str,
+                    seq_length: int, add_inputs: bool):
+    """
+    Compare vllm.v1_expand against a reference implementation.
+    """
+    data: PunicaTensors = generate_data_for_nslices(
+        batches,
+        hidden_size,
+        num_loras,
+        rank,
+        seq_length,
+        nslices,
+        dtype,
+        "expand",
+        device,
+    )
+    max_seq_length, token_nums = data.meta()
+
+    # Setup metadata information for reference sgmv kernels
+    sgmv_meta_args = (data.b_seq_start_loc, data.seq_len_tensor,
+                      data.prompt_lora_mapping, batches, max_seq_length,
+                      token_nums)
+
+    # Setup metadata information for the kernel.
+    v1_meta = V1KernelMeta.make(max_loras=num_loras,
+                                max_num_tokens=token_nums,
+                                device='cuda')
+    v1_meta.reset()
+    v1_meta.prepare_tensors(data.token_lora_mapping)
+
+    with _dict_lock:
+        _LORA_B_PTR_DICT.clear()
+        torch.ops.vllm.v1_expand(data.inputs_tensor,
+                                 data.lora_weights,
+                                 data.our_out_tensor,
+                                 *v1_meta.meta_args(num_tokens=token_nums),
+                                 offset_start=0,
+                                 add_inputs=add_inputs)
+
+    sgmv_expand_for_nslices(nslices,
+                            hidden_size,
+                            data.inputs_tensor,
+                            data.lora_weights,
+                            data.ref_out_tensor,
+                            *sgmv_meta_args,
+                            add_inputs=add_inputs)
+
     assert_close(data.our_out_tensor, data.ref_out_tensor)
 
 
@@ -649,3 +756,82 @@ def test_punica_bgmv_expand_nslices_hidden_size(batches: int, num_loras: int,
                             dtype=dtype,
                             device=device,
                             add_inputs=True)
+
+
+@pytest.mark.parametrize("batches", test_params['batches'])
+@pytest.mark.parametrize("num_loras", test_params['num_loras'])
+@pytest.mark.parametrize("rank", test_params['max_ranks'])
+@pytest.mark.parametrize("hidden_size", test_params['hidden_sizes'])
+@pytest.mark.parametrize("nslices", [1, 2, 3])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("seed", SEED)
+@pytest.mark.parametrize("seq_length", [1, 128])
+@pytest.mark.parametrize("op_type", ["shrink", "expand"])
+def test_v1_kernels(batches: int, num_loras: int, rank: int, hidden_size: int,
+                    nslices: int, dtype: torch.dtype, device: str, seed: int,
+                    seq_length: int, op_type: str):
+
+    torch.set_default_device(device)
+    current_platform.seed_everything(seed)
+
+    if op_type == "shrink":
+        check_v1_shrink(batches=batches,
+                        num_loras=num_loras,
+                        rank=rank,
+                        hidden_size=hidden_size,
+                        nslices=nslices,
+                        dtype=dtype,
+                        device=device,
+                        seq_length=seq_length,
+                        scaling=0.5)
+    else:
+        check_v1_expand(batches=batches,
+                        num_loras=num_loras,
+                        rank=rank,
+                        hidden_size=hidden_size,
+                        nslices=nslices,
+                        dtype=dtype,
+                        device=device,
+                        seq_length=seq_length,
+                        add_inputs=True)
+
+
+@pytest.mark.parametrize("batches", hs_test_params['batches'])
+@pytest.mark.parametrize("num_loras", hs_test_params['num_loras'])
+@pytest.mark.parametrize("rank", hs_test_params['max_ranks'])
+@pytest.mark.parametrize("hidden_size", hs_test_params['hidden_sizes'])
+@pytest.mark.parametrize("nslices", [1, 2, 3])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("seed", SEED)
+@pytest.mark.parametrize("seq_length", [1, 13])
+@pytest.mark.parametrize("op_type", ["shrink", "expand"])
+def test_v1_kernels_hidden_size(batches: int, num_loras: int, rank: int,
+                                hidden_size: int, nslices: int,
+                                dtype: torch.dtype, device: str, seed: int,
+                                seq_length: int, op_type: str):
+
+    torch.set_default_device(device)
+    current_platform.seed_everything(seed)
+
+    if op_type == "shrink":
+        check_v1_shrink(batches=batches,
+                        num_loras=num_loras,
+                        rank=rank,
+                        hidden_size=hidden_size,
+                        nslices=nslices,
+                        dtype=dtype,
+                        device=device,
+                        seq_length=seq_length,
+                        scaling=0.5)
+    else:
+        check_v1_expand(batches=batches,
+                        num_loras=num_loras,
+                        rank=rank,
+                        hidden_size=hidden_size,
+                        nslices=nslices,
+                        dtype=dtype,
+                        device=device,
+                        seq_length=seq_length,
+                        add_inputs=True)
