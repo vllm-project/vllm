@@ -575,7 +575,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def submit_microbatch(self, scheduler_output):
         if self.forward_dag is None:
-            self.forward_dag = self._compiled_ray_dag()
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
         refs = self.forward_dag.execute(scheduler_output)
         return refs[0]
 

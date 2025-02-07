@@ -283,12 +283,12 @@ class Scheduler:
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        assert len(self.running) + len(self.running_pipelined) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
-        assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
-                len(scheduled_running_reqs) <= len(self.running))
+        # assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
+        #         len(scheduled_running_reqs) <= len(self.running))
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.

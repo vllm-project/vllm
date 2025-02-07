@@ -931,6 +931,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions=positions,
                 kv_caches=kv_caches,
                 attn_metadata=None,
+                intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
         return hidden_states
@@ -1068,7 +1069,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             torch.cuda.synchronize()
             del hidden_states, logits
             self.encoder_cache.clear()
-        gc.collect()
+            gc.collect()
 
     def capture_model(self) -> None:
         if not self.use_cuda_graph:

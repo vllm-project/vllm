@@ -73,6 +73,8 @@ class LLMEngine:
             vllm_config=vllm_config,
             executor_class=executor_class,
         )
+        logger.info(f"LLMEngine initialized with multiprocess_mode={multiprocess_mode}"
+                    f"engine_core_type={type(self.engine_core)}")
 
     @classmethod
     def from_engine_args(

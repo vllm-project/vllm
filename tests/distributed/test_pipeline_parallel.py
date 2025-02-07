@@ -390,6 +390,7 @@ def _compare_tp(
 )
 @fork_new_process_for_each_test
 def test_tp_language_generation(
+    monkeypatch,
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
@@ -397,6 +398,10 @@ def test_tp_language_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
+    monkeypatch.setenv('VLLM_USE_V1', '1')
+    from vllm.envs import VLLM_USE_V1
+    if not VLLM_USE_V1:
+        pytest.skip("Skipping test on vllm V0")
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
