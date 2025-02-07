@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
                     Union)
 
@@ -397,7 +399,11 @@ class AriaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {"image": self.get_num_image_tokens()}
 
     def get_num_image_tokens(self) -> int:

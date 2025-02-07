@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
@@ -35,7 +37,6 @@ author = 'the vLLM Team'
 # ones.
 extensions = [
     "sphinx.ext.napoleon",
-    "sphinx.ext.viewcode",
     "sphinx.ext.linkcode",
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",

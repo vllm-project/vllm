@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import os
 import signal
@@ -5,7 +7,6 @@ import weakref
 from abc import ABC, abstractmethod
 from typing import List, Optional, Type
 
-import msgspec
 import zmq
 import zmq.asyncio
 
@@ -18,7 +19,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
                             EngineCoreRequestUnion, EngineCoreResetPrefixCache)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.serial_utils import MsgpackDecoder, PickleEncoder
 from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
@@ -161,7 +162,7 @@ class MPClient(EngineCoreClient):
 
         # Serialization setup.
         self.encoder = PickleEncoder()
-        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+        self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
         self.ctx = (

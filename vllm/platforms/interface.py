@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 import platform
 import random
@@ -179,6 +181,11 @@ class Platform:
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         """Get the name of a device."""
+        raise NotImplementedError
+
+    @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        """Get the uuid of a device, e.g. the PCI bus ID."""
         raise NotImplementedError
 
     @classmethod

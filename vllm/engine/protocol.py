@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Mapping, Optional

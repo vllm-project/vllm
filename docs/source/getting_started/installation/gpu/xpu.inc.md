@@ -36,7 +36,7 @@ VLLM_TARGET_DEVICE=xpu python setup.py install
 
 :::{note}
 - FP16 is the default data type in the current XPU backend. The BF16 data
-  type will be supported in the future.
+  type is supported on Intel Data Center GPU, not supported on Intel Arc GPU yet.
 :::
 
 ## Set up using Docker

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import contextlib
 import importlib
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -950,6 +952,15 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                                           num_tokens_post_pad)
 
 
+def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
+                             block_size: int, sorted_token_ids: torch.Tensor,
+                             experts_ids: torch.Tensor,
+                             num_tokens_post_pad: torch.Tensor) -> None:
+    torch.ops._moe_C.sgl_moe_align_block_size(topk_ids, num_experts,
+                                              block_size, sorted_token_ids,
+                                              experts_ids, num_tokens_post_pad)
+
+
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indicies: torch.Tensor,
                  gating_output: float) -> None:
@@ -1024,6 +1035,11 @@ def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+
+
+def copy_blocks_mla(kv_caches: List[torch.Tensor],
+                    block_mapping: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.copy_blocks_mla(kv_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
