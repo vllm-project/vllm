@@ -78,7 +78,13 @@ class ErrorResponse(OpenAIBaseModel):
     message: str
     type: str
     param: Optional[str] = None
-    code: int
+    code: int       
+    # In case of error OpenAI sends message in error field
+    error: Optional[dict] = Field(default_factory=lambda: {"message": ""})
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.error["message"] = self.message  # In case of error OpenAI sends message in error field
 
 
 class ModelPermission(OpenAIBaseModel):
