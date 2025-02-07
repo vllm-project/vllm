@@ -45,7 +45,7 @@ from transformers.utils import logging
 
 from .interfaces import SupportsMultiModal, SupportsPP, SupportsLoRA
 from .vision_siglip_navit import get_siglip_vision_model
-from .phi3s_utils import AudioEmbedding
+from .phi4o_utils import AudioEmbedding
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
@@ -112,35 +112,6 @@ def get_max_phi3v_image_tokens(ctx: InputContext):
         token_compression_factor
     )
     return image_num_tokens
-
-
-# image processor
-def parity_check_image_processor():
-    return
-    import requests
-    from PIL import Image
-    url = 'https://www.ilankelman.org/stopsigns/australia.jpg'
-    image = Image.open(requests.get(url, stream=True).raw)
-    image_inputs = preprocess(
-        [image], dynamic_hd_size=16, vit_resolution=448, vit_patch_size=14
-    )
-    image_inputs['input_image_embeds'] = image_inputs['pixel_values']
-
-    gt_dict = torch.load("examples/parity_processor.pt")
-
-    print('image preprocessing parity check')
-    for k in gt_dict:
-        print(f"checking {k} ...")
-        gt = gt_dict[k]
-        pt = image_inputs[k]
-        if isinstance(gt_dict[k], torch.Tensor):
-            gt = gt.cpu()
-            pt = pt.cpu()
-            error = pt - gt
-            print(f"max difference: {torch.max(torch.abs(error))}")
-        else:
-            print(f"pt: {pt}")
-            print(f"gt: {gt}")
 
 
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
@@ -1347,9 +1318,6 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
         self.lora_config = lora_config
-        
-        # parity check for image processor
-        parity_check_image_processor()
 
         self.vision_encoder = PhiOImageEncoder(
             config,
