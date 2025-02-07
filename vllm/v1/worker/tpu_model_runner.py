@@ -448,10 +448,12 @@ class TPUModelRunner(ModelRunnerBase):
         model = model.eval()
         xm.wait_device_ops()
         model = ModelWrapperV1(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        # xw32 turns off dynamo
+        self.model = model
+        #self.model = torch.compile(model,
+        #                           backend="openxla",
+        #                           fullgraph=True,
+        #                           dynamic=False)
 
     def dummy_run(
         self,
