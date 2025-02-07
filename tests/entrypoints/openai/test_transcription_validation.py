@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # imports for guided decoding tests
-import re
+import io
+import json
 
+import librosa
+import numpy as np
 import openai
 import pytest
+import soundfile as sf
+
+from vllm.assets.audio import AudioAsset
 
 from ...utils import RemoteOpenAIServer
-from vllm.assets.audio import AudioAsset
-import json
+
 
 @pytest.fixture
 def mary_had_lamb():
@@ -16,18 +21,20 @@ def mary_had_lamb():
     with open(str(path), "rb") as f:
         yield f
 
+
 @pytest.fixture
 def winning_call():
     path = AudioAsset('winning_call').get_asset_path()
     with open(str(path), "rb") as f:
         yield f
 
+
 @pytest.mark.asyncio
 async def test_basic_audio(mary_had_lamb):
     model_name = "openai/whisper-large-v3-turbo"
     server_args = ["--enforce-eager"]
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
-    prompt="THE FIRST WORDS I SPOKE"
+    prompt = "THE FIRST WORDS I SPOKE"
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
         transcription = await client.audio.transcriptions.create(
@@ -48,8 +55,7 @@ async def test_basic_audio(mary_had_lamb):
             temperature=0.0)
         out_capital = json.loads(transcription_wprompt)['text']
         assert prompt not in out_capital
-        print(out_capital.capitalize(), out_capital)
-        
+
 
 @pytest.mark.asyncio
 async def test_bad_requests(mary_had_lamb):
@@ -60,11 +66,21 @@ async def test_bad_requests(mary_had_lamb):
 
         # invalid language
         with pytest.raises(openai.BadRequestError):
-            await client.audio.transcriptions.create(
-                model=model_name,
-                file=mary_had_lamb,
-                language="hh",
-                response_format="text",
-                temperature=0.0)
-        
-        # TODO audio too long
+            await client.audio.transcriptions.create(model=model_name,
+                                                     file=mary_had_lamb,
+                                                     language="hh",
+                                                     temperature=0.0)
+
+        # Expect audio too long: repeat the timeseries
+        mary_had_lamb.seek(0)
+        audio, sr = librosa.load(mary_had_lamb)
+        repeated_audio = np.tile(audio, 10)
+        # Repeated audio to buffer
+        buffer = io.BytesIO()
+        sf.write(buffer, repeated_audio, sr, format='WAV')
+        buffer.seek(0)
+        with pytest.raises(openai.BadRequestError):
+            await client.audio.transcriptions.create(model=model_name,
+                                                     file=buffer,
+                                                     language="en",
+                                                     temperature=0.0)
