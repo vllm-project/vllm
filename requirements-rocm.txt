@@ -10,3 +10,9 @@ ray >= 2.10.0
 peft
 pytest-asyncio
 tensorizer>=2.9.0
+
+--extra-index-url https://download.pytorch.org/whl/rocm6.2
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+amdsmi==6.2.4
