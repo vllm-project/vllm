@@ -669,7 +669,7 @@ setup(
     package_data=package_data,
     entry_points={
         "console_scripts": [
-            "vllm=vllm.scripts:main",
+            "vllm=vllm.cmd.main:main",
         ],
     },
 )
