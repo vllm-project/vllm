@@ -205,15 +205,15 @@ class GPTQMarlinConfig(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod",
                         UnquantizedLinearMethod, UnquantizedEmbeddingMethod]]:
-        lm_head_quantized = isinstance(
+        parallel_lm_head_quantized = isinstance(
             layer, ParallelLMHead) and self.lm_head_quantized
-        if isinstance(layer, LinearBase) or lm_head_quantized:
+        if isinstance(layer, LinearBase) or parallel_lm_head_quantized:
             if len(self.dynamic) > 0:
                 result = self.get_dynamic_override(layer_name=prefix)
                 # False = skip module, None = no override, else = Positive match
                 if result == False: 
                     return UnquantizedEmbeddingMethod(
-                    ) if lm_head_quantized else UnquantizedLinearMethod()
+                    ) if parallel_lm_head_quantized else UnquantizedLinearMethod()
 
             return GPTQMarlinLinearMethod(self, prefix=prefix)
         elif isinstance(layer, FusedMoE):
