@@ -299,22 +299,26 @@ class FusedMoE(torch.nn.Module):
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
+        self.expert_map = None
 
         ep_rank = get_tensor_model_parallel_rank() // self.tp_size
-        # Create a tensor of size num_experts filled with -1
-        self.expert_map = torch.full((num_experts, ), -1, dtype=torch.int32)
-        # Create a expert map for the local experts
-        local_num_experts = num_experts // self.ep_size
-        if ep_rank < (self.ep_size - 1):
-            # Each rank gets local_num_experts experts, except the last rank.
-            self.expert_map[ep_rank * local_num_experts:
-                            (ep_rank + 1) * local_num_experts] = \
-                torch.arange(0, local_num_experts,dtype=torch.int32)
-        else:
-            # All remaining experts are assigned to the last rank.
-            local_num_experts = num_experts - ep_rank * local_num_experts
-            self.expert_map[-local_num_experts:] = \
-                torch.arange(0, local_num_experts,dtype=torch.int32)
+        if self.ep_size > 1:
+            # Create a tensor of size num_experts filled with -1
+            self.expert_map = torch.full((num_experts, ),
+                                         -1,
+                                         dtype=torch.int32)
+            # Create a expert map for the local experts
+            local_num_experts = num_experts // self.ep_size
+            if ep_rank < (self.ep_size - 1):
+                # Each rank gets local_num_experts experts, except the last rank.
+                self.expert_map[ep_rank * local_num_experts:
+                                (ep_rank + 1) * local_num_experts] = \
+                    torch.arange(0, local_num_experts,dtype=torch.int32)
+            else:
+                # All remaining experts are assigned to the last rank.
+                local_num_experts = num_experts - ep_rank * local_num_experts
+                self.expert_map[-local_num_experts:] = \
+                    torch.arange(0, local_num_experts,dtype=torch.int32)
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -458,6 +462,8 @@ class FusedMoE(torch.nn.Module):
             expert_data.copy_(loaded_weight)
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+        if self.expert_map is None:
+            return expert_id
         return self.expert_map[expert_id].item()
 
     def weight_loader(self, param: torch.nn.Parameter,
