@@ -89,6 +89,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         y_offset: int,
         y_slice_size: int,
+        y_total_size: int,
         add_inputs: bool,
     ):
         #No LoRA request, so return directly
@@ -101,6 +102,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             *self.prefill_metadata,
             y_offset,
             y_slice_size,
+            y_total_size,
             add_inputs,
         )
 
@@ -111,12 +113,13 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         y_offset: int,
         y_slice_size: int,
+        y_total_size: int,
         add_inputs: bool,
     ):
         if self.no_lora:
             return
         bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
-                          y_slice_size, add_inputs)
+                          y_slice_size, y_total_size, add_inputs)
 
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
                    x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
@@ -161,7 +164,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                    lora_b_stacked: Tuple[torch.Tensor, ...],
                    lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
                    output_slices: Tuple[int, ...],
-                   offset_start: int = 0,
                    add_inputs=True,
                    **kwargs) -> None:
         """
@@ -189,7 +191,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         y_org = y
         y = y.view(-1, y.shape[-1])
-        offset_left = offset_start
+        offset_left = 0
         if lora_bias_stacked is not None:
             self._apply_bias(self.token_lora_indices, y, output_slices,
                              lora_bias_stacked)
@@ -200,6 +202,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 lora_b_stacked[slice_idx],
                 offset_left,
                 output_slices[slice_idx],
+                y_total_size=sum(output_slices),
                 add_inputs=add_inputs,
             )
             offset_left += output_slices[slice_idx]
