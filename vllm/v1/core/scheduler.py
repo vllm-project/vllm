@@ -577,14 +577,15 @@ class Scheduler:
                 # Add EngineCoreOutputs for this Request.
                 output.request_ids.append(req_id)
                 output.new_token_id_offsets.append(offset)
-                output.new_token_ids += request.output_token_ids[-num_new_tokens:]
+                new_ids = request.output_token_ids[-num_new_tokens:]
+                output.new_token_ids += new_ids
                 output.finished.append(request.is_finished())
                 if request.get_finished_reason() is not None:
                     output.finish_reason[req_id] = request.get_finished_reason()
                 #print(f"req stop = {request.stop_reason}, {request.status}")
                 output.stop_reason.append(request.stop_reason)
                 output.events.append(request.fake_events())
-                offset = offset + 1  # move out of if?
+                offset = offset + len(new_ids)  # move out of if?
 
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
