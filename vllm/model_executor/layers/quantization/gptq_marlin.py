@@ -58,13 +58,16 @@ class GPTQMarlinConfig(QuantizationConfig):
             # (since we have only one group per output channel)
             desc_act = False
 
-        # GPTQModel use `dynamic` config property to allow per module quantization 
-        # config so each module can be individually optimized.
-        # Format is Dict[str, Dict] where key is a regex string that can perform both
-        # positive ("+:" prefixed) or negative ("-:" prefixed) matching of a module.
+        # GPTQModel use `dynamic` config property to allow per module
+        # quantization config so each module can be individually optimized.
+        # Format is Dict[str, Dict] where key is a regex string that can
+        # perform both positive ("+:" prefixed) or negative ("-:" prefixed)
+        # matching of a module.
         # Default to positive match, override base quant config mode, if no
-        # prefix is used. Value is in dict format of field key and override value.
-        # Negative matching will skip quantization init for this module entirely:
+        # prefix is used. Value is in dict format of field key and override
+        # value.
+        # Negative matching will skip quantization init for this module
+        # entirely:
         # non-quantized inference. More details and quantization examples can be
         # found at: https://github.com/ModelCloud/GPTQModel
         # Example:
