@@ -577,8 +577,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 # end-env-vars-definition
 
 
-def overwrite_env_vars(name: str,
-                       default_value: Optional[Any],
+def overwrite_env_vars(name: str, default_value: Optional[Any],
                        getter: Optional[Callable[[], Any]]):
     """Overwrite the existed environment variance in `environment_variables`.
 
