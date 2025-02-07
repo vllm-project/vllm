@@ -415,15 +415,11 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def _open_mesh_device(self):
         num_devices_available = len(ttnn.get_device_ids())
         
-        mesh_grid_dict = {"N150": (1, 1), "N300": (1, 2), "T3K_LINE": (1, 8), "T3K_RING": (2, 4), "TG": (8, 4)}
+        mesh_grid_dict = {"N150": (1, 1), "N300": (1, 2), "T3K": (1, 8), "TG": (8, 4)}
         mesh_device = os.environ.get("MESH_DEVICE")
         if mesh_device is not None:
             assert mesh_device in mesh_grid_dict, f"Invalid MESH_DEVICE: {mesh_device}"
         mesh_grid = mesh_grid_dict.get(mesh_device, (1, num_devices_available))
-        if mesh_device == "T3K_RING":
-            mesh_type=ttnn.MeshType.Ring
-        else:
-            mesh_type=ttnn.MeshType.RowMajor
         
         if mesh_grid[0] * mesh_grid[1] > num_devices_available:
             assert f"Requested mesh grid shape {mesh_grid} is larger than number of available devices {num_devices_available}"
@@ -436,7 +432,6 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             ttnn.MeshShape(*mesh_grid),
             dispatch_core_config=self._get_dispatch_core_config(device_params),
             **device_params,
-            mesh_type=mesh_type,
         )
         logger.info(f"multidevice with {mesh_device.get_num_devices()} devices and grid {mesh_grid} is created")
         return mesh_device
