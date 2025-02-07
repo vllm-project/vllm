@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention on rocm"""
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -5,10 +6,11 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.logger import init_logger
-from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.attention.ops.prefix_prefill import context_attention_fwd
+from vllm.logger import init_logger
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
 logger = init_logger(__name__)
 
 
@@ -46,6 +48,7 @@ class ROCmAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
+
 
 class ROCmAttentionImpl(AttentionImpl):
 
@@ -97,7 +100,6 @@ class ROCmAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "ROCmAttentionImpl")
 
-
     def forward(
         self,
         layer: torch.nn.Module,
@@ -124,7 +126,7 @@ class ROCmAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
-        
+
         assert attn_metadata.use_cascade is False
 
         # IMPORTANT!
@@ -138,19 +140,19 @@ class ROCmAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
+            kv_cache, self.num_kv_heads, self.head_size)
 
         # Reshape the input keys and values and store them in the cache.
         PagedAttention.write_to_paged_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+            key,
+            value,
+            key_cache,
+            value_cache,
+            attn_metadata.slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
         # TODO(sage): Refactor the context_attention_fwd kernel so that this
         # overhead can be removed
@@ -158,27 +160,26 @@ class ROCmAttentionImpl(AttentionImpl):
         batch_size = len(attn_metadata.query_start_loc) - 1
         assert len(context_lens) == batch_size
         for i in range(batch_size):
-            query_start = attn_metadata.query_start_loc[i] 
+            query_start = attn_metadata.query_start_loc[i]
             query_end = attn_metadata.query_start_loc[i + 1]
-            context_lens[i] = attn_metadata.seq_lens[i] - (query_end - query_start)
+            context_lens[i] = attn_metadata.seq_lens[i] - (query_end -
+                                                           query_start)
 
         # Compute attention and update output up to `num_actual_tokens`.
-        context_attention_fwd(
-            q=query[:num_actual_tokens],
-            k=key[:num_actual_tokens],
-            v=value[:num_actual_tokens],
-            o=output[:num_actual_tokens],
-            kv_cache_dtype=self.kv_cache_dtype,
-            k_cache=key_cache,
-            v_cache=value_cache,
-            b_loc=attn_metadata.block_table,
-            b_start_loc=attn_metadata.query_start_loc,
-            b_seq_len=attn_metadata.seq_lens,
-            b_ctx_len=context_lens,
-            max_input_len=attn_metadata.max_query_len,
-            k_scale=layer._k_scale,
-            v_scale=layer._v_scale,
-            alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window[0]
-        )
+        context_attention_fwd(q=query[:num_actual_tokens],
+                              k=key[:num_actual_tokens],
+                              v=value[:num_actual_tokens],
+                              o=output[:num_actual_tokens],
+                              kv_cache_dtype=self.kv_cache_dtype,
+                              k_cache=key_cache,
+                              v_cache=value_cache,
+                              b_loc=attn_metadata.block_table,
+                              b_start_loc=attn_metadata.query_start_loc,
+                              b_seq_len=attn_metadata.seq_lens,
+                              b_ctx_len=context_lens,
+                              max_input_len=attn_metadata.max_query_len,
+                              k_scale=layer._k_scale,
+                              v_scale=layer._v_scale,
+                              alibi_slopes=self.alibi_slopes,
+                              sliding_window=self.sliding_window[0])
         return output
