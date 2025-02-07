@@ -41,6 +41,7 @@ _MAX_NUM_SAMPLES = 128
 @dataclass
 class PromptInputData:
 
+    # xw32: what are those?
     req_ids: List
     prompt_lens: List
     input_tokens: List
@@ -54,6 +55,7 @@ class PromptInputData:
 
 @dataclass
 class DecodeInputData:
+    # xw32: similar to PromptInputData, what are those?
     req_ids: List
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
@@ -69,6 +71,7 @@ class TPUModelRunner(ModelRunnerBase):
     ):
         super().__init__(vllm_config, device)
 
+
         # Persistent batch.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
@@ -78,6 +81,7 @@ class TPUModelRunner(ModelRunnerBase):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
         )
+        # print(f'xw32 {self.max_num_reqs=}, {self.max_model_len=}, {self.max_num_blocks_per_req=}, {self.model_config.get_vocab_size()=}') # xw32 self.max_num_reqs=16, self.max_model_len=512, self.max_num_blocks_per_req=32, self.model_config.get_vocab_size()=151936
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
@@ -95,6 +99,8 @@ class TPUModelRunner(ModelRunnerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> PromptInputData:
+        # xw32 note, to be deleted later. Cannot use pdb in this file. Will run into an error
+        # "Got fatal signal from worker processes, shutting down. See stack trace above for root cause issue." if doing so.
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -335,6 +341,8 @@ class TPUModelRunner(ModelRunnerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
+        logger.info("xw32 TPUModelRunner.execute_model.")
+
         # Update cached state
         self.update_states(scheduler_output)
 
@@ -419,6 +427,7 @@ class TPUModelRunner(ModelRunnerBase):
         return model_runner_output
 
     def load_model(self) -> None:
+        logger.info("xw32 TPUModelRunner.load_model.")
         self.device = self.device_config.device
 
         # NOTE(woosuk): While the executor assigns the TP ranks to the worker
@@ -451,6 +460,7 @@ class TPUModelRunner(ModelRunnerBase):
         seq_len: Optional[int] = None,
         exec_mode: Optional[ExecutionMode] = None,
     ) -> None:
+        logger.info("xw32 TPUModelRunner.dummy_run.")
         assert seq_len is not None
         assert exec_mode is not None
 
@@ -559,6 +569,7 @@ class TPUModelRunner(ModelRunnerBase):
     def capture_model(self) -> None:
         """Compile the model."""
 
+        logger.info("xw32 TPUModelRunner.capture_model.")
         logger.info("Compiling the model with different input shapes.")
 
         # Capture prefill shapes
@@ -614,6 +625,7 @@ class TPUModelRunner(ModelRunnerBase):
             kv_cache_config: Configuration for the KV cache, including the KV 
             cache size of each layer
         """
+        logger.info("xw32 TPUModelRunner.initialize_kv_cache.")
         if len(kv_cache_config.groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
@@ -673,6 +685,7 @@ class ModelWrapperV1(nn.Module):
                 memory profiling at initialization.
         """
         # Skip this in memory profiling at initialization.
+        # logger.info("xw32 ModelWrapperV1.forward.")
         if attn_metadata is not None:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape

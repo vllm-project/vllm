@@ -173,7 +173,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
-
+        print('xw32 print something')
         if attn_metadata is None:
             if output is None:
                 output = torch.ones_like(query)

@@ -31,10 +31,13 @@ class TPUWorker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        logger.info("xw32 TPUWorker.__init__.")
+
         super().__init__(vllm_config, local_rank, rank,
                          distributed_init_method)
 
     def init_device(self):
+        logger.info("xw32 TPUWorker.init_device.")
         os.environ["PJRT_DEVICE"] = "TPU"
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
@@ -72,6 +75,7 @@ class TPUWorker(WorkerBase):
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
+        logger.info("xw32 TPUWorker.determine_available_memory.")
         assert self.model_runner is not None
 
         num_layers = self.model_config.get_num_layers(self.parallel_config)
@@ -113,6 +117,7 @@ class TPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
+        logger.info("xw32 TPUWorker.execute_model.")
         assert self.model_runner is not None
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.rank == 0 else None
