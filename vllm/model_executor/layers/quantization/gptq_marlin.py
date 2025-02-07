@@ -149,8 +149,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlinConfig":
         dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
-        if dynamic is None:
-            dynamic = {}
+        dynamic = {} if dynamic is None else dynamic
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
