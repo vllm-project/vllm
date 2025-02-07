@@ -80,10 +80,6 @@ class ROCmAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
-        if logits_soft_cap is None:
-            # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
-            logits_soft_cap = 0
-        self.logits_soft_cap = logits_soft_cap
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads

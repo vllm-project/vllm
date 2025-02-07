@@ -99,6 +99,10 @@ class RocmPlatform(Platform):
     @classmethod
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
+        # NOTE: When using V1 this function is called when overriding the
+        # engine args. Calling torch.cuda.get_device_name(device_id) here
+        # will result in the ROCm context being initialized before other
+        # processes can be created.
         return "AMD"
 
     @classmethod
