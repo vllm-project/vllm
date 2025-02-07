@@ -210,7 +210,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         if isinstance(layer, LinearBase) or lm_head_quantized:
             if len(self.dynamic) > 0:
                 result = self.get_dynamic_override(layer_name=prefix)
-                if result is not None and not result:
+                # False = skip module, None = no override, else = Positive match
+                if result == False: 
                     return UnquantizedEmbeddingMethod(
                     ) if lm_head_quantized else UnquantizedLinearMethod()
 
