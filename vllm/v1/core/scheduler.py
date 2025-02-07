@@ -12,7 +12,7 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import (GroupedBlockIDs, FullAttentionSpec,
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, GroupedBlockIDs,
                                         KVCacheConfig)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
