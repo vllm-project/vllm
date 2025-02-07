@@ -519,7 +519,8 @@ class GPUModelRunner:
                 common_prefix_len = (common_prefix_len // block_size *
                                      block_size)
                 kv_cache_spec = kv_cache_group.kv_cache_spec
-                assert isinstance(kv_cache_spec, FullAttentionSpec)
+                assert isinstance(kv_cache_spec,
+                                  (FullAttentionSpec, SlidingWindowSpec))
                 use_cascade = FlashAttentionBackend.use_cascade_attention(
                     common_prefix_len=common_prefix_len,
                     query_lens=num_scheduled_tokens,

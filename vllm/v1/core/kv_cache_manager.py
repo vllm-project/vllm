@@ -95,8 +95,8 @@ class KVCacheManager:
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: DefaultDict[str,
-                                        ReqKVCacheBlocks] = defaultdict(list)
+        self.req_to_blocks: DefaultDict[str, ReqKVCacheBlocks] = defaultdict(
+            lambda: [[] for _ in range(self.num_kv_cache_groups)])
 
     @property
     def usage(self) -> float:
@@ -155,8 +155,6 @@ class KVCacheManager:
             computed_blocks[i] = computed_blocks[i][:num_computed_tokens //
                                                     manager.block_size]
 
-        # Free the blocks that are not needed. (?????)
-        # self._free_useless_blocks(computed_blocks, num_computed_tokens)
         return computed_blocks, num_computed_tokens
 
     def allocate_slots(
@@ -193,22 +191,21 @@ class KVCacheManager:
         if num_tokens == 0:
             raise ValueError("num_tokens must be greater than 0")
 
+        req_blocks = self.req_to_blocks[request.request_id]
         # We can free blocks that are no longer needed even if we cannot
         # schedule this request due to the limit of free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
-        self._free_useless_blocks(self.req_to_blocks[request.request_id],
-                                  request.num_computed_tokens)
+        self._free_useless_blocks(req_blocks, request.num_computed_tokens)
 
         new_computed_blocks = new_computed_blocks if new_computed_blocks is not None else [
-            [] for _ in self.num_kv_cache_groups
+            [] for _ in range(self.num_kv_cache_groups)
         ]
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                num_new_computed_tokens)
-        req_blocks = self.req_to_blocks[request.request_id]
 
         num_new_blocks = [
             manager.get_num_new_blocks(
@@ -291,7 +288,7 @@ class KVCacheManager:
             # full after appending the actual tokens.
             num_full_blocks = (num_computed_tokens +
                                num_tokens) // manager.block_size
-            num_computed_full_blocks = num_computed_tokens // self.block_size
+            num_computed_full_blocks = num_computed_tokens // manager.block_size
 
             new_full_blocks = req_blocks[i][
                 num_computed_full_blocks:num_full_blocks]
