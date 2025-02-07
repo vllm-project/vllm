@@ -1,7 +1,7 @@
+import argparse
 import json
 import os
 from pathlib import Path
-import argparse
 
 import pandas as pd
 from tabulate import tabulate
@@ -77,14 +77,14 @@ def results_to_json(latency, throughput, serving):
 if __name__ == "__main__":
 
     args = parser.parse_args()
-    if args.version == 0:
-        suffix = ""
-    else:
-        suffix = "_v1"
+    suffix = "" if args.version == 0 else "_v1"
 
     # collect results
     if args.version == 0:
-        files = [f for f in results_folder.glob("*.json") if "_v1.json" not in f.name]
+        files = [
+            f for f in results_folder.glob("*.json")
+            if "_v1.json" not in f.name
+        ]
     else:
         files = list(results_folder.glob("*_v1.json"))
 
