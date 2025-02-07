@@ -505,3 +505,7 @@ class KVCacheManager:
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
             prev_block_hash_value = block_hash.hash_value
+
+    def free_block_hashes(self, request: Request) -> None:
+        """Remove the block hashes for the request."""
+        del self.req_to_block_hashes[request.request_id]
