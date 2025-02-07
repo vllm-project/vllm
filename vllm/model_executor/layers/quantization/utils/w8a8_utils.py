@@ -42,6 +42,10 @@ def cutlass_block_fp8_supported() -> bool:
     return ops.cutlass_scaled_mm_supports_block_fp8(capability)
 
 
+CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
+CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
+
+
 def per_tensor_dequantize(
         tensor: torch.Tensor, inv_scale: Union[float,
                                                torch.Tensor]) -> torch.Tensor:
@@ -109,7 +113,7 @@ def apply_fp8_linear(
     input_scale: Optional[torch.Tensor] = None,
     input_scale_ub: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    cutlass_fp8_supported: bool = True,
+    cutlass_fp8_supported: bool = CUTLASS_FP8_SUPPORTED,
     use_per_token_if_dynamic: bool = False,
 ) -> torch.Tensor:
     # ops.scaled_fp8_quant supports both dynamic and static quant.

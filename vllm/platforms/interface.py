@@ -184,6 +184,11 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        """Get the uuid of a device, e.g. the PCI bus ID."""
+        raise NotImplementedError
+
+    @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """Get the total memory of a device in bytes."""
         raise NotImplementedError

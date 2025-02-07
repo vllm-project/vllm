@@ -38,7 +38,10 @@ def test_processor_override(
         trust_remote_code=True,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    tokenizer = cached_get_tokenizer(ctx.model_config.tokenizer)
+    tokenizer = cached_get_tokenizer(
+        ctx.model_config.tokenizer,
+        trust_remote_code=ctx.model_config.trust_remote_code,
+    )
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
         tokenizer=tokenizer,

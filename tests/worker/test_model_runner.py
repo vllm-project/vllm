@@ -24,6 +24,15 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     return model_runner
 
 
+def test_deepseek_mla_attn_backend_module():
+    model_runner = _create_model_runner(
+        "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+        trust_remote_code=True,
+        enable_chunked_prefill=False,
+    )
+    assert model_runner.attn_backend.__name__ == "TritonMLABackend"
+
+
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_prompt(batch_size):
     model_runner = _create_model_runner(
