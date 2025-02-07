@@ -523,12 +523,20 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         "max_position_embeddings", 128_000)
 
     if config_dict.get("quantization") is not None:
-        quantization_config = {
-            "quant_method": "fp8",
-            "activation_scheme": "static"
-        }
+        quantization = config_dict.get("quantization")
+        if quantization.get("qformat_weight") == "fp8_e4m3":
+            # This maps to the FP8 static per-tensor quantization scheme
+            quantization_config = {
+                "quant_method": "fp8",
+                "activation_scheme": "static"
+            }
+        else:
+            raise ValueError(
+                f"Found unknown quantization='{quantization}' in config")
 
-    config_type: Literal["text", "multimodal"] = "multimodal" if config_dict.get("vision_encoder") is not None else "text"
+    config_type: Literal["text",
+                         "multimodal"] = "multimodal" if config_dict.get(
+                             "vision_encoder") is not None else "text"
 
     if config_dict.get("moe") is not None:
         config_dict["architectures"] = ["MixtralForCausalLM"]
@@ -552,8 +560,10 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     # transform to HF config format
     if config_type == "multimodal":
-        config_dict["text_config"] = PretrainedConfig(**config_dict["text_config"])
-        config_dict["vision_config"] = PretrainedConfig(**config_dict["vision_config"])
+        config_dict["text_config"] = PretrainedConfig(
+            **config_dict["text_config"])
+        config_dict["vision_config"] = PretrainedConfig(
+            **config_dict["vision_config"])
 
     return PretrainedConfig(**config_dict)
 
