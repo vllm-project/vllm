@@ -52,6 +52,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         y_offset: int,
         y_slice_size: int,
+        y_total_size: int,
         add_inputs: bool,
     ) -> torch.Tensor:
         if self.no_lora:
@@ -102,7 +103,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                    lora_b_stacked: Tuple[torch.Tensor, ...],
                    lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
                    output_slices: Tuple[int, ...],
-                   offset_start: int = 0,
                    add_inputs=True,
                    **kwargs) -> torch.Tensor:
         """
@@ -137,6 +137,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 lora_b_stacked[slice_idx],
                 offset_left,
                 output_slices[slice_idx],
+                y_total_size=sum(output_slices),
                 add_inputs=add_inputs,
             )
             offset_left += output_slices[slice_idx]
