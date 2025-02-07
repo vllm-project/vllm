@@ -18,7 +18,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from vllm import envs
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
+from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
@@ -252,33 +252,50 @@ class StackAudioFrames(nn.Module):
         return audio_embeds
 
 
+class FlippedSiluAndMul(SiluAndMul):
+    """Ultravox is trained with SwiGLU with flipped halves."""
+
+    def forward(self, x: torch.Tensor):
+        a, b = x.chunk(2, dim=-1)
+        flipped = torch.cat((b, a), dim=-1)
+        return super().forward(flipped)
+
+
 class UltravoxProjector(nn.Module):
 
     def __init__(self, config: UltravoxConfig):
         super().__init__()
         self.hidden_dim = config.hidden_size
         self._pad_and_stack = StackAudioFrames(config.stack_factor)
-        dim = config.audio_config.hidden_size * config.stack_factor
-        self.ln_pre = RMSNorm(dim)
-        self.linear_1 = nn.Linear(dim, self.hidden_dim, bias=False)
-        dim = self.hidden_dim
+        dim_in = config.audio_config.hidden_size * config.stack_factor
+        self.ln_pre = RMSNorm(dim_in)
+        self.linear_1 = nn.Linear(dim_in, self.hidden_dim, bias=False)
+        dim_mid = self.hidden_dim
 
         if config.projector_act == "swiglu":
-            self.act = MulAndSilu()
-            dim = dim // 2
+            self.act = FlippedSiluAndMul()
+            dim_mid = dim_mid // 2
         else:
             self.act = get_act_fn(config.projector_act)
 
-        self.linear_2 = nn.Linear(dim,
-                                  config.text_config.hidden_size,
-                                  bias=False)
-        self.ln_post = RMSNorm(config.text_config.hidden_size)
+        dim_out = config.text_config.hidden_size
+        self.linear_2 = nn.Linear(dim_mid, dim_out, bias=False)
+
+        # Ultravox v0.4.1 and below uses layer_norm after the second linear layer,
+        # while v0.5.0 and above uses layer_norm after the first linear layer.
+        if config.projector_ln_mid:
+            self.ln_mid: nn.Module = RMSNorm(dim_mid)
+            self.ln_post = nn.Identity()
+        else:
+            self.ln_mid = nn.Identity()
+            self.ln_post = RMSNorm(dim_out)
 
     def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
         audio_features = self._pad_and_stack(audio_features)
         audio_features = self.ln_pre(audio_features)
         hidden_states = self.linear_1(audio_features)
         hidden_states = self.act(hidden_states)
+        hidden_states = self.ln_mid(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         hidden_states = self.ln_post(hidden_states)
         return hidden_states

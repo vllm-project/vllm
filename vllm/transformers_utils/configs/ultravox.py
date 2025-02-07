@@ -37,6 +37,12 @@ class UltravoxConfig(transformers.PretrainedConfig):
             The LoRA configuration for finetuning the text model.
         audio_model_lora_config (`LoraConfigSimplified`, *optional*):
             The LoRA configuration for finetuning the audio model.
+        projector_ln_mid (`bool`, *optional*, defaults to `False`):
+            Whether to apply layer normalization at the middle of the
+            projector or at the end. Versions v0.4.1 and below
+            use `False`, but v0.5 and above use `True`.
+        audio_latency_block_size (`int`, *optional*, defaults to `None`):
+            The latency block size for simulating audio streaming.
     """
 
     model_type = "ultravox"
@@ -56,6 +62,8 @@ class UltravoxConfig(transformers.PretrainedConfig):
         projector_act: str = "swiglu",
         text_model_lora_config: Optional[Dict[str, Any]] = None,
         audio_model_lora_config: Optional[Dict[str, Any]] = None,
+        projector_ln_mid: bool = False,
+        audio_latency_block_size: Optional[int] = None,
         **kwargs,
     ):
         self.ignore_index = ignore_index
@@ -68,6 +76,8 @@ class UltravoxConfig(transformers.PretrainedConfig):
         self.stack_factor = stack_factor
         self.norm_init = norm_init
         self.projector_act = projector_act
+        self.projector_ln_mid = projector_ln_mid
+        self.audio_latency_block_size = audio_latency_block_size
 
         if text_model_id is not None:
             # Avoid circular import
