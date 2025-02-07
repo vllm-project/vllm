@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/tests/lora/test_llama.py
 from dataclasses import dataclass
@@ -68,11 +70,20 @@ def do_sample(llm: vllm.LLM,
     return generated_texts
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", [1])
 def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
                           tp_size):
-    if num_gpus_available < tp_size:
+    if num_gpus_available < tp_size and \
+        tp_size > 1 and current_platform.is_cuda_alike():
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     llm = vllm.LLM(

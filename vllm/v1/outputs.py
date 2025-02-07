@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -8,7 +10,7 @@ import torch
 class SamplerOutput:
 
     # [num_reqs]
-    sampled_token_ids: List[int]
+    sampled_token_ids: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids: Optional[torch.Tensor]

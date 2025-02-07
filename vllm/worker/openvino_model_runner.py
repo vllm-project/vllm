@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import defaultdict
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -8,6 +10,7 @@ from torch import nn
 from vllm.attention import get_attn_backend
 from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm.config import VllmConfig
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -51,15 +54,13 @@ class OpenVINOModelRunner(ModelRunnerBase):
     ):
         self.ov_core = ov_core
         ModelRunnerBase.__init__(self, vllm_config=vllm_config)
-        cache_config = self.cache_config
-        model_config = self.model_config
         self.is_driver_worker = is_driver_worker
 
         self.device = self.device_config.device
 
         self.kv_cache_dtype = kv_cache_dtype
-        self.sliding_window = model_config.get_sliding_window()
-        self.block_size = cache_config.block_size
+        self.sliding_window = self.model_config.get_sliding_window()
+        self.block_size = self.cache_config.block_size
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
@@ -78,10 +79,12 @@ class OpenVINOModelRunner(ModelRunnerBase):
         self.model: nn.Module  # Set after init_Model
 
     def load_model(self) -> None:
-        self.model = get_model(model_config=self.model_config,
-                               device_config=self.device_config,
+        self.model = get_model(vllm_config=self.vllm_config,
                                kv_cache_dtype=self.kv_cache_dtype,
                                ov_core=self.ov_core)
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     def _prepare_model_input(
         self,
@@ -278,6 +281,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
             block_indices_begins=block_indices_begins_tensor,
             max_context_len=max_context_len_tensor,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=False,
         )
 
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
@@ -350,7 +354,8 @@ class OpenVINOModelRunner(ModelRunnerBase):
                                          device=self.device),
         }
 
-        hidden_states = model_executable(**execute_model_kwargs)
+        with set_forward_context(attn_metadata, self.vllm_config, 0):
+            hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import json
 from typing import Dict
@@ -31,7 +33,7 @@ if __name__ == "__main__":
                         type=str,
                         required=True,
                         help="json trace file output by "
-                        "examples/offline_profile.py")
+                        "examples/offline_inference/profiling.py")
     parser.add_argument("--phase",
                         type=str,
                         required=True,

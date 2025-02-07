@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 from abc import ABC, abstractmethod
 from typing import List
@@ -120,6 +122,11 @@ class BlockSpaceManager(ABC):
     @abstractmethod
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         """Prefix cache hit rate. -1 means not supported or disabled."""
+        pass
+
+    @abstractmethod
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache for all devices."""
         pass
 
     @abstractmethod

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from itertools import accumulate
 from typing import List, Optional
 

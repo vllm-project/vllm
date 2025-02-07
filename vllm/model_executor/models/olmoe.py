@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,6 +22,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -34,12 +37,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.utils import print_warning_once
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+
+logger = init_logger(__name__)
 
 
 class OlmoeMoE(nn.Module):
@@ -446,7 +450,7 @@ class OlmoeForCausalLM(nn.Module, SupportsPP):
                         remapped_kv_scale_name = name.replace(
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
-                            print_warning_once(
+                            logger.warning_once(
                                 "Found kv scale in the checkpoint "
                                 f"(e.g. {name}), but not found the expected "
                                 f"name in the model "

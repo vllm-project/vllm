@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_intern_vit.py
 # --------------------------------------------------------
 # InternVL
@@ -271,7 +273,7 @@ class InternSdpaAttention(nn.Module):
         v = v.transpose(1, 2)
 
         x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
-        x = x.transpose(1, 2).view(B, N, -1)
+        x = x.transpose(1, 2).reshape(B, N, -1)
 
         x = self.proj(x)
         return x

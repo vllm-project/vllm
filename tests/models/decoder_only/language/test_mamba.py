@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM when using greedy sampling for Mamba.
 
 Run `pytest tests/models/test_mamba.py`.
@@ -51,10 +52,13 @@ def test_models(
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        print(vllm_model.model.llm_engine.model_executor.driver_worker.
-              model_runner.model)
+        def print_model(model):
+            print(model)
+
+        vllm_model.apply_model(print_model)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]

@@ -22,7 +22,7 @@ NOTE: If you want to not only transfer KV caches, but adjust the model execution
 
 ## Disaggregated prefilling
 
-The example usage is in [this file](../../../examples/disaggregated_prefill.sh).
+The example usage is in [this file](../../../examples/online_serving/disaggregated_prefill.sh).
 
 Here is the diagram of how we run disaggretgated prefilling.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Test the piecewise compilation with a simple model, comparing the output
 with and without the piecewise compilation.
@@ -321,7 +322,7 @@ def test_toy_llama():
             num_graphs_seen=0,
             num_piecewise_graphs_seen=0,
             num_piecewise_capturable_graphs_seen=0,
-            num_inductor_compilations=0,
+            num_backend_compilations=0,
             num_cudagraph_caputured=0,
     ):
         outputs.append(run_model(llama_config, use_compile=False))
@@ -331,7 +332,7 @@ def test_toy_llama():
             num_graphs_seen=1,  # one graph for the model
             num_piecewise_graphs_seen=1,
             num_piecewise_capturable_graphs_seen=1,
-            num_inductor_compilations=1,  # num_piecewise_capturable_graphs_seen
+            num_backend_compilations=1,  # num_piecewise_capturable_graphs_seen
             num_cudagraph_caputured=
             2,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     ):
@@ -344,7 +345,7 @@ def test_toy_llama():
             1,  # 2 * num_layers + 1
             num_piecewise_capturable_graphs_seen=1 +
             llama_config.num_layers,  # 1 + num_layers
-            num_inductor_compilations=1 +
+            num_backend_compilations=1 +
             llama_config.num_layers,  # num_piecewise_capturable_graphs_seen
             num_cudagraph_caputured=2 *
         (1 + llama_config.num_layers

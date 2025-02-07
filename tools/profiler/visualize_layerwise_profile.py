@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import copy
 import json
@@ -534,11 +536,11 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--json-trace",
-        type=str,
-        required=True,
-        help="json trace file output by examples/offline_profile.py")
+    parser.add_argument("--json-trace",
+                        type=str,
+                        required=True,
+                        help="json trace file output by \
+                              examples/offline_inference/profiling.py")
     parser.add_argument("--output-directory",
                         type=str,
                         required=False,

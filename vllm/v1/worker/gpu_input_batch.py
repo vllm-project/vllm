@@ -1,14 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
 
+from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
@@ -28,6 +32,11 @@ class CachedRequestState:
     block_ids: List[int]
     num_computed_tokens: int
     output_token_ids: List[int]
+
+    mrope_positions: Optional[torch.Tensor] = None
+    mrope_position_delta: Optional[int] = None
+
+    lora_request: Optional[LoRARequest] = None
 
     @property
     def num_tokens(self) -> int:
@@ -66,22 +75,18 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
+        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
-        # Attention-related.
-        self.block_table = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
-            device=self.device,
-            dtype=torch.int32,
-        )
-        self.block_table_cpu_tensor = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
-            device="cpu",
-            dtype=torch.int32,
+        # Block table.
+        self.block_table = BlockTable(
+            max_num_reqs=max_num_reqs,
+            max_model_len=max_model_len,
+            max_num_blocks_per_req=max_num_blocks_per_req,
             pin_memory=pin_memory,
+            device=device,
         )
-        self.block_table_cpu = self.block_table_cpu_tensor.numpy()
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),
@@ -159,6 +164,12 @@ class InputBatch:
         ]
         self.prompt_token_ids: Optional[torch.Tensor] = None
 
+        # lora related
+        self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
+                                             dtype=np.int32)
+        self.lora_id_to_request_ids: Dict[int, Set[str]] = {}
+        self.lora_id_to_lora_request: Dict[int, LoRARequest] = {}
+
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
@@ -189,10 +200,10 @@ class InputBatch:
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
+        self.num_tokens[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
-        num_blocks = len(request.block_ids)
-        self.block_table_cpu[req_index, :num_blocks] = request.block_ids
+        self.block_table.add_row(req_index, request.block_ids)
 
         sampling_params = request.sampling_params
         self.temperature_cpu[req_index] = sampling_params.temperature
@@ -233,6 +244,19 @@ class InputBatch:
         if sampling_params.prompt_logprobs:
             self.prompt_logprob_reqs.add(req_id)
 
+        # Add request lora ID
+        if request.lora_request:
+            lora_id = request.lora_request.lora_int_id
+            if lora_id not in self.lora_id_to_request_ids:
+                self.lora_id_to_request_ids[lora_id] = set()
+
+            self.request_lora_mapping[req_index] = lora_id
+            self.lora_id_to_request_ids[lora_id].add(request.req_id)
+            self.lora_id_to_lora_request[lora_id] = request.lora_request
+        else:
+            # No LoRA
+            self.request_lora_mapping[req_index] = 0
+
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
@@ -249,6 +273,16 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
+
+        # LoRA
+        lora_id = self.request_lora_mapping[req_index]
+        if lora_id != 0:
+            self.lora_id_to_request_ids[lora_id].discard(req_id)
+            if len(self.lora_id_to_request_ids[lora_id]) == 0:
+                self.lora_id_to_request_ids.pop(lora_id)
+                self.lora_id_to_lora_request.pop(lora_id)
+            self.request_lora_mapping[req_index] = 0
+
         return req_index
 
     def clear(self) -> None:
@@ -264,6 +298,9 @@ class InputBatch:
         self.generators.clear()
         self.num_logprobs.clear()
         self.prompt_logprob_reqs.clear()
+        self.request_lora_mapping.fill(0)
+        self.lora_id_to_lora_request.clear()
+        self.lora_id_to_request_ids.clear()
 
     def condense(self, empty_req_indices: List[int]) -> None:
         if self.num_reqs == 0:
@@ -290,16 +327,15 @@ class InputBatch:
             self.req_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            # TODO(woosuk): Optimize the copy of token_ids_cpu and
-            # block_table_cpu.
-            self.token_ids_cpu[empty_index] = self.token_ids_cpu[
-                last_req_index]
+            num_tokens = self.num_tokens[last_req_index]
+            self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
+                last_req_index, :num_tokens]
+            self.num_tokens[empty_index] = num_tokens
             self.num_prompt_tokens[empty_index] = \
                 self.num_prompt_tokens[last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
-            self.block_table_cpu[empty_index] = self.block_table_cpu[
-                last_req_index]
+            self.block_table.move_row(last_req_index, empty_index)
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
@@ -316,6 +352,9 @@ class InputBatch:
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
+
+            self.request_lora_mapping[empty_index] = self.request_lora_mapping[
+                last_req_index]
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
@@ -399,6 +438,29 @@ class InputBatch:
             prompt_token_ids[i, self.num_prompt_tokens[i]:] = self.vocab_size
         return prompt_token_ids_cpu_tensor.to(device=self.device,
                                               non_blocking=True)
+
+    def make_lora_inputs(
+        self, num_scheduled_tokens: np.ndarray
+    ) -> Tuple[Tuple[int, ...], Tuple[int, ...], Set[LoRARequest]]:
+        """
+        Given the num_scheduled_tokens for each request in the batch, return
+        datastructures used to activate the current LoRAs.
+        Returns:
+            1. prompt_lora_mapping: A tuple of size self.num_reqs where,
+               prompt_lora_mapping[i] is the LoRA id to use for the ith prompt.
+            2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
+               where, token_lora_mapping[i] is the LoRA id to use for ith token.
+            3. lora_requests: Set of relevant LoRA requests.
+        """
+
+        req_lora_mapping = self.request_lora_mapping[:self.num_reqs]
+        prompt_lora_mapping = tuple(req_lora_mapping)
+        token_lora_mapping = tuple(
+            req_lora_mapping.repeat(num_scheduled_tokens))
+        active_lora_requests: Set[LoRARequest] = set(
+            self.lora_id_to_lora_request.values())
+
+        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
 
     @property
     def num_reqs(self) -> int:

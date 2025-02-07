@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/a5cc30d72ae2dc19af534e4b35c986cc28db1275/src/transformers/models/falcon/modeling_falcon.py
 # Copyright 2023 The vLLM team.
@@ -409,9 +411,9 @@ class FalconModel(nn.Module):
 
 
 class FalconForCausalLM(nn.Module, SupportsPP):
-
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {}
+    packed_modules_mapping = {
+        "query_key_value": ["query_key_value"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
