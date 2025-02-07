@@ -43,7 +43,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BoundPromptReplacement,
                                         MultiModalFieldConfig,
                                         PlaceholderFeaturesInfo,
-                                        ProcessorMixin, PromptReplacement)
+                                        PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
@@ -171,13 +171,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         self.image_token_num = calculate_image_placeholder(vision_config)
         self.image_size = vision_config["image_size"]
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: Optional[ProcessorMixin],
-    ) -> int:
+    def get_num_image_tokens(self) -> int:
         return self.image_token_num
 
     def get_image_size(self) -> ImageSize:
@@ -231,8 +225,7 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
     ) -> list[PromptReplacement]:
 
         def get_replacement(item_idx: int):
-            num_image_tokens = self.info.get_num_image_tokens(
-                image_height=1120, image_width=1120, processor=None)
+            num_image_tokens = self.info.get_num_image_tokens()
             return [IMAGE_TOKEN_ID] * num_image_tokens
 
         return [
