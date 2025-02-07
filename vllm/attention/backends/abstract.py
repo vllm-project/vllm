@@ -275,7 +275,6 @@ class AttentionImpl(ABC, Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
