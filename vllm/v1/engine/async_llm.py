@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import asyncio
 from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
 
@@ -83,8 +82,7 @@ class AsyncLLM(EngineClient):
             executor_class=executor_class,
         )
 
-        # Output handler background task.
-        self.output_handler = asyncio.create_task(self._run_output_handler())
+        self.output_handler: Optional[asyncio.Task] = None
 
     @classmethod
     def from_engine_args(
@@ -193,6 +191,13 @@ class AsyncLLM(EngineClient):
         """
 
         try:
+            # We start the output_handler on the first call to generate() so
+            # we can call __init__ before the event loop, which enables us
+            # to handle startup failure gracefully in the OpenAI server.
+            if self.output_handler is None:
+                self.output_handler = asyncio.create_task(
+                    self._run_output_handler())
+
             q = await self.add_request(
                 request_id,
                 prompt,
