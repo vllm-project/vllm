@@ -23,7 +23,7 @@ from PIL import Image
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext, DummyData
 from vllm.inputs.data import token_inputs, TokenInputs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -43,7 +43,7 @@ from transformers.utils import logging
 from .interfaces import SupportsMultiModal, SupportsPP, SupportsLoRA
 from .vision_siglip_navit import get_siglip_vision_model
 from .phi4o_utils import AudioEmbedding
-from .utils import PPMissingLayer
+from .utils import PPMissingLayer, maybe_prefix
 
 
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010  # <|endoftext10|> (see vocab.json in hf model)
@@ -1296,15 +1296,9 @@ def cat_with_pad(tensors, dim, padding_value=0):
 )
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4o)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phio)
-class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
+class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     """
-    Implements the Phi-4-Omni model in VLLM.
-
-    Args:
-        config (PretrainedConfig): Pretrained model configuration.
-        multimodal_config (MultiModalConfig): Multi-modal configuration.
-        cache_config (Optional[CacheConfig]): Cache configuration.
-        quant_config (Optional[QuantizationConfig]): Quantization configuration.
+    Implements the Phi-4-multimodal-instruct model in VLLM.
     """
     # LoRA specific attributes
     packed_modules_mapping = {
@@ -1336,6 +1330,10 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
         self.quant_config = quant_config
         self.lora_config = lora_config
 
+        # Tensor/Pipeline parallel not supported for now.
+        assert get_tensor_model_parallel_world_size() == 1, "tensor parallel is not supported"
+        assert get_pp_group().world_size == 1, "pipeline parallel is not supported"
+
         self.vision_encoder = PhiOImageEncoder(
             config,
             quant_config,
@@ -1356,35 +1354,31 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
             }
 
         self.embed_tokens_extend = AudioEmbedding(config, **embedding_config)
-        self.model = LlamaModel(vllm_config=vllm_config, prefix="model")
-        if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-            self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=(
-                    DEFAULT_VOCAB_PADDING_SIZE
-                    # We need bigger padding if using lora for kernel
-                    # compatibility
-                    if not lora_config else
-                    lora_config.lora_vocab_padding_size),
-                quant_config=quant_config,
-            )
-            if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(
-                    self.model.embed_tokens)
-            logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
-            self.sampler = Sampler()
-        else:
-            self.lm_head = PPMissingLayer()
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+        self.model = LlamaModel(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+
+        self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.lm_head = ParallelLMHead(
+            self.unpadded_vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            padding_size=(
+                DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else
+                lora_config.lora_vocab_padding_size),
+            quant_config=quant_config,
+        )
+        if config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(
+                self.model.embed_tokens)
+        logit_scale = getattr(config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size,
+                                                logit_scale)
+        self.sampler = Sampler()
         
     def _audio_features_to_embeddings(
         self,
