@@ -212,8 +212,8 @@ def test_contexted_kv_attention(
         "--internal-hlo2tensorizer-options='--verify-hlo'",
         "--retry_failed_compilation",
     ]
-    compiler_flags = " ".join(compiler_flags)
-    os.environ["NEURON_CC_FLAGS"] = compiler_flags
+    compiler_flags_str = " ".join(compiler_flags)
+    os.environ["NEURON_CC_FLAGS"] = compiler_flags_str
 
     torch.manual_seed(0)
     torch.set_printoptions(sci_mode=False)
