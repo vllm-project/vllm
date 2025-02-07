@@ -37,11 +37,11 @@ def test_lm_head(
             lm_head_layer = model.lm_head
 
             if lm_head_quantized:
-                assert isinstance(lm_head_layer.linear_method,
+                assert isinstance(lm_head_layer.quant_method,
                                   (GPTQLinearMethod, GPTQMarlinLinearMethod,
                                    MarlinLinearMethod))
             else:
-                assert isinstance(lm_head_layer.linear_method,
+                assert isinstance(lm_head_layer.quant_method,
                                   UnquantizedEmbeddingMethod)
 
         vllm_model.apply_model(check_model)

@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, marlin_moe_permute_scales,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, UnquantizedEmbeddingMethod
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
                                            PackedColumnParameter,
@@ -176,13 +176,13 @@ class GPTQMarlinConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod",
-                        UnquantizedLinearMethod]]:
-        if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
-                                             and self.lm_head_quantized):
+                        UnquantizedLinearMethod, UnquantizedEmbeddingMethod]]:
+        lm_head_quantized = isinstance(layer, ParallelLMHead) and self.lm_head_quantized
+        if isinstance(layer, LinearBase) or lm_head_quantized:
             if len(self.dynamic_cfg) > 0:
                 result = self.get_dynamic_config(layer_name=prefix)
                 if result is not None and not result:
-                    return UnquantizedLinearMethod()
+                    return UnquantizedEmbeddingMethod() if lm_head_quantized else UnquantizedLinearMethod()
 
             return GPTQMarlinLinearMethod(self, prefix=prefix)
         elif isinstance(layer, FusedMoE):
