@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import random
 from typing import Optional
 
 import pytest
@@ -26,8 +25,7 @@ class BlockDiagonalCausalFromBottomRightMask:
             key_lens_blockaligned = offset_per_seq[:num_seqs].tolist()
         n_keys = sum(key_lens_blockaligned)
 
-        a = (torch.arange(n_queries).reshape(n_queries,
-                                             1).expand(n_queries, n_keys))
+        a = torch.arange(n_queries).reshape(n_queries, 1).expand(n_queries, n_keys)
         b = torch.arange(n_keys).reshape(1, n_keys).expand(n_queries, n_keys)
         q_cumsum = torch.tensor([0] + query_lens).cumsum(dim=0)
         k_cumsum = torch.tensor([0] + key_lens_blockaligned).cumsum(dim=0)
@@ -64,27 +62,23 @@ class BlockDiagonalCausalFromBottomRightMask:
     def from_seqlens(query_lens, seq_lens, block_size=None):
         contexted = block_size is None
         if contexted:
-            prior_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(
-                query_lens, seq_lens)
+            prior_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(query_lens, seq_lens)
             active_mask = None
         else:
             prior_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(
-                query_lens, seq_lens, block_size)
+                query_lens, seq_lens, block_size
+            )
             active_mask = BlockDiagonalCausalFromBottomRightMask._from_seqlens(
-                query_lens, query_lens)
+                query_lens, query_lens
+            )
         return prior_mask, active_mask
 
 
-def ref_softmax(x: torch.Tensor,
-                dim: int,
-                mixed_precision=False,
-                return_max_reduce=False):
+def ref_softmax(x: torch.Tensor, dim: int, mixed_precision=False, return_max_reduce=False):
     max_value = torch.amax(x, dim=dim, keepdims=True)
     exp = torch.exp(x - max_value)
     if mixed_precision:
-        sum_value = torch.sum(exp.astype(torch.float32),
-                              dim=dim,
-                              keepdims=True).astype(x.dtype)
+        sum_value = torch.sum(exp.astype(torch.float32), dim=dim, keepdims=True).astype(x.dtype)
     else:
         sum_value = torch.sum(exp, dim=dim, keepdims=True)
     if return_max_reduce:
@@ -105,7 +99,8 @@ def ref_masked_attention(
         masked_score = scaled_qk + attn_mask.float()
     if return_max_reduce:
         norm_score, cached_max, cached_sum_reciprocal = ref_softmax(
-            masked_score, dim=-1, return_max_reduce=True)
+            masked_score, dim=-1, return_max_reduce=True
+        )
     else:
         norm_score = ref_softmax(masked_score, dim=-1)
     out = torch.einsum("hqk,khd->qhd", norm_score, value)
@@ -140,22 +135,20 @@ def ref_context_attention(
         key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
         value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
 
-    attn_mask, _ = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
-        query_lens, seq_lens)
+    attn_mask, _ = BlockDiagonalCausalFromBottomRightMask.from_seqlens(query_lens, seq_lens)
 
     # convert binary mask to -inf values
     attn_mask = torch.logical_not(attn_mask)
     attn_mask = attn_mask.float() * -30000
 
-    output, cached_max, cached_sum_reciprocal, lse, masked_score, scaled_qk = (
-        ref_masked_attention(
-            query,
-            key,
-            value,
-            scale,
-            attn_mask,
-            return_max_reduce=return_max_reduce,
-        ))
+    output, cached_max, cached_sum_reciprocal, lse, masked_score, scaled_qk = ref_masked_attention(
+        query,
+        key,
+        value,
+        scale,
+        attn_mask,
+        return_max_reduce=return_max_reduce,
+    )
 
     output = output.unsqueeze(1)
     if return_max_reduce:
@@ -172,6 +165,15 @@ def ref_context_attention(
 
 
 @pytest.mark.parametrize(
+    "block_size, large_tile_size",
+    [
+        (32, 2048),  # 64 blocks
+        (32, 4096),  # 128 blocks
+        (32, 8192),  # 256 blocks
+        (64, 8192),  # 128 blocks
+    ],
+)
+@pytest.mark.parametrize(
     "num_heads,num_queries_per_kv,head_size,mixed_precision",
     [
         (4, 2, 8, False),
@@ -184,6 +186,8 @@ def test_contexted_kv_attention(
     num_heads: int,
     num_queries_per_kv: int,
     head_size: int,
+    block_size: int,
+    large_tile_size,
     mixed_precision: bool,
 ) -> None:
     import os
@@ -195,10 +199,9 @@ def test_contexted_kv_attention(
     device = xm.xla_device()
 
     os.environ["NEURON_CC_FLAGS"] = (
-        " --model-type=transformer -O1 "
-        " --internal-hlo2tensorizer-options='--verify-hlo' ")
+        " --model-type=transformer -O1 --internal-hlo2tensorizer-options='--verify-hlo' "
+    )
 
-    random.seed(0)
     torch.manual_seed(0)
     torch.set_printoptions(sci_mode=False)
 
@@ -209,23 +212,21 @@ def test_contexted_kv_attention(
     prefill_batch_size = 2
     decode_batch_size = 6
     batch_size = prefill_batch_size + decode_batch_size
-    block_size = 32
     max_model_len = (max_query_len + max_ctx_len) * 4
 
     max_block_per_request = max_model_len // block_size
     dtype = torch.float32
     cache_size = (batch_size * max_block_per_request) + 2
-    ctx_lens = [
-        random.randint(min_ctx_len, max_ctx_len)
-        for _ in range(prefill_batch_size)
-    ] + [
-        random.randint(min_ctx_len, max_ctx_len)
-        for _ in range(decode_batch_size)
-    ]
-    query_lens = [
-        random.randint(min_query_len, max_query_len)
-        for _ in range(prefill_batch_size)
-    ] + [1 for _ in range(decode_batch_size)]
+    prefill_ctx_lens = torch.randint(
+        min_ctx_len, max_ctx_len + 1, (prefill_batch_size,), dtype=torch.long
+    ).tolist()
+    decode_ctx_lens = torch.randint(
+        min_ctx_len, max_ctx_len + 1, (decode_batch_size,), dtype=torch.long
+    ).tolist()
+    ctx_lens = prefill_ctx_lens + decode_ctx_lens
+    query_lens = torch.randint(
+        min_query_len, max_query_len + 1, (prefill_batch_size,), dtype=torch.long
+    ).tolist() + [1 for _ in range(decode_batch_size)]
     seq_lens = [a + b for a, b in zip(query_lens, ctx_lens)]
     num_kv_heads = num_heads // num_queries_per_kv
 
@@ -238,37 +239,23 @@ def test_contexted_kv_attention(
     kv.uniform_(-1, 1)
     key, value = kv.unbind(dim=1)
 
-    k_cache = torch.zeros(cache_size,
-                          block_size,
-                          num_kv_heads,
-                          head_size,
-                          dtype=dtype)
-    v_cache = torch.zeros(cache_size,
-                          block_size,
-                          num_kv_heads,
-                          head_size,
-                          dtype=dtype)
+    k_cache = torch.zeros(cache_size, block_size, num_kv_heads, head_size, dtype=dtype)
+    v_cache = torch.zeros(cache_size, block_size, num_kv_heads, head_size, dtype=dtype)
     k = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     v = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     values = torch.arange(0, cache_size, dtype=torch.long)
     values = values[torch.randperm(cache_size)]
-    block_table = values[:batch_size * max_block_per_request].view(
-        batch_size, max_block_per_request)
-    torch.tensor(seq_lens, dtype=torch.long)
+    block_table = values[: batch_size * max_block_per_request].view(
+        batch_size, max_block_per_request
+    )
     b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
-    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens[:-1],
-                                            dtype=torch.long),
-                               dim=0)
+    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens[:-1], dtype=torch.long), dim=0)
     # copy kv to cache
-    b_seq_start_loc = torch.cumsum(torch.tensor([0] + seq_lens[:-1],
-                                                dtype=torch.long),
-                                   dim=0)
+    b_seq_start_loc = torch.cumsum(torch.tensor([0] + seq_lens[:-1], dtype=torch.long), dim=0)
     for i in range(batch_size):
         for j in range(query_lens[i]):
-            k[b_start_loc[i] + j].copy_(key[b_seq_start_loc[i] + b_ctx_len[i] +
-                                            j])
-            v[b_start_loc[i] + j].copy_(value[b_seq_start_loc[i] +
-                                              b_ctx_len[i] + j])
+            k[b_start_loc[i] + j].copy_(key[b_seq_start_loc[i] + b_ctx_len[i] + j])
+            v[b_start_loc[i] + j].copy_(value[b_seq_start_loc[i] + b_ctx_len[i] + j])
         cur_ctx = 0
         block_id = 0
         while cur_ctx < b_ctx_len[i]:
@@ -279,12 +266,12 @@ def test_contexted_kv_attention(
                 end_loc = start_loc + block_size
             start_slot = block_table[i, block_id] * block_size
             end_slot = start_slot + end_loc - start_loc
-            k_cache.view(-1, num_kv_heads,
-                         head_size)[start_slot:end_slot].copy_(
-                             key[start_loc:end_loc])
-            v_cache.view(-1, num_kv_heads,
-                         head_size)[start_slot:end_slot].copy_(
-                             value[start_loc:end_loc])
+            k_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+                key[start_loc:end_loc]
+            )
+            v_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+                value[start_loc:end_loc]
+            )
             cur_ctx += block_size
             block_id += 1
 
@@ -311,20 +298,16 @@ def test_contexted_kv_attention(
     # build neuron program
     return_debug_tensors = False
     B_P_SIZE = 128
-    LARGE_TILE_SZ = 2048
-    max_num_queries = (
-        (sum(query_lens) + block_size - 1) // block_size) * block_size
+    LARGE_TILE_SZ = large_tile_size
+    max_num_queries = ((sum(query_lens) + block_size - 1) // block_size) * block_size
 
-    def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
-                                num_blocks):
+    def get_active_block_tables(block_tables, query_lens, seq_lens, block_size, num_blocks):
         context_lens = seq_lens - query_lens
         blocks_per_seq = (context_lens + block_size - 1) // block_size
         num_seqs = len(seq_lens)
         active_blocks: list[int] = []
         for seq_id in range(num_seqs):
-            active_blocks = (
-                active_blocks +
-                block_tables[seq_id, :blocks_per_seq[seq_id]].tolist())
+            active_blocks = active_blocks + block_tables[seq_id, : blocks_per_seq[seq_id]].tolist()
         return F.pad(
             torch.tensor(active_blocks),
             (0, num_blocks - len(active_blocks)),
@@ -339,17 +322,15 @@ def test_contexted_kv_attention(
     max_num_queries_shifted = shift_bit_length(max_num_queries)
     max_num_queries_factor = B_P_SIZE // max_num_queries_shifted
     max_num_queries_padded = max_num_queries_shifted * max_num_queries_factor
-    assert (max_num_queries_padded == B_P_SIZE
-            ), "invalid {max_num_queries_padded=}"
+    assert max_num_queries_padded == B_P_SIZE, "invalid {max_num_queries_padded=}"
     head_size_padded = B_P_SIZE
     context_lens = torch.tensor(seq_lens) - torch.tensor(query_lens)
     num_active_blocks_shifted = shift_bit_length(
-        ((context_lens + block_size - 1) // block_size).sum().item())
-    num_active_blocks_factor = (LARGE_TILE_SZ // block_size //
-                                num_active_blocks_shifted)
+        ((context_lens + block_size - 1) // block_size).sum().item()
+    )
+    num_active_blocks_factor = LARGE_TILE_SZ // block_size // num_active_blocks_shifted
     num_active_blocks = num_active_blocks_shifted * num_active_blocks_factor
-    assert (num_active_blocks *
-            block_size) == LARGE_TILE_SZ, "invalid {num_active_blocks=}"
+    assert (num_active_blocks * block_size) == LARGE_TILE_SZ, "invalid {num_active_blocks=}"
     context_kv_len = num_active_blocks * block_size
     assert context_kv_len == LARGE_TILE_SZ, f"invalid {context_kv_len=}"
 
@@ -386,9 +367,9 @@ def test_contexted_kv_attention(
     )
 
     # Build attention masks
-    prior_mask, active_mask = (
-        BlockDiagonalCausalFromBottomRightMask.from_seqlens(
-            query_lens, seq_lens, block_size=block_size))
+    prior_mask, active_mask = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
+        query_lens, seq_lens, block_size=block_size
+    )
     attn_mask = torch.concat(
         [
             F.pad(
@@ -433,8 +414,7 @@ def test_contexted_kv_attention(
     )
 
     if return_debug_tensors:
-        output_nki, *debug_tensors = flash_attn_varlen_nkifunc(
-            *input_args, **input_kwargs)
+        output_nki, *debug_tensors = flash_attn_varlen_nkifunc(*input_args, **input_kwargs)
     else:
         output_nki = flash_attn_varlen_nkifunc(*input_args, **input_kwargs)
         debug_tensors = []
@@ -445,8 +425,8 @@ def test_contexted_kv_attention(
     num_actual_tokens = sum(query_lens)
     print(f"{num_actual_tokens=}")
     # - o: shape (bs, n_heads, seq_q, d) -> (bs, seq_q, n_heads, d)
-    output_nki = output_nki.permute(
-        0, 2, 1, 3)[:, :, :, :head_size].cpu()[0, :num_actual_tokens, :, :]
+    output_nki = output_nki.permute(0, 2, 1, 3)[:, :, :, :head_size].cpu()
+    output_nki = output_nki[0, :num_actual_tokens, :, :]
     output_ref_padded = F.pad(
         output_ref,
         (0, 0, 0, 0, 0, 0, 0, max_num_queries_padded - output_ref.shape[0]),

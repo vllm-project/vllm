@@ -228,6 +228,20 @@ def load_v_tile(v_hbm_tile, cur_v_tile, j, v_i, config):
 
 
 @nki.jit
+def load_block_tables(block_tables_hbm, num_tiles):
+    (num_blocks,) = block_tables_hbm.shape
+    assert num_blocks % num_tiles == 0
+    num_blocks_per_tile = num_blocks // num_tiles
+    block_tables_hbm = block_tables_hbm.reshape((num_tiles, num_blocks_per_tile))
+    block_tables_buffer = nl.load(block_tables_hbm, dtype=nl.int32)
+    return block_tables_buffer
+
+
+def is_power_of_2(x):
+    return x > 0 and (x & (x - 1)) == 0
+
+
+@nki.jit
 def flash_paged_attention(
     query,
     key,
@@ -358,19 +372,12 @@ def flash_paged_attention(
     ), f"Need B_P_SIZE ({B_P_SIZE}) to be divisible by {block_size=}"
     num_large_k_tile = context_kv_len // LARGE_TILE_SZ
     num_blocks_per_large_tile = LARGE_TILE_SZ // block_size
-    assert num_blocks_per_large_tile <= B_P_SIZE, (
-        f"The number of blocks in each large tile "
-        f"({num_blocks_per_large_tile}) shouldn't exceed partition size {B_P_SIZE}"
-    )
+    assert block_size % 32 == 0, "block_size is expected to be a multiple of 32"
+    assert is_power_of_2(
+        num_blocks_per_large_tile
+    ), "The number of blocks in each large tile is expected of be power of 2"
 
-    block_tables_sbuf = nl.full(
-        (par_dim(B_P_SIZE), num_large_k_tile), 0, dtype=np.int32, buffer=nl.sbuf
-    )
-    for j in nl.affine_range(num_large_k_tile):
-        i_p = nl.arange(num_blocks_per_large_tile)[:, None]
-        block_tables_sbuf[i_p, j] = nl.load(
-            block_tables[j * num_blocks_per_large_tile + i_p], dtype=np.int32
-        )
+    block_tables_sbuf = load_block_tables(block_tables, num_large_k_tile)
 
     # Global Flash Attention accumulators
     o_buffer = nl.zeros(
@@ -400,7 +407,7 @@ def flash_paged_attention(
         )
 
         for k_i in nl.affine_range(num_blocks_per_large_tile):
-            loaded = nl.load(key_cache[block_tables_sbuf[k_i, j], :, head_id, :])
+            loaded = nl.load(key_cache[block_tables_sbuf[j, k_i], :, head_id, :])
             cur_k_tile[:, nl.ds(k_i * block_size, block_size)] = nl.transpose(loaded)
 
         load_tile_size = B_P_SIZE
@@ -408,7 +415,7 @@ def flash_paged_attention(
         for partition_idx in nl.affine_range(LARGE_TILE_SZ // load_tile_size):
             for block_in_partition in nl.affine_range(num_blocks_per_partition):
                 v_i = partition_idx * num_blocks_per_partition + block_in_partition
-                loaded_v = nl.load(value_cache[block_tables_sbuf[v_i, j], :, head_id, :])
+                loaded_v = nl.load(value_cache[block_tables_sbuf[j, v_i], :, head_id, :])
                 cur_v_tile[
                     partition_idx,
                     nl.ds(block_in_partition * block_size, block_size),
