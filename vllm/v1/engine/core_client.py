@@ -284,17 +284,19 @@ class AsyncMPClient(MPClient):
             log_stats=True,
         )
 
+        # ZMQ IO. Run it in background task so that we can
+        # overlap with AsyncLLM.output_handler_loop. This
+        # works because ZMQ IO releases the GIL.
         self.queue_task: Optional[asyncio.Task] = None
-        self.outputs_queue: Optional[asyncio.Queue[Union[EngineCoreOutputs,
-                                                         Exception]]] = None
+        self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs,
+                                                Exception]] = asyncio.Queue()
+
+    def shutdown(self):
+        super().shutdown()
+        if queue_task := getattr(self, "queue_task", None):
+            queue_task.cancel()
 
     async def _process_outputs_socket_loop(self):
-        """
-        ZMQ IO background loop. This helps performance because
-        ZMQ IO releases the GIL so we can overlap with output_handler_loop.
-        """
-
-        assert self.outputs_queue is not None
         try:
             while True:
                 (frame, ) = await self.output_socket.recv_multipart(copy=False)
@@ -305,11 +307,13 @@ class AsyncMPClient(MPClient):
 
     async def get_output_async(self) -> EngineCoreOutputs:
 
-        if self.outputs_queue is None:
-            self.outputs_queue = asyncio.Queue()
+        # Start output loop on the first call.
+        if self.queue_task is None:
             self.queue_task = asyncio.create_task(
                 self._process_outputs_socket_loop())
 
+        # NOTE: if an exception arises processing the socket,
+        # the exception is forwarded to the queue.
         outputs = await self.outputs_queue.get()
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
