@@ -1,23 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import signal
 import weakref
 from abc import ABC, abstractmethod
-from typing import List, Type
+from typing import List, Optional, Type
 
-import msgspec
 import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path, make_zmq_socket
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion)
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.serial_utils import MsgpackDecoder, PickleEncoder
 from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
@@ -40,7 +41,6 @@ class EngineCoreClient(ABC):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        log_stats: bool = False,
     ) -> "EngineCoreClient":
 
         # TODO: support this for debugging purposes.
@@ -50,18 +50,18 @@ class EngineCoreClient(ABC):
                 "is not currently supported.")
 
         if multiprocess_mode and asyncio_mode:
-            return AsyncMPClient(vllm_config, executor_class, log_stats)
+            return AsyncMPClient(vllm_config, executor_class)
 
         if multiprocess_mode and not asyncio_mode:
-            return SyncMPClient(vllm_config, executor_class, log_stats)
+            return SyncMPClient(vllm_config, executor_class)
 
-        return InprocClient(vllm_config, executor_class, log_stats)
+        return InprocClient(vllm_config, executor_class)
 
     @abstractmethod
     def shutdown(self):
         ...
 
-    def get_output(self) -> List[EngineCoreOutput]:
+    def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -70,16 +70,22 @@ class EngineCoreClient(ABC):
     def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
+    def reset_prefix_cache(self) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
-    async def get_output_async(self) -> List[EngineCoreOutput]:
+    async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
     async def profile_async(self, is_start: bool = True) -> None:
+        raise NotImplementedError
+
+    async def reset_prefix_cache_async(self) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -99,20 +105,24 @@ class InprocClient(EngineCoreClient):
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
 
-    def get_output(self) -> List[EngineCoreOutput]:
+    def get_output(self) -> EngineCoreOutputs:
         return self.engine_core.step()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         self.engine_core.add_request(request)
 
     def abort_requests(self, request_ids: List[str]) -> None:
-        self.engine_core.abort_requests(request_ids)
+        if len(request_ids) > 0:
+            self.engine_core.abort_requests(request_ids)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
+
+    def reset_prefix_cache(self) -> None:
+        self.engine_core.reset_prefix_cache()
 
 
 class MPClient(EngineCoreClient):
@@ -133,11 +143,11 @@ class MPClient(EngineCoreClient):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        log_stats: bool = False,
+        log_stats: bool,
     ):
         # Serialization setup.
         self.encoder = PickleEncoder()
-        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+        self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
         self.ctx = (
@@ -198,10 +208,8 @@ class MPClient(EngineCoreClient):
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 executor_class: Type[Executor],
-                 log_stats: bool = False):
+    def __init__(self, vllm_config: VllmConfig,
+                 executor_class: Type[Executor]):
 
         # Setup EngineCore signal handler.
         def sigusr1_handler(signum, frame):
@@ -213,13 +221,15 @@ class SyncMPClient(MPClient):
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=log_stats,
+            log_stats=False,
         )
 
-    def get_output(self) -> List[EngineCoreOutput]:
+    def get_output(self) -> EngineCoreOutputs:
+
         try:
             (frame, ) = self.output_socket.recv_multipart(copy=False)
-            return self.decoder.decode(frame.buffer).outputs
+            engine_core_outputs = self.decoder.decode(frame.buffer)
+            return engine_core_outputs
         except Exception as e:
             raise self._format_exception(e) from None
 
@@ -233,28 +243,34 @@ class SyncMPClient(MPClient):
             raise self._format_exception(e) from None
 
     def add_request(self, request: EngineCoreRequest) -> None:
+        # NOTE: text prompt is not needed in the core engine as it has been
+        # tokenized.
+        request.prompt = None
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: List[str]) -> None:
-        self._send_input(EngineCoreRequestType.ABORT, request_ids)
+        if len(request_ids) > 0:
+            self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     def profile(self, is_start: bool = True) -> None:
         self._send_input(EngineCoreRequestType.PROFILE,
                          EngineCoreProfile(is_start))
 
+    def reset_prefix_cache(self) -> None:
+        self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE,
+                         EngineCoreResetPrefixCache())
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 executor_class: Type[Executor],
-                 log_stats: bool = False):
+    def __init__(self, vllm_config: VllmConfig,
+                 executor_class: Type[Executor]):
 
         # EngineCore sends SIGUSR1 when it gets an Exception.
-        # NOTE: super().__init__ blocks the event loop until 
+        # NOTE: super().__init__ blocks the event loop until
         # background procs are setup. This handler allows us
-        # to catch  issues during startup (e.g. OOM). We switch 
+        # to catch  issues during startup (e.g. OOM). We switch
         # to a signal handler in the event loop __init__.
         def sigusr1_handler(signum, frame):
             self._sigusr1_handler()
@@ -266,25 +282,15 @@ class AsyncMPClient(MPClient):
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=log_stats,
+            log_stats=True,
         )
 
-        # Unregister the hander in the main trhead, 
-        # signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+        self.queue_task: Optional[asyncio.Task] = None
 
-        # NOTE TO SELF: putting this in AsyncMPClient is causing issues
-        # where the AsyncLLM is not triggering shutdown since the Excpections
-        # are not being raised. TODO: move it back to AsyncLLM.
-        def sigusr1_handler_asyncio():
-            self._sigusr1_handler()
-
-        asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
-                                                      sigusr1_handler_asyncio)
-
-    async def get_output_async(self) -> List[EngineCoreOutput]:
+    async def get_output_async(self) -> EngineCoreOutputs:
         try:
-            frames = await self.output_socket.recv_multipart(copy=False)
-            return self.decoder.decode(frames[0].buffer).outputs
+            (frame, ) = await self.output_socket.recv_multipart(copy=False)
+            return self.decoder.decode(frame.buffer)
         except Exception as e:
             raise self._format_exception(e) from None
 
@@ -297,6 +303,9 @@ class AsyncMPClient(MPClient):
             raise self._format_exception(e) from None
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        # NOTE: text prompt is not needed in the core engine as it has been
+        # tokenized.
+        request.prompt = None
         await self._send_input(EngineCoreRequestType.ADD, request)
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -306,3 +315,7 @@ class AsyncMPClient(MPClient):
     async def profile_async(self, is_start: bool = True) -> None:
         await self._send_input(EngineCoreRequestType.PROFILE,
                                EngineCoreProfile(is_start))
+
+    async def reset_prefix_cache_async(self) -> None:
+        await self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE,
+                               EngineCoreResetPrefixCache())

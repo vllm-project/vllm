@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 import json
 import os
@@ -5,9 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Type, Union
 
 import huggingface_hub
-from huggingface_hub import (file_exists, hf_hub_download,
+from huggingface_hub import (file_exists, hf_hub_download, list_repo_files,
                              try_to_load_from_cache)
-from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
+from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
+                                   HFValidationError, LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
 from torch import nn
@@ -23,8 +26,9 @@ from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
-                                             DbrxConfig, EAGLEConfig,
-                                             ExaoneConfig, H2OVLChatConfig,
+                                             DbrxConfig, DeepseekVLV2Config,
+                                             EAGLEConfig, ExaoneConfig,
+                                             H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
@@ -54,6 +58,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
+    "deepseek_vl_v2": DeepseekVLV2Config,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
@@ -260,42 +265,66 @@ def get_config(
     return config
 
 
+def try_get_local_file(model: Union[str, Path],
+                       file_name: str,
+                       revision: Optional[str] = 'main') -> Optional[Path]:
+    file_path = Path(model) / file_name
+    if file_path.is_file():
+        return file_path
+    else:
+        try:
+            cached_filepath = try_to_load_from_cache(repo_id=model,
+                                                     filename=file_name,
+                                                     revision=revision)
+            if isinstance(cached_filepath, str):
+                return Path(cached_filepath)
+        except HFValidationError:
+            ...
+    return None
+
+
 def get_hf_file_to_dict(file_name: str,
                         model: Union[str, Path],
                         revision: Optional[str] = 'main'):
     """
-    Downloads a file from the Hugging Face Hub and returns 
+    Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
 
     Parameters:
     - file_name (str): The name of the file to download.
     - model (str): The name of the model on the Hugging Face Hub.
-    - revision (str): The specific version of the model. 
+    - revision (str): The specific version of the model.
 
     Returns:
-    - config_dict (dict): A dictionary containing 
+    - config_dict (dict): A dictionary containing
     the contents of the downloaded file.
     """
-    file_path = Path(model) / file_name
 
-    if file_or_path_exists(model=model,
-                           config_name=file_name,
-                           revision=revision):
+    file_path = try_get_local_file(model=model,
+                                   file_name=file_name,
+                                   revision=revision)
 
-        if not file_path.is_file():
-            try:
-                hf_hub_file = hf_hub_download(model,
-                                              file_name,
-                                              revision=revision)
-            except (RepositoryNotFoundError, RevisionNotFoundError,
-                    EntryNotFoundError, LocalEntryNotFoundError) as e:
-                logger.debug("File or repository not found in hf_hub_download",
-                             e)
-                return None
-            file_path = Path(hf_hub_file)
+    if file_path is None and file_or_path_exists(
+            model=model, config_name=file_name, revision=revision):
+        try:
+            hf_hub_file = hf_hub_download(model, file_name, revision=revision)
+        except (RepositoryNotFoundError, RevisionNotFoundError,
+                EntryNotFoundError, LocalEntryNotFoundError) as e:
+            logger.debug("File or repository not found in hf_hub_download", e)
+            return None
+        except HfHubHTTPError as e:
+            logger.warning(
+                "Cannot connect to Hugging Face Hub. Skipping file "
+                "download for '%s':",
+                file_name,
+                exc_info=e)
+            return None
+        file_path = Path(hf_hub_file)
 
+    if file_path is not None and file_path.is_file():
         with open(file_path) as file:
             return json.load(file)
+
     return None
 
 
@@ -316,7 +345,12 @@ def get_pooling_config(model: str, revision: Optional[str] = 'main'):
     """
 
     modules_file_name = "modules.json"
-    modules_dict = get_hf_file_to_dict(modules_file_name, model, revision)
+
+    modules_dict = None
+    if file_or_path_exists(model=model,
+                           config_name=modules_file_name,
+                           revision=revision):
+        modules_dict = get_hf_file_to_dict(modules_file_name, model, revision)
 
     if modules_dict is None:
         return None
@@ -370,31 +404,54 @@ def get_sentence_transformer_tokenizer_config(model: str,
                                               revision: Optional[str] = 'main'
                                               ):
     """
-    Returns the tokenization configuration dictionary for a 
+    Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
 
     Parameters:
-    - model (str): The name of the Sentence Transformer 
+    - model (str): The name of the Sentence Transformer
     BERT model.
     - revision (str, optional): The revision of the m
     odel to use. Defaults to 'main'.
 
     Returns:
-    - dict: A dictionary containing the configuration parameters 
+    - dict: A dictionary containing the configuration parameters
     for the Sentence Transformer BERT model.
     """
-    for config_name in [
-            "sentence_bert_config.json",
-            "sentence_roberta_config.json",
-            "sentence_distilbert_config.json",
-            "sentence_camembert_config.json",
-            "sentence_albert_config.json",
-            "sentence_xlm-roberta_config.json",
-            "sentence_xlnet_config.json",
-    ]:
-        encoder_dict = get_hf_file_to_dict(config_name, model, revision)
-        if encoder_dict:
-            break
+    sentence_transformer_config_files = [
+        "sentence_bert_config.json",
+        "sentence_roberta_config.json",
+        "sentence_distilbert_config.json",
+        "sentence_camembert_config.json",
+        "sentence_albert_config.json",
+        "sentence_xlm-roberta_config.json",
+        "sentence_xlnet_config.json",
+    ]
+    encoder_dict = None
+
+    for config_file in sentence_transformer_config_files:
+        if try_get_local_file(model=model,
+                              file_name=config_file,
+                              revision=revision) is not None:
+            encoder_dict = get_hf_file_to_dict(config_file, model, revision)
+            if encoder_dict:
+                break
+
+    if not encoder_dict:
+        try:
+            # If model is on HuggingfaceHub, get the repo files
+            repo_files = list_repo_files(model,
+                                         revision=revision,
+                                         token=HF_TOKEN)
+        except Exception as e:
+            logger.debug("Error getting repo files", e)
+            repo_files = []
+
+        for config_name in sentence_transformer_config_files:
+            if config_name in repo_files:
+                encoder_dict = get_hf_file_to_dict(config_name, model,
+                                                   revision)
+                if encoder_dict:
+                    break
 
     if not encoder_dict:
         return None

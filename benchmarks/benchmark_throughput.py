@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Benchmark offline inference throughput."""
 import argparse
 import dataclasses

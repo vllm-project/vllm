@@ -53,12 +53,12 @@ void set_conv_params_fwd(ConvParamsBase &params,
                          const at::Tensor x,
                          const at::Tensor weight,
                          const at::Tensor out,
-                         const c10::optional<at::Tensor>& bias,
+                         const std::optional<at::Tensor>& bias,
                          bool silu_activation,
                          int64_t pad_slot_id,
-                         const c10::optional<at::Tensor>& query_start_loc = std::nullopt,
-                         const c10::optional<at::Tensor>& cache_indices = std::nullopt,
-                         const c10::optional<at::Tensor>& has_initial_state = std::nullopt) {
+                         const std::optional<at::Tensor>& query_start_loc = std::nullopt,
+                         const std::optional<at::Tensor>& cache_indices = std::nullopt,
+                         const std::optional<at::Tensor>& has_initial_state = std::nullopt) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -93,11 +93,11 @@ void set_conv_params_fwd(ConvParamsBase &params,
 
 
 void causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
-                  const c10::optional<at::Tensor> &bias_,
-                  const c10::optional<at::Tensor> &conv_states,
-                  const c10::optional<at::Tensor> &query_start_loc,
-                  const c10::optional<at::Tensor> &cache_indices,
-                  const c10::optional<at::Tensor> &has_initial_state,
+                  const std::optional<at::Tensor> &bias_,
+                  const std::optional<at::Tensor> &conv_states,
+                  const std::optional<at::Tensor> &query_start_loc,
+                  const std::optional<at::Tensor> &cache_indices,
+                  const std::optional<at::Tensor> &has_initial_state,
                   bool silu_activation,
                  // used to identify padding entries if cache_indices provided
                  // in case of padding, the kernel will return early
@@ -194,10 +194,10 @@ void causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
 void causal_conv1d_update(const at::Tensor &x,
                      const at::Tensor &conv_state,
                      const at::Tensor &weight,
-                     const c10::optional<at::Tensor> &bias_,
+                     const std::optional<at::Tensor> &bias_,
                      bool silu_activation,
-                     const c10::optional<at::Tensor> &cache_seqlens_,
-                     const c10::optional<at::Tensor> &conv_state_indices_,
+                     const std::optional<at::Tensor> &cache_seqlens_,
+                     const std::optional<at::Tensor> &conv_state_indices_,
                      // used to identify padding entries if cache_indices provided
                      // in case of padding, the kernel will return early
                      int64_t pad_slot_id) {

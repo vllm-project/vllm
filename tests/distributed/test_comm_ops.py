@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test the communication operators.
 
 Run `pytest tests/distributed/test_comm_ops.py`.

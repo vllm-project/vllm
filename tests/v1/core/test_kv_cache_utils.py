@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
-from vllm.inputs import token_inputs
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock,
@@ -14,14 +16,18 @@ def make_request(request_id,
                  prompt_token_ids,
                  mm_positions=None,
                  mm_hashes=None):
+    if mm_positions is None:
+        multi_modal_inputs = None
+    else:
+        multi_modal_inputs = [MultiModalKwargs({})] * len(mm_positions)
+
     return Request(
         request_id=request_id,
-        inputs=token_inputs(
-            prompt_token_ids=prompt_token_ids,
-            multi_modal_placeholders={"image": mm_positions}
-            if mm_positions else None,
-            multi_modal_hashes=mm_hashes,
-        ),
+        prompt=None,
+        prompt_token_ids=prompt_token_ids,
+        multi_modal_inputs=multi_modal_inputs,
+        multi_modal_hashes=mm_hashes,
+        multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
         eos_token_id=100,
         arrival_time=0,
@@ -147,22 +153,22 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
-    assert extra_keys == (("hash1", 0), )
+    assert extra_keys == ("hash1", )
     assert next_mm_idx == 1
 
     # Test with partial overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 3, 8, 0)
-    assert extra_keys == (("hash1", 3), )
+    assert extra_keys == ("hash1", )
     assert next_mm_idx == 1
 
     # Test with no overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 6, 10, 0)
-    assert extra_keys == ()
+    assert extra_keys is None
     assert next_mm_idx == 1
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == (("hash1", 0), ("hash2", 0))
+    assert extra_keys == ('hash1', 'hash2')
     assert next_mm_idx == 2
 
 
@@ -188,7 +194,7 @@ def test_hash_block_tokens():
                                    extra_keys)
     assert isinstance(block_hash, BlockHashType)
     assert block_hash.hash_value == hash(
-        (parent_block_hash, *curr_block_token_ids))
+        (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
     assert block_hash.extra_keys == extra_keys
 
@@ -216,11 +222,43 @@ def test_hash_request_tokens():
 
     # Check the first block
     assert block_hashes[0].token_ids == (0, 1, 2)
-    assert block_hashes[0].extra_keys == (("hash1", 0), )
+    assert block_hashes[0].extra_keys == ("hash1", )
 
     # Check the second block
     assert block_hashes[1].token_ids == (3, 4, 5)
-    assert block_hashes[1].extra_keys == (("hash2", 0), )
+    assert block_hashes[1].extra_keys == ("hash2", )
+
+
+def test_hash_tokens_different_mm_input():
+    request1 = make_request(
+        request_id=0,
+        prompt_token_ids=[_ for _ in range(6)],
+        mm_positions=[{
+            "offset": 0,
+            "length": 3
+        }, {
+            "offset": 3,
+            "length": 3
+        }],
+        mm_hashes=["hash1", "hash2"],
+    )
+    request2 = make_request(
+        request_id=1,
+        prompt_token_ids=[_ for _ in range(6)],
+        mm_positions=[{
+            "offset": 0,
+            "length": 3
+        }, {
+            "offset": 3,
+            "length": 3
+        }],
+        mm_hashes=["hash3", "hash2"],
+    )
+    block_size = 3
+    block_hashes1 = hash_request_tokens(block_size, request1)
+    block_hashes2 = hash_request_tokens(block_size, request2)
+    assert block_hashes1[0] != block_hashes2[0]
+    assert block_hashes1[1] != block_hashes2[1]
 
 
 def test_hash_request_tokens_no_mm_inputs():

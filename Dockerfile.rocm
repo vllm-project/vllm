@@ -1,174 +1,119 @@
-# Default ROCm 6.2 base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.2_ubuntu20.04_py3.9_pytorch_release_2.3.0"
+# default base image
+ARG REMOTE_VLLM="0"
+ARG USE_CYTHON="0"
+ARG BUILD_RPD="1"
+ARG COMMON_WORKDIR=/app
+ARG BASE_IMAGE=rocm/vllm-dev:base
 
-# Default ROCm ARCHes to build vLLM for.
-ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
+FROM ${BASE_IMAGE} AS base
 
-# Whether to install CK-based flash-attention
-# If 0, will not install flash-attention
-ARG BUILD_FA="1"
-ARG FA_GFX_ARCHS="gfx90a;gfx942"
-ARG FA_BRANCH="3cea2fb"
-
-# Whether to build triton on rocm
-ARG BUILD_TRITON="1"
-ARG TRITON_BRANCH="e192dba"
-
-### Base image build stage
-FROM $BASE_IMAGE AS base
-
-# Import arg(s) defined before this build stage
-ARG PYTORCH_ROCM_ARCH
+ARG ARG_PYTORCH_ROCM_ARCH
+ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
 # Install some basic utilities
-RUN apt-get update && apt-get install python3 python3-pip -y
-RUN apt-get update && apt-get install -y \
-    curl \
-    ca-certificates \
-    sudo \
-    git \
-    bzip2 \
-    libx11-6 \
-    build-essential \
-    wget \
-    unzip \
-    tmux \
-    ccache \
- && rm -rf /var/lib/apt/lists/*
-
-# When launching the container, mount the code directory to /vllm-workspace
-ARG APP_MOUNT=/vllm-workspace
-WORKDIR ${APP_MOUNT}
-
-RUN python3 -m pip install --upgrade pip
-# Remove sccache so it doesn't interfere with ccache
-# TODO: implement sccache support across components
+RUN apt-get update -q -y && apt-get install -q -y \
+    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev
+# Remove sccache    
+RUN python3 -m pip install --upgrade pip && pip install setuptools_scm
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
-
-# Install torch == 2.6.0 on ROCm
-RUN --mount=type=cache,target=/root/.cache/pip \
-    case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-        *"rocm-6.2"*) \
-            python3 -m pip uninstall -y torch torchvision \
-            && python3 -m pip install --pre \
-                torch==2.6.0.dev20241113+rocm6.2 \
-                'setuptools-scm>=8' \
-                torchvision==0.20.0.dev20241113+rocm6.2 \
-                --extra-index-url https://download.pytorch.org/whl/nightly/rocm6.2;; \
-        *) ;; esac
-
-ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
-ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/libtorch/lib:
-ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include/:/opt/rocm/include/:
-
-ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
-ENV CCACHE_DIR=/root/.cache/ccache
+ARG COMMON_WORKDIR
+WORKDIR ${COMMON_WORKDIR}
 
 
-### AMD-SMI build stage
-FROM base AS build_amdsmi
-# Build amdsmi wheel always
-RUN cd /opt/rocm/share/amd_smi \
-    && python3 -m pip wheel . --wheel-dir=/install
+# -----------------------
+# vLLM fetch stages
+FROM base AS fetch_vllm_0
+ONBUILD COPY ./ vllm/
+FROM base AS fetch_vllm_1
+ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
+ARG VLLM_BRANCH="main"
+ONBUILD RUN git clone ${VLLM_REPO} \
+	    && cd vllm \
+	    && git checkout ${VLLM_BRANCH}
+FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
+# -----------------------
+# vLLM build stages
+FROM fetch_vllm AS build_vllm
+ARG USE_CYTHON
+# Build vLLM
+RUN cd vllm \
+    && python3 -m pip install -r requirements-rocm.txt \
+    && python3 setup.py clean --all  \
+    && if [ ${USE_CYTHON} -eq "1" ]; then python3 setup_cython.py build_ext --inplace; fi \
+    && python3 setup.py bdist_wheel --dist-dir=dist
+FROM scratch AS export_vllm
+ARG COMMON_WORKDIR
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements*.txt /
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 
-### Flash-Attention wheel build stage
-FROM base AS build_fa
-ARG BUILD_FA
-ARG FA_GFX_ARCHS
-ARG FA_BRANCH
-# Build ROCm flash-attention wheel if `BUILD_FA = 1`
-RUN --mount=type=cache,target=${CCACHE_DIR} \
-    if [ "$BUILD_FA" = "1" ]; then \
-        mkdir -p libs \
-        && cd libs \
-        && git clone https://github.com/ROCm/flash-attention.git \
-        && cd flash-attention \
-        && git checkout "${FA_BRANCH}" \
-        && git submodule update --init \
-        && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
-    # Create an empty directory otherwise as later build stages expect one
-    else mkdir -p /install; \
-    fi
+# -----------------------
+# Test vLLM image
+FROM base AS test
 
+RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
-### Triton wheel build stage
-FROM base AS build_triton
-ARG BUILD_TRITON
-ARG TRITON_BRANCH
-# Build triton wheel if `BUILD_TRITON = 1`
-RUN --mount=type=cache,target=${CCACHE_DIR} \
-    if [ "$BUILD_TRITON" = "1" ]; then \
-    mkdir -p libs \
-    && cd libs \
-    && python3 -m pip install ninja cmake wheel pybind11 \
-    && git clone https://github.com/OpenAI/triton.git \
-    && cd triton \
-    && git checkout "${TRITON_BRANCH}" \
-    && cd python \
-    && python3 setup.py bdist_wheel --dist-dir=/install; \
-    # Create an empty directory otherwise as later build stages expect one
-    else mkdir -p /install; \
-    fi
+# Install vLLM
+RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
+    cd /install \
+    && pip install -U -r requirements-rocm.txt \
+    && pip uninstall -y vllm \
+    && pip install *.whl
 
-
-### Final vLLM build stage
-FROM base AS final
-# Import the vLLM development directory from the build context
-COPY . .
-ARG GIT_REPO_CHECK=0
-RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
-
-RUN python3 -m pip install --upgrade pip
-
-# Package upgrades for useful functionality or to avoid dependency issues
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --upgrade numba scipy huggingface-hub[cli] pytest-shard
-
-
-# Workaround for ray >= 2.10.0
-ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
-# Silences the HF Tokenizers warning
-ENV TOKENIZERS_PARALLELISM=false
-
-RUN --mount=type=cache,target=${CCACHE_DIR} \
-    --mount=type=bind,source=.git,target=.git \
-    --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -Ur requirements-rocm.txt \
-    && python3 setup.py clean --all \
-    && python3 setup.py develop
-
-# Copy amdsmi wheel into final image
-RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install \
-    mkdir -p libs \
-    && cp /install/*.whl libs \
-    # Preemptively uninstall to avoid same-version no-installs
-    && python3 -m pip uninstall -y amdsmi;
-
-# Copy triton wheel(s) into final image if they were built
-RUN --mount=type=bind,from=build_triton,src=/install,target=/install \
-    mkdir -p libs \
-    && if ls /install/*.whl; then \
-        cp /install/*.whl libs \
-        # Preemptively uninstall to avoid same-version no-installs
-        && python3 -m pip uninstall -y triton; fi
-
-# Copy flash-attn wheel(s) into final image if they were built
-RUN --mount=type=bind,from=build_fa,src=/install,target=/install \
-    mkdir -p libs \
-    && if ls /install/*.whl; then \
-        cp /install/*.whl libs \
-        # Preemptively uninstall to avoid same-version no-installs
-        && python3 -m pip uninstall -y flash-attn; fi
-
-# Install wheels that were built to the final image
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if ls libs/*.whl; then \
-    python3 -m pip install libs/*.whl; fi
+WORKDIR /vllm-workspace
+ARG COMMON_WORKDIR
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
 
 # install development dependencies (for testing)
-RUN python3 -m pip install -e tests/vllm_test_utils
+RUN cd /vllm-workspace \
+    && rm -rf vllm \
+    && python3 -m pip install -e tests/vllm_test_utils \
+    && python3 -m pip install lm-eval[api]==0.4.4 \
+    && python3 -m pip install pytest-shard
+
+# -----------------------
+# Final vLLM image
+FROM base AS final
+
+RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
+# Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
+# Manually remove it so that later steps of numpy upgrade can continue
+RUN case "$(which python3)" in \
+        *"/opt/conda/envs/py_3.9"*) \
+            rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/;; \
+        *) ;; esac
+
+RUN python3 -m pip install --upgrade huggingface-hub[cli]
+ARG BUILD_RPD
+RUN if [ ${BUILD_RPD} -eq "1" ]; then \
+    git clone -b nvtx_enabled https://github.com/ROCm/rocmProfileData.git \
+    && cd rocmProfileData/rpd_tracer \
+    && pip install -r requirements.txt && cd ../ \
+    && make && make install \
+    && cd hipMarker && python3 setup.py install ; fi
+
+# Install vLLM
+RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
+    cd /install \
+    && pip install -U -r requirements-rocm.txt \
+    && pip uninstall -y vllm \
+    && pip install *.whl
+
+ARG COMMON_WORKDIR
+
+# Copy over the benchmark scripts as well
+COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
+COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
+
+ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+ENV TOKENIZERS_PARALLELISM=false
+
+# Performance environment variable.
+ENV HIP_FORCE_DEV_KERNARG=1
 
 CMD ["/bin/bash"]
+
