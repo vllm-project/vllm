@@ -150,9 +150,12 @@ class PagedAttention:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
 
         max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
-        if kv_cache_dtype not in ['int8', 'fp8', 'fp8', 'fp8_e5m2', 'fp8_e4m3']:
+        if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
             k_scale, v_scale = (None, None)
             query = query.contiguous()
+        elif "fp8" in kv_cache_dtype:
+            key_cache = key_cache.view(torch.float8_e4m3fnuz)
+            value_cache = value_cache.view(torch.float8_e4m3fnuz)
         else:
             key_cache = key_cache.view(torch.int8)
             value_cache = value_cache.view(torch.int8)
