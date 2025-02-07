@@ -72,6 +72,12 @@ class KVCacheManager:
         self.req_to_blocks: DefaultDict[str,
                                         List[KVCacheBlock]] = defaultdict(list)
 
+        # Mapping from request ID to kv block hashes.
+        # This is used to avoid recomputing the block hashes when the request
+        # is preempted and resumed.
+        self.req_to_block_hashes: DefaultDict[
+            str, List[BlockHashType]] = defaultdict(list)
+
     @property
     def usage(self) -> float:
         return 1.0 - (self.free_block_queue.num_free_blocks /
@@ -98,10 +104,10 @@ class KVCacheManager:
 
         # The block hashes for the request may already be computed
         # if the request was preempted and resumed.
-        if not request.kv_block_hashes:
-            request.set_kv_block_hashes(
-                hash_request_tokens(self.block_size, request))
-        block_hashes = request.kv_block_hashes
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        if not block_hashes:
+            block_hashes = hash_request_tokens(self.block_size, request)
+            self.req_to_block_hashes[request.request_id] = block_hashes
 
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -437,7 +443,8 @@ class KVCacheManager:
             full_blocks: The list of blocks to update hash metadata.
             prev_block: The previous block in the chain.
         """
-        num_cached_block_hashes = len(request.kv_block_hashes)
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        num_cached_block_hashes = len(block_hashes)
 
         # Update the new blocks with the block hashes through the chain.
         prev_block_hash_value = None
@@ -470,7 +477,7 @@ class KVCacheManager:
                 # this request (either the prompt tokens or the previously
                 # generated tokens with preemption). In this case we simply
                 # reuse the block hash.
-                block_hash = request.kv_block_hashes[blk_idx]
+                block_hash = block_hashes[blk_idx]
             else:
                 # Otherwise compute the block hash and cache it in the request
                 # in case it will be preempted in the future.
@@ -492,7 +499,7 @@ class KVCacheManager:
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(prev_block_hash_value,
                                                block_tokens, extra_keys)
-                request.append_kv_block_hashes(block_hash)
+                block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
