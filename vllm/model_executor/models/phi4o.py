@@ -1567,16 +1567,6 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         return merged_embeds
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
-        """
-        Load in the weights for VLLM.
-
-        NOTE: I highly recommend avoiding the VLLM WeightMapper/Autoloader approach
-        since it's needlessly complex.
-
-        Args:
-            weights (Iterable[Tuple[str, torch.Tensor]]): Weights to load (usualy from a
-                Hugging Face model).
-        """
         weights = {name: weight for name, weight in weights}
         adjusted_weights = {}
 
@@ -1606,10 +1596,10 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         missing_keys, unexpected_keys = self.load_state_dict(
             adjusted_weights, strict=False
         )
-        logger.debug("--------------- missing keys -----------------")
+        logger.debug("*** missing keys:")
         for key in missing_keys:
             logger.debug(key)
-        logger.debug("--------------- unexpected keys ---------------")
+        logger.debug("**** unexpected keys:")
         for key in unexpected_keys:
             logger.debug(key)
 
@@ -1622,21 +1612,6 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        """
-        Run the forward pass of the model.
-
-        Args:
-            input_ids (torch.Tensor): Input IDs.
-            positions (torch.Tensor): Positions (handled by VLLM)
-            kv_caches (List[torch.Tensor]): Key-value caches (handled by VLLM)
-            attn_metadata (AttentionMetadata): Attention metadata (handled by VLLM)
-            intermediate_tensors (Optional[IntermediateTensors]): Intermediate tensors
-                (handled by VLLM)
-            kwargs (object): Keyword arguments.  NOTE: this should contain the audio/MM input.
-
-        Returns:
-            torch.Tensor: Hidden states / model output.
-        """
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
@@ -1692,16 +1667,6 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        """
-        Boilerplate method for computing logits (needed by the sampler).
-
-        Args:
-            hidden_states (torch.Tensor): Hidden states.
-            sampling_metadata (SamplingMetadata): Sampling metadata.
-
-        Returns:
-            Optional[torch.Tensor]: Logits.
-        """
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
@@ -1711,15 +1676,5 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        """
-        Boilerplate method for sampling by VLLM.
-
-        Args:
-            logits (torch.Tensor): Logits.
-            sampling_metadata (SamplingMetadata): Sampling metadata.
-
-        Returns:
-            Optional[SamplerOutput]: Sampler output.
-        """
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
