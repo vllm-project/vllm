@@ -598,10 +598,7 @@ async def benchmark(
 
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
-        #raise ValueError(
-        #    "Initial test run failed - Please make sure benchmark arguments "
-        #    f"are correctly specified. Error: {test_output.error}")
-        print(
+        raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
             f"are correctly specified. Error: {test_output.error}")
     else:

@@ -159,7 +159,7 @@ class OutputProcessor:
 
             num_tokens = last - first  # might not be robust
             start = engine_core_outputs.new_token_id_offsets[i]
-            end = engine_core_outputs.new_token_id_offsets[i + 1] if i < num_tokens - 1 else -1
+            end = engine_core_outputs.new_token_id_offsets[i + 1] if i < num_tokens - 1 else len(engine_core_outputs.new_token_ids)
             # better way to do this?
             new_token_ids = engine_core_outputs.new_token_ids[start:end]
 
