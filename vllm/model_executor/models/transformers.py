@@ -137,26 +137,6 @@ class HFCompatiblePPMissingLayer(PPMissingLayer):
         return (super().forward(input), )
 
 
-def get_layers(module: nn.Module) -> nn.ModuleList:
-    # TODO transformers will have a util to get it
-    for child in module.children():
-        if isinstance(child, nn.ModuleList):
-            return child
-    raise ValueError(f"Could not find a ModuleList in {module}")
-
-
-def get_final_norm_name(module: nn.Module) -> nn.Module:
-    # TODO transformers will have a util to get it
-    for name, child in reversed(list(module.named_children())):
-        if "norm" in child.__class__.__name__.lower():
-            return name
-        if "norm" in name.lower():
-            return name
-        if isinstance(child, nn.ModuleList):
-            break
-    raise ValueError(f"Could not find a norm layer in {module}")
-
-
 class TransformersModel(nn.Module, SupportsPP):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
@@ -175,6 +155,11 @@ class TransformersModel(nn.Module, SupportsPP):
         self.device_config = device_config
         self.quant_config = quant_config
 
+        self.pp_group = get_pp_group()
+        self.pp_size = self.pp_group.world_size
+        self.pp_rank = self.pp_group.rank_in_group
+        self.tp_size = get_tensor_model_parallel_world_size()
+
         # Use meta device to delay allocating GPU tensors
         with torch.device("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
@@ -184,40 +169,25 @@ class TransformersModel(nn.Module, SupportsPP):
             )
         prefix = self.model.base_model_prefix
 
+        self.pipeline_parallel()
+        self.tensor_parallel()
+
         # Input embeddings
-        if get_pp_group().is_first_rank or (config.tie_word_embeddings
-                                            and get_pp_group().is_last_rank):
-            new_module = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                quant_config=None,
-            )
-            self.model.set_input_embeddings(new_module)
-        else:
-            self.model.set_input_embeddings(PPMissingLayer())
-
-        # Pipeline parallelise the transformer layers
-        start_layer, end_layer = get_pp_indices(config.num_hidden_layers,
-                                                get_pp_group().rank_in_group,
-                                                get_pp_group().world_size)
-        layers = get_layers(self.model)
-        for i in range(len(layers)):
-            if start_layer <= i and i < end_layer:
-                continue
-            layers[i] = HFCompatiblePPMissingLayer()
-
-        final_norm_name = get_final_norm_name(self.model)
-        if not get_pp_group().is_last_rank:
-            setattr(self.model, final_norm_name, PPMissingLayer())
+        if not isinstance(self.model.get_input_embeddings(), PPMissingLayer):
+            self.model.set_input_embeddings(
+                VocabParallelEmbedding(
+                    config.vocab_size,
+                    config.hidden_size,
+                    org_num_embeddings=config.vocab_size,
+                    quant_config=None,
+                ))
 
         # Transformer layers (this must happen after pipeline parallelisation)
         self.attention_instances = self.create_attention_instances(
             config, cache_config, quant_config=None)
-        self.apply_base_model_tp_plan(self.model)
 
         # Output embeddings
-        if get_pp_group().is_last_rank:
+        if not isinstance(getattr(self, "lm_head", None), PPMissingLayer):
             self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -233,8 +203,6 @@ class TransformersModel(nn.Module, SupportsPP):
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
                                                     logit_scale)
-        else:
-            self.lm_head = PPMissingLayer()
 
         # Initialize buffers
         self.init_buffers(self.model)
@@ -248,6 +216,85 @@ class TransformersModel(nn.Module, SupportsPP):
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.hidden_size))
 
+    def pipeline_parallel(self):
+        """
+        Apply the model's pipeline parallelization plan.
+        """
+        if self.pp_size <= 1:
+            return
+
+        if not self.model.supports_pp_plan:
+            raise ValueError(
+                f"{type(self.model)} does not support pipeline parallel yet!")
+
+        module_lists = []
+        module_list_idx = None
+        pp_plan = list(self.model._pp_plan.keys())
+        for i, name in enumerate(pp_plan):
+            if isinstance(getattr(self.model, name), nn.ModuleList):
+                module_lists.append(name)
+                module_list_idx = i
+
+        if len(module_lists) > 1:
+            raise ValueError(
+                "Pipeline parallel of models with multiple `ModuleList`s "
+                "in the base model are not supported yet!")
+        if module_list_idx is None:
+            raise ValueError(
+                f"Could not find `ModuleList` in {type(self.model)}")
+
+        # Layers before module list
+        for name in pp_plan[:module_list_idx]:
+            if self.pp_group.is_first_rank or (self.config.tie_word_embeddings
+                                               and self.pp_group.is_last_rank):
+                continue
+            setattr(self.model, name, PPMissingLayer())
+
+        # Module list
+        start_layer, end_layer = get_pp_indices(self.config.num_hidden_layers,
+                                                self.pp_rank, self.pp_size)
+        layers_name = pp_plan[module_list_idx]
+        layers = getattr(self.model, layers_name)
+        for i in range(len(layers)):
+            if start_layer <= i and i < end_layer:
+                continue
+            layers[i] = HFCompatiblePPMissingLayer()
+
+        # Layers after module list
+        for name in pp_plan[module_list_idx + 1:]:
+            # Modules that should be on last rank
+            if not self.pp_group.is_last_rank:
+                setattr(self.model, name, PPMissingLayer())
+
+        if not self.pp_group.is_last_rank:
+            self.lm_head = PPMissingLayer()
+
+    def tensor_parallel(self):
+        """
+        Apply the model's tensor parallelization plan.
+        Currently only supports linear layers.
+        """
+        if self.tp_size > 1 and not self.model.supports_tp_plan:
+            raise ValueError(
+                f"{type(self.model)} does not support tensor parallel yet!")
+
+        tp_plan = self.model._tp_plan
+
+        def tensor_parallel(module: nn.Module, prefix: str = ""):
+            for child_name, child_module in module.named_children():
+                qual_name = maybe_prefix(prefix, child_name)
+                for pattern, style in tp_plan.items():
+                    if re.match(pattern, qual_name) and isinstance(
+                            child_module, nn.Linear):
+                        new_module = replace_linear_class(
+                            child_module, style, self.quant_config)
+                        setattr(module, child_name, new_module)
+                        log_replacement(qual_name, child_module, new_module)
+                else:
+                    tensor_parallel(child_module, prefix=qual_name)
+
+        tensor_parallel(self.model)
+
     def create_attention_instances(
         self,
         config: PretrainedConfig,
@@ -257,48 +304,22 @@ class TransformersModel(nn.Module, SupportsPP):
         """
         Create `Attention` instances to inform KV cache allocation.
         """
-        tp_size = get_tensor_model_parallel_world_size()
-        pp_size = get_pp_group().world_size
-        pp_rank = get_pp_group().rank_in_group
-        layers_per_rank = divide(config.num_hidden_layers, pp_size)
-        offset = layers_per_rank * pp_rank
+        start, end = get_pp_indices(self.config.num_hidden_layers,
+                                    self.pp_rank, self.pp_size)
         return {
-            i + offset:
+            i:
             Attention(
-                num_heads=divide(config.num_attention_heads, tp_size),
+                num_heads=divide(config.num_attention_heads, self.tp_size),
                 head_size=config.head_dim,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_flash_attention_forward
                 scale=config.head_dim**-0.5,
-                num_kv_heads=divide(config.num_key_value_heads, tp_size),
+                num_kv_heads=divide(config.num_key_value_heads, self.tp_size),
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f"{i + offset}.attn")
-            for i in range(layers_per_rank)
+                prefix=f"{i}.attn")
+            for i in range(start, end)
         }
-
-    def apply_base_model_tp_plan(self, module: nn.Module, prefix: str = ""):
-        """
-        Apply the base model tensor parallelization plan to a module.
-        Currently only supports linear layers.
-        """
-        if (self.config.base_model_tp_plan is None
-                and get_tensor_model_parallel_world_size() > 1):
-            raise ValueError(
-                "Trying to run tensor parallelization but the model does not "
-                "support it yet!")
-
-        for child_name, child_module in module.named_children():
-            qual_name = maybe_prefix(prefix, child_name)
-            for pattern, style in self.config.base_model_tp_plan.items():
-                if re.match(pattern, qual_name) and isinstance(
-                        child_module, nn.Linear):
-                    new_module = replace_linear_class(child_module, style,
-                                                      self.quant_config)
-                    setattr(module, child_name, new_module)
-                    log_replacement(qual_name, child_module, new_module)
-            else:
-                self.apply_base_model_tp_plan(child_module, prefix=qual_name)
 
     def init_buffers(self, module: nn.Module):
         for name, buffer in module.named_buffers(recurse=False):
