@@ -195,6 +195,9 @@ steps:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - VLLM_USE_V1=1 pytest -v -s v1/e2e
+    # Integration test for streaming correctness (requires special branch).
+    - pip install -U git+https://github.com/robertgshaw2-neuralmagic/lm-evaluation-harness.git@streaming-api
+    - pytest -v -s entrypoints/openai/test_accuracy.py::test_lm_eval_accuracy_v1_engine
 
 - label: Examples Test # 25min
   working_dir: "/vllm-workspace/examples"
