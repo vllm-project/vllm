@@ -18,7 +18,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from vllm import envs
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
+from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
@@ -252,15 +252,6 @@ class StackAudioFrames(nn.Module):
         return audio_embeds
 
 
-class FlippedSiluAndMul(SiluAndMul):
-    """Ultravox is trained with SwiGLU with flipped halves."""
-
-    def forward(self, x: torch.Tensor):
-        a, b = x.chunk(2, dim=-1)
-        flipped = torch.cat((b, a), dim=-1)
-        return super().forward(flipped)
-
-
 class UltravoxProjector(nn.Module):
 
     def __init__(self, config: UltravoxConfig):
@@ -273,7 +264,7 @@ class UltravoxProjector(nn.Module):
         dim_mid = self.hidden_dim
 
         if config.projector_act == "swiglu":
-            self.act = FlippedSiluAndMul()
+            self.act = MulAndSilu()
             dim_mid = dim_mid // 2
         else:
             self.act = get_act_fn(config.projector_act)
@@ -281,7 +272,7 @@ class UltravoxProjector(nn.Module):
         dim_out = config.text_config.hidden_size
         self.linear_2 = nn.Linear(dim_mid, dim_out, bias=False)
 
-        # Ultravox v0.4.1 and below uses layer_norm after the second linear layer,
+        # Ultravox v0.4.1 and below use layer_norm after the second linear layer
         # while v0.5.0 and above uses layer_norm after the first linear layer.
         if config.projector_ln_mid:
             self.ln_mid: nn.Module = RMSNorm(dim_mid)
