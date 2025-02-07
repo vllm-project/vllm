@@ -87,6 +87,7 @@ class ErrorResponse(OpenAIBaseModel):
         # In case of error OpenAI sends message in error field
         self.error = {"message": self.message}
 
+
 class ModelPermission(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"modelperm-{random_uuid()}")
     object: str = "model_permission"
