@@ -346,15 +346,15 @@ class TransformersModel(nn.Module, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        if get_pp_group().is_first_rank:
-            if input_ids is not None:
-                input_ids = input_ids[None, ...]
-            if inputs_embeds is not None:
-                inputs_embeds = inputs_embeds[None, ...]
-        else:
+        if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             input_ids = None
-            inputs_embeds = intermediate_tensors["hidden_states"][None, ...]
+            inputs_embeds = intermediate_tensors["hidden_states"]
+
+        if input_ids is not None:
+            input_ids = input_ids[None, ...]
+        if inputs_embeds is not None:
+            inputs_embeds = inputs_embeds[None, ...]
 
         hidden_states = self.model(
             input_ids=input_ids,
