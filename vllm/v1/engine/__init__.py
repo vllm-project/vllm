@@ -131,11 +131,11 @@ class EngineCoreOutputs(
     request_ids: List[str]
     new_token_id_offsets: List[int]
     new_token_ids: List[int]
-    new_logprobs: List[Optional[LogprobsLists]] = None
-    new_prompt_logprobs_tensors: List[Optional[LogprobsTensors]] = None
+    # TODO: need offsets for logprobs?
+    new_logprobs: List[Optional[LogprobsLists]]
+    new_prompt_logprobs_tensors: List[Optional[LogprobsTensors]]
     finished: List[bool]
     finish_reason: Dict[str, FinishReason]  # Union[List, Dict]?
-    stop_reason: List[Union[int, str, None]]
     events: List[Optional[List[EngineCoreEvent]]]
     scheduler_stats: SchedulerStats
     timestamp: float = 0.0

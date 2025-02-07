@@ -151,9 +151,10 @@ class EngineCore:
                 request_ids=[],
                 new_token_id_offsets=[],
                 new_token_ids=[],
+                new_logprobs = [],
+                new_prompt_logprobs_tensors = [],
                 finished=[],
                 finish_reason={},
-                stop_reason=[],
                 scheduler_stats=self.scheduler.make_stats()
             )
 

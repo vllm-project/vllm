@@ -8,9 +8,9 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
-from vllm.v1.engine.detokenizer import (DetokenizerOutput,
-                                        IncrementalDetokenizer)
+from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest, FinishReason
+from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.metrics.stats import IterationStats, RequestStateStats
 
 
@@ -146,6 +146,7 @@ class OutputProcessor:
 
         If you need to touch every element of the batch, do it from
         within the loop below.
+
         **********************************************************
         """
 
@@ -160,8 +161,6 @@ class OutputProcessor:
             num_tokens = last - first  # might not be robust
             start = engine_core_outputs.new_token_id_offsets[i]
             end = engine_core_outputs.new_token_id_offsets[i + 1] if i < num_tokens - 1 else len(engine_core_outputs.new_token_ids)
-            # better way to do this?
-            new_token_ids = engine_core_outputs.new_token_ids[start:end]
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(req_state,
@@ -170,7 +169,10 @@ class OutputProcessor:
                                            engine_core_timestamp,
                                            iteration_stats)
 
-            finish_reason = engine_core_outputs.finish_reason[i + first]
+            new_token_ids = engine_core_outputs.new_token_ids[start:end]
+            new_logprobs = engine_core_outputs.new_logprobs[start:end]
+            new_prompt_logprobs_tensors = engine_core_outputs.new_prompt_logprobs_tensors[start:end]
+            finish_reason = engine_core_outputs.finish_reason.get(req_id)
 
             # TODO(andy): prompt logprobs + chunked prefill can
             # result in engine core returning an output for a
@@ -195,7 +197,10 @@ class OutputProcessor:
 
             # 3) Compute sample and prompt logprobs for request,
             #    if required.
-            req_state.logprobs_processor.update_from_output(engine_core_output)
+            req_state.logprobs_processor.update_from_output(
+                new_logprobs,
+                new_prompt_logprobs_tensors,
+            )
 
             # 4) Create and handle RequestOutput objects.
             if request_output := self._make_request_output(

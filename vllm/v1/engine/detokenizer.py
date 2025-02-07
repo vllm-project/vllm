@@ -7,7 +7,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
-from vllm.v1.engine import EngineCoreRequest, FinishReason
+from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
@@ -84,12 +84,7 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
         )
 
-    def update(
-        self,
-        new_token_ids: List[int],
-        finish_reason: Optional[FinishReason],
-        stop_reason: Union[int, str, None],
-    ) -> Optional[str]:
+    def update(self, new_token_ids: List[int]) -> Optional[str]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.

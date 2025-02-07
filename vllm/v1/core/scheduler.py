@@ -485,9 +485,10 @@ class Scheduler:
         output = EngineCoreOutputs(request_ids=[],
                                    new_token_id_offsets=[],
                                    new_token_ids=[],
+                                   new_logprobs = [],
+                                   new_prompt_logprobs_tensors = [],
                                    finished=[],
                                    finish_reason={},
-                                   stop_reason=[],
                                    scheduler_stats=None
                                    )
 
@@ -549,8 +550,8 @@ class Scheduler:
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
 
             stopped = False
-            new_logprobs = None
-            new_token_ids: List[int] = []
+            new_logprobs = []# None
+            new_token_ids = []#None
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
@@ -579,11 +580,15 @@ class Scheduler:
                 output.new_token_id_offsets.append(offset)
                 new_ids = request.output_token_ids[-num_new_tokens:]
                 output.new_token_ids += new_ids
+
+                # XXXXXXXXX list/None
+                output.new_logprobs += new_logprobs
+                output.new_prompt_logprobs_tensors += (prompt_logprobs_tensors if prompt_logprobs_tensors is not None else [])
+
                 output.finished.append(request.is_finished())
                 if request.get_finished_reason() is not None:
                     output.finish_reason[req_id] = request.get_finished_reason()
                 #print(f"req stop = {request.stop_reason}, {request.status}")
-                output.stop_reason.append(request.stop_reason)
                 output.events.append(request.fake_events())
                 offset = offset + len(new_ids)  # move out of if?
 
