@@ -263,6 +263,7 @@ class InputPreprocessor:
 
         if isinstance(prompt, list):
             prompt = tokenizer.decode(prompt)
+
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
