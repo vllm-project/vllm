@@ -85,7 +85,7 @@ def bgmv_shrink(inputs: torch.Tensor,
     outputs = (selected_loras @ inputs.reshape(
         (batch_size, input_size, 1))).reshape((batch_size, output_size))
 
-    output_tensor = scaling * outputs[:]
+    output_tensor = scaling * outputs
 
 
 def sgmv_expand_slice(inputs: torch.Tensor,
@@ -99,13 +99,12 @@ def sgmv_expand_slice(inputs: torch.Tensor,
                       token_nums: int,
                       slice_offset: int,
                       slice_size: int,
-                      total_size: int,
                       add_inputs: bool = False):
     exploded_indices = torch.repeat_interleave(lora_indices_tensor,
                                                inputs.size(0))
 
     bgmv_expand_slice(inputs, lora_b_weights, output_tensor, exploded_indices,
-                      slice_offset, slice_size, total_size, add_inputs)
+                      slice_offset, slice_size, add_inputs)
 
 
 def bgmv_expand_slice(inputs: torch.Tensor,
@@ -114,7 +113,6 @@ def bgmv_expand_slice(inputs: torch.Tensor,
                       lora_indices_tensor: torch.Tensor,
                       slice_offset: int,
                       slice_size: int,
-                      total_size: int,
                       add_inputs: bool = True):
     selected_loras = lora_b_weights[lora_indices_tensor].to(
         dtype=output_tensor.dtype)
@@ -132,8 +130,9 @@ def bgmv_expand_slice(inputs: torch.Tensor,
     outputs = torch.cat((
         torch.zeros((batch_size, slice_offset), device=outputs.device),
         outputs,
-        torch.zeros((batch_size, total_size - (slice_offset + slice_size)),
-                    device=outputs.device),
+        torch.zeros(
+            (batch_size, output_tensor.shape[1] - (slice_offset + slice_size)),
+            device=outputs.device),
     ),
                         dim=1)
 
