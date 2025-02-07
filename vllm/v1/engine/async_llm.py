@@ -256,14 +256,15 @@ class AsyncLLM(EngineClient):
                 # event loop for too long.
                 num_outputs = len(outputs.new_token_id_offsets)
 
-                if True or num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
+                if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
                     slices = ((0, num_outputs), )
                 else:
                     slices = []
                     parts = np.linspace(
+                        0,
                         num_outputs,
-                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
-                        dtype='int')
+                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE)+1,
+                        dtype='int')[1:]
                     last = 0
                     for i in parts:
                         slices.append((last, i))
