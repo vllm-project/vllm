@@ -507,7 +507,7 @@ class KVCacheManager:
             prev_block_hash_value = block_hash.hash_value
 
     def free_block_hashes(self, request: Request) -> None:
-        """Remove the block hashes for the request.
+        """Discard the block hashes for the request.
 
         NOTE: Unlike `free`, this method should be called only when the request
         is finished, not when it is preempted.
