@@ -17,8 +17,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import (PoolingOutput, PoolingRequestOutput,
-                          ScoringRequestOutput)
+from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                PreTrainedTokenizer,
@@ -187,12 +186,13 @@ class OpenAIServingScores(OpenAIServing):
 
         # Non-streaming response
         final_res_batch: List[Optional[PoolingRequestOutput]] = []
-        embeddings: List[PoolingRequestOutput[PoolingOutput]]
 
         num_embeddings = len(engine_prompts) * 2
 
+        embeddings: List[Optional[PoolingRequestOutput]]
+        embeddings = [None] * num_embeddings
+
         try:
-            embeddings = [None] * num_embeddings
 
             async for i, res in result_generator:
                 embeddings[i] = res
