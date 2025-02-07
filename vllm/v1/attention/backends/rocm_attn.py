@@ -177,5 +177,6 @@ class ROCmAttentionImpl(AttentionImpl):
                               k_scale=layer._k_scale,
                               v_scale=layer._v_scale,
                               alibi_slopes=self.alibi_slopes,
-                              sliding_window=self.sliding_window[0])
+                              sliding_window=self.sliding_window[0],
+                              sm_scale=self.scale)
         return output
