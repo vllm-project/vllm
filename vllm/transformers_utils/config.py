@@ -544,6 +544,8 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
             raise ValueError(
                 f"Found unknown quantization='{quantization}' in config")
 
+        config_dict["quantization_config"] = quantization_config
+
     config_type: Literal["text",
                          "multimodal"] = "multimodal" if config_dict.get(
                              "vision_encoder") is not None else "text"
@@ -565,7 +567,6 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     config_dict.update(kwargs)
 
-    config_dict["quantization_config"] = quantization_config
     config_dict = recurse_elems(config_dict)
 
     # transform to HF config format
