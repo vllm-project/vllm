@@ -29,7 +29,7 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -804,8 +804,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
             )
         hidden_states = hidden_states[:num_scheduled_tokens]
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
+        sample_hidden_states = hidden_states[logits_indices]
+        logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(batch_changed)
@@ -818,7 +818,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
         request_seq_lens: List[Tuple[int, CachedRequestState, int]] = []
-        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+        for i, req_id in enumerate(  # type: ignore[assignment]
+                self.input_batch.req_ids[:num_reqs]):
             assert req_id is not None
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
@@ -847,27 +848,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         sampled_token_ids = sampler_output.sampled_token_ids.tolist()
+        logprobs_tensors = sampler_output.logprobs_tensors
+        logprobs_lists = logprobs_tensors.tolists() \
+            if logprobs_tensors is not None else None
+
+        # Compute prompt logprobs if needed.
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+            hidden_states,
+            scheduler_output,
+        )
+
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
             token_id = sampled_token_ids[i]
             self.input_batch.token_ids_cpu[i, seq_len] = token_id
             req_state.output_token_ids[-1] = token_id
 
-        if sampler_output.logprob_token_ids is None:
-            logprob_token_ids = None
-        else:
-            logprob_token_ids = sampler_output.logprob_token_ids.cpu()
-        if sampler_output.logprobs is None:
-            logprobs = None
-        else:
-            logprobs = sampler_output.logprobs.cpu()
-
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            logprob_token_ids_cpu=logprob_token_ids,
-            logprobs_cpu=logprobs,
+            logprobs=logprobs_lists,
+            prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
 
@@ -885,6 +887,76 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
+
+    def _get_prompt_logprobs_dict(
+        self,
+        hidden_states: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+    ) -> Dict[str, LogprobsTensors]:
+        num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
+        if not num_prompt_logprobs_dict:
+            return {}
+
+        prompt_logprobs_dict: Dict[str, LogprobsTensors] = {}
+
+        # Since prompt logprobs are a rare feature, prioritize simple,
+        # maintainable loop over optimal performance.
+        completed_prefill_reqs = []
+        for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
+
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+
+            # Get metadata for this request.
+            request = self.requests[req_id]
+            num_prompt_tokens = len(request.prompt_token_ids)
+            prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
+                self.device, non_blocking=True)
+
+            # Determine number of logits to retrieve.
+            start_tok = request.num_computed_tokens + 1
+            num_remaining_tokens = num_prompt_tokens - start_tok
+            if num_tokens < num_remaining_tokens:
+                # This is a chunk, more tokens remain.
+                num_logits = num_tokens
+            else:
+                # This is the last chunk of prompt tokens to return.
+                num_logits = num_remaining_tokens
+                completed_prefill_reqs.append(req_id)
+
+            # Get the logits corresponding to this req's prompt tokens.
+            # If this is a partial request (i.e. chunked prefill),
+            # then there is prompt logprob generated for each index.
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            offset = self.query_start_loc_np[req_idx].item()
+            prompt_hidden_states = hidden_states[offset:offset + num_logits]
+            logits = self.model.compute_logits(prompt_hidden_states, None)
+
+            # Get the "target" tokens for each index. For prompt at index i,
+            # the token at prompt index i+1 is the "sampled" token we want
+            # to gather the logprob for.
+            tgt_token_ids = prompt_token_ids[start_tok:start_tok + num_logits]
+
+            # Compute prompt logprobs.
+            logprobs = self.model.sampler.compute_logprobs(logits)
+            token_ids, logprobs, ranks = self.model.sampler.gather_logprobs(
+                logprobs, num_prompt_logprobs, tgt_token_ids)
+
+            # Transfer GPU->CPU async.
+            prompt_logprobs_dict[req_id] = LogprobsTensors(
+                token_ids.to("cpu", non_blocking=True),
+                logprobs.to("cpu", non_blocking=True),
+                ranks.to("cpu", non_blocking=True),
+            )
+
+        # Remove requests that have completed prefill from the batch
+        # num_prompt_logprobs_dict.
+        for req_id in completed_prefill_reqs:
+            del num_prompt_logprobs_dict[req_id]
+
+        # Must synchronize the non-blocking GPU->CPU transfers.
+        torch.cuda.synchronize()
+
+        return prompt_logprobs_dict
 
     @torch.inference_mode()
     def _dummy_run(

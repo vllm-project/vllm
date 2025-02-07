@@ -437,6 +437,8 @@ class Scheduler:
     ) -> EngineCoreOutputs:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
+        logprobs = model_runner_output.logprobs
+        prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         outputs: List[EngineCoreOutput] = []
@@ -471,6 +473,13 @@ class Scheduler:
                         self.encoder_cache_manager.free_encoder_input(
                             request, input_id)
 
+            # Get prompt logprobs for this request.
+            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+
+            stopped = False
+            new_logprobs = None
+            new_token_ids = None
+
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
                 # NOTE(woosuk): Currently, we assume that each request
@@ -486,20 +495,30 @@ class Scheduler:
                 if stopped:
                     self._free_request(request)
 
+                # Extract sample logprobs if needed.
+                if request.sampling_params.logprobs is not None:
+                    assert logprobs is not None
+                    # NOTE: once we support N tokens per step (spec decode),
+                    # the outer lists can be of length > 1.
+                    new_logprobs = logprobs.slice(req_index, req_index + 1)
+
+                new_token_ids = request.output_token_ids[-num_new_tokens:]
+
+            # Transmit partial if chunked prefill & prompt logprobs is enabled
+            if new_token_ids or prompt_logprobs_tensors is not None:
                 # Add EngineCoreOutput for this Request.
-                output = EngineCoreOutput(
-                    request_id=req_id,
-                    new_token_ids=request.output_token_ids[-num_new_tokens:],
-                    finished=request.is_finished(),
-                    finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason)
-                outputs.append(output)
+                outputs.append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=new_token_ids or [],
+                        finish_reason=request.get_finished_reason(),
+                        new_logprobs=new_logprobs,
+                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                        stop_reason=request.stop_reason))
 
-                # Breakout of the loop.
-                if stopped:
-                    continue
+            if not stopped:
+                new_running.append(request)
 
-            new_running.append(request)
         self.running = new_running
         return EngineCoreOutputs(
             outputs=outputs,

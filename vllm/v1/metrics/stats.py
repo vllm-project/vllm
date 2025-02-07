@@ -60,14 +60,17 @@ class IterationStats:
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
-            # This relies on the invariant that EngineCore does
-            # not stream outputs for partially completed prefills
-            # (scheduler.update_from_output makes EngineCoreOutput
-            # iff num_computed_tokens == num_tokens).
-            assert (num_new_generation_tokens > 0)
-            self.num_prompt_tokens += prompt_len
-
-            self.time_to_first_tokens_iter.append(last_token_latency)
+            # TODO(andy): we used to assert that num_new_generation_tokens
+            # > 0 with an invariant that EngineCore does not stream outputs
+            # for partially completed prefills (scheduler.update_from_output
+            # makes EngineCoreOutput iff num_computed_tokens == num_tokens).
+            # When prompt logprobs are enabled, we currently stream out the
+            # partially completed prompt.
+            # This will be reverted in a follow up PR and we should re-enable
+            # this assertion / invariant.
+            if num_new_generation_tokens > 0:
+                self.num_prompt_tokens += prompt_len
+                self.time_to_first_tokens_iter.append(last_token_latency)
         else:
             self.time_per_output_tokens_iter.append(last_token_latency)
 

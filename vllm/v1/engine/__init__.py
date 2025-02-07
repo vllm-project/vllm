@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, Optional, Union
 import msgspec
 
 from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
@@ -67,9 +68,16 @@ class EngineCoreOutput(
 
     request_id: str
     new_token_ids: List[int]
-    finished: bool
+
+    new_logprobs: Optional[LogprobsLists] = None
+    new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
+
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
+
+    @property
+    def finished(self) -> bool:
+        return self.finish_reason is not None
 
 
 class EngineCoreOutputs(
