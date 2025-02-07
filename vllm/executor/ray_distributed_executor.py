@@ -565,6 +565,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             forward_dag = MultiOutputNode(outputs)
 
         return forward_dag.experimental_compile(
+            _submit_timeout=-1,
             enable_asyncio=enable_asyncio,
             _overlap_gpu_communication=envs.
             VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)

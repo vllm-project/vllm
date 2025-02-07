@@ -63,7 +63,6 @@ class EngineCore:
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
         )
-
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
 
@@ -90,6 +89,9 @@ class EngineCore:
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
+        # Print current process ID
+        import os
+        logger.info("Current process ID: %d", os.getpid())
         return num_gpu_blocks, num_cpu_blocks
 
     def add_request(self, request: EngineCoreRequest):
@@ -172,15 +174,10 @@ class EngineCoreProc(EngineCore):
                          args=(output_path, ),
                          daemon=True).start()
 
-        self.microbatch_queue = queue.Queue()
         self.microbatch_queue_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.submit_condition = threading.Condition()
-        self.schedule_condition = threading.Condition()        
-        threading.Thread(target=self.submit_microbatch, daemon=True).start()
+        self.microbatch_queue = queue.Queue(self.microbatch_queue_size)
+        self.scheduler_lock = threading.Lock()        
         threading.Thread(target=self.finish_microbatch, daemon=True).start()
-        with self.submit_condition:
-            # allow the first microbatch to be submitted
-            self.submit_condition.notify()
 
         # Send Readiness signal to EngineClient.
         ready_pipe.send({"status": "READY"})
@@ -225,35 +222,22 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
 
-    def submit_microbatch(self):
-        while True:
-            with self.schedule_condition:
-                self.schedule_condition.wait()
-                scheduler_output = self.scheduler.schedule()
-            with self.submit_condition:
-                self.submit_condition.wait()
-                exe_ref = self.model_executor.submit_microbatch(
-                    scheduler_output)
-                self.microbatch_queue.put((exe_ref, scheduler_output))
-
     def finish_microbatch(self):
         while True:
-            with self.submit_condition:
-                exe_ref, scheduler_output = self.microbatch_queue.get()
-                model_output = exe_ref.get()
-                if self.microbatch_queue.qsize() < self.microbatch_queue_size:
-                    self.submit_condition.notify()
-            with self.schedule_condition: # for locking purpose
+            exe_ref, scheduler_output = self.microbatch_queue.get()
+            model_output = exe_ref.get()
+            with self.scheduler_lock: # for locking purpose
                 engine_core_outputs = self.scheduler.update_from_output(
                     scheduler_output, model_output)
             self.output_queue.put_nowait(engine_core_outputs)
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
+        logger.info("Inside run_busy_loop")
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
-            with self.schedule_condition: # for locking purpose
+            with self.scheduler_lock: # for locking purpose
                 schedulable = self.scheduler.has_schedulable_requests()
             # 1) Poll the input queue until there is work to do.
             if not schedulable:
@@ -270,13 +254,16 @@ class EngineCoreProc(EngineCore):
                     except BaseException:
                         raise
 
-            # 2) Handle any new client requests (Abort or Add).
-            while not self.input_queue.empty():
-                req = self.input_queue.get_nowait()
-                self._handle_client_request(req)
+            with self.scheduler_lock:
+                # 2) Handle any new client requests (Abort or Add).
+                while not self.input_queue.empty():
+                    req = self.input_queue.get_nowait()
+                    self._handle_client_request(req)
+                scheduler_output = self.scheduler.schedule()
 
-            with self.schedule_condition:
-                self.schedule_condition.notify()
+            exe_ref = self.model_executor.submit_microbatch(
+                scheduler_output)
+            self.microbatch_queue.put((exe_ref, scheduler_output))
 
     def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""

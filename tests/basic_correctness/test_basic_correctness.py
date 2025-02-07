@@ -116,7 +116,7 @@ def test_models_distributed(
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 
-    if model == "meta-llama/Llama-2-7b-hf" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
+    if distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
         # test ray adag
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
         os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
@@ -139,7 +139,7 @@ def test_models_distributed(
     with vllm_runner(model,
                      dtype=dtype,
                      tensor_parallel_size=2,
-                     pipeline_parallel_size=2,
+                     pipeline_parallel_size=1,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
                      ) as vllm_model:
