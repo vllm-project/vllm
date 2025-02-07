@@ -1024,13 +1024,6 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
-    if (world_size
-            != tensor_model_parallel_size * pipeline_model_parallel_size):
-        raise RuntimeError(
-            f"world_size ({world_size}) is not equal to "
-            f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
-            f"pipeline_model_parallel_size ({pipeline_model_parallel_size})")
-
     # Build the tensor model-parallel groups.
     num_tensor_model_parallel_groups: int = (world_size //
                                              tensor_model_parallel_size)
