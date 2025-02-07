@@ -1378,8 +1378,8 @@ class LLM:
                 total=num_requests,
                 desc="Processed prompts",
                 dynamic_ncols=True,
-                postfix=(f"est. speed input: {0:.2f} toks/s, "
-                         f"output: {0:.2f} toks/s"),
+                postfix=(f"est. speed: {0:.2f} total toks/s, "
+                         f"{0:.2f} output toks/s"),
             )
 
         # Run the engine.
@@ -1396,14 +1396,15 @@ class LLM:
                             # Calculate tokens only for RequestOutput
                             assert output.prompt_token_ids is not None
                             total_in_toks += len(output.prompt_token_ids)
-                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs)
+                            tot_spd = (total_in_toks + total_out_toks
+                                       ) / pbar.format_dict["elapsed"]
                             out_spd = (total_out_toks /
                                        pbar.format_dict["elapsed"])
                             pbar.postfix = (
-                                f"est. speed input: {in_spd:.2f} toks/s, "
-                                f"output: {out_spd:.2f} toks/s")
+                                f"est. speed: {tot_spd:.2f} total toks/s, "
+                                f"{out_spd:.2f} output toks/s")
                         pbar.update(1)
 
         if use_tqdm:
