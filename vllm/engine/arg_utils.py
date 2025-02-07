@@ -1150,6 +1150,13 @@ class EngineArgs:
             (self.enable_chunked_prefill and model_config.use_mla):
             gpu_memory_utilization = 0.85
 
+        if self.enable_chunked_prefill and model_config.use_mla:
+            # Currently chunked prefill with MLA is not supported with CUDA
+            # graphs
+            logger.warning("Chunked prefill is not supported with MLA. "
+                           "Disabling CUDA graphs.")
+            self.enforce_eager = True
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=gpu_memory_utilization,

@@ -609,7 +609,9 @@ class GroupCoordinator:
             # all happening on CPU. Therefore, we can use the CPU group.
             self.broadcast_object(metadata_list, src=src)
             async_handles = []
-            for tensor in tensor_list:
+            for i, tensor in enumerate(tensor_list):
+                print("broadcasting", metadata_list[i][0])
+                print(" ", tensor.shape, tensor.stride())
                 if tensor.numel() == 0:
                     # Skip broadcasting empty tensors.
                     continue

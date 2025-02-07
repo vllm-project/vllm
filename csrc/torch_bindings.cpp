@@ -498,7 +498,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // Gather cache blocks from src_cache to dst.
   cache_ops.def(
       "gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
-      "Tensor cu_seq_lens, int batch_size) -> ()");
+      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("gather_cache", torch::kCUDA, &gather_cache);
 }
 

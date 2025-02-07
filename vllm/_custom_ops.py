@@ -1113,9 +1113,9 @@ def convert_fp8(output: torch.Tensor,
 
 def gather_cache(src_cache: torch.Tensor, dst: torch.Tensor,
                  block_table: torch.Tensor, cu_seq_lens: torch.Tensor,
-                 batch_size: int) -> None:
+                 batch_size: int, seq_starts: Optional[torch.Tensor]) -> None:
     torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
-                                        cu_seq_lens, batch_size)
+                                        cu_seq_lens, batch_size, seq_starts)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:

@@ -574,17 +574,20 @@ void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
 
 namespace vllm {
 
-// grid (batch, num_splits)
+// grid is launched with dimensions (batch, num_splits)
 template <typename scalar_t>
 __global__ void gather_cache(
     const scalar_t* __restrict__ src_cache,   // [NUM_BLOCKS, BLOCK_SIZE,
                                               // ENTRIES...]
     scalar_t* __restrict__ dst,               // [TOT_TOKENS, ENTRIES...]
-    const int32_t __restrict__* block_table,  // [BATCH, BLOCK_INDICES]
-    const int32_t __restrict__* cu_seq_lens,  // [BATCH+1]
+    const int32_t* __restrict__ block_table,  // [BATCH, BLOCK_INDICES]
+    const int32_t* __restrict__ cu_seq_lens,  // [BATCH+1]
     const int32_t block_size, const int32_t entry_size,
     const int64_t block_table_stride, const int64_t cache_block_stride,
-    const int64_t cache_entry_stride, const int64_t dst_entry_stride) {
+    const int64_t cache_entry_stride, const int64_t dst_entry_stride,
+    const int32_t* __restrict__ seq_starts) {  // Optional: starting offsets per
+                                               // batch
+
   const int64_t bid = blockIdx.x;  // Batch ID
   const int32_t num_splits = gridDim.y;
   const int32_t split = blockIdx.y;
@@ -605,7 +608,17 @@ __global__ void gather_cache(
   int32_t full_blocks_end = split_end;
   int32_t partial_block_size = 0;
 
-  block_table += bid * block_table_stride;
+  // Adjust the pointer for the block_table for this batch.
+  // If seq_starts is provided, compute an offset based on (seq_starts[bid] /
+  // page_size)
+  const int32_t batch_offset = bid * block_table_stride;
+  int32_t offset = 0;
+  if (seq_starts != nullptr) {
+    offset = seq_starts[bid] / block_size;
+  }
+  const int32_t* batch_block_table = block_table + batch_offset + offset;
+
+  // Adjust dst pointer based on the cumulative sequence lengths.
   dst += seq_start * dst_entry_stride;
 
   if (is_last_split) {
@@ -620,7 +633,7 @@ __global__ void gather_cache(
   };
 
   for (int pid = split_start; pid < full_blocks_end; ++pid) {
-    auto block_id = block_table[pid];
+    auto block_id = batch_block_table[pid];
     auto block_start_ptr = src_cache + block_id * cache_block_stride;
     auto block_dst_ptr = dst + pid * block_size * dst_entry_stride;
     for (int eid = 0; eid < block_size; ++eid) {
@@ -630,7 +643,7 @@ __global__ void gather_cache(
   }
 
   if (partial_block_size) {
-    auto block_id = block_table[full_blocks_end];
+    auto block_id = batch_block_table[full_blocks_end];
     auto block_start_ptr = src_cache + block_id * cache_block_stride;
     auto block_dst_ptr = dst + full_blocks_end * block_size * dst_entry_stride;
     for (int eid = 0; eid < partial_block_size; ++eid) {
@@ -642,24 +655,27 @@ __global__ void gather_cache(
 
 }  // namespace vllm
 
+// Macro to dispatch the kernel based on the data type.
 #define CALL_GATHER_CACHE(CPY_DTYPE)                                    \
   vllm::gather_cache<CPY_DTYPE><<<grid, block, 0, stream>>>(            \
       reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()),               \
       reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),                     \
       block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
       block_size, entry_size, block_table_stride, cache_block_stride,   \
-      cache_entry_stride, dst_entry_stride);
+      cache_entry_stride, dst_entry_stride, seq_starts_ptr);
 
-// Gather sequences from cache into dst tensor based on block_table
-//  cu_seq_lens is the cumulative sequence lengths of the batch and
-//  simultaneously used as the start locations in dst for each sequence
-//  in the batch.
+// Gather sequences from the cache into the destination tensor.
+//  - cu_seq_lens contains the cumulative sequence lengths for each batch
+//  - block_table contains the cache block indices for each sequence
+//  - Optionally, seq_starts (if provided) offsets the starting block index by
+//  (seq_starts[bid] / page_size)
 void gather_cache(
     torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
     torch::Tensor const& dst,          // [TOT_TOKENS, ENTRIES...]
     torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
-    int64_t batch_size) {
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts = std::nullopt) {
   at::cuda::OptionalCUDAGuard device_guard(src_cache.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -670,14 +686,18 @@ void gather_cache(
               "block_table must be int32");
   TORCH_CHECK(cu_seq_lens.dtype() == torch::kInt32,
               "cu_seq_lens must be int32");
+  if (seq_starts.has_value()) {
+    TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
+                "seq_starts must be int32");
+  }
 
   int64_t block_table_stride = block_table.stride(0);
   int64_t cache_block_stride = src_cache.stride(0);
   int64_t cache_entry_stride = src_cache.stride(1);
   int64_t dst_entry_stride = dst.stride(0);
 
+  // Decide on the number of splits based on the batch size.
   int num_splits = batch_size > 128 ? 2 : batch_size > 64 ? 4 : 16;
-
   dim3 grid(batch_size, num_splits);
   dim3 block(1024);
 
@@ -685,6 +705,9 @@ void gather_cache(
               "src_cache and dst must have the same dtype");
 
   const int dtype_bits = src_cache.element_size() * 8;
+  const int32_t* seq_starts_ptr =
+      seq_starts.has_value() ? seq_starts.value().data_ptr<int32_t>() : nullptr;
+
   if (dtype_bits == 32) {
     CALL_GATHER_CACHE(uint32_t);
   } else if (dtype_bits == 16) {
