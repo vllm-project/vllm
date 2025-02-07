@@ -58,14 +58,14 @@ class GPTQMarlinConfig(QuantizationConfig):
             # (since we have only one group per output channel)
             desc_act = False
 
-        # GPTQModel use `dynamic` to allow per module quantization config
-        # so each module can be optimized for its own unique quant errors.
-        # Format is Dict[str, Dict] where key is a regex string that can both
-        # positive ("+:" prefixed) or negative ("-:" prefixed) match a module.
-        # Default to positive match (override base quant config mode) if no
-        # prefix. Value is in dict format of field key and override value.
-        # Negative matching will skip quantization init for this module entirely
-        # (non-quantized inference). More details and quantize examples can be
+        # GPTQModel use `dynamic` config property to allow per module quantization 
+        # config so each module can be individually optimized.
+        # Format is Dict[str, Dict] where key is a regex string that can perform both
+        # positive ("+:" prefixed) or negative ("-:" prefixed) matching of a module.
+        # Default to positive match, override base quant config mode, if no
+        # prefix is used. Value is in dict format of field key and override value.
+        # Negative matching will skip quantization init for this module entirely:
+        # non-quantized inference. More details and quantization examples can be
         # found at: https://github.com/ModelCloud/GPTQModel
         # Example:
         #  # last 1/2 of the layers 10-21 has 8bit vs 4bit for 0-9
@@ -76,7 +76,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         #  r"+:.*\.(?:1[0-5])\..*": {"bits": 8,},
         #  # positive match layer 16-21
         #  r"+:.*\.(?:1[6-9]|20|21)\..*": {"bits": 8, "group_size": 64,},
-        #  r"-:.*\.moe\..*": {}, # negative match all `moe` layers
+        #  r"-:.*\.moe\..*": {}, # negative match (skip) all `moe` layers
         # }
         self.dynamic = dynamic
 
@@ -94,8 +94,8 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
 
-    # match dynamic rules with module name (prefix) and apply to quantize
-    # config overrides if matched
+    # Match dynamic rules with module name (prefix) and override quantize
+    # config if module (prefix) matches a rule
     def override_config(self, prefix: str):
         bits = self.weight_bits
 
@@ -185,11 +185,11 @@ class GPTQMarlinConfig(QuantizationConfig):
         default_value: Union[int, bool, None] = None
     ) -> Union[Dict, int, bool, None]:
         for pattern, pattern_dict in self.dynamic.items():
-            # negative match: matched modules are excluded from quantization
+            # Negative match: matched modules are excluded from quantized init
             if pattern.startswith("-:"):
                 if re.match(pattern.removeprefix("-:"), layer_name):
                     return False
-            # positive match: matched modules have quant properties overriding
+            # Positive match: matched modules have quant properties overrides
             # base quant config
             elif re.match(pattern.removeprefix("+:"), layer_name):
                 if key is None:
@@ -218,7 +218,6 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def is_gptq_marlin_compatible(cls, quant_config: Dict[str, Any]):
-        # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")
         group_size = quant_config.get("group_size")
@@ -231,7 +230,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         if quant_method != "gptq":
             return False
 
-        # If we cannot find the info needed in the config, cannot convert.
+        # Marlin conversion is only valid if required properties are found
         if (num_bits is None or group_size is None or sym is None
                 or desc_act is None):
             return False
@@ -257,8 +256,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         self.prefix = prefix
 
         if len(self.quant_config.dynamic) > 0 and self.prefix:
-            # gptqmodel per module/layer dynamic my override/change base
-            # model quant config
+            # Dynamic per module/layer rules may override base config
             self.quant_config.override_config(prefix=self.prefix)
 
         # Verify supported on platform.
