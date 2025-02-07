@@ -208,11 +208,17 @@ class GPTQMarlinConfig(QuantizationConfig):
             layer, ParallelLMHead) and self.lm_head_quantized
         if isinstance(layer, LinearBase) or parallel_lm_head_quantized:
             # False = skip module, None = no override, else = Positive match
-            if self.get_dynamic_override(layer_name=prefix) == False: 
+            if self.get_dynamic_override(layer_name=prefix) == False:
                 return UnquantizedEmbeddingMethod(
                 ) if parallel_lm_head_quantized else UnquantizedLinearMethod()
 
-            return GPTQMarlinLinearMethod(self, prefix=prefix)
+            quant_config = deepcopy(self)
+
+            if len(quant_config.dynamic) > 0 and prefix:
+                # Dynamic per module/layer rules may override base config
+                quant_config.override_config(prefix=prefix)
+
+            return GPTQMarlinLinearMethod(quant_config)
         elif isinstance(layer, FusedMoE):
             return GPTQMarlinMoEMethod(self)
         return None
@@ -252,13 +258,8 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
     _kernel_backends_being_used: Set[str] = set()
 
-    def __init__(self, quant_config: GPTQMarlinConfig, prefix: str) -> None:
-        self.quant_config = deepcopy(quant_config)
-        self.prefix = prefix
-
-        if len(self.quant_config.dynamic) > 0 and self.prefix:
-            # Dynamic per module/layer rules may override base config
-            self.quant_config.override_config(prefix=self.prefix)
+    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
+        self.quant_config = quant_config
 
         # Verify supported on platform.
         verify_marlin_supported(quant_type=self.quant_config.quant_type,
