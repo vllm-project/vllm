@@ -254,13 +254,15 @@ class InputPreprocessor:
         Apply the model's multi-modal processor to a multi-modal prompt,
         returning the corresponding token IDs and metadata.
         """
+
+        # At the moment on model (PrithviGeoSpatialMAE) requires to be
+        # initialized without a tokenizer while using also multi-modal
+        # input.
         if not self.tokenizer:
             tokenizer = None
         else:
             tokenizer_group = self.get_tokenizer_group()
             tokenizer = tokenizer_group.get_lora_tokenizer(lora_request)
-            if isinstance(prompt, list):
-                prompt = tokenizer.decode(prompt)
 
         mm_processor = self.mm_registry.create_processor(
             self.model_config, tokenizer)
