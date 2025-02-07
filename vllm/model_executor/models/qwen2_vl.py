@@ -650,8 +650,8 @@ class Qwen2VisionTransformer(nn.Module):
         return loaded_params
 
 
-class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
-                                            dict[str, torch.Tensor]]):
+class Qwen2VLEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
+                                              dict[str, torch.Tensor]]):
 
     def __init__(self, data: dict, modality: str) -> None:
         super().__init__(data, modality)
@@ -683,26 +683,26 @@ class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
         return self.data
 
 
-class Qwen2ImageEmbeddingItems(Qwen2EmbeddingItems):
+class Qwen2VLImageEmbeddingItems(Qwen2VLEmbeddingItems):
 
     def __init__(self, data: dict) -> None:
         super().__init__(data, "image")
 
 
-class Qwen2VideoEmbeddingItems(Qwen2EmbeddingItems):
+class Qwen2VLVideoEmbeddingItems(Qwen2VLEmbeddingItems):
 
     def __init__(self, data: dict) -> None:
         super().__init__(data, "video")
 
 
-class Qwen2MultiModalDataParser(MultiModalDataParser):
+class Qwen2VLMultiModalDataParser(MultiModalDataParser):
 
     def _parse_image_data(
         self,
         data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2EmbeddingItems(data, modality="image")
+            return Qwen2VLEmbeddingItems(data, modality="image")
 
         return super()._parse_image_data(data)
 
@@ -711,7 +711,7 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
         data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2EmbeddingItems(data, modality="video")
+            return Qwen2VLEmbeddingItems(data, modality="video")
 
         return super()._parse_video_data(data)
 
@@ -948,7 +948,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
                                  ):
 
     def _get_data_parser(self) -> MultiModalDataParser:
-        return Qwen2MultiModalDataParser()
+        return Qwen2VLMultiModalDataParser()
 
     def _get_prompt_replacements(
         self,

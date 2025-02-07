@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, List, Optional, Union
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -109,7 +109,7 @@ class Request:
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 
-    def get_finished_reason(self) -> Union[str, None]:
+    def get_finished_reason(self) -> Union[FinishReason, None]:
         return RequestStatus.get_finished_reason(self.status)
 
     def has_encoder_inputs(self) -> bool:
@@ -149,7 +149,8 @@ class RequestStatus(enum.IntEnum):
         return status > RequestStatus.PREEMPTED
 
     @staticmethod
-    def get_finished_reason(status: "RequestStatus") -> Union[str, None]:
+    def get_finished_reason(
+            status: "RequestStatus") -> Union[FinishReason, None]:
         return _FINISHED_REASON_MAP.get(status)
 
 
@@ -158,8 +159,8 @@ class RequestStatus(enum.IntEnum):
 # are longer than the model's length cap. Therefore, the stop
 # reason should also be "length" as in OpenAI API.
 _FINISHED_REASON_MAP = {
-    RequestStatus.FINISHED_STOPPED: "stop",
-    RequestStatus.FINISHED_LENGTH_CAPPED: "length",
-    RequestStatus.FINISHED_ABORTED: "abort",
-    RequestStatus.FINISHED_IGNORED: "length",
+    RequestStatus.FINISHED_STOPPED: FinishReason.STOP,
+    RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
+    RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
 }
