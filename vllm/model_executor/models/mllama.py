@@ -157,13 +157,15 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            num_tiles = [[
+            num_tiles = [
                 self.info.get_num_tiles_per_image(img.height, img.width)
                 for img in mm_data["images"]
-            ]]
+            ]
             processed_outputs = super()._call_hf_processor(
                 prompt, mm_data, mm_kwargs)
             processed_outputs["num_tiles"] = torch.tensor(num_tiles)
+            for k in ('pixel_values', 'aspect_ratio_ids', "aspect_ratio_mask"):
+                processed_outputs[k] = processed_outputs[k].squeeze(0)
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -1188,48 +1190,12 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         if pixel_values is not None:
             assert aspect_ratio_ids is not None
             assert aspect_ratio_mask is not None
-            max_num_images = max([len(x[0]) for x in pixel_values])
-            if max_num_images == 0:
-                raise ValueError("No images provided.")
-            max_num_tiles = max(
-                max([len(x) for x in y[0]]) for y in pixel_values)
-            device = next(self.multi_modal_projector.parameters()).device
-            bsz = len(pixel_values)
-            out_num_tiles = []
-            out_images = torch.zeros(
-                bsz,
-                max_num_images,
-                max_num_tiles,
-                3,
-                self.image_size,
-                self.image_size,
-                dtype=torch.float32,
-                device=device,
-            )
-            out_ar_ids = torch.ones(bsz,
-                                    max_num_images,
-                                    dtype=torch.int64,
-                                    device=device)
-            out_ar_mask = torch.zeros(bsz,
-                                      max_num_images,
-                                      max_num_tiles,
-                                      dtype=torch.int64,
-                                      device=device)
-            for b in range(len(pixel_values)):
-                _num_tiles = []
-                for i in range(len(pixel_values[b][0])):
-                    img = pixel_values[b][0][i]
-                    out_images[b, i, :img.shape[0]] = img
-                    out_ar_ids[b, i] = aspect_ratio_ids[b][0][i]
-                    out_ar_mask[b, i] = aspect_ratio_mask[b][0][i]
-                    _num_tiles.append(img.shape[0])
-                out_num_tiles.append(_num_tiles)
 
             return MllamaImagePixelInputs(
                 type="pixel_values",
-                data=out_images,
-                aspect_ratio_ids=out_ar_ids,
-                aspect_ratio_mask=out_ar_mask,
+                data=pixel_values,
+                aspect_ratio_ids=aspect_ratio_ids,
+                aspect_ratio_mask=aspect_ratio_mask,
             )
 
         if image_embeds is not None:
@@ -1368,7 +1334,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             # block manager to allocate blocks for those images only.
             # See input_processor_for_mllama() for more details.
             num_tiles_tensor = kwargs.pop("num_tiles")
-            num_tiles = [t[0].tolist() for t in num_tiles_tensor]
+            num_tiles = [t.tolist() for t in num_tiles_tensor]
             num_tokens_per_tile = (self.image_size // 14)**2 + 1
             actual_encoder_seq_lens = [
                 sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
