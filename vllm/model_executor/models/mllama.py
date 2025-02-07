@@ -66,7 +66,6 @@ from .utils import maybe_prefix
 
 logger = init_logger(__name__)
 MLLAMA_IMAGE_TOKEN_ID = 128256
-MLLAMA_IMAGE_TOKEN = "<|image|>"
 
 
 class MllamaImagePixelInputs(TypedDict):
