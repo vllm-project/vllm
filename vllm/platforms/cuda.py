@@ -232,7 +232,10 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+        if envs.VLLM_USE_V1:
+            return "vllm.lora.v1.punica_wrapper.punica_gpu_v1.PunicaWrapperGPUV1"  # noqa
+        else:
+            return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
 
 # NVML utils
