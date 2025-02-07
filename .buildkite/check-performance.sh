@@ -39,9 +39,9 @@ git restore .
 # TODO auto-rebase if no conflicts are detected?
 git fetch origin "$BASE_BRANCH" >/dev/null 2>&1
 # Buildkite detached head state prevents 'merge-base' from finding common ancestor.
-git remote add pr "$BUILDKITE_PULL_REQUEST_REPO"
+git remote add pr "$BUILDKITE_PULL_REQUEST_REPO" || echo "Remote already present: testing V1."
 git fetch pr >/dev/null 2>&1
-git switch "$CURRENT_BRANCH"
+git switch "$CURRENT_BRANCH" >/dev/null 2>&1
 
 # Find the common ancestor between PR and base/main
 BASE_COMMIT=$(git merge-base "origin/$BASE_BRANCH" "$BUILDKITE_COMMIT" || echo "") 
@@ -60,21 +60,20 @@ git checkout -q "$BASE_COMMIT"
 
 # Extra arguments passed to the script are used here to spin up the server.
 run_benchmark $@ && mv benchmark_serving.txt benchmark_base.txt
-cat benchmark_base.txt
 
 # Test PR commit
 echo "--- Testing PR commit ($BUILDKITE_COMMIT)"
-git switch "$CURRENT_BRANCH"
+git switch "$CURRENT_BRANCH" >/dev/null 2>&1
 
 run_benchmark $@ && mv benchmark_serving.txt benchmark_pr.txt
-cat benchmark_pr.txt
 rm ShareGPT_V3_unfiltered_cleaned_split.json
 
 # Compare results. Run the comparison 3 times to avoid jitter of a single run.
 FAILURES=0
 ATTEMPTS=3
 
-for ((i=0; i<ATTEMPTS; i++)); do
+set +e # do not quit on first error
+for ((i=1; i<=ATTEMPTS; i++)); do
   echo "Attempt $i/$ATTEMPTS:"
   if ! python3 compare_benchmarks.py benchmark_base.txt benchmark_pr.txt; then
     ((FAILURES++))
