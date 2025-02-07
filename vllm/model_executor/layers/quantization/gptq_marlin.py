@@ -99,17 +99,17 @@ class GPTQMarlinConfig(QuantizationConfig):
     def override_config(self, prefix: str):
         bits = self.weight_bits
 
-        b = self.get_dynamic_value(prefix, "bits", bits)
+        b = self.get_dynamic_override(prefix, "bits", bits)
         if isinstance(b, int):
             bits = b
-        group_size = self.get_dynamic_value(prefix, "group_size",
-                                            self.group_size)
+        group_size = self.get_dynamic_override(prefix, "group_size",
+                                               self.group_size)
         if isinstance(group_size, int):
             self.group_size = group_size
-        desc_act = self.get_dynamic_value(prefix, "desc_act", self.desc_act)
+        desc_act = self.get_dynamic_override(prefix, "desc_act", self.desc_act)
         if isinstance(desc_act, bool):
             self.desc_act = desc_act
-        is_sym = self.get_dynamic_value(prefix, "sym", self.is_sym)
+        is_sym = self.get_dynamic_override(prefix, "sym", self.is_sym)
         if isinstance(is_sym, bool):
             self.is_sym = is_sym
 
@@ -178,7 +178,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def get_dynamic_value(
+    def get_dynamic_override(
         self,
         layer_name: str,
         key: Optional[str] = None,
@@ -206,7 +206,7 @@ class GPTQMarlinConfig(QuantizationConfig):
             layer, ParallelLMHead) and self.lm_head_quantized
         if isinstance(layer, LinearBase) or lm_head_quantized:
             if len(self.dynamic) > 0:
-                result = self.get_dynamic_value(layer_name=prefix)
+                result = self.get_dynamic_override(layer_name=prefix)
                 if result is not None and not result:
                     return UnquantizedEmbeddingMethod(
                     ) if lm_head_quantized else UnquantizedLinearMethod()

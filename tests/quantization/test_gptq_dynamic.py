@@ -42,11 +42,12 @@ def test_gptq_with_dynamic(vllm_runner, model_id: str):
             # desc_act=False
             assert isinstance(submodule.quant_method, GPTQMarlinLinearMethod)
             config = submodule.quant_method.quant_config
-            assert config.get_dynamic_value(layer_name=name, key="bits") == 8
-            assert config.get_dynamic_value(layer_name=name,
-                                            key="group_size") == 32
-            assert not config.get_dynamic_value(layer_name=name,
-                                                key="desc_act")
+            assert config.get_dynamic_override(layer_name=name,
+                                               key="bits") == 8
+            assert config.get_dynamic_override(layer_name=name,
+                                               key="group_size") == 32
+            assert not config.get_dynamic_override(layer_name=name,
+                                                   key="desc_act")
         elif (name == 'model.layers.2.self_attn.qkv_proj'
               or name == 'model.layers.2.mlp.gate_up_proj'):
             # All other layers (layer index >= 2) are not quantized
