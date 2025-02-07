@@ -23,7 +23,6 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers.models.mllama.configuration_mllama as config_mllama
-from PIL import Image
 from torch import nn
 from transformers import BatchFeature, MllamaConfig
 from transformers.modeling_outputs import (BaseModelOutput,
@@ -132,13 +131,20 @@ class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
         hf_processor = self.info.get_hf_processor()
         image_token: str = hf_processor.image_token
 
-        width = height = 1024
-        image = Image.new("RGB", (width, height), color=0)
+        vision_config = self.info.get_hf_config().vision_config
+        image_size = vision_config.image_size
+        max_num_tiles = vision_config.max_num_tiles
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=image_size * max_num_tiles,
+                                   height=image_size,
+                                   num_images=num_images)
+        }
 
         return ProcessorInputs(
             prompt_text=image_token * num_images,
-            mm_data={"image": image},
-            hf_processor_mm_kwargs={},
+            mm_data=mm_data,
         )
 
 
