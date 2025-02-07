@@ -38,8 +38,6 @@ def test_lm_head(
 
         def check_model(model):
             lm_head_layer = model.lm_head
-            print("lm_head_layer.quant_method", model,
-                  lm_head_layer.quant_method)
             if lm_head_quantized:
                 assert isinstance(lm_head_layer.quant_method,
                                   (GPTQLinearMethod, GPTQMarlinLinearMethod,
