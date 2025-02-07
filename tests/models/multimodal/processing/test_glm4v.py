@@ -119,6 +119,7 @@ def _test_processing_correctness(
         assert baseline_result == cached_result, (
             f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
+
 # yapf: disable
 @pytest.mark.parametrize("model_id", ["THUDM/glm-4v-9b"])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
@@ -137,5 +138,3 @@ def test_processing_correctness(
         num_batches=num_batches,
         simplify_rate=simplify_rate,
     )
-
-
