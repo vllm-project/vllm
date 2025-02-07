@@ -214,7 +214,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
             quant_config = deepcopy(self)
 
-            if len(quant_config.dynamic) > 0 and prefix:
+            if prefix:
                 # Dynamic per module/layer rules may override base config
                 quant_config.override_config(prefix=prefix)
 
