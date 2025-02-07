@@ -28,6 +28,7 @@ from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              graph_capture)
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
+from vllm.kv_transfer_params import KVTransferParams
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -96,6 +97,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
+    kv_transfer_params: Optional[KVTransferParams] = None
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
     seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
@@ -113,6 +115,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
             "virtual_engine": self.virtual_engine,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
+            "kv_transfer_params": self.kv_transfer_params,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
@@ -163,6 +166,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             "virtual_engine": self.virtual_engine,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
+            "kv_transfer_params": self.kv_transfer_params,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -250,6 +254,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             multi_modal_kwargs: Optional[MultiModalKwargs] = None,
             multi_modal_placeholder_maps: Optional[Dict[
                 str, MultiModalPlaceholderMap]] = None,
+
+            # KVTransferParams inputs.
+            kv_transfer_params: Optional[KVTransferParams] = None,
 
             # Whether the prefix cache is hit (prefill only).
             prefix_cache_hit: bool = False,
@@ -378,6 +385,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.multi_modal_kwargs = multi_modal_kwargs
             self.multi_modal_placeholder_maps = multi_modal_placeholder_maps
             self.prefix_cache_hit = prefix_cache_hit
+            self.kv_transfer_params = kv_transfer_params
 
             self.n_seqs = len(self.seq_ids)
 
@@ -749,7 +757,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             computed_block_nums=seq_group_metadata.computed_block_nums,
             reinit=True,
             reinit_use_defaults=True,
-            encoder_seq_len=encoder_seq_len)
+            encoder_seq_len=encoder_seq_len,
+            kv_transfer_params=seq_group_metadata.kv_transfer_params)
 
         self.inter_data_list.append(inter_data)
 
@@ -978,6 +987,18 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
+        # KVTransferParams data.
+        kv_transfer_params_list = [
+            data.kv_transfer_params for data in self.inter_data_list
+            if data.kv_transfer_params is not None]
+        kv_transfer_params = KVTransferParams(
+            prefix_prompt_ids=[
+                item.prefix_prompt_ids for item in kv_transfer_params_list],
+            kvcache_load_keys=[
+                item.kvcache_load_keys for item in kv_transfer_params_list],
+            kvcache_store_keys=[
+                item.kvcache_store_keys for item in kv_transfer_params_list])
+
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
@@ -991,7 +1012,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             request_ids_to_seq_ids=request_ids_to_seq_ids,
             finished_requests_ids=self.finished_requests_ids,
             prompt_adapter_mapping=prompt_adapter_mapping,
-            prompt_adapter_requests=prompt_adapter_requests)
+            prompt_adapter_requests=prompt_adapter_requests,
+            kv_transfer_params=kv_transfer_params)
 
 
 class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):

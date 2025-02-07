@@ -523,6 +523,7 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
+            kv_transfer_params=kv_transfer_params,
             priority=priority,
         )
 
@@ -942,6 +943,7 @@ class AsyncLLMEngine(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.

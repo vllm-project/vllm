@@ -15,6 +15,7 @@ import msgspec
 import torch
 
 from vllm.inputs import SingletonInputs, SingletonInputsAdapter
+from vllm.kv_transfer_params import KVTransferParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
@@ -653,6 +654,7 @@ class SequenceGroup:
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> None:
         self.request_id = request_id
@@ -677,6 +679,7 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+        self.kv_transfer_params=kv_transfer_params
         self.priority = priority
 
         self.cached_request_output = None
@@ -966,6 +969,7 @@ class SequenceGroupMetadata(
     cross_block_table: Optional[List[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
+    kv_transfer_params: Optional[KVTransferParams] = None
 
     ### Stateful fields that are lazily defined. ###
     # The number of speculative tokens adopted in this request.

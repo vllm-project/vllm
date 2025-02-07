@@ -506,7 +506,8 @@ class MQLLMEngineClient(EngineClient):
 
         return self._process_request(prompt, sampling_params, request_id,
                                      lora_request, trace_headers,
-                                     prompt_adapter_request, priority)
+                                     prompt_adapter_request,
+                                     kv_transfer_params, priority)
 
     @overload
     def encode(
@@ -579,6 +580,7 @@ class MQLLMEngineClient(EngineClient):
                                   request_id,
                                   lora_request,
                                   trace_headers,
+                                  kv_transfer_params=kv_transfer_params,
                                   priority=priority))
 
     async def _process_request(
@@ -589,6 +591,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
             PoolingRequestOutput, None]]:
@@ -642,6 +645,7 @@ class MQLLMEngineClient(EngineClient):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
+                    kv_transfer_params=kv_transfer_params,
                     priority=priority,
                 ))
 

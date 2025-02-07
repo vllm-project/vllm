@@ -604,6 +604,7 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
+                kv_transfer_params=kv_transfer_params,
                 priority=priority)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
@@ -770,6 +771,7 @@ class LLMEngine:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
+            kv_transfer_params=kv_transfer_params,
             priority=priority,
         )
 
@@ -804,6 +806,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
@@ -835,6 +838,7 @@ class LLMEngine:
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
+            kv_transfer_params=kv_transfer_params,
             priority=priority)
 
         return seq_group
