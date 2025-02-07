@@ -19,8 +19,9 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
+                                               PreTrainedTokenizer,
+                                               PreTrainedTokenizerFast)
 from vllm.utils import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
@@ -67,16 +68,16 @@ class OpenAIServingScores(OpenAIServing):
 
     async def _embedding_score(
         self,
-        tokenizer: Union[AnyTokenizer],
-        text_1: List[Union[List[str], str]],
-        text_2: List[Union[List[str], str]],
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        input_pairs: List[tuple],
         request: ScoreRequest,
         model_name=str,
         request_id=str,
         created_time=int,
         truncate_prompt_tokens: Optional[int] = None,
-        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest | None] = None,
+        lora_request: Optional[Union[LoRARequest, None]] = None,
+        prompt_adapter_request: Optional[Union[PromptAdapterRequest,
+                                               None]] = None,
         raw_request: Optional[Request] = None,
     ) -> Union[ScoreResponse, ErrorResponse]:
 
@@ -84,7 +85,6 @@ class OpenAIServingScores(OpenAIServing):
         engine_prompts = []
 
         try:
-            input_pairs = make_pairs(text_1, text_2)
             for q, t in input_pairs:
                 request_prompt = f"{q}{tokenizer.sep_token}{t}"
 
@@ -97,7 +97,7 @@ class OpenAIServingScores(OpenAIServing):
                                             executor=self._tokenizer_executor)
 
                 #first of the pair
-                prompt_inputs_q = await tokenize_async(text=q,
+                prompt_inputs_q = await tokenize_async(q,
                                                        **tokenization_kwargs)
 
                 input_ids_q = prompt_inputs_q["input_ids"]
@@ -110,7 +110,7 @@ class OpenAIServingScores(OpenAIServing):
                     token_type_ids=prompt_inputs_q.get("token_type_ids"))
 
                 #second of the pair
-                prompt_inputs_t = await tokenize_async(text=t,
+                prompt_inputs_t = await tokenize_async(t,
                                                        **tokenization_kwargs)
                 input_ids_t = prompt_inputs_t["input_ids"]
 
@@ -181,18 +181,14 @@ class OpenAIServingScores(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        num_prompts = len(engine_prompts)
-
         # Non-streaming response
-        final_res_batch: List[Optional[PoolingRequestOutput]]
-        final_res_batch = [None] * num_prompts
+        final_res_batch: List[Optional[PoolingRequestOutput]] = []
 
         try:
             embeddings = []
             async for i, res in result_generator:
                 embeddings.append(res)
 
-            scores = []
             scorer = torch.nn.CosineSimilarity(0)
 
             for i in range(0, len(embeddings), 2):
@@ -208,7 +204,7 @@ class OpenAIServingScores(OpenAIServing):
                     tokens = embeddings[i].prompt_token_ids + embeddings[
                         i + 1].prompt_token_ids
 
-                scores.append(
+                final_res_batch.append(
                     PoolingRequestOutput(
                         request_id=
                         f"{embeddings[i].request_id}_{embeddings[i+1].request_id}",
@@ -216,7 +212,6 @@ class OpenAIServingScores(OpenAIServing):
                         prompt_token_ids=tokens,
                         finished=True))
 
-            final_res_batch = scores
             assert all(final_res is not None for final_res in final_res_batch)
 
             final_res_batch_checked = cast(List[PoolingRequestOutput],
@@ -240,15 +235,15 @@ class OpenAIServingScores(OpenAIServing):
     async def _cross_encoding_score(
         self,
         tokenizer: Union[AnyTokenizer],
-        text_1: List[Union[List[str], str]],
-        text_2: List[Union[List[str], str]],
+        input_pairs: List[tuple],
         request: ScoreRequest,
         model_name=str,
         request_id=str,
         created_time=int,
         truncate_prompt_tokens: Optional[int] = None,
-        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest | None] = None,
+        lora_request: Optional[Union[LoRARequest | None]] = None,
+        prompt_adapter_request: Optional[Union[PromptAdapterRequest,
+                                               None]] = None,
         raw_request: Optional[Request] = None,
     ) -> Union[ScoreResponse, ErrorResponse]:
 
@@ -260,7 +255,6 @@ class OpenAIServingScores(OpenAIServing):
                 raise ValueError(
                     "MistralTokenizer not supported for cross-encoding")
 
-            input_pairs = make_pairs(text_1, text_2)
             for q, t in input_pairs:
                 request_prompt = f"{q}{tokenizer.sep_token}{t}"
 
@@ -394,11 +388,12 @@ class OpenAIServingScores(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+        input_pairs = make_pairs(request.text_1, request.text_2)
+
         if self.model_config.is_cross_encoder:
             response = await self._cross_encoding_score(
                 tokenizer=tokenizer,
-                text_1=request.text_1,
-                text_2=request.text_2,
+                input_pairs=input_pairs,
                 request=request,
                 model_name=model_name,
                 request_id=request_id,
@@ -411,8 +406,7 @@ class OpenAIServingScores(OpenAIServing):
         else:
             response = await self._embedding_score(
                 tokenizer=tokenizer,
-                text_1=request.text_1,
-                text_2=request.text_2,
+                input_pairs=input_pairs,
                 request=request,
                 model_name=model_name,
                 request_id=request_id,
