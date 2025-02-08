@@ -1043,10 +1043,10 @@ def _get_rank_dev_map() -> Optional[Dict[int, int]]:
     return _RANK_DEV_MAP.copy()
 
 
-def get_device_idx(local_rank: int) -> Optional[int]:
+def get_device_idx(local_rank: int) -> int:
     rdm = _get_rank_dev_map()
 
-    return rdm[local_rank] if rdm else None
+    return rdm[local_rank] if rdm else local_rank
 
 
 def initialize_model_parallel(
