@@ -263,7 +263,7 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
-        self.cached_block_num.pop(request.request_id)
+        self.cached_block_num.pop(request.request_id, None)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF

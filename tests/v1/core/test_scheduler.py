@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from typing import List, Optional
 
-import torch
-
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
@@ -42,6 +40,7 @@ def create_scheduler(
     return Scheduler(scheduler_config,
                      model_config,
                      cache_config,
+                     speculative_config=None,
                      lora_config=None)
 
 
@@ -202,7 +201,7 @@ def test_schedule_partial_requests():
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=torch.tensor([[0]] * len(requests)),
+        sampled_token_ids=[[0] for _ in range(len(requests))],
         logprobs=None,
         prompt_logprobs_dict={},
     )

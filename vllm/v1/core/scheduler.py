@@ -453,7 +453,6 @@ class Scheduler:
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
     ) -> EngineCoreOutputs:
-        # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -474,9 +473,8 @@ class Scheduler:
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            spec_token_ids = request.spec_token_ids
             generated_token_ids = sampled_token_ids[req_index]
-            if not spec_token_ids:
+            if not request.spec_token_ids:
                 # When the request's num_computed_tokens catches up
                 # its num_tokens, the request generates output tokens.
                 # Otherwise, we ignore the sampler output for the request.
@@ -526,18 +524,9 @@ class Scheduler:
 
             stopped = False
             new_logprobs = None
-            new_token_ids = None
+            new_token_ids = []
 
             if request.num_computed_tokens == request.num_tokens:
-                req_index = model_runner_output.req_id_to_index[req_id]
-                # NOTE(woosuk): Currently, we assume that each request
-                # generates at most one token at each step.
-                token_id = sampled_token_ids[req_index]
-                request.append_output_token_ids(token_id)
-                num_new_tokens = 1
-                # TODO: Update the KV cache manager for prefix caching.
-
-                new_token_ids = []
                 for output_token_id in generated_token_ids:
                     request.append_output_token_ids(output_token_id)
                     new_token_ids.append(output_token_id)
@@ -551,11 +540,10 @@ class Scheduler:
                 # Extract sample logprobs if needed.
                 if request.sampling_params.logprobs is not None:
                     assert logprobs is not None
+                    req_index = model_runner_output.req_id_to_index[req_id]
                     # NOTE: once we support N tokens per step (spec decode),
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
-
-                new_token_ids = request.output_token_ids[-num_new_tokens:]
 
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or prompt_logprobs_tensors is not None:
