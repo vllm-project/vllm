@@ -89,8 +89,8 @@ def _test_processing_correctness(
     if model_config.hf_config.model_type == "mllama":
         # For Mllama, tokenizer will always add bos_token at the beginning of
         # prompt by default, causing hf_processor outputs incorrect token ids.
-        # So we need to override to use `add_special_tokens=False` here to leave
-        # bos token to be added by the processor.
+        # So we need use `add_special_tokens=False` here to leave bos_token
+        # to be added by the processor.
         tokenizer_encode_kwargs = {"add_special_tokens": False}
 
     for batch_idx in range(num_batches):
