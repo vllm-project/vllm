@@ -56,6 +56,10 @@ async def test_async_llm_processor_error(monkeypatch):
                     max_tokens=EXPECTED_TOKENS,
                     output_kind=RequestOutputKind.DELTA)):
             outputs.append(out)
-        assert len(outputs) == EXPECTED_TOKENS
+
+        generated_tokens = []
+        for out in outputs:
+            generated_tokens.extend(out.outputs[0].token_ids)
+        assert len(generated_tokens) == EXPECTED_TOKENS
 
         async_llm.shutdown()
