@@ -88,7 +88,8 @@ def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
 
 
 def find_tokenizer_file(files: List[str]):
-    file_pattern = re.compile(r"^tokenizer\.model\.v.*$|^tekken\.json$")
+    file_pattern = re.compile(
+        r"^tokenizer\.model\.v.*$|^tekken\.json$|^tokenizer\.mm\.model\.v.*$")
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
