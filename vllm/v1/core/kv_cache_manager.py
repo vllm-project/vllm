@@ -98,6 +98,13 @@ class KVCacheManager:
         self.req_to_blocks: DefaultDict[str, ReqKVCacheBlocks] = defaultdict(
             lambda: [[] for _ in range(self.num_kv_cache_groups)])
 
+        # Mapping from request ID to kv block hashes.
+        # This is to avoid recomputing the block hashes for each call of
+        # `get_computed_blocks` or `allocate_slots`.
+        self.req_to_block_hashes: DefaultDict[
+            str, List[List[BlockHashType]]] = defaultdict(
+                lambda: [[] for _ in range(self.num_kv_cache_groups)])
+
     @property
     def usage(self) -> float:
         return 1.0 - (self.free_block_queue.num_free_blocks /
@@ -121,17 +128,19 @@ class KVCacheManager:
             return [[] for _ in self.managers], 0
 
         # The block hashes for the request may already be computed
-        # if the request was preempted and resumed.
-        if not request.kv_block_hashes:
-            request.set_kv_block_hashes([
+        # if the scheduler has tried to schedule the request before.
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        if not block_hashes:
+            block_hashes = [
                 hash_request_tokens(manager.block_size, request, i)
                 for i, manager in enumerate(self.managers)
-            ])
+            ]
+            self.req_to_block_hashes[request.request_id] = block_hashes
 
         computed_blocks: ReqKVCacheBlocks = []  # computed blocks of each group
         prefix_length: List[PrefixLength] = [
         ]  # possible cached prefix length of each group
-        block_hashes = request.kv_block_hashes
+
         for i, manager in enumerate(self.managers):
             prefix_length_i, computed_blocks_i = (
                 manager.get_possible_cached_prefix(block_hashes[i]))
@@ -154,7 +163,6 @@ class KVCacheManager:
         for i, manager in enumerate(self.managers):
             computed_blocks[i] = computed_blocks[i][:num_computed_tokens //
                                                     manager.block_size]
-
         return computed_blocks, num_computed_tokens
 
     def allocate_slots(
@@ -560,8 +568,8 @@ class KVCacheManager:
             prev_block: The previous block in the chain.
             kv_cache_group_id: The KV cache group that the blocks belong to
         """
-        num_cached_block_hashes = len(
-            request.kv_block_hashes[kv_cache_group_id])
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        num_cached_block_hashes = len(block_hashes[kv_cache_group_id])
 
         # Update the new blocks with the block hashes through the chain.
         prev_block_hash_value = None
@@ -596,8 +604,7 @@ class KVCacheManager:
                 # this request (either the prompt tokens or the previously
                 # generated tokens with preemption). In this case we simply
                 # reuse the block hash.
-                block_hash = request.kv_block_hashes[kv_cache_group_id][
-                    blk_idx]
+                block_hash = block_hashes[kv_cache_group_id][blk_idx]
             else:
                 # Otherwise compute the block hash and cache it in the request
                 # in case it will be preempted in the future.
@@ -620,12 +627,20 @@ class KVCacheManager:
                 block_hash = hash_block_tokens(prev_block_hash_value,
                                                block_tokens, kv_cache_group_id,
                                                extra_keys)
-                request.append_kv_block_hashes(kv_cache_group_id, block_hash)
+                block_hashes.append(kv_cache_group_id, block_hash)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
             prev_block_hash_value = block_hash.hash_value
+
+    def free_block_hashes(self, request: Request) -> None:
+        """Discard the block hashes for the request.
+
+        NOTE: Unlike `free`, this method should be called only when the request
+        is finished, not when it is preempted.
+        """
+        self.req_to_block_hashes.pop(request.request_id, None)
 
     def get_null_block(self) -> KVCacheBlock:
         return self._null_block
