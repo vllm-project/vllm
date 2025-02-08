@@ -1020,7 +1020,7 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16,
                        global_num_experts, expert_map, w1_scale, w2_scale,
-                       a1_scale, a2_scale, block_shape)
+                       w1_zp, w2_zp, a1_scale, a2_scale, block_shape)
 
 
 def inplace_fused_experts_fake(

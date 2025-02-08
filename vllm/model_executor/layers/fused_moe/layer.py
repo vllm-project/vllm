@@ -300,8 +300,7 @@ class FusedMoE(torch.nn.Module):
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
-
-        ep_rank = get_tensor_model_parallel_rank() // self.tp_size
+        
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1
             self.expert_map = torch.full((num_experts, ),
@@ -309,6 +308,7 @@ class FusedMoE(torch.nn.Module):
                                          dtype=torch.int32)
             # Create a expert map for the local experts
             local_num_experts = num_experts // self.ep_size
+            ep_rank = get_tensor_model_parallel_rank() // self.tp_size
             if ep_rank < (self.ep_size - 1):
                 # Each rank gets local_num_experts experts, except the last rank.
                 self.expert_map[ep_rank * local_num_experts:
@@ -331,8 +331,11 @@ class FusedMoE(torch.nn.Module):
             self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None
 
+        local_num_experts = torch.sum(self.expert_map != -1) \
+            if self.expert_map is not None else num_experts
+
         moe_quant_params = {
-            "num_experts": torch.sum(self.expert_map != -1),
+            "num_experts": local_num_experts,
             "hidden_size": hidden_size,
             "intermediate_size_per_partition":
             self.intermediate_size_per_partition,
@@ -630,7 +633,10 @@ class FusedMoE(torch.nn.Module):
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor) -> torch.Tensor:
         assert self.quant_method is not None
-
+        
+        if self.expert_map is not None:
+            self.expert_map = self.expert_map.to(hidden_states.device)
+            
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -640,7 +646,7 @@ class FusedMoE(torch.nn.Module):
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
             global_num_experts=self.global_num_experts,
-            expert_map=self.expert_map.to(hidden_states.device),
+            expert_map=self.expert_map,
             topk_group=self.topk_group,
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
