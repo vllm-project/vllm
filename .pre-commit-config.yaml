@@ -35,7 +35,6 @@ repos:
   - id: pymarkdown
     # Conflicts with pyml disable, so we flag this to be fixed manually
     args: [fix, -d, md007]
-  hooks:
   - id: pymarkdown
     args: [scan]
 - repo: https://github.com/rhysd/actionlint
