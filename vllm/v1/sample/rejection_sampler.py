@@ -77,10 +77,7 @@ class RejectionSampler(nn.Module):
             target_probs,
         )
         return SamplerOutput(sampled_token_ids=sampled_token_ids,
-                             logprob_token_ids=None,
-                             logprobs=None,
-                             prompt_logprob_token_ids=None,
-                             prompt_logprobs=None)
+                             logprobs_tensors=None)
 
     def greedy_sample_ref(
             self, logits: torch.Tensor,
@@ -125,10 +122,7 @@ class RejectionSampler(nn.Module):
         assert output_token_start_idx == len(output_token_ids_cpu)
 
         return SamplerOutput(sampled_token_ids=sampled_token_ids,
-                             logprob_token_ids=None,
-                             logprobs=None,
-                             prompt_logprob_token_ids=None,
-                             prompt_logprobs=None)
+                             logprobs_tensors=None)
 
     def _create_greedy_token_probs(self, token_ids: torch.Tensor,
                                    vocab_size: int,

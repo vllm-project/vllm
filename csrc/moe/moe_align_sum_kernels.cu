@@ -207,8 +207,8 @@ __global__ void sgl_moe_align_block_size_kernel(
   __shared__ int32_t shared_counts[32][8];
   __shared__ int32_t local_offsets[256];
 
-  const int warp_id = threadIdx.x / WARP_SIZE;
-  const int lane_id = threadIdx.x % WARP_SIZE;
+  const int warp_id = threadIdx.x / 32;
+  const int lane_id = threadIdx.x % 32;
   const int experts_per_warp = 8;
   const int my_expert_start = warp_id * experts_per_warp;
 
