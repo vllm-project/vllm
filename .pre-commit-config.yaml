@@ -33,7 +33,7 @@ repos:
   rev: v0.9.27
   hooks:
   - id: pymarkdown
-    files: docs/.*
+    args: [fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
