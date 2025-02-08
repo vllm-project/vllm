@@ -580,7 +580,6 @@ class MQLLMEngineClient(EngineClient):
                                   request_id,
                                   lora_request,
                                   trace_headers,
-                                  kv_transfer_params=kv_transfer_params,
                                   priority=priority))
 
     async def _process_request(

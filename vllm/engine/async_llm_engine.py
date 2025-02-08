@@ -1106,7 +1106,6 @@ class AsyncLLMEngine(EngineClient):
                     pooling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    kv_transfer_params=kv_transfer_params,
                     priority=priority,
             ):
                 yield LLMEngine.validate_output(output, PoolingRequestOutput)
