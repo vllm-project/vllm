@@ -627,7 +627,7 @@ class KVCacheManager:
                 block_hash = hash_block_tokens(prev_block_hash_value,
                                                block_tokens, kv_cache_group_id,
                                                extra_keys)
-                block_hashes.append(kv_cache_group_id, block_hash)
+                block_hashes[kv_cache_group_id].append(block_hash)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
