@@ -75,9 +75,8 @@ class MetaData():
         self.p_descale = p_descale
         self.use_p_scale = (p_scale is not None) and (
             p_descale is not None) and (v_descale is not None)
-        self.int8_kv = (q_descale is None) and (k_descale
-                                                is not None) and (v_descale
-                                                                  is not None)
+        self.int8_kv = ((q_descale is None) and (k_descale is not None)
+                        and (v_descale is not None))
 
     def need_bias(self, bias, batch, nheads, seqlen_q, seqlen_k):
         assert bias.is_cuda
@@ -129,7 +128,8 @@ class MetaData():
                 assert (self.v_descale is not None) and (self.k_descale
                                                          is not None)
             else:
-                assert (q.dtype == k.dtype and q.dtype == v.dtype and q.dtype == torch.int8)
+                assert (q.dtype == k.dtype and q.dtype == v.dtype
+                        and q.dtype == torch.int8)
                 assert (self.q_descale
                         is not None) and (self.k_descale
                                           is not None) and (self.v_descale
@@ -216,8 +216,10 @@ def compute_alibi_block(alibi_slope,
                         offs_m,
                         offs_n,
                         transpose=False):
-    # when seqlen_k and seqlen_q are different we want the diagonal to stick to the bottom right of the attention matrix
-    # for casual mask we want something like this where (1 is kept and 0 is masked)
+    # when seqlen_k and seqlen_q are different we want the diagonal to stick to
+    # the bottom right of the attention matrix
+    # for casual mask we want something like this where (1 is kept and 0 is
+    # masked) 
     # seqlen_q = 2 and seqlen_k = 5
     #   1 1 1 1 0
     #   1 1 1 1 1
@@ -227,20 +229,22 @@ def compute_alibi_block(alibi_slope,
     #        0 0
     #        1 0
     #        1 1
-    # for alibi the diagonal is 0 indicating no penalty for attending to that spot and increasing penalty for attending further from the diagonal
-    # e.g. alibi_slope = 1, seqlen_q = 2, seqlen_k = 5, offs_m = [0, 1, 2, 3], offs_n = [0, 1, 2, 3, 4], transpose = False
+    # for alibi the diagonal is 0 indicating no penalty for attending to that
+    # spot and increasing penalty for attending further from the diagonal
+    # e.g. alibi_slope = 1, seqlen_q = 2, seqlen_k = 5,
+    # offs_m = [0, 1, 2, 3], offs_n = [0, 1, 2, 3, 4], transpose = False
     # 1. offs_m[:,None] = [[0],
     #                       [1],
     # 2. offs_m[:,None] + seqlen_k = [[5],
     #                                  [6],
     # 3. offs_m[:,None] + seqlen_k - seqlen_q = [[3],
     #                                             [4],
-    # 4. offs_m[:,None] + seqlen_k - seqlen_q - offs_n[None,:] = [[3], - [[0, 1, 2, 3, 4]] =  [[ 3, 2, 1, 0,-1],
-    #                                                            [4],                           [ 4, 3, 2, 1, 0]]
+    # 4. offs_m[:,None] + seqlen_k - seqlen_q - offs_n[None,:] = 
+    # [[3], - [[0, 1, 2, 3, 4]] =  [[ 3, 2, 1, 0,-1], [4], [ 4, 3, 2, 1, 0]]
     # 5. -1 * alibi_slope * tl.abs(relative_pos_block) = [[ -3, -2, -1, 0,-1],
     #                                                     [ -4, -3, -2, -1, 0]],
-    relative_pos_block = offs_m[:,
-                                None] + seqlen_k - seqlen_q - offs_n[None, :]
+    relative_pos_block = (offs_m[:, None] + seqlen_k - seqlen_q -
+                          offs_n[None, :])
     alibi_block = -1 * alibi_slope * tl.abs(relative_pos_block)
     if transpose:
         return alibi_block.T
@@ -295,9 +299,9 @@ def _attn_fwd_inner(
         if MASK_STEPS:
             # If this is the last block / iteration, we want to
             # mask if the sequence length is not a multiple of block size
-            # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if not is_modulo_mn.
-            # last step might get wasted but that is okay. check if this masking works For
-            # that case.
+            # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if not
+            # is_modulo_mn. last step might get wasted but that is okay.
+            # check if this masking works for that case.
             if (start_n + BLOCK_N == block_max) and (n_extra_tokens != 0):
                 boundary_m = tl.full([BLOCK_M],
                                      actual_seqlen_k,
@@ -324,8 +328,9 @@ def _attn_fwd_inner(
             bias = load_fn(bias_ptrs, OFFS_M, bias_offs_n, actual_seqlen_q,
                            actual_seqlen_k)
             # While bias is added after multiplying qk with sm_scale,
-            # our optimization to use 2^x instead of e^x results in an additional
-            # scale factor of log2(e) which we must also multiply the bias with.
+            # our optimization to use 2^x instead of e^x results in an
+            # additional scale factor of log2(e) which we must also multiply
+            # the bias with.
             qk += (bias * 1.44269504089)
 
         if alibi_slope is not None:
@@ -346,7 +351,7 @@ def _attn_fwd_inner(
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
         if ENABLE_DROPOUT:
-            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
+            philox_offset = (batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N)
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M,
                                 BLOCK_N, actual_seqlen_k)
             if RETURN_ENCODED_SOFTMAX:
@@ -603,8 +608,8 @@ def attn_fwd(
         num_tiles_per_head = tl.cdiv(
             MAX_SEQLENS_Q,
             BLOCK_M)  # the number of work units (tiles) of a single head
-        num_tiles_per_sample = num_tiles_per_head * HQ  # times the number of heads
-        num_tiles_total = num_tiles_per_sample * B  # times the number of samples
+        num_tiles_per_sample = num_tiles_per_head * HQ  # times number of heads
+        num_tiles_total = num_tiles_per_sample * B  # times number of samples
         if PERSISTENT_DYNAMIC:
             tile_id = atomic_counter.atomic_add(
                 1)  # retuns the value BEFORE the atomic operation
@@ -617,9 +622,12 @@ def attn_fwd(
     while tile_id < num_tiles_total:  # loops more than once only if PERSISTENT
         if PERSISTENT:
             # tile id basically tells us the Q block we are handling
-            off_z = tile_id // num_tiles_per_sample  # at which batch sample are we
-            off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head  # at which head are we inside the sample
-            start_m = tile_id % num_tiles_per_sample % num_tiles_per_head  # at which tile are we inside the head
+            # at which batch sample are we
+            off_z = tile_id // num_tiles_per_sample
+            # at which head are we inside the sample
+            off_h_q = tile_id % num_tiles_per_sample // num_tiles_per_head
+            # at which tile are we inside the head
+            start_m = tile_id % num_tiles_per_sample % num_tiles_per_head 
         else:
             start_m = tl.program_id(0)
             off_h_q = tl.program_id(1)
@@ -629,14 +637,15 @@ def attn_fwd(
         offs_n = tl.arange(0, BLOCK_N)
         offs_d = tl.arange(0, BLOCK_DMODEL)
 
-        continue_condition = True  # as we can't have return statements inside while loop in Triton
+        # as we can't have return statements inside while loop in Triton
+        continue_condition = True
 
         if VARLEN:
             cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z)
             cu_seqlens_q_end = tl.load(cu_seqlens_q + off_z + 1)
             seqlen_q = cu_seqlens_q_end - cu_seqlens_q_start
-            # We have a one-size-fits-all grid in id(0). Some seqlens might be too
-            # small for all start_m so for those we return early.
+            # We have a one-size-fits-all grid in id(0). Some seqlens might be
+            # too small for all start_m so for those we return early.
             if start_m * BLOCK_M > seqlen_q:
                 continue_condition = False
                 # return
@@ -654,8 +663,8 @@ def attn_fwd(
             # This is because for seqlen_q > seqlen_k, M rows of the attn scores
             # are completely masked, resulting in 0s written to the output, and
             # inf written to LSE. We don't need to do any GEMMs in this case.
-            # This block of code determines what N is, and if this WG is operating
-            # on those M rows.
+            # This block of code determines what N is, and if this WG is
+            # operating on those M rows.
             n_blocks = cdiv_fn(seqlen_k, BLOCK_N)
             if (IS_CAUSAL):
                 # If seqlen_q == seqlen_k, the attn scores are a square matrix.
@@ -992,7 +1001,6 @@ def attn_fwd(
                 tile_id += NUM_WG
         else:
             tile_id = num_tiles_total  # break after single tile
-
 
 
 def get_shape_from_layout(q, k, metadata):
