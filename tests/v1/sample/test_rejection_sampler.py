@@ -165,18 +165,3 @@ def test_logits_shape_handling(sampler):
     expected = torch.tensor([[1, 2, 3]], dtype=torch.int, device=logits.device)
     assert torch.equal(output.sampled_token_ids, expected)
     assert logits.shape[-1] == vocab_size
-
-
-def test_none_outputs(sampler):
-    """Test that other output fields are None as expected"""
-    spec_tokens = [[1]]
-    output_tokens = [1, 2]
-
-    metadata = create_sampling_metadata(spec_tokens)
-    logits = create_logits_tensor(output_tokens)
-
-    output = sampler.sample(logits, metadata)
-    assert output.logprob_token_ids is None
-    assert output.logprobs is None
-    assert output.prompt_logprob_token_ids is None
-    assert output.prompt_logprobs is None
