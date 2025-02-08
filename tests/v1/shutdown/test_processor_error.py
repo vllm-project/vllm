@@ -8,6 +8,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
+from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineGenerateError
 
@@ -51,9 +52,10 @@ async def test_async_llm_processor_error(monkeypatch):
         async for out in async_llm.generate(
                 "Hello my name is",
                 request_id="abc",
-                sampling_params=SamplingParams(max_tokens=EXPECTED_TOKENS)):
+                sampling_params=SamplingParams(
+                    max_tokens=EXPECTED_TOKENS,
+                    output_kind=RequestOutputKind.DELTA)):
             outputs.append(out)
-        print(f"{outputs=}")
         assert len(outputs) == EXPECTED_TOKENS
 
         async_llm.shutdown()
