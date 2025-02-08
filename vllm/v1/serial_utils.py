@@ -6,7 +6,8 @@ from typing import Any, Optional
 import torch
 from msgspec import msgpack
 
-CUSTOM_TYPE_CODE_PICKLE = 1
+CUSTOM_TYPE_TENSOR = 1
+CUSTOM_TYPE_PICKLE = 2
 
 
 class MsgpackEncoder:
@@ -38,13 +39,15 @@ def custom_enc_hook(obj: Any) -> Any:
         # NOTE(rob): it is fastest to use numpy + pickle
         # when serializing torch tensors.
         # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
-        return msgpack.Ext(CUSTOM_TYPE_CODE_PICKLE, pickle.dumps(obj.numpy()))
+        return msgpack.Ext(CUSTOM_TYPE_TENSOR, pickle.dumps(obj.numpy()))
 
-    raise NotImplementedError(f"Objects of type {type(obj)} are not supported")
+    return msgpack.Ext(CUSTOM_TYPE_PICKLE, pickle.dumps(obj))
 
 
 def custom_ext_hook(code: int, data: memoryview) -> Any:
-    if code == CUSTOM_TYPE_CODE_PICKLE:
+    if code == CUSTOM_TYPE_TENSOR:
         return torch.from_numpy(pickle.loads(data))
+    if code == CUSTOM_TYPE_PICKLE:
+        return pickle.loads(data)
 
     raise NotImplementedError(f"Extension type code {code} is not supported")

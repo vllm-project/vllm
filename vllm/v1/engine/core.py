@@ -267,7 +267,7 @@ class EngineCoreProc(EngineCore):
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
-                request_type = EngineCoreRequestType(type_frame.buffer)
+                request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                 # Deserialize the request data.
                 decoder = add_request_decoder if (

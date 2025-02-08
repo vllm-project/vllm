@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import List, Optional, Union
 
 import msgspec
 
+from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.inputs import PlaceholderRange
+from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
-
-if TYPE_CHECKING:
-    from vllm.lora.request import LoRARequest
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.inputs import PlaceholderRange
-    from vllm.sampling_params import SamplingParams
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -53,13 +51,13 @@ class EngineCoreRequest(
     # Detokenizer, but set to None when it is added to EngineCoreClient.
     prompt: Optional[str]
     prompt_token_ids: List[int]
-    mm_inputs: Optional[List[Optional["MultiModalKwargs"]]]
+    mm_inputs: Optional[List[Optional[MultiModalKwargs]]]
     mm_hashes: Optional[List[str]]
-    mm_placeholders: Optional[List["PlaceholderRange"]]
-    sampling_params: "SamplingParams"
+    mm_placeholders: Optional[List[PlaceholderRange]]
+    sampling_params: SamplingParams
     eos_token_id: Optional[int]
     arrival_time: float
-    lora_request: Optional["LoRARequest"]
+    lora_request: Optional[LoRARequest]
 
 
 class EngineCoreOutput(
