@@ -254,6 +254,9 @@ class WorkerProc:
             logger.exception("WorkerProc got error at startup:", exc_info=e)
             ready_pipe.send({"status": "FAILED"})
 
+        finally:
+            ready_pipe.close()
+
     @staticmethod
     def make_worker_process(
             vllm_config: VllmConfig,
