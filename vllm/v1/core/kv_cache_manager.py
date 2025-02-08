@@ -73,8 +73,8 @@ class KVCacheManager:
                                         List[KVCacheBlock]] = defaultdict(list)
 
         # Mapping from request ID to kv block hashes.
-        # This is used to avoid recomputing the block hashes when the request
-        # is preempted and resumed.
+        # This is to avoid recomputing the block hashes for each call of
+        # `get_computed_blocks` or `allocate_slots`.
         self.req_to_block_hashes: DefaultDict[
             str, List[BlockHashType]] = defaultdict(list)
 
@@ -103,7 +103,7 @@ class KVCacheManager:
         computed_blocks = []
 
         # The block hashes for the request may already be computed
-        # if the request was preempted and resumed.
+        # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
             block_hashes = hash_request_tokens(self.block_size, request)
