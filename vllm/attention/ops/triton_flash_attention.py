@@ -27,7 +27,7 @@ import triton.language as tl
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
 
-class MetaData():
+class MetaData:
     cu_seqlens_q = None
     cu_seqlens_k = None
     max_seqlens_q = 0
@@ -281,10 +281,7 @@ def _attn_fwd_inner(
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
-        if MASK_STEPS:
-            k_offs_n = start_n + tl.arange(0, BLOCK_N)
-        else:
-            k_offs_n = None
+        k_offs_n = start_n + tl.arange(0, BLOCK_N) if MASK_STEPS else None
         k_offs_k = None if not PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
         k = load_fn(k_ptrs, k_offs_k, k_offs_n, ACTUAL_BLOCK_DMODEL,
                     actual_seqlen_k)
@@ -296,7 +293,7 @@ def _attn_fwd_inner(
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
-        if MASK_STEPS:
+        if MASK_STEPS: # noqa: SIM102
             # If this is the last block / iteration, we want to
             # mask if the sequence length is not a multiple of block size
             # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if not
@@ -394,26 +391,6 @@ def _attn_fwd_inner(
         if RETURN_ENCODED_SOFTMAX:
             encoded_sm_ptrs += BLOCK_N
     return acc, l_i, m_i
-
-
-def get_gfx_version():
-    try:
-        # Run the rocminfo command
-        result = subprocess.run(['rocminfo'],
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                text=True)
-        output = result.stdout
-
-        # Parse the output to find the gfx version
-        for line in output.splitlines():
-            line = line.strip()
-            if line.startswith("Name: gfx"):
-                gfx_version = line.split("Name:")[1].strip()
-                return gfx_version
-    except Exception as e:
-        print(f"Error: {e}")
-    return None
 
 
 def is_hip():
