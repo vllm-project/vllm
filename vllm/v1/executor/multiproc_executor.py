@@ -74,8 +74,8 @@ class MultiprocExecutor(Executor):
             )
             unready_workers.append(unready_worker)
 
-        # All workers are created before wait_for_ready, since
-        # initialization calls self.init_device(), which does a sync.
+        # Workers must be created before wait_for_ready to avoid
+        # deadlock, since worker.init_device() does a device sync.
         self.workers: List[WorkerProcHandle] = []
         for unready_worker in unready_workers:
             # NOTE: the WorkerProc wraps startup in a try ... catch
