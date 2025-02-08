@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Type
+from typing import List, Type, Union
+from concurrent.futures import Future
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
@@ -70,10 +71,14 @@ class Executor(ExecutorBase):
     def execute_model(
         self,
         scheduler_output,
-    ) -> ModelRunnerOutput:
+    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
         output = self.collective_rpc("execute_model",
                                      args=(scheduler_output, ))
         return output[0]
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        return 1
 
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start, ))
