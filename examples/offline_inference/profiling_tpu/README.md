@@ -29,7 +29,6 @@ python3 profiling.py \
     --profile-result-dir profiles
 ```
 
-
 ### Generate Decode Trace
 
 This example runs Llama 3.1 70B with a batch of 32 requests where each has 1 input token and 128 output tokens. This is set up in attempt to profile just the 32 decodes running in parallel by having an extremely small prefill of 1 token and setting `VLLM_TPU_PROFILE_DELAY_MS=1000` to skip the first second of inference (hopefully prefill).
@@ -51,17 +50,18 @@ python3 profiling.py \
     --max-model-len 2048 --tensor-parallel-size 8
 ```
 
-
 ## Visualizing the profiles
 
 Once you have collected your profiles with this script, you can visualize them using [TensorBoard](https://cloud.google.com/tpu/docs/pytorch-xla-performance-profiling-tpu-vm).
 
 Here are most likely the dependencies you need to install:
+
 ```bash
 pip install tensorflow-cpu tensorboard-plugin-profile etils importlib_resources
 ```
 
 Then you just need to point TensorBoard to the directory where you saved the profiles and visit `http://localhost:6006/` in your browser:
+
 ```bash
 tensorboard --logdir profiles/ --port 6006
 ```

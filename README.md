@@ -16,6 +16,7 @@ Easy, fast, and cheap LLM serving for everyone
 ---
 
 *Latest News* 🔥
+
 - [2025/01] We are excited to announce the alpha release of vLLM V1: A major architectural upgrade with 1.7x speedup! Clean code, optimized execution loop, zero-overhead prefix caching, enhanced multimodal support, and more. Please check out our blog post [here](https://blog.vllm.ai/2025/01/27/v1-alpha-release.html).
 - [2025/01] We hosted [the eighth vLLM meetup](https://lu.ma/zep56hui) with Google Cloud! Please find the meetup slides from vLLM team [here](https://docs.google.com/presentation/d/1epVkt4Zu8Jz_S5OhEHPc798emsYh2BwYfRuDDVEF7u4/edit?usp=sharing), and Google Cloud team [here](https://drive.google.com/file/d/1h24pHewANyRL11xy5dXUbvRC9F9Kkjix/view?usp=sharing).
 - [2024/12] vLLM joins [pytorch ecosystem](https://pytorch.org/blog/vllm-joins-pytorch)! Easy, Fast, and Cheap LLM Serving for Everyone!
@@ -33,7 +34,9 @@ Easy, fast, and cheap LLM serving for everyone
 - [2023/06] We officially released vLLM! FastChat-vLLM integration has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid-April. Check out our [blog post](https://vllm.ai).
 
 ---
+
 ## About
+
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
 Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
@@ -127,6 +130,7 @@ We also have an official fundraising venue through [OpenCollective](https://open
 ## Citation
 
 If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
+
 ```bibtex
 @inproceedings{kwon2023efficient,
   title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
@@ -138,11 +142,11 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 
 ## Contact Us
 
-* For technical questions and feature requests, please use Github issues or discussions.
-* For discussing with fellow users and coordinating contributions and development, please use Slack.
-* For security disclosures, please use Github's security advisory feature.
-* For collaborations and partnerships, please contact us at vllm-questions AT lists.berkeley.edu.
+- For technical questions and feature requests, please use Github issues or discussions.
+- For discussing with fellow users and coordinating contributions and development, please use Slack.
+- For security disclosures, please use Github's security advisory feature.
+- For collaborations and partnerships, please contact us at vllm-questions AT lists.berkeley.edu.
 
 ## Media Kit
 
-* If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit).
+- If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit).

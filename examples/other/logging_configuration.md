@@ -15,7 +15,6 @@ more-complex-and-more-flexible.
   - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
     set `VLLM_LOGGING_CONFIG_PATH=<path-to-logging-config.json>`
 
-
 ## Logging Configuration Environment Variables
 
 ### `VLLM_CONFIGURE_LOGGING`
@@ -44,7 +43,6 @@ schema](https://docs.python.org/3/library/logging.config.html#dictionary-schema-
 
 If `VLLM_LOGGING_CONFIG_PATH` is specified, but `VLLM_CONFIGURE_LOGGING` is
 disabled, an error will occur while starting vLLM.
-
 
 ## Examples
 
@@ -97,7 +95,6 @@ to the path of the custom logging configuration JSON file:
 VLLM_LOGGING_CONFIG_PATH=/path/to/logging_config.json \
     vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
-
 
 ### Example 2: Silence a particular vLLM logger
 
@@ -153,7 +150,6 @@ VLLM_LOGGING_CONFIG_PATH=/path/to/logging_config.json \
     vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
 
-
 ### Example 3: Disable vLLM default logging configuration
 
 To disable vLLM's default logging configuration and silence all vLLM loggers,
@@ -165,7 +161,6 @@ loggers.
 VLLM_CONFIGURE_LOGGING=0 \
     vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
-
 
 ## Additional resources
 
