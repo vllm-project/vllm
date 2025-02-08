@@ -293,7 +293,7 @@ def _attn_fwd_inner(
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
-        if MASK_STEPS: # noqa: SIM102
+        if MASK_STEPS:  # noqa: SIM102
             # If this is the last block / iteration, we want to
             # mask if the sequence length is not a multiple of block size
             # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if not
@@ -679,8 +679,8 @@ def attn_fwd(
                     # we subtract this from qk which makes it -inf, such that
                     # exp(qk - inf) = 0 for these masked blocks.
                     l_value = tl.full([BLOCK_M],
-                                value=float("inf"),
-                                dtype=tl.float32)
+                                      value=float("inf"),
+                                      dtype=tl.float32)
                     l_ptrs_mask = offs_m < MAX_SEQLENS_Q
                     tl.store(l_ptrs, l_value, mask=l_ptrs_mask)
                     # TODO: Should dropout and return encoded softmax be
@@ -941,7 +941,7 @@ def attn_fwd(
                 start_m_idx = start_m * BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k
                 acc = acc.to(Out.type.element_ty)
-                if IS_CAUSAL: # noqa: SIM102
+                if IS_CAUSAL:  # noqa: SIM102
                     if (causal_start_idx > start_m_idx
                             and causal_start_idx < end_m_idx):
                         out_mask_boundary = tl.full((BLOCK_DMODEL, ),
@@ -1115,52 +1115,51 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
-        attn_fwd[grid](
-            q,
-            k,
-            v,
-            metadata.bias,
-            metadata.sm_scale,
-            M,
-            o,
-            *q_strides,
-            *k_strides,
-            *v_strides,
-            *o_strides,
-            *bias_strides,
-            *alibi_strides,
-            q_descale,
-            k_descale,
-            p_scale,
-            p_descale,
-            v_descale,
-            metadata.cu_seqlens_q,
-            metadata.cu_seqlens_k,
-            dropout_p=metadata.dropout_p,
-            philox_seed=philox_seed,
-            philox_offset_base=philox_offset,
-            encoded_softmax=encoded_softmax,
-            alibi_slopes=metadata.alibi_slopes,
-            HQ=nheads_q,
-            HK=nheads_k,
-            ACTUAL_BLOCK_DMODEL=head_size,
-            MAX_SEQLENS_Q=metadata.max_seqlens_q,
-            MAX_SEQLENS_K=metadata.max_seqlens_k,
-            IS_CAUSAL=metadata.causal,
-            VARLEN=metadata.varlen,
-            BLOCK_DMODEL=padded_d_model,
-            USE_BIAS=bool(metadata.bias),
-            USE_ALIBI=bool(metadata.alibi_slopes),
-            ENABLE_DROPOUT=metadata.dropout_p > 0.0,
-            RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
-            INT8=metadata.int8,
-            USE_P_SCALE=metadata.int8 and metadata.use_p_scale,
-            INT8_KV=metadata.int8 and metadata.int8_kv,
-            PERSISTENT=metadata.persistent is not None,
-            PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
-            NUM_CU=NUM_CU,
-            atomic_counter=atomic_counter,
-            B=batch)
+        attn_fwd[grid](q,
+                       k,
+                       v,
+                       metadata.bias,
+                       metadata.sm_scale,
+                       M,
+                       o,
+                       *q_strides,
+                       *k_strides,
+                       *v_strides,
+                       *o_strides,
+                       *bias_strides,
+                       *alibi_strides,
+                       q_descale,
+                       k_descale,
+                       p_scale,
+                       p_descale,
+                       v_descale,
+                       metadata.cu_seqlens_q,
+                       metadata.cu_seqlens_k,
+                       dropout_p=metadata.dropout_p,
+                       philox_seed=philox_seed,
+                       philox_offset_base=philox_offset,
+                       encoded_softmax=encoded_softmax,
+                       alibi_slopes=metadata.alibi_slopes,
+                       HQ=nheads_q,
+                       HK=nheads_k,
+                       ACTUAL_BLOCK_DMODEL=head_size,
+                       MAX_SEQLENS_Q=metadata.max_seqlens_q,
+                       MAX_SEQLENS_K=metadata.max_seqlens_k,
+                       IS_CAUSAL=metadata.causal,
+                       VARLEN=metadata.varlen,
+                       BLOCK_DMODEL=padded_d_model,
+                       USE_BIAS=bool(metadata.bias),
+                       USE_ALIBI=bool(metadata.alibi_slopes),
+                       ENABLE_DROPOUT=metadata.dropout_p > 0.0,
+                       RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
+                       INT8=metadata.int8,
+                       USE_P_SCALE=metadata.int8 and metadata.use_p_scale,
+                       INT8_KV=metadata.int8 and metadata.int8_kv,
+                       PERSISTENT=metadata.persistent is not None,
+                       PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
+                       NUM_CU=NUM_CU,
+                       atomic_counter=atomic_counter,
+                       B=batch)
 
         ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
