@@ -47,7 +47,6 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
-        print("EXECUTOR_READY")
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks = self._initialize_kv_caches(
@@ -248,7 +247,7 @@ class EngineCoreProc(EngineCore):
             # 3) Step the engine core.
             outputs = self.step()
 
-            # 5) Put EngineCoreOutputs into the output queue.
+            # 4) Put EngineCoreOutputs into the output queue.
             self.output_queue.put_nowait(outputs)
 
     def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:

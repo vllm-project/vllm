@@ -185,8 +185,8 @@ class MPClient(EngineCoreClient):
         self.proc_handle.shutdown()
         self._finalizer()
 
-    def _validate_alive(self, frame: Any):
-        if frame == EngineCoreProc.ENGINE_CORE_DEAD:
+    def _validate_alive(self, buffer: Any):
+        if buffer == EngineCoreProc.ENGINE_CORE_DEAD:
             self.is_engine_dead = True
             raise EngineDeadError()
 
@@ -213,7 +213,7 @@ class SyncMPClient(MPClient):
 
         try:
             (frame, ) = self.output_socket.recv_multipart(copy=False)
-            self._validate_alive(frame)
+            self._validate_alive(frame.buffer)
             return self.decoder.decode(frame.buffer)
         except Exception as e:
             raise self._format_exception(e) from None
@@ -273,10 +273,11 @@ class AsyncMPClient(MPClient):
             # to overlap with this task (run_output_handler).
             async def process_outputs_socket():
                 try:
-                    (frame, ) = await self.output_socket.recv_multipart(
-                        copy=False)
-                    self._validate_alive(frame)
-                    self.outputs_queue.put_nowait(frame.buffer)
+                    while True:
+                        (frame, ) = await self.output_socket.recv_multipart(
+                            copy=False)
+                        self._validate_alive(frame.buffer)
+                        self.outputs_queue.put_nowait(frame.buffer)
                 except Exception as e:
                     self.outputs_queue.put_nowait(e)
 
