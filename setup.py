@@ -47,6 +47,11 @@ elif not (sys.platform.startswith("linux")
         "Building on %s, "
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
+elif (sys.platform.startswith("linux") and torch.version.cuda is None
+      and os.getenv("VLLM_TARGET_DEVICE") is None):
+    # if cuda is not available and VLLM_TARGET_DEVICE is not set,
+    # fallback to cpu
+    VLLM_TARGET_DEVICE = "cpu"
 
 MAIN_CUDA_VERSION = "12.1"
 
@@ -482,7 +487,6 @@ def get_vllm_version() -> str:
     version = get_version(
         write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
     )
-
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
@@ -520,7 +524,8 @@ def get_vllm_version() -> str:
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
-        version += f"{sep}cpu"
+        if envs.VLLM_TARGET_DEVICE == "cpu":
+            version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
     else:
