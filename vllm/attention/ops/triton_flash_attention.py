@@ -941,7 +941,7 @@ def attn_fwd(
                 start_m_idx = start_m * BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k
                 acc = acc.to(Out.type.element_ty)
-                if IS_CAUSAL:
+                if IS_CAUSAL: # noqa: SIM102
                     if (causal_start_idx > start_m_idx
                             and causal_start_idx < end_m_idx):
                         out_mask_boundary = tl.full((BLOCK_DMODEL, ),
@@ -1149,8 +1149,8 @@ class _attention(torch.autograd.Function):
             IS_CAUSAL=metadata.causal,
             VARLEN=metadata.varlen,
             BLOCK_DMODEL=padded_d_model,
-            USE_BIAS=False if metadata.bias is None else True,
-            USE_ALIBI=False if metadata.alibi_slopes is None else True,
+            USE_BIAS=bool(metadata.bias),
+            USE_ALIBI=bool(metadata.alibi_slopes),
             ENABLE_DROPOUT=metadata.dropout_p > 0.0,
             RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
             INT8=metadata.int8,
