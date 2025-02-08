@@ -68,7 +68,7 @@ class LMCacheConnector(KVConnectorBase):
         hidden_or_intermediate_states = None
 
         # TODO (Jiayi): Need to support chunked prefill
-        retrieve_status = [self.retrieve_status.PREFILL]
+        retrieve_status = self.retrieve_status.PREFILL
 
         model_input, bypass_model_exec = self.lmcache_retrieve_kv(
             model_executable, model_input, self.cache_config, kv_caches,
@@ -93,7 +93,6 @@ class LMCacheConnector(KVConnectorBase):
                 num_reqs += 1
 
         # TODO (Jiayi): Only normal prefill is supported for now
-        #store_status = [self.store_status.PREFILL] * num_reqs
         store_status = self.lmcache_should_store(model_input)
         self.lmcache_store_kv(
             self.model_config,
