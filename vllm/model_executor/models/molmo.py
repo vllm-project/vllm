@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-import re
-from array import array
 from dataclasses import dataclass
-from functools import lru_cache, partial
-from typing import Iterable, List, Mapping, Optional, Set, Tuple, TypedDict
+from functools import cached_property, partial
+from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
+                    Union)
 
+import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
-from PIL import Image
-from torch import nn
-from torch.nn import functional as F
-from transformers import PretrainedConfig
+from transformers import (BatchFeature, PretrainedConfig, ProcessorMixin,
+                          TensorType)
+from transformers.image_utils import ImageInput
+from transformers.tokenization_utils_base import TextInput
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.layer import MultiHeadAttention
@@ -22,8 +24,6 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather)
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import (MulAndSilu, QuickGELU,
                                                    SiluAndMul)
@@ -40,12 +40,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
-from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
-from vllm.transformers_utils.processor import get_processor
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
+from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
+                                   MultiModalDataItems)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptReplacementDetails)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
@@ -64,28 +68,22 @@ DEFAULT_IM_COL_TOKEN_ID = 152065
 
 class MolmoImageInputs(TypedDict):
     images: torch.Tensor
-    """Shape:
-    `(batch_size, num_crops, num_patch, patch_dim)`
-    """
+    """Shape: `(batch_size, num_crops, num_patch, patch_dim)`"""
 
     image_input_idx: torch.Tensor
-    """Shape:
-    `(batch_size, num_crops, num_patch)`
-    """
-
-    seq_len: torch.Tensor
-    """Shape:
-    `(batch_size, )`
-    """
+    """Shape: `(batch_size, num_crops, num_patch)`"""
 
     image_masks: Optional[torch.Tensor]
-    """Shape:
-    `(batch_size, num_crops, num_patch)`
-    """
+    """Shape: `(batch_size, num_crops, num_patch)`"""
 
-    image_start_end: Tuple[int, int]
-    """Starting and ending index of placeholder 
-    tokens
+    seq_len: torch.Tensor
+    """Shape: `(batch_size, )`"""
+
+    image_start_end: torch.Tensor
+    """
+    Starting and ending index of placeholder tokens.
+
+    Shape: `(2,)`
     """
 
 
@@ -888,249 +886,506 @@ class MolmoModel(nn.Module):
         return loaded_params
 
 
-cached_get_processor = lru_cache(get_processor)
+def _lowest_multiple(x: int, k: int) -> int:
+    return (x // k) * k
 
 
-def get_num_patches(num_tiles: int, crop_patches: int, left_margin: int,
-                    right_margin: int, pooling_size: int) -> int:
-    crop_window_patches = crop_patches - (left_margin + right_margin)
-    if num_tiles > 1:
-        left_crop_window_patches = (crop_window_patches + left_margin +
-                                    pooling_size -
-                                    1) // pooling_size * pooling_size
-        middle_crop_window_patches = (crop_window_patches + pooling_size -
-                                      1) // pooling_size * pooling_size
-        right_crop_window_patches = (crop_window_patches + right_margin +
-                                     pooling_size -
-                                     1) // pooling_size * pooling_size
-        return left_crop_window_patches + (
-            num_tiles -
-            2) * middle_crop_window_patches + right_crop_window_patches
-    else:
-        single_crop_window_patches = (crop_patches + pooling_size -
-                                      1) // pooling_size * pooling_size
-        return single_crop_window_patches
+def get_num_crop_window_patches(
+    crop_patches: int,
+    *,
+    left_margin: int,
+    right_margin: int,
+):
+    return crop_patches - (left_margin + right_margin)
 
 
-def get_tokens(tiling_h: int, tiling_w: int, crop_patches: int,
-               left_margin: int, right_margin: int, pooling_size: int) -> int:
-    h = get_num_patches(tiling_h, crop_patches, left_margin, right_margin,
-                        pooling_size)
-    w = get_num_patches(tiling_w, crop_patches, left_margin, right_margin,
-                        pooling_size)
-    per_row = w // pooling_size + 1
-    joint = per_row * (h // pooling_size) + 2
-    image_token_length = (crop_patches + pooling_size - 1) // pooling_size
-    resize = (image_token_length + 1) * image_token_length + 2
-    return resize + joint
+def get_num_patches(
+    num_tiles: int,
+    *,
+    crop_patches: int,
+    left_margin: int,
+    right_margin: int,
+    pooling_size: int,
+) -> int:
+    if num_tiles == 1:
+        return _lowest_multiple(crop_patches + pooling_size - 1, pooling_size)
 
-
-def get_max_tokens(max_crops: int, crop_patches: int, left_margin: int,
-                   right_margin: int, pooling_size: int) -> int:
-    tilings = []
-    for i in range(1, max_crops + 1):
-        for j in range(1, max_crops + 1):
-            if i * j <= max_crops:
-                tilings.append((i, j))
-    tokens = [
-        get_tokens(tilings[i][0], tilings[i][1], crop_patches, left_margin,
-                   right_margin, pooling_size) for i in range(len(tilings))
-    ]
-    return max(tokens)
-
-
-def get_max_molmo_image_tokens(ctx: InputContext) -> int:
-    processor = cached_get_processor(
-        ctx.model_config.model,
-        trust_remote_code=ctx.model_config.trust_remote_code,
-        revision=ctx.model_config.code_revision)
-    image_processor = processor.image_processor
-    max_llm_image_tokens = get_max_tokens(
-        image_processor.max_crops,
-        image_processor.base_image_input_size[0] //
-        image_processor.image_patch_size,
-        image_processor.overlap_margins[0],
-        image_processor.overlap_margins[1],
-        2,
+    crop_window_patches = get_num_crop_window_patches(
+        crop_patches,
+        left_margin=left_margin,
+        right_margin=right_margin,
     )
-    return max_llm_image_tokens
+
+    left_num = _lowest_multiple(
+        crop_window_patches + left_margin + pooling_size - 1,
+        pooling_size,
+    )
+    middle_num = _lowest_multiple(
+        crop_window_patches + pooling_size - 1,
+        pooling_size,
+    )
+    right_num = _lowest_multiple(
+        crop_window_patches + right_margin + pooling_size - 1,
+        pooling_size,
+    )
+
+    return left_num + (num_tiles - 2) * middle_num + right_num
 
 
-# NOTE: preprocessing for the image data has been included in the
-# 'input_processor_for_molmo' function
-def image_input_mapper_for_molmo(
-    ctx: InputContext,
-    data: object,
+def get_patches_grid_size(
+    *,
+    tiling_h: int,
+    tiling_w: int,
+    crop_patches: int,
+    left_margin: int,
+    right_margin: int,
+    pooling_size: int,
+) -> tuple[int, int]:
+    nrows = get_num_patches(
+        tiling_h,
+        crop_patches=crop_patches,
+        left_margin=left_margin,
+        right_margin=right_margin,
+        pooling_size=pooling_size,
+    )
+    ncols = get_num_patches(
+        tiling_w,
+        crop_patches=crop_patches,
+        left_margin=left_margin,
+        right_margin=right_margin,
+        pooling_size=pooling_size,
+    )
+
+    return ncols, nrows
+
+
+def get_candidate_tilings(max_num: int) -> list[tuple[int, int]]:
+    tilings = [(i, j) for i in range(1, max_num + 1)
+               for j in range(1, max_num + 1) if i * j <= max_num]
+    return sorted(tilings, key=lambda x: x[0] * x[1])
+
+
+def select_tiling(
+    *,
+    height: int,
+    width: int,
+    patch_size: int,
+    max_num_patches: int,
 ):
-    if isinstance(data, list):
-        assert len(data) == 1, "Molmo supports only one image per prompt."
-        data = data[0]
+    tilings = get_candidate_tilings(max_num_patches)
+    candidate_tilings = np.array(tilings, dtype=np.int32)
+    candidate_resolutions = candidate_tilings * patch_size
 
-    return MultiModalKwargs(data)
+    original_size = np.array([height, width], dtype=np.float32)
+    required_scale_d = candidate_resolutions.astype(np.float32) / original_size
+    required_scale = required_scale_d.min(axis=-1, keepdims=True)
 
-
-def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
-                         mm_counts: Mapping[str, int]):
-    processor = cached_get_processor(
-        ctx.model_config.model,
-        trust_remote_code=ctx.model_config.trust_remote_code,
-        revision=ctx.model_config.code_revision)
-    image_processor = processor.image_processor
-
-    base_image_input_d = image_processor.image_patch_size
-    left_margin, right_margin = image_processor.overlap_margins
-    max_crops = image_processor.max_crops
-
-    # Assume: prompt_token_ids always starts with bos_token_id followed image tokens # noqa: E501
-    max_llm_image_tokens = get_max_molmo_image_tokens(ctx)
-    if seq_len - max_llm_image_tokens - 1 < 0:
-        raise RuntimeError(
-            f"Molmo cannot process {max_crops} crops in a prompt, "
-            "please increase max_model_len or reduce number of crops")
-
-    # The vertical image has the maximum number of image tokens due to column tokens. # noqa: E501
-    tiling = (max_crops, 1)
-    total_margin_pixels = base_image_input_d * (right_margin + left_margin)
-    crop_patches = image_processor.base_image_input_size[
-        0] // base_image_input_d
-    crop_window_patches = crop_patches - (right_margin + left_margin)
-    crop_window_size = crop_window_patches * base_image_input_d
-
-    h = crop_window_size * tiling[0] + total_margin_pixels
-    w = crop_window_size * tiling[1] + total_margin_pixels
-
-    dummy_image = Image.new("RGB", (w, h), color="red")
-
-    out = processor.process("dummy prompt", dummy_image)
-
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      out["input_ids"][:1 + max_llm_image_tokens])
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - max_llm_image_tokens - 1)
-    dummy_seqdata = SequenceData(token_ids)
-    dummy_imgdata = {
-        "images": out["images"],
-        "image_input_idx": out["image_input_idx"],
-    }
-    if "image_masks" in out:
-        dummy_imgdata["image_masks"] = out["image_masks"]
-    dummy_imgdata["seq_len"] = torch.tensor(seq_len, dtype=torch.long)
-    size = 0
-    offset = -1
-    for i in range(len(token_ids)):
-        if token_ids[i] in (DEFAULT_IMAGE_PATCH_TOKEN_ID,
-                            DEFAULT_IM_START_TOKEN_ID, DEFAULT_IM_END_TOKEN_ID,
-                            DEFAULT_IM_COL_TOKEN_ID):
-            if offset < 0:
-                offset = i
-            size += 1
-    dummy_imgdata["image_start_end"] = (offset, offset + size)
-    return DummyData(seq_data=dummy_seqdata,
-                     multi_modal_data={"image": dummy_imgdata},
-                     multi_modal_placeholders={
-                         "image":
-                         [PlaceholderRange(offset=offset, length=size)]
-                     })
-
-
-def pad_images(
-    max_total_crops: int,
-    images: torch.Tensor,
-    image_input_idx: torch.Tensor,
-    image_masks: Optional[torch.Tensor] = None,
-):
-    n = max_total_crops - images.shape[0]
-    images = F.pad(images, (0, 0, 0, 0, 0, n), value=-1)
-    image_input_idx = F.pad(image_input_idx, (0, 0, 0, n), value=-1)
-    if image_masks is not None:
-        image_masks = F.pad(image_masks, (0, 0, 0, n), value=-1)
-    return images, image_input_idx, image_masks
-
-
-def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
-    prompt = inputs.get("prompt")
-    multi_modal_data = inputs.get("multi_modal_data")
-    image = None if multi_modal_data is None else multi_modal_data.get("image")
-
-    model_config = ctx.model_config
-    processor = cached_get_processor(
-        ctx.model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=ctx.model_config.code_revision)
-    tokenizer = cached_get_tokenizer(
-        model_config.tokenizer,
-        trust_remote_code=model_config.trust_remote_code)
-
-    # NOTE: message formatting for raw text prompt is only applied for
-    # offline inference; for online serving, the prompt is always in
-    # instruction format and tokenized.
-    if prompt is not None and re.match(r"^User:[\s\S]*?(Assistant:)*$",
-                                       prompt):
-        out = processor.process(prompt, image, message_format="none")
-    elif prompt is not None:
-        out = processor.process(prompt, image)
+    if (required_scale < 1).all():
+        ix = required_scale.argmax()
     else:
-        out = processor.process(None, image, tokens=inputs["prompt_token_ids"])
+        ix = np.where(required_scale < 1.0, 10e9, required_scale).argmin()
 
-    # If there is no image, return directly.
-    if image is None:
-        new_prompt_token_ids = out["input_ids"].tolist()
-        prompt = inputs.get("prompt")
-        if prompt is None:
-            prompt = tokenizer.decode(new_prompt_token_ids)
-        return token_inputs(
-            prompt_token_ids=new_prompt_token_ids,
-            prompt=prompt,
+    return candidate_tilings[ix]
+
+
+class MolmoProcessorWrapper:
+    """
+    Wraps :class:`MolmoProcessor` so that it can be called directly.
+
+    The original definition can be found here:
+    https://huggingface.co/allenai/Molmo-7B-D-0924/blob/main/preprocessing_molmo.py
+    """
+
+    def __init__(self, processor: ProcessorMixin):
+        super().__init__()
+
+        self.processor = processor
+
+    @property
+    def max_crops(self) -> int:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        max_crops = image_processor.max_crops
+        assert isinstance(max_crops, int)
+
+        return max_crops
+
+    @property
+    def base_image_input_size(self) -> tuple[int, int]:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        base_image_input_size = image_processor.base_image_input_size
+        if isinstance(base_image_input_size, int):
+            return base_image_input_size, base_image_input_size
+
+        return tuple(base_image_input_size)
+
+    @property
+    def image_patch_size(self) -> int:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        image_patch_size = image_processor.image_patch_size
+        assert isinstance(image_patch_size, int)
+
+        return image_patch_size
+
+    @property
+    def overlap_margins(self) -> tuple[int, int]:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        left_margin, right_margin = image_processor.overlap_margins
+        assert isinstance(left_margin, int)
+        assert isinstance(right_margin, int)
+
+        return left_margin, right_margin
+
+    @property
+    def image_token_length_w(self) -> int:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        image_token_length_w = image_processor.image_token_length_w
+        assert isinstance(image_token_length_w, int)
+
+        return image_token_length_w
+
+    @property
+    def image_token_length_h(self) -> int:
+        image_processor = self.processor.image_processor  # type: ignore
+
+        image_token_length_h = image_processor.image_token_length_h
+        assert isinstance(image_token_length_h, int)
+
+        return image_token_length_h
+
+    @property
+    def message_format(self) -> Optional[str]:
+        return "role"
+
+    @property
+    def always_start_with_space(self) -> bool:
+        return True
+
+    @property
+    def pooling_size(self) -> int:
+        return 2
+
+    def get_patches_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        max_crops = self.max_crops
+        left_margin, right_margin = self.overlap_margins
+        base_image_input_size = self.base_image_input_size
+        base_image_input_d = self.image_patch_size
+        pooling_size = self.pooling_size
+
+        total_margin_pixels = base_image_input_d * (right_margin + left_margin)
+        crop_patches = base_image_input_size[0] // base_image_input_d
+        crop_window_patches = crop_patches - (right_margin + left_margin)
+        crop_window_size = crop_window_patches * base_image_input_d
+        tiling_h, tiling_w = select_tiling(
+            height=image_height - total_margin_pixels,
+            width=image_width - total_margin_pixels,
+            patch_size=crop_window_size,
+            max_num_patches=max_crops,
         )
 
-    image_processor = processor.image_processor
-    max_total_crops = 1 + image_processor.max_crops
-    images, image_input_idx, image_masks = pad_images(
-        max_total_crops,
-        out["images"],
-        out["image_input_idx"],
-        out.get("image_masks"),
-    )
-    image_data = dict(
-        images=images,
-        image_input_idx=image_input_idx,
-    )
-    if image_masks is not None:
-        image_data["image_masks"] = image_masks
+        ncols, nrows = get_patches_grid_size(
+            tiling_h=tiling_h,
+            tiling_w=tiling_w,
+            crop_patches=crop_patches,
+            left_margin=left_margin,
+            right_margin=right_margin,
+            pooling_size=pooling_size,
+        )
 
-    new_prompt_token_ids = out["input_ids"].tolist()
-    image_data["seq_len"] = torch.tensor(len(new_prompt_token_ids),
-                                         dtype=torch.long)
+        return ncols, nrows
 
-    multi_modal_data = dict(image=image_data)
-    size = 0
-    offset = -1
-    for i in range(len(new_prompt_token_ids)):
-        if new_prompt_token_ids[i] in (DEFAULT_IMAGE_PATCH_TOKEN_ID,
-                                       DEFAULT_IM_START_TOKEN_ID,
-                                       DEFAULT_IM_END_TOKEN_ID,
-                                       DEFAULT_IM_COL_TOKEN_ID):
-            if offset < 0:
-                offset = i
-            size += 1
-    image_data["image_start_end"] = (offset, offset + size)
-    prompt = inputs.get("prompt")
-    if prompt is None:
-        prompt = tokenizer.decode(new_prompt_token_ids)
-    return token_inputs(
-        prompt_token_ids=new_prompt_token_ids,
-        prompt=prompt,
-        multi_modal_data=multi_modal_data,
-        multi_modal_placeholders={
-            "image": [PlaceholderRange(offset=offset, length=size)]
-        },
-    )
+    def __call__(
+        self,
+        text: Optional[Union[TextInput, list[TextInput]]] = None,
+        images: Optional[Union[ImageInput, list[ImageInput]]] = None,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+        **kwargs,
+    ) -> BatchFeature:
+        outputs = self.processor.process(text, images,
+                                         **kwargs)  # type: ignore
+
+        return BatchFeature(
+            {
+                "input_ids": outputs.pop("input_ids").unsqueeze(0),
+                **outputs
+            },
+            tensor_type=return_tensors,
+        )
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(image_input_mapper_for_molmo)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_molmo_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_molmo)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_molmo)
+class MolmoProcessingInfo(BaseProcessingInfo):
+
+    @cached_property
+    def bos_token_id(self) -> int:
+        # HF processor adds bos_token_id
+        tokenizer = self.get_tokenizer()
+
+        # qwen2 and olmo do not have a BOS,
+        # and instead use EOS as a generic separator token.
+        bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
+        assert isinstance(bos_token_id, int)
+
+        return bos_token_id
+
+    def get_hf_processor(self) -> MolmoProcessorWrapper:
+        processor = self.ctx.get_hf_processor()
+        return MolmoProcessorWrapper(processor)
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {"image": self.get_max_image_tokens()}
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Optional[MolmoProcessorWrapper],
+    ) -> int:
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        ncols, nrows = processor.get_patches_grid_size(
+            image_width=image_width,
+            image_height=image_height,
+        )
+        pooling_size = processor.pooling_size
+
+        base_image_input_size = processor.base_image_input_size
+        base_image_input_d = processor.image_patch_size
+
+        crop_patches = base_image_input_size[0] // base_image_input_d
+
+        per_row = ncols // pooling_size + 1
+        joint = per_row * (nrows // pooling_size) + 2
+        image_token_length = (crop_patches + pooling_size - 1) // pooling_size
+        resize = (image_token_length + 1) * image_token_length + 2
+
+        return resize + joint
+
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        return self.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            processor=None,
+        )
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        processor = self.get_hf_processor()
+
+        tilings = get_candidate_tilings(processor.max_crops)
+        base_h, base_w = processor.base_image_input_size
+
+        largest_feature_size, largest_feature_pinpoint = 0, None
+        for wr, hr in tilings:
+            width, height = base_w * wr, base_h * hr
+
+            feat_size = self.get_num_image_tokens(
+                image_width=width,
+                image_height=height,
+                processor=processor,
+            )
+            if feat_size > largest_feature_size:
+                largest_feature_size = feat_size
+                largest_feature_pinpoint = ImageSize(width=width,
+                                                     height=height)
+
+        if largest_feature_size == 0 or largest_feature_pinpoint is None:
+            raise ValueError("Cannot have a largest feature size of 0!")
+
+        return largest_feature_pinpoint
+
+
+class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+        num_images = mm_counts.get("image", 0)
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text="",
+            mm_data=mm_data,
+        )
+
+
+class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        prompt_ids = processed_outputs.input_ids  # shape: (1, seq_len)
+        image_ids = torch.tensor([
+            DEFAULT_IMAGE_PATCH_TOKEN_ID,
+            DEFAULT_IM_START_TOKEN_ID,
+            DEFAULT_IM_END_TOKEN_ID,
+            DEFAULT_IM_COL_TOKEN_ID,
+        ])  # Shape: (4,)
+        is_image_id = (prompt_ids == image_ids[:, None]).any(dim=0)
+
+        num_image_idxs = is_image_id.sum()
+        image_start_idx = torch.tensor(
+            -1) if num_image_idxs == 0 else is_image_id.nonzero()[0][0]
+        image_end_idx = image_start_idx + num_image_idxs
+
+        processed_outputs["seq_len"] = prompt_ids.shape[1]
+        processed_outputs["image_start_end"] = torch.stack(
+            [image_start_idx, image_end_idx])
+
+        return processed_outputs
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        processor = self.info.get_hf_processor()
+
+        # Apply the chat template to the tokens
+        tokens = processor.processor.get_tokens_input(  # type: ignore
+            self.info.get_tokenizer().decode(prompt_tokens),
+            message_format=processor.message_format,
+            always_start_with_space=processor.always_start_with_space,
+        )
+
+        processed_data = self.info.ctx.call_hf_processor(
+            processor,  # type: ignore
+            dict(tokens=tokens),
+        )
+        prompt_ids, = processed_data.pop("input_ids").tolist()
+
+        return prompt_ids
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        images = hf_inputs.get("images", torch.empty(0))
+        num_images = len(images)
+
+        return dict(
+            images=MultiModalFieldConfig.batched("image"),
+            image_masks=MultiModalFieldConfig.batched("image"),
+            image_input_idx=MultiModalFieldConfig.batched("image"),
+            seq_len=MultiModalFieldConfig.shared("image", num_images),
+            image_start_end=MultiModalFieldConfig.shared("image", num_images),
+        )
+
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        bos_token_id = self.info.bos_token_id
+
+        image_token_length_w = processor.image_token_length_w
+        image_token_length_h = processor.image_token_length_h
+        pooling_size = processor.pooling_size
+
+        user_prefix = "User: "
+        if processor.always_start_with_space:
+            user_prefix += " "
+
+        user_prefix_tokens = tokenizer.encode(user_prefix,
+                                              add_special_tokens=False)
+
+        def get_replacement_molmo(item_idx: int):
+            images = mm_items.get_items("image", ImageProcessorItems)
+            image_size = images.get_image_size(item_idx)
+
+            ncols, nrows = processor.get_patches_grid_size(
+                image_width=image_size.width,
+                image_height=image_size.height,
+            )
+
+            per_row = np.full(
+                (ncols + 1) // pooling_size,
+                DEFAULT_IMAGE_PATCH_TOKEN_ID,
+            )
+            per_row = np.concatenate(
+                [[per_row], DEFAULT_IM_COL_TOKEN_ID],
+                axis=0,
+            )
+            joint = [
+                [DEFAULT_IM_START_TOKEN_ID],
+                np.tile(per_row, [(nrows + 1) // pooling_size]),
+                [DEFAULT_IM_END_TOKEN_ID],
+            ]
+
+            extra_per_row = np.full(
+                (image_token_length_w, ),
+                DEFAULT_IMAGE_PATCH_TOKEN_ID,
+            )
+            extra_per_row = np.concatenate(
+                [extra_per_row, [DEFAULT_IM_COL_TOKEN_ID]],
+                axis=0,
+            )
+            extra_joint = [
+                [DEFAULT_IM_START_TOKEN_ID],
+                np.tile(extra_per_row, [image_token_length_h]),
+                [DEFAULT_IM_END_TOKEN_ID],
+            ]
+
+            image_tokens = np.concatenate([extra_joint + joint], axis=0)
+            image_tokens = image_tokens.tolist()
+
+            return PromptReplacementDetails(
+                full=user_prefix_tokens + [bos_token_id] + image_tokens,
+                features=image_tokens,
+            )
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=user_prefix,
+                replacement=get_replacement_molmo,
+            )
+        ]
+
+
+@MULTIMODAL_REGISTRY.register_processor(MolmoMultiModalProcessor,
+                                        info=MolmoProcessingInfo,
+                                        dummy_inputs=MolmoDummyInputsBuilder)
 class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                        SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
@@ -1235,14 +1490,27 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             raise ValueError("image_input_idx is required for Molmo model.")
         if seq_len is None:
             raise ValueError("seq_len is required for Molmo model.")
+        if not isinstance(images, torch.Tensor):
+            raise ValueError("Incorrect type of images. "
+                             f"Got type: {type(images)}")
+        if not isinstance(image_input_idx, torch.Tensor):
+            raise ValueError("Incorrect type of image_input_idx. "
+                             f"Got type: {type(image_input_idx)}")
+        if not (image_masks is None or isinstance(image_masks, torch.Tensor)):
+            raise ValueError("Incorrect type of image_masks. "
+                             f"Got type: {type(image_masks)}")
         if not isinstance(seq_len, torch.Tensor):
-            seq_len = torch.tensor(seq_len)
+            raise ValueError("Incorrect type of seq_len. "
+                             f"Got type: {type(seq_len)}")
+        if not isinstance(image_start_end, torch.Tensor):
+            raise ValueError("Incorrect type of image_start_end. "
+                             f"Got type: {type(image_start_end)}")
 
         return MolmoImageInputs(
             images=images,
             image_input_idx=image_input_idx,
-            seq_len=seq_len,
             image_masks=image_masks,
+            seq_len=seq_len,
             image_start_end=image_start_end,
         )
 

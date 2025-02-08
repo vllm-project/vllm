@@ -89,7 +89,7 @@ def _test_processing_correctness(
         mm_data = {
             k:
             [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
-             for _ in range(rng.randint(limit))]
+             for _ in range(rng.randint(limit + 1))]
             for k, limit in limit_mm_per_prompt.items()
         }
 
@@ -158,6 +158,7 @@ def _test_processing_correctness(
     "mistral-community/pixtral-12b",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
+    "allenai/Molmo-7B-D-0924",
     "nvidia/NVLM-D-72B",
     "Qwen/Qwen-VL-Chat",
     "Qwen/Qwen2-VL-2B-Instruct",
