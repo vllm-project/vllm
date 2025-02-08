@@ -97,17 +97,16 @@ class RejectionSampler(nn.Module):
         for spec_tokens in spec_token_ids:
             num_spec_tokens = len(spec_tokens)
             max_spec_len = max(max_spec_len, num_spec_tokens)
-            output_tokens = output_token_ids_cpu[
-                output_token_start_idx:output_token_start_idx + 1 +
-                num_spec_tokens]
             i = 0
-            while i < len(spec_tokens):
-                if spec_tokens[i] != output_tokens[i]:
+            while i < num_spec_tokens:
+                if spec_tokens[i] != output_token_ids_cpu[
+                        output_token_start_idx + i]:
                     break
                 i += 1
             # +1 to include the bonus token.
             i += 1
-            output_tokens = output_tokens[:i]
+            output_tokens = output_token_ids_cpu[
+                output_token_start_idx:output_token_start_idx + i]
             sampled_token_ids.append(output_tokens)
             output_token_start_idx += num_spec_tokens + 1
 
