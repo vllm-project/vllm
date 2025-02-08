@@ -388,6 +388,8 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
+        print(f"{self.engine_core.is_engine_dead=}")
+        print(f"{self.is_running=}")
         return (self.engine_core.is_engine_dead or not self.is_running)
 
     @property

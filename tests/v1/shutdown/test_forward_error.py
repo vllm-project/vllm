@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test that we handle an Error in model forward and shutdown."""
 
 import asyncio
@@ -84,7 +85,7 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
             timeout_s=60,
         )
 
-        # NOTE: shutdown is handled by the API Server. If an exception
+        # NOTE: shutdown is handled by the API Server if an exception
         # occurs, so it is expected that we would need to call this.
         async_llm.shutdown()
 

@@ -389,7 +389,7 @@ class WorkerProc:
             except Exception as e:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
-                logger.exception("WorkerProc hit an exception: %s", exc_info=e)
+                logger.exception("WorkerProc hit an exception:", exc_info=e)
                 continue
 
             self.worker_response_mq.enqueue(

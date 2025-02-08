@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test error handling in Processor. Should not impact other reqs."""
 
 import asyncio
