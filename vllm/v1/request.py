@@ -98,8 +98,9 @@ class Request:
         token_ids: Union[int, List[int]],
     ) -> None:
         if isinstance(token_ids, int):
-            token_ids = [token_ids]
-        self._spec_token_ids.extend(token_ids)
+            self._spec_token_ids.append(token_ids)
+        else:
+            self._spec_token_ids.extend(token_ids)
 
     def clear_spec_tokens(self) -> None:
         self._spec_token_ids = []
