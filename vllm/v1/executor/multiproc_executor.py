@@ -9,12 +9,12 @@ import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
+from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cloudpickle
 import psutil
-import zmq
 
 from vllm.config import VllmConfig
 from vllm.distributed import (destroy_distributed_environment,
@@ -26,7 +26,7 @@ from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_mp_context,
-                        get_open_port, get_open_zmq_ipc_path, zmq_socket_ctx)
+                        get_open_port)
 from vllm.v1.executor.abstract import Executor
 from vllm.worker.worker_base import WorkerWrapperBase
 
@@ -191,7 +191,7 @@ class MultiprocExecutor(Executor):
 class WorkerProcHandle:
     proc: BaseProcess
     rank: int
-    ready_path: str
+    ready_pipe: Connection
     worker_response_mq: MessageQueue  # The worker process writes to this MQ
 
 
@@ -207,44 +207,45 @@ class WorkerProc:
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
-        ready_path: str,
+        ready_pipe: Connection,
     ):
-        self.rank = rank
-        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
-        # TODO: move `init_worker` to executor level as a collective rpc call
-        all_kwargs: List[Dict] = [
-            {} for _ in range(vllm_config.parallel_config.world_size)
-        ]
-        all_kwargs[rank] = {
-            "vllm_config": vllm_config,
-            "local_rank": local_rank,
-            "rank": rank,
-            "distributed_init_method": distributed_init_method,
-        }
-        wrapper.init_worker(all_kwargs)
-        self.worker = wrapper.worker
+        try:
+            self.rank = rank
+            wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
+            # TODO: move `init_worker` to executor as a collective rpc call
+            all_kwargs: List[Dict] = [
+                {} for _ in range(vllm_config.parallel_config.world_size)
+            ]
+            all_kwargs[rank] = {
+                "vllm_config": vllm_config,
+                "local_rank": local_rank,
+                "rank": rank,
+                "distributed_init_method": distributed_init_method,
+            }
+            wrapper.init_worker(all_kwargs)
+            self.worker = wrapper.worker
 
-        pid = os.getpid()
-        _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
-        _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
+            pid = os.getpid()
+            _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
+            _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
 
-        # Initialize MessageQueue for receiving SchedulerOutput
-        self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-            input_shm_handle, self.worker.rank)
+            # Initialize MessageQueue for receiving SchedulerOutput
+            self.rpc_broadcast_mq = MessageQueue.create_from_handle(
+                input_shm_handle, self.worker.rank)
 
-        # Initializes a message queue for sending the model output
-        self.worker_response_mq = MessageQueue(1, 1)
-        worker_response_mq_handle = self.worker_response_mq.export_handle()
+            # Initializes a message queue for sending the model output
+            self.worker_response_mq = MessageQueue(1, 1)
+            worker_response_mq_handle = self.worker_response_mq.export_handle()
 
-        # Send Readiness signal to EngineCore process.
-        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
-            payload = pickle.dumps(worker_response_mq_handle,
-                                   protocol=pickle.HIGHEST_PROTOCOL)
-            ready_socket.send_string(WorkerProc.READY_STR)
-            ready_socket.send(payload)
+            self.worker.init_device()
+            self.worker.load_model()
 
-        self.worker.init_device()
-        self.worker.load_model()
+            # Send Readiness signal to Executor.
+            ready_pipe.send({"status": "READY"})
+
+        except Exception as e:
+            logger.exception("WorkerProc got error at startup:", exc_info=e)
+            ready_pipe.send({"status": "FAILED"})
 
     @staticmethod
     def make_worker_process(
@@ -255,10 +256,7 @@ class WorkerProc:
             input_shm_handle,  # Receive SchedulerOutput
     ) -> WorkerProcHandle:
         context = get_mp_context()
-
-        # ZMQ path for worker to send ready message and shm_broadcast handle
-        # back to core process.
-        ready_path = get_open_zmq_ipc_path()
+        reader, writer = context.Pipe(duplex=False)
 
         process_kwargs = {
             "vllm_config": vllm_config,
@@ -266,7 +264,7 @@ class WorkerProc:
             "rank": rank,
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
-            "ready_path": ready_path,
+            "ready_pipe": writer,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
@@ -275,13 +273,12 @@ class WorkerProc:
         proc.start()
 
         # Wait for startup
-        worker_response_mq_handle = WorkerProc.wait_for_startup(
-            proc, ready_path)
+        worker_response_mq_handle = WorkerProc.wait_for_startup(proc, reader)
 
         worker_response_mq = MessageQueue.create_from_handle(
             worker_response_mq_handle, 0)
 
-        return WorkerProcHandle(proc, rank, ready_path, worker_response_mq)
+        return WorkerProcHandle(proc, rank, reader, worker_response_mq)
 
     def shutdown(self):
         self.rpc_broadcast_mq = None
@@ -346,24 +343,21 @@ class WorkerProc:
 
     @staticmethod
     def wait_for_startup(
-        proc: BaseProcess,
-        ready_path: str,
+        process_name: str,
+        reader: Connection,
     ) -> Optional[Handle]:
         """Wait until the Worker is ready."""
-        with zmq_socket_ctx(ready_path, zmq.constants.PULL) as socket:
 
-            # Wait for Worker to send READY.
-            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                logger.info("Waiting for WorkerProc to startup.")
+        e = Exception(f"{process_name} initialization failed due to "
+                      "an exception in a background process. See stack trace "
+                      "for root cause.")
 
-                if not proc.is_alive():
-                    raise RuntimeError("WorkerProc failed to start.")
-
-            message = socket.recv_string()
-            assert message == WorkerProc.READY_STR
-            handle_frame = socket.recv(copy=False)
-            handle = pickle.loads(handle_frame.buffer)
-            return handle
+        try:
+            if reader.recv()["status"] != "READY":
+                raise e
+        except EOFError:
+            e.__suppress_context__ = True
+            raise e from None
 
     class ResponseStatus(Enum):
         SUCCESS = auto()
