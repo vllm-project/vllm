@@ -49,7 +49,10 @@ def chat(system_prompt: Optional[str], model_name: str,
 
     print("Please enter a message for the chat model:")
     while True:
-        input_message = input("> ")
+        try:
+            input_message = input("> ")
+        except EOFError:
+            return
         conversation.append({"role": "user", "content": input_message})
 
         chat_completion = client.chat.completions.create(model=model_name,
@@ -103,7 +106,10 @@ class ChatCommand(CLISubcommand):
 
         print("Please enter a message for the chat model:")
         while True:
-            input_message = input("> ")
+            try:
+                input_message = input("> ")
+            except EOFError:
+                return
             conversation.append({"role": "user", "content": input_message})
 
             chat_completion = client.chat.completions.create(
