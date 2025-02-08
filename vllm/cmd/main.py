@@ -57,7 +57,7 @@ def main():
                         '--version',
                         action='version',
                         version=vllm.version.__version__)
-    subparsers = parser.add_subparsers(required=True, dest="subparser")
+    subparsers = parser.add_subparsers(required=False, dest="subparser")
     cmds = {}
     for cmd_module in CMD_MODULES:
         new_cmds = cmd_module.cmd_init()
