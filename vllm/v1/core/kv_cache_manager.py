@@ -299,9 +299,7 @@ class KVCacheManager:
 
         While all scheduled requests must be in the RUNNING state, the inverse
         is not necessarily true. There may be RUNNING requests that are not
-        scheduled in the current step. As of 1/1/2025, the scheduler does not
-        allow this case, but it is possible in the future, as we allow more
-        flexible scheduling.
+        scheduled in the current step.
 
         This can result in an edge case where the number of common prefix blocks
         is 0, even though all scheduled requests share a common prefix. This
