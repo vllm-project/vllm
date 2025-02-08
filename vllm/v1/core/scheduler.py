@@ -474,7 +474,7 @@ class Scheduler:
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-            if not request.spec_token_ids:
+            if not scheduler_output.use_spec_decode:
                 # When the request's num_computed_tokens catches up
                 # its num_tokens, the request generates output tokens.
                 # Otherwise, we ignore the sampler output for the request.
@@ -484,19 +484,23 @@ class Scheduler:
                 # num_computed_tokens_step is the number of tokens computed
                 # in the current step.
                 # num_computed_tokens_step =
-                #   num_scheduled_tokens - num_tokens_rejected,
+                # num_scheduled_tokens - num_tokens_rejected,
                 # where num_tokens_rejected =
-                #   len(request.spec_token_ids) + 1 - len(generated_token_ids).
+                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
                 # We use this way of calculating num_computed_tokens_step
                 # because of chunked prefill. In chunked prefill, number of
                 # computed tokens is not equal to the number of
-                # generated/sampled tokens. Here, len(request.spec_token_ids)
+                # generated/sampled tokens. Here, len(scheduled_spec_token_ids)
                 # + 1 is the maximum number of tokens generated in the current
-                # step, len(request.spec_token_ids) + 1 -
+                # step, len(scheduled_spec_token_ids) + 1 -
                 # len(generated_token_ids) is the number of tokens rejected
                 # in the current step.
+                scheduled_spec_token_ids = (
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, []))
                 num_computed_tokens_step = num_scheduled_tokens[req_id] - (
-                    len(request.spec_token_ids) + 1 - len(generated_token_ids))
+                    len(scheduled_spec_token_ids) + 1 -
+                    len(generated_token_ids))
                 request.num_computed_tokens += num_computed_tokens_step
 
             cached_encoder_input_ids = (
@@ -526,7 +530,7 @@ class Scheduler:
             new_logprobs = None
             new_token_ids = []
 
-            if request.num_computed_tokens == request.num_tokens:
+            if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
                     request.append_output_token_ids(output_token_id)
                     new_token_ids.append(output_token_id)

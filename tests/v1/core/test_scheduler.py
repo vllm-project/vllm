@@ -4,7 +4,7 @@ from typing import List, Optional
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.scheduler import Scheduler
+from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -221,66 +221,184 @@ def test_schedule_partial_requests():
     assert requests[2].request_id not in output.num_scheduled_tokens
 
 
-def test_multiple_stop_tokens():
-    """Test with stop when generating multiple tokens"""
+def test_stop_via_update_from_output():
+    """Test stopping behavior through update_from_output"""
     scheduler = create_scheduler()
-    # Nonstop case
-    request = create_requests(num_requests=1,
-                              max_tokens=100,
-                              stop_token_ids=[42, 43, 44])[0]
-    scheduler.requests[request.request_id] = request
-    request.append_output_token_ids([4, 5, 6, 7, 8])
-    result = scheduler._maybe_stop_and_crop(request)
-    assert result is False
 
-    # EOS token is generated in the beginning of the output tokens
-    request = create_requests(num_requests=1,
-                              max_tokens=100,
-                              stop_token_ids=[42, 43, 44])[0]
-    scheduler.requests[request.request_id] = request
-    request.append_output_token_ids([EOS_TOKEN_ID, 5, EOS_TOKEN_ID, 7, 43, 5])
-    result = scheduler._maybe_stop_and_crop(request)
-    assert result is True
-    assert request.status == RequestStatus.FINISHED_STOPPED
-    assert len(request.output_token_ids) == 1
-    assert list(request.output_token_ids) == [EOS_TOKEN_ID]
+    # Test case 1: Stop on EOS token
+    requests = create_requests(num_requests=2, max_tokens=10)
+    for req in requests:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
 
-    # EOS token is generated in the middle of the output tokens
-    request = create_requests(num_requests=1,
-                              max_tokens=100,
-                              stop_token_ids=[42, 43, 44])[0]
-    scheduler.requests[request.request_id] = request
-    request.append_output_token_ids([1, 2, 3, 4, 5, EOS_TOKEN_ID, 7, 43, 5])
-    result = scheduler._maybe_stop_and_crop(request)
-    assert result is True
-    assert request.status == RequestStatus.FINISHED_STOPPED
-    assert len(request.output_token_ids) == 6
-    assert list(request.output_token_ids) == [1, 2, 3, 4, 5, EOS_TOKEN_ID]
+    scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
+                                       scheduled_cached_reqs=[],
+                                       num_scheduled_tokens={
+                                           requests[0].request_id: 1,
+                                           requests[1].request_id: 2
+                                       },
+                                       total_num_scheduled_tokens=3,
+                                       scheduled_encoder_inputs={},
+                                       use_spec_decode=True,
+                                       scheduled_spec_decode_tokens={
+                                           requests[0].request_id: [],
+                                           requests[1].request_id: [10]
+                                       },
+                                       num_common_prefix_blocks=0,
+                                       finished_req_ids=set(),
+                                       free_encoder_input_ids=[])
 
-    # Stop token, 43 is one of the stop tokens
-    request = create_requests(num_requests=1,
-                              max_tokens=100,
-                              stop_token_ids=[42, 43, 44])[0]
-    scheduler.requests[request.request_id] = request
-    request.append_output_token_ids([4, 5, 43, 7, 43, 5])
-    result = scheduler._maybe_stop_and_crop(request)
-    assert result is True
-    assert request.status == RequestStatus.FINISHED_STOPPED
-    assert request.stop_reason == 43
-    # Should be cropped at the first stop token
-    assert len(request.output_token_ids) == 3
-    assert list(request.output_token_ids) == [4, 5, 43]
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(requests)
+        },
+        sampled_token_ids=[[EOS_TOKEN_ID],
+                           [10,
+                            11]],  # First request hits EOS, second continues
+        logprobs=None,
+        prompt_logprobs_dict={})
 
-    # Max tokens, should be cropped when reaching the max tokens
-    max_tokens = 2
-    request = create_requests(num_requests=1,
-                              max_tokens=max_tokens,
-                              stop_token_ids=[42, 43, 44])[0]
-    scheduler.requests[request.request_id] = request
-    output_token_ids = [4, 5, 43, 7, 43, 5]
-    request.append_output_token_ids(output_token_ids)
-    result = scheduler._maybe_stop_and_crop(request)
-    assert result is True
-    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
-    assert len(request.output_token_ids) == max_tokens
-    assert list(request.output_token_ids) == output_token_ids[:max_tokens]
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # Verify first request stopped, second continues
+    assert len(scheduler.running) == 1
+    assert scheduler.running[0].request_id == requests[1].request_id
+    assert requests[0].status == RequestStatus.FINISHED_STOPPED
+    assert requests[0].request_id in scheduler.finished_req_ids
+    assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID]
+    assert list(requests[1].output_token_ids) == [10, 11]
+
+    # Test case 2: Stop on custom stop token
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=2,
+                               max_tokens=10,
+                               stop_token_ids=[42, 43])
+    for req in requests:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+
+    scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
+                                       scheduled_cached_reqs=[],
+                                       num_scheduled_tokens={
+                                           requests[0].request_id: 3,
+                                           requests[1].request_id: 2
+                                       },
+                                       total_num_scheduled_tokens=5,
+                                       scheduled_encoder_inputs={},
+                                       use_spec_decode=True,
+                                       scheduled_spec_decode_tokens={
+                                           requests[0].request_id: [10, 42],
+                                           requests[1].request_id: [13]
+                                       },
+                                       num_common_prefix_blocks=0,
+                                       finished_req_ids=set(),
+                                       free_encoder_input_ids=[])
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(requests)
+        },
+        sampled_token_ids=[[10, 42, 12],
+                           [13, 14]],  # First request hits stop token
+        logprobs=None,
+        prompt_logprobs_dict={})
+
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # Verify first request stopped on custom token
+    assert len(scheduler.running) == 1
+    assert scheduler.running[0].request_id == requests[1].request_id
+    assert requests[0].status == RequestStatus.FINISHED_STOPPED
+    assert requests[0].stop_reason == 42
+    assert requests[0].request_id in scheduler.finished_req_ids
+    assert list(requests[0].output_token_ids) == [10, 42]
+    assert list(requests[1].output_token_ids) == [13, 14]
+
+    # Test case 3: Stop on max tokens
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=2, max_tokens=2)
+    for req in requests:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+
+    scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
+                                       scheduled_cached_reqs=[],
+                                       num_scheduled_tokens={
+                                           requests[0].request_id: 3,
+                                           requests[1].request_id: 1
+                                       },
+                                       total_num_scheduled_tokens=4,
+                                       scheduled_encoder_inputs={},
+                                       use_spec_decode=True,
+                                       scheduled_spec_decode_tokens={
+                                           requests[0].request_id: [10, 11],
+                                           requests[1].request_id: []
+                                       },
+                                       num_common_prefix_blocks=0,
+                                       finished_req_ids=set(),
+                                       free_encoder_input_ids=[])
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(requests)
+        },
+        sampled_token_ids=[[10, 11, 12],
+                           [13]],  # First request exceeds max_tokens
+        logprobs=None,
+        prompt_logprobs_dict={})
+
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # Verify first request stopped due to length
+    assert len(scheduler.running) == 1
+    assert scheduler.running[0].request_id == requests[1].request_id
+    assert requests[0].status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert requests[0].request_id in scheduler.finished_req_ids
+    assert list(requests[0].output_token_ids) == [10, 11
+                                                  ]  # Truncated to max_tokens
+    assert list(requests[1].output_token_ids) == [13]
+
+    # Test case 4: Ignore EOS flag
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=1, max_tokens=10)
+    requests[0].sampling_params.ignore_eos = True
+    requests[0].num_computed_tokens = requests[0].num_tokens
+    scheduler.requests[requests[0].request_id] = requests[0]
+    scheduler.running.append(requests[0])
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=[],
+        num_scheduled_tokens={requests[0].request_id: 3},
+        total_num_scheduled_tokens=3,
+        scheduled_encoder_inputs={},
+        use_spec_decode=True,
+        scheduled_spec_decode_tokens={
+            requests[0].request_id: [EOS_TOKEN_ID, 10]
+        },
+        num_common_prefix_blocks=0,
+        finished_req_ids=set(),
+        free_encoder_input_ids=[])
+
+    model_output = ModelRunnerOutput(
+        req_ids=[requests[0].request_id],
+        req_id_to_index={requests[0].request_id: 0},
+        sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
+        logprobs=None,
+        prompt_logprobs_dict={})
+
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # Verify request continues past EOS
+    assert len(scheduler.running) == 1
+    assert not requests[0].is_finished()
+    assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID, 10, 11]
