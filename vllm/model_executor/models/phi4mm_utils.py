@@ -3354,7 +3354,7 @@ class AudioEmbedding(nn.Module):
         self.audio_embed_sizes = None
 
     def post_init(self, audio_config):
-        # execute after the from_pretrained() initialization of the phi3 model
+        # execute after the from_pretrained() initialization of the phi model
         if audio_config.get("name", None) == "cascades":
             init_model_config = audio_config.get("init_model", {})
             self.encoder.post_init(init_model_config)

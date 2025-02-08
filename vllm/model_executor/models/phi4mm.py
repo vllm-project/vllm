@@ -291,7 +291,7 @@ def preprocess(images, dynamic_hd_size, vit_resolution, vit_patch_size):
     return data
 
 
-class PhiOImageEncoder(nn.Module):
+class Phi4MMImageEncoder(nn.Module):
     """Image embedding."""
 
     def __init__(self,
@@ -518,19 +518,19 @@ class PhiOImageEncoder(nn.Module):
         return img_set_tensor
 
 
-class Phi4OAudioFeatureInputs(TypedDict):
+class Phi4MMAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: Tuple[NestedTensors]
     """Shape: `((batch_size, num_audios, 80, M), )"""
 
 
-class Phi4OAudioEmbeddingInputs(TypedDict):
+class Phi4MMAudioEmbeddingInputs(TypedDict):
     type: Literal["audio_embeds"]
     data: NestedTensors
     """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)"""
 
 
-Phi4OAudioInputs = Union[Phi4OAudioFeatureInputs, Phi4OAudioEmbeddingInputs]
+Phi4MMAudioInputs = Union[Phi4MMAudioFeatureInputs, Phi4MMAudioEmbeddingInputs]
 
 
 def speechlib_mel(sample_rate, n_fft, n_mels, fmin=None, fmax=None):
@@ -726,7 +726,7 @@ def _compute_num_image_tokens(
     architecture and exclude output features containing only padding pixels
 
     for siglip, vit_image_size=448, vit_patch_size=14, so output will be 32x32 feature map
-    NOTE right now, Phi-O uses hard-coded token_compression_factor=2
+    NOTE right now, Phi4MM uses hard-coded token_compression_factor=2
     """
     assert vit_image_size % vit_patch_size == 0, "vit_image_size must be divisible by vit_patch_size"
     assert vit_image_size // vit_patch_size % token_compression_factor == 0, "vit_image_size // vit_patch_size must be divisible by token_compression_factor"
@@ -1094,7 +1094,7 @@ def get_max_phi4mm_audio_tokens(ctx: InputContext) -> int:
 
 def dummy_audio_for_phi4mm(audio_count: int) -> dict:
     """
-    Create dummy audio data for the Phi-4O model, which is used for profiling.
+    Create dummy audio data for the Phi4MM model, which is used for profiling.
 
     Args:
         audio_count (int): Number of audio samples.
@@ -1115,7 +1115,7 @@ def dummy_data_for_phi4mm(
     ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
 ) -> DummyData:
     """
-    Create dummy sequence (input_ids) and audio data for the Phi-4O model, which is used for
+    Create dummy sequence (input_ids) and audio data for the Phi4MM model, which is used for
     profiling.
 
     In this case, the sequence data is a bunch of 0s with a number of audio tokens that correspond
@@ -1144,7 +1144,7 @@ def dummy_data_for_phi4mm(
 
     if seq_len - audio_feature_size * audio_count - total_image_tokens < 0:
         raise RuntimeError(
-            f"Phi4O cannot process {audio_count} audios and {image_count} images in a prompt,"
+            f"Phi4MM cannot process {audio_count} audios and {image_count} images in a prompt,"
             f"please increase max_model_len to be at larger than {audio_feature_size * audio_count + total_image_tokens}"
              " or reduce audio/image limit by --limit-mm-per-prompt.")
 
@@ -1169,7 +1169,7 @@ def dummy_data_for_phi4mm(
 
 def input_mapper_for_phi4mm_audio(ctx: InputContext, data: object) -> MultiModalInputs:
     """
-    This function is used to create the MultiModalInputs for the Phi-4O (audio) model.
+    This function is used to create the MultiModalInputs for the Phi4MM (audio) model.
     Specifically, for audio, we extract the audio features from the sound file and create
     pairs of audio features and audio embed lengths (the latter of which is used to repeat
     the audio placeholder token in the input prompt IDs).
@@ -1317,7 +1317,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         assert get_tensor_model_parallel_world_size() == 1, "tensor parallel is not supported"
         assert get_pp_group().world_size == 1, "pipeline parallel is not supported"
 
-        self.vision_encoder = PhiOImageEncoder(
+        self.vision_encoder = Phi4MMImageEncoder(
             config,
             quant_config,
             prefix="model.vision_embed_tokens",
@@ -1401,7 +1401,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
-    ) -> Optional[Phi4OAudioInputs]:
+    ) -> Optional[Phi4MMAudioInputs]:
         """
         Parse and validate the audio input to the model.  This handles both audio features and
         audio embeddings, but only the former is used for now.
@@ -1410,7 +1410,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             kwargs (object): Keyword arguments.
 
         Returns:
-            Optional[Phi4OAudioInputs]: Parsed and validated audio inputs.
+            Optional[Phi4MMAudioInputs]: Parsed and validated audio inputs.
         """
         audio_features = kwargs.pop("audio_features", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
@@ -1425,7 +1425,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                     f"Got type: {type(audio_features)}"
                 )
 
-            return Phi4OAudioFeatureInputs(
+            return Phi4MMAudioFeatureInputs(
                 type="audio_features", data=audio_features
             )
 
@@ -1436,14 +1436,14 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                     f"Got type: {type(audio_embeds)}"
                 )
 
-            return Phi4OAudioEmbeddingInputs(
+            return Phi4MMAudioEmbeddingInputs(
                 type="audio_embeds", data=audio_embeds
             )
 
         raise AssertionError("This line should be unreachable.")
 
     def _process_audio_input(
-        self, input_ids: torch.Tensor, audio_input: Phi4OAudioInputs, audio_projection_mode: str
+        self, input_ids: torch.Tensor, audio_input: Phi4MMAudioInputs, audio_projection_mode: str
     ) -> NestedTensors:
         """
         Create the audio embeddings from the audio input, where the audio input is pairs of
@@ -1453,7 +1453,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         Args:
             input_ids (torch.Tensor): Input IDs (the prompt in this case, before the audio token
                 replication).
-            audio_input (Phi4OAudioInputs): Audio input.
+            audio_input (Phi4MMAudioInputs): Audio input.
 
         Returns:
             NestedTensors: Audio embeddings

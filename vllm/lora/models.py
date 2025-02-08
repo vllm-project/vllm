@@ -389,7 +389,6 @@ class LoRAModelManager(AdapterModelManager):
         for module_name, module in self.modules.items():
             module_lora = lora_model.get_lora(module_name)
             if module_lora:
-                logger.debug(f"setting {module_name}")
                 module_lora.optimize()
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
                 bias = module_lora.bias
@@ -405,7 +404,6 @@ class LoRAModelManager(AdapterModelManager):
                                 module_lora.embeddings_tensor,
                                 module_lora.bias)
             else:
-                logger.debug(f"resetting {module_name}")
                 module.reset_lora(index)
         return True
 
@@ -507,7 +505,6 @@ class LoRAModelManager(AdapterModelManager):
             # aims to prevent this error
             if self.supports_mm and not isinstance(new_module,
                                                    BaseLayerWithLoRA):
-                logger.debug("-------- Skipping %s --------", module_name)
                 continue
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
