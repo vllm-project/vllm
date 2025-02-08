@@ -268,12 +268,10 @@ class EngineCoreProc(EngineCore):
         """Send EngineDead status to the EngineCoreClient."""
 
         # Put ENGINE_CORE_DEAD to the front of the queue.
-        with self.output_queue.mutex:
-            self.output_queue.queue.clear()
-            self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
+        self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
 
         # Wait until msg sent by the daemon before shutdown.
-        if not self.errored_sent_event.wait(timeout=10):
+        if not self.errored_sent_event.wait(timeout=10.):
             logger.fatal("vLLM shutdown signal from EngineCore failed "
                          "to send. Please report this issue.")
 
