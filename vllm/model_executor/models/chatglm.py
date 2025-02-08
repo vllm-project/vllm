@@ -4,8 +4,8 @@
 # https://github.com/THUDM/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
-from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import (Iterable, List, Mapping, Optional, Sequence, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 from torch import nn
@@ -40,9 +40,10 @@ from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BatchFeature,
+                                        BoundPromptReplacement,
                                         MultiModalFieldConfig,
-                                        PromptReplacement,
-                                        PromptReplacementDetails)
+                                        PlaceholderFeaturesInfo,
+                                        PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
@@ -162,7 +163,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
 
-        return {"image": self.image_token_num}
+        return {"image": self.image_token_num + 2}
 
     def _pre_calculate(self):
         hf_config = self.get_hf_config()
@@ -171,7 +172,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         self.image_size = vision_config["image_size"]
 
     def get_num_image_tokens(self) -> int:
-        return self.image_token_num
+        return self.image_token_num + 2
 
     def get_image_size(self) -> ImageSize:
 
@@ -223,22 +224,45 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
 
-        hf_config = self.info.get_hf_config()
-        boi_token_id = hf_config.boi_token_id
-        eoi_token_id = hf_config.eoi_token_id
-        num_image_tokens = self.info.get_num_image_tokens()
-        image_tokens = [IMAGE_TOKEN_ID] * num_image_tokens
+        def get_replacement(item_idx: int):
+            image_tokens = self.info.image_token_num
+            return [IMAGE_TOKEN_ID] * image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
                 target=[IMAGE_TOKEN_ID],
-                replacement=PromptReplacementDetails(
-                    full=([boi_token_id] + image_tokens + [eoi_token_id]),
-                    features=image_tokens,
-                ),
-            )
+                replacement=get_replacement,
+            ),
         ]
+
+    def _apply_prompt_replacements(
+        self,
+        token_ids: list[int],
+        mm_prompt_repls: Mapping[str, Sequence[BoundPromptReplacement]],
+        mm_item_counts: Mapping[str, int],
+    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        token_ids, text, placeholders = super()._apply_prompt_replacements(
+            token_ids=token_ids,
+            mm_prompt_repls=mm_prompt_repls,
+            mm_item_counts=mm_item_counts,
+        )
+        hf_config = self.info.get_hf_config()
+        boi_token_id = hf_config.boi_token_id
+        eoi_token_id = hf_config.eoi_token_id
+        placeholders = {
+            modality: [
+                PlaceholderFeaturesInfo(
+                    modality=p.modality,
+                    item_idx=p.item_idx,
+                    start_idx=p.start_idx - 1,
+                    tokens=[boi_token_id] + p.tokens + [eoi_token_id],
+                ) for p in ps
+            ]
+            for modality, ps in placeholders.items()
+        }
+
+        return token_ids, text, placeholders
 
 
 class GLMAttention(nn.Module):
@@ -592,7 +616,11 @@ class ChatGLMModel(nn.Module):
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
                 multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=IMAGE_TOKEN_ID,
+                placeholder_token_id=[
+                    self.config.boi_token_id,
+                    IMAGE_TOKEN_ID,
+                    self.config.eoi_token_id,
+                ],
             )
         return inputs_embeds
 
