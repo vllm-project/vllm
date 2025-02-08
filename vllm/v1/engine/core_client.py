@@ -273,7 +273,8 @@ class AsyncMPClient(MPClient):
 
     async def get_output_async(self) -> EngineCoreOutputs:
         if self.queue_task is None:
-
+            # Run ZMQ IO (which releases the GIL) in a background task
+            # to overlap with this task (run_output_handler).
             async def process_outputs_socket():
                 try:
                     (frame, ) = await self.output_socket.recv_multipart(
@@ -283,8 +284,6 @@ class AsyncMPClient(MPClient):
                 except Exception as e:
                     self.outputs_queue.put_nowait(e)
 
-            # Run ZMQ IO (which releases the GIL) in a background task
-            # to overlap with this task (run_output_handler).
             self.queue_task = asyncio.create_task(process_outputs_socket())
 
         # If an exception arises in process_outputs_socket task,
