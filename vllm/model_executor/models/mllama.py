@@ -134,7 +134,7 @@ class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        num_images = mm_counts["image"]
+        num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
@@ -164,6 +164,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        tokenizer = self.info.get_tokenizer()
         if mm_data:
             num_tiles = [
                 self.info.get_num_tiles_per_image(img.height, img.width)
@@ -174,8 +175,36 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
             processed_outputs["num_tiles"] = torch.tensor(num_tiles)
             for k in ('pixel_values', 'aspect_ratio_ids', "aspect_ratio_mask"):
                 processed_outputs[k] = processed_outputs[k].squeeze(0)
+            # Example input to encoder and decoder:
+            # {
+            #     'encoder': {
+            #         'type': 'token',
+            #         'prompt_token_ids': [128256, 128000, 3923, 374, 279, 2262, 315, 420, 2217, 30],  # noqa: E501
+            #         'prompt': '<|image|><|begin_of_text|>What is the content of this image?',  # noqa: E501
+            #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
+            #     },
+            #     'decoder': {
+            #         'type': 'token',
+            #         'prompt_token_ids': [128000],
+            #     },
+            # }
+            processed_token_ids = processed_outputs.pop("input_ids")
+            start_idx, end_idx = 0, processed_token_ids.size(1)
+            processed_prompt_text = tokenizer.decode(processed_token_ids[0])
+
+            hf_processor = self.info.get_hf_processor()
+            bos_token = hf_processor.bos_token
+            # Remove the bos_token from the start of prompt,
+            # because we all know there would be image_token.
+            if processed_prompt_text.startswith(bos_token):
+                start_idx += 1
+            # Remove the bos_token from the end of prompt,
+            # because text is empty in this case.
+            if processed_prompt_text.endswith(bos_token):
+                end_idx -= 1
+            processed_outputs[
+                "input_ids"] = processed_token_ids[:, start_idx:end_idx]
         else:
-            tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
                                           add_special_tokens=False,
                                           return_tensors="pt")

@@ -1335,7 +1335,9 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         # the original encoder prompt without extra process
         if isinstance(prompt, str):
             decoder_prompt = prompt
-            decoder_prompt_ids = encode_tokens(tokenizer, prompt)
+            decoder_prompt_ids = encode_tokens(tokenizer,
+                                               prompt,
+                                               add_special_tokens=False)
         else:
             decoder_prompt = decode_tokens(tokenizer, prompt)
             decoder_prompt_ids = prompt
