@@ -3,6 +3,7 @@
 ## Downloading the ShareGPT dataset
 
 You can download the dataset by running:
+
 ```bash
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 ```
@@ -11,6 +12,7 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 
 The json file refers to several image datasets (coco, llava, etc.). The benchmark scripts
 will ignore a datapoint if the referred image is missing.
+
 ```bash
 wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json
 mkdir coco -p

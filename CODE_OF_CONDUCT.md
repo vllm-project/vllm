@@ -125,4 +125,3 @@ Community Impact Guidelines were inspired by
 For answers to common questions about this code of conduct, see the
 [Contributor Covenant FAQ](https://www.contributor-covenant.org/faq). Translations are available at
 [Contributor Covenant translations](https://www.contributor-covenant.org/translations).
-
