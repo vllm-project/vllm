@@ -205,7 +205,6 @@ class SyncMPClient(MPClient):
 
     def __init__(self, vllm_config: VllmConfig,
                  executor_class: Type[Executor]):
-
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
