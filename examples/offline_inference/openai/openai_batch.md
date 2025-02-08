@@ -182,7 +182,7 @@ aws s3 cp s3://MY_BUCKET/MY_OUTPUT_FILE.jsonl -
 
 Add embedding requests to your batch file. The following is an example:
 
-```jsonl
+```text
 {"custom_id": "request-1", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}
 {"custom_id": "request-2", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are an unhelpful assistant."}}
 ```
@@ -213,7 +213,7 @@ $ cat results.jsonl
 
 Add score requests to your batch file. The following is an example:
 
-```jsonl
+```text
 {"custom_id": "request-1", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
 {"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
 ```
