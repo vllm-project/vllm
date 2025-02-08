@@ -678,11 +678,11 @@ def attn_fwd(
                     # We store inf to LSE, not -inf because in the bwd pass,
                     # we subtract this from qk which makes it -inf, such that
                     # exp(qk - inf) = 0 for these masked blocks.
-                    l = tl.full([BLOCK_M],
+                    l_value = tl.full([BLOCK_M],
                                 value=float("inf"),
                                 dtype=tl.float32)
                     l_ptrs_mask = offs_m < MAX_SEQLENS_Q
-                    tl.store(l_ptrs, l, mask=l_ptrs_mask)
+                    tl.store(l_ptrs, l_value, mask=l_ptrs_mask)
                     # TODO: Should dropout and return encoded softmax be
                     # handled here too?
                     continue_condition = False
