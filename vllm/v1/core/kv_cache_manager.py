@@ -512,4 +512,4 @@ class KVCacheManager:
         NOTE: Unlike `free`, this method should be called only when the request
         is finished, not when it is preempted.
         """
-        del self.req_to_block_hashes[request.request_id]
+        self.req_to_block_hashes.pop(request.request_id, None)
