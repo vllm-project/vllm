@@ -12,7 +12,6 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
-    from vllm.v1.core.kv_cache_utils import BlockHashType
 
 
 class Request:
@@ -62,11 +61,6 @@ class Request:
         assert len(self.mm_inputs) == len(self.mm_positions)
         if self.mm_hashes:
             assert len(self.mm_inputs) == len(self.mm_hashes)
-
-        # Cache the computed kv block hashes of the request to avoid
-        # recomputing.
-        self._kv_block_hashes: List[BlockHashType] = []
-        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
 
         # Read-only views
         # Prevent directly appending to the these lists since
@@ -123,13 +117,6 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
-
-    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
-        self._kv_block_hashes = value
-        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
-
-    def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
-        self._kv_block_hashes.append(block_hash)
 
 
 class RequestStatus(enum.IntEnum):
