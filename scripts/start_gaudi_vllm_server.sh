@@ -194,8 +194,15 @@ else
 fi
 
 export TOKENIZERS_PARALLELISM=true
+export PT_HPU_WEIGHT_SHARING=0
+export VLLM_MLA_DISABLE_REQUANTIZATION=1
+export RAY_IGNORE_UNHANDLED_ERRORS="1"
+export VLLM_RAY_DISABLE_LOG_TO_DRIVER="1"
 export VLLM_GRAPH_RESERVED_MEM=${VLLM_GRAPH_RESERVED_MEM:-"0.2"}
 export VLLM_GRAPH_PROMPT_RATIO=${VLLM_GRAPH_PROMPT_RATIO:-"0.8"}
+export VLLM_EP_SIZE=${VLLM_EP_SIZE:-"1"}
+export VLLM_MOE_N_SLICE=${VLLM_MOE_N_SLICE:-"4"}
+
 gpu_memory_utilization=${VLLM_GPU_MEMORY_UTILIZATION:-"0.9"}
 
 set_numactl
@@ -213,7 +220,10 @@ python3 -m vllm.entrypoints.openai.api_server \
     --max-num-seqs "$max_num_seqs" \
     --max-num-batched-tokens "$max_num_batched_tokens" \
     --max-model-len "$max_model_len" \
+    --disable-log-requests \
+    --use-v2-block-manager \
     --use-padding-aware-scheduling \
     --num-scheduler-steps "${scheduler_steps}" \
+    --distributed_executor_backend mp \
     --gpu-memory-utilization "${gpu_memory_utilization}" \
     |& tee "${case_name}".log
