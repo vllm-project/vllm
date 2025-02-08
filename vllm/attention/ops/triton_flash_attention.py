@@ -659,47 +659,51 @@ def attn_fwd(
             seqlen_k = MAX_SEQLENS_K
 
         if continue_condition:
-            # Now we compute whether we need to exit early due to causal masking.
-            # This is because for seqlen_q > seqlen_k, M rows of the attn scores
-            # are completely masked, resulting in 0s written to the output, and
-            # inf written to LSE. We don't need to do any GEMMs in this case.
-            # This block of code determines what N is, and if this WG is
-            # operating on those M rows.
+            # Now we compute whether we need to exit early due to causal
+            # masking. This is because for seqlen_q > seqlen_k, M rows of the
+            # attn scores are completely masked, resulting in 0s written to the
+            # output, and inf written to LSE. We don't need to do any GEMMs in
+            # this case. This block of code determines what N is, and if this
+            # WG is operating on those M rows.
             n_blocks = cdiv_fn(seqlen_k, BLOCK_N)
             if (IS_CAUSAL):
                 # If seqlen_q == seqlen_k, the attn scores are a square matrix.
-                # If seqlen_q != seqlen_k, attn scores are rectangular which means
-                # the causal mask boundary is bottom right aligned, and ends at either
-                # the top edge (seqlen_q < seqlen_k) or left edge.
-                # This captures the decrease in n_blocks if we have a rectangular attn matrix
+                # If seqlen_q != seqlen_k, attn scores are rectangular which
+                # means the causal mask boundary is bottom right aligned, and
+                # ends at either the top edge (seqlen_q < seqlen_k) or left
+                # edge. This captures the decrease in n_blocks if we have a
+                # rectangular attn matrix
                 n_blocks_seqlen = cdiv_fn(
                     (start_m + 1) * BLOCK_M + seqlen_k - seqlen_q, BLOCK_N)
                 # This is what adjusts the block_max for the current WG, only
-                # if IS_CAUSAL. Otherwise we want to always iterate through all n_blocks
+                # if IS_CAUSAL. Otherwise we want to always iterate through all
+                # n_blocks
                 n_blocks = min(n_blocks, n_blocks_seqlen)
-                # If we have no blocks after adjusting for seqlen deltas, this WG is part of
-                # the blocks that are all 0. We exit early.
+                # If we have no blocks after adjusting for seqlen deltas, this
+                # WG is part of the blocks that are all 0. We exit early.
                 if n_blocks <= 0:
-                    o_offset = Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
-                    o_ptrs = o_offset + offs_m[:, None] * stride_om + offs_d[
-                        None, :] * stride_on
+                    o_offset = (Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om)
+                    o_ptrs = (o_offset + offs_m[:, None] * stride_om + offs_d[
+                        None, :] * stride_on)
                     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL],
                                    dtype=Out.type.element_ty)
                     o_ptrs_mask = (offs_m[:, None] < seqlen_q).broadcast_to(
                         [BLOCK_M, BLOCK_DMODEL])
                     # We still need to write 0s to the result
                     tl.store(o_ptrs, acc, mask=o_ptrs_mask)
-                    # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
-                    # statically known.
-                    l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
-                    # We store inf to LSE, not -inf because in the bwd pass, we subtract this
-                    # from qk which makes it -inf, such that exp(qk - inf) = 0 for these masked blocks.
+                    # The tensor allocated for L is based on MAX_SEQLENS_Q as
+                    # that is statically known.
+                    l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m)
+                    # We store inf to LSE, not -inf because in the bwd pass,
+                    # we subtract this from qk which makes it -inf, such that
+                    # exp(qk - inf) = 0 for these masked blocks.
                     l = tl.full([BLOCK_M],
                                 value=float("inf"),
                                 dtype=tl.float32)
                     l_ptrs_mask = offs_m < MAX_SEQLENS_Q
                     tl.store(l_ptrs, l, mask=l_ptrs_mask)
-                    # TODO: Should dropout and return encoded softmax be handled here too?
+                    # TODO: Should dropout and return encoded softmax be
+                    # handled here too?
                     continue_condition = False
                     # return
 
@@ -720,15 +724,15 @@ def attn_fwd(
                                              != BLOCK_DMODEL)
 
                 # Compute pointers for all the tensors used in this kernel.
-                q_offset = Q + off_z * stride_qz + off_h_q * stride_qh + cu_seqlens_q_start * stride_qm
-                q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[
-                    None, :] * stride_qk
-                k_offset = K + off_z * stride_kz + off_h_k * stride_kh + cu_seqlens_k_start * stride_kn
-                k_ptrs = k_offset + offs_d[:, None] * stride_kk + offs_n[
-                    None, :] * stride_kn
-                v_offset = V + off_z * stride_vz + off_h_k * stride_vh + cu_seqlens_k_start * stride_vk
-                v_ptrs = v_offset + offs_n[:, None] * stride_vk + offs_d[
-                    None, :] * stride_vn
+                q_offset = (Q + off_z * stride_qz + off_h_q * stride_qh + cu_seqlens_q_start * stride_qm)
+                q_ptrs = (q_offset + offs_m[:, None] * stride_qm + offs_d[
+                    None, :] * stride_qk)
+                k_offset = (K + off_z * stride_kz + off_h_k * stride_kh + cu_seqlens_k_start * stride_kn)
+                k_ptrs = (k_offset + offs_d[:, None] * stride_kk + offs_n[
+                    None, :] * stride_kn)
+                v_offset = (V + off_z * stride_vz + off_h_k * stride_vh + cu_seqlens_k_start * stride_vk)
+                v_ptrs = (v_offset + offs_n[:, None] * stride_vk + offs_d[
+                    None, :] * stride_vn)
                 # Compute pointers for all the scale tensors used in this kernel.
 
                 INT8_GEMM: tl.constexpr = INT8 & (not INT8_KV)
