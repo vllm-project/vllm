@@ -68,7 +68,8 @@ Each row of it is equal to $` \mathbf 1 \widehat B `$, which is a row-vector of 
 
 ## Epilogues
 
-### ScaledEpilogue
+### `ScaledEpilogue`
+
 This epilogue computes the symmetric quantization for activations without bias, meaning $` C = 0 `$ and $` z_a = 0 `$.
 The output of the GEMM is:
 
@@ -88,7 +89,8 @@ Epilogue parameters:
 - `scale_a` is the scale for activations, can be per-tensor (scalar) or per-token (column-vector).
 - `scale_b` is the scale for weights, can be per-tensor (scalar) or per-channel (row-vector).
 
-### ScaledEpilogueBias
+### `ScaledEpilogueBias`
+
 This epilogue computes the symmetric quantization for activations with bias, meaning $` z_a = 0 `$.
 The output of the GEMM is:
 
@@ -110,7 +112,8 @@ Epilogue parameters:
 - `scale_b` is the scale for weights, can be per-tensor (scalar) or per-channel (row-vector).
 - `bias` is the bias, is always per-channel (row-vector).
 
-### ScaledEpilogueAzp
+### `ScaledEpilogueAzp`
+
 This epilogue computes the asymmetric per-tensor quantization for activations with bias.
 The output of the GEMM is:
 
@@ -139,7 +142,7 @@ Epilogue parameters:
 
 To use these kernels efficiently, users must precompute the `azp_with_adj` term offline and pass it to the kernel.
 
-### ScaledEpilogueAzpPerToken
+### `ScaledEpilogueAzpPerToken`
 
 This epilogue computes the asymmetric per-token quantization for activations with bias.
 
