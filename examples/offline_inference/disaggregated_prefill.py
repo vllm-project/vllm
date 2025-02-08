@@ -2,8 +2,6 @@
 This file demonstrates the example usage of disaggregated prefilling
 We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
 and then transfer the KV cache between them.
-
-Learn more about Ray Data in https://docs.ray.io/en/latest/data/data.html
 """
 import os
 import time
@@ -23,16 +21,22 @@ def run_prefill(prefill_done):
     # and 3 and do prefilling on request 2.
     prompts = [
         "Hello, my name is",
-        # "Hi, your name is", # To trigger partial prefill of batched requests
+        # "Hi, your name is",
+        # The decode node will actually "prefill" this request.
         "Tell me a very long story",
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
+    # Using PyNcclConnector to transmit KV caches between vLLM instances.
+    # This instance is the prefill node (kv_producer, rank 0).
+    # The number of parallel instances for KV cache transfer is set to 2,
+    # as required for PyNcclConnector.
     ktc = KVTransferConfig.from_cli(
         '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
     )
-    # Example: Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
-    # memory. Reduce the value if your GPU has less memory.
+
+    # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
+    # memory. You may need to adjust the value to fit your GPU.
     llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
               kv_transfer_config=ktc,
               max_model_len=2000,
@@ -42,7 +46,8 @@ def run_prefill(prefill_done):
     print("Prefill node is finished.")
     prefill_done.set()
 
-    # To keep the prefill node running in case the decode node is not done
+    # To keep the prefill node running in case the decode node is not done;
+    # otherwise, the script might exit prematurely, causing incomplete decoding.
     try:
         while True:
             time.sleep(1)
@@ -61,11 +66,16 @@ def run_decode(prefill_done):
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
+    # Using PyNcclConnector to transmit KV caches between vLLM instances.
+    # This instance is the decode node (kv_consumer, rank 1).
+    # The number of parallel instances for KV cache transfer is set to 2,
+    # as required for PyNcclConnector.
     ktc = KVTransferConfig.from_cli(
         '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}'
     )
-    # Example: Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
-    # of memory. Reduce the value if your GPU has less memory.
+
+    # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
+    # memory. You may need to adjust the value to fit your GPU.
     llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
               kv_transfer_config=ktc,
               max_model_len=2000,
@@ -75,6 +85,8 @@ def run_decode(prefill_done):
     print("Waiting for prefill node to finish...")
     prefill_done.wait()
 
+    # At this point when the prefill_done is set, the kv-cache should have been
+    # transferred to this decode node, so we can start decoding.
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         prompt = output.prompt
