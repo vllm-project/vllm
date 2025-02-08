@@ -14,7 +14,6 @@ from multiprocessing.process import BaseProcess
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cloudpickle
-import psutil
 
 from vllm.config import VllmConfig
 from vllm.distributed import (destroy_distributed_environment,
@@ -355,19 +354,18 @@ class WorkerProc:
             logger.debug("Worker interrupted.")
 
         except Exception as e:
-            # Log rather than raise so the stack trace is in order of
-            # WorkerProc -> EngineCore -> AsyncLLM.
+            # NOTE: if an Exception arises in busy_loop, we send
+            # a FAILURE message over the MQ RPC to notify the Executor,
+            # which triggers system shutdown.
+            # TODO(rob): handle case where the MQ itself breaks.
+
+            # Log so stack trace order is: Worker -> EngineCore -> AsyncLLM
             logger.exception("WorkerProc got an Exception:", exc_info=e)
 
-            # The parent will send a SIGTERM to all worker processes
-            # after we send SIGUSR. Set this value so we don't re-throw
-            # SystemExit(), to avoid zmq exceptions during __del__.
+            # The parent sends a SIGTERM to all worker processes if
+            # any worker dies. Set this value so we don't re-throw
+            # SystemExit() to avoid zmq exceptions in __del__.
             shutdown_requested = True
-
-            # worker_busy_loop sends exceptions exceptons to Executor
-            # for shutdown, but if there is an error in startup or an
-            # error with IPC itself, we need to alert the parent.
-            psutil.Process().parent().send_signal(signal.SIGUSR1)
 
         finally:
             # Clean up once worker exits busy loop
@@ -381,9 +379,9 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
-        while True:
-            method, args, kwargs = self.rpc_broadcast_mq.dequeue()
+        method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
+        while True:
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
