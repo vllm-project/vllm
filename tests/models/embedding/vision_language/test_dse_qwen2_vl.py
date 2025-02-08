@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import partial
 from typing import Callable, Dict, List, Type
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
@@ -405,7 +407,11 @@ class Blip2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {"image": self.get_num_image_tokens()}
 
     def get_num_image_tokens(self) -> int:
@@ -475,15 +481,23 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        bos_token_id = tokenizer.bos_token_id
+        assert isinstance(bos_token_id, int)
+
+        image_token_id = vocab["<image>"]
         num_image_tokens = self.info.get_num_image_tokens()
+        image_tokens = [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
-                target="</s>",
+                target=[bos_token_id],
                 replacement=PromptReplacementDetails(
-                    full="<image>" * num_image_tokens + "</s>",
-                    features="<image>" * num_image_tokens,
+                    full=image_tokens + [bos_token_id],
+                    features=image_tokens,
                 ),
             )
         ]

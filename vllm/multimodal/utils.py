@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import lru_cache
 from itertools import groupby
 from pathlib import Path
@@ -503,8 +505,13 @@ def group_mm_inputs_by_modality(
         if len(mm_input.modalities) > 1:
             return id(mm_input)
 
-        # Otherwise return the modality string
-        return list(mm_input.modalities)[0]
+        elif len(mm_input.modalities) == 1:
+            return list(mm_input.modalities)[0]
+
+        # FIXME(Isotr0py): Modality of mm_input from legacy pipeline is empty,
+        # this is used to make InternVL with legacy pipeline still work with v1.
+        else:
+            return ""
 
     return [
         list(group) for _, group in groupby(mm_inputs, key=modality_group_func)

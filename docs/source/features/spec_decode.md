@@ -2,15 +2,15 @@
 
 # Speculative Decoding
 
-```{warning}
+:::{warning}
 Please note that speculative decoding in vLLM is not yet optimized and does
 not usually yield inter-token latency reductions for all prompt datasets or sampling parameters.
 The work to optimize it is ongoing and can be followed here: <gh-issue:4630>
-```
+:::
 
-```{warning}
+:::{warning}
 Currently, speculative decoding in vLLM is not compatible with pipeline parallelism.
-```
+:::
 
 This document shows how to use [Speculative Decoding](https://x.com/karpathy/status/1697318534555336961) with vLLM.
 Speculative decoding is a technique which improves inter-token latency in memory-bound LLM inference.
@@ -131,7 +131,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 llm = LLM(
     model="meta-llama/Meta-Llama-3.1-70B-Instruct",
     tensor_parallel_size=4,
-    speculative_model="ibm-fms/llama3-70b-accelerator",
+    speculative_model="ibm-ai-platform/llama3-70b-accelerator",
     speculative_draft_tensor_parallel_size=1,
 )
 outputs = llm.generate(prompts, sampling_params)
@@ -149,11 +149,11 @@ limitation will be fixed in a future release.
 
 A variety of speculative models of this type are available on HF hub:
 
-- [llama-13b-accelerator](https://huggingface.co/ibm-fms/llama-13b-accelerator)
-- [llama3-8b-accelerator](https://huggingface.co/ibm-fms/llama3-8b-accelerator)
-- [codellama-34b-accelerator](https://huggingface.co/ibm-fms/codellama-34b-accelerator)
-- [llama2-70b-accelerator](https://huggingface.co/ibm-fms/llama2-70b-accelerator)
-- [llama3-70b-accelerator](https://huggingface.co/ibm-fms/llama3-70b-accelerator)
+- [llama-13b-accelerator](https://huggingface.co/ibm-ai-platform/llama-13b-accelerator)
+- [llama3-8b-accelerator](https://huggingface.co/ibm-ai-platform/llama3-8b-accelerator)
+- [codellama-34b-accelerator](https://huggingface.co/ibm-ai-platform/codellama-34b-accelerator)
+- [llama2-70b-accelerator](https://huggingface.co/ibm-ai-platform/llama2-70b-accelerator)
+- [llama3-70b-accelerator](https://huggingface.co/ibm-ai-platform/llama3-70b-accelerator)
 - [granite-3b-code-instruct-accelerator](https://huggingface.co/ibm-granite/granite-3b-code-instruct-accelerator)
 - [granite-8b-code-instruct-accelerator](https://huggingface.co/ibm-granite/granite-8b-code-instruct-accelerator)
 - [granite-7b-instruct-accelerator](https://huggingface.co/ibm-granite/granite-7b-instruct-accelerator)

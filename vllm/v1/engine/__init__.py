@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
@@ -5,12 +7,36 @@ from typing import TYPE_CHECKING, List, Optional, Union
 import msgspec
 
 from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.sampling_params import SamplingParams
+
+# These are possible values of RequestOutput.finish_reason,
+# so form part of the external API.
+FINISH_REASON_STRINGS = ("stop", "length", "abort")
+
+
+class FinishReason(enum.IntEnum):
+    """
+    Reason a request finished - stop, length, or abort.
+
+    Int rather than Str for more compact serialization.
+
+    stop - a stop string was emitted
+    length - max_tokens was consumed, or max_model_len was reached
+    abort - aborted for another reason
+
+    """
+    STOP = 0
+    LENGTH = 1
+    ABORT = 2
+
+    def __str__(self):
+        return FINISH_REASON_STRINGS[self.value]
 
 
 @dataclass
@@ -42,9 +68,16 @@ class EngineCoreOutput(
 
     request_id: str
     new_token_ids: List[int]
-    finished: bool
-    finish_reason: Optional[str] = None
+
+    new_logprobs: Optional[LogprobsLists] = None
+    new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
+
+    finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
+
+    @property
+    def finished(self) -> bool:
+        return self.finish_reason is not None
 
 
 class EngineCoreOutputs(
@@ -54,7 +87,7 @@ class EngineCoreOutputs(
         gc=False):  # type: ignore[call-arg]
 
     #NOTE(Nick): We could consider ways to make this more compact,
-    # e.g. columnwise layout and using an int enum for finish/stop reason
+    # e.g. columnwise layout
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
@@ -66,6 +99,11 @@ class EngineCoreProfile:
     is_start: bool
 
 
+@dataclass
+class EngineCoreResetPrefixCache:
+    pass
+
+
 class EngineCoreRequestType(enum.Enum):
     """
     Request types defined as hex byte strings, so it can be sent over sockets
@@ -74,6 +112,8 @@ class EngineCoreRequestType(enum.Enum):
     ADD = b'\x00'
     ABORT = b'\x01'
     PROFILE = b'\x02'
+    RESET_PREFIX_CACHE = b'\x03'
 
 
-EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile, List[str]]
+EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile,
+                               EngineCoreResetPrefixCache, List[str]]

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Derived from BART implementation posted on HuggingFace; license below:
 #
 # coding=utf-8

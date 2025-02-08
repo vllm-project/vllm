@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -58,11 +60,19 @@ class Request:
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
-        assert len(self.mm_inputs) == len(self.mm_hashes)
+        if self.mm_hashes:
+            assert len(self.mm_inputs) == len(self.mm_hashes)
 
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
         self._kv_block_hashes: List[BlockHashType] = []
+        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
+
+        # Read-only views
+        # Prevent directly appending to the these lists since
+        # they should also be updated simultaneously.
+        self.output_token_ids = ConstantList(self._output_token_ids)
+        self.all_token_ids = ConstantList(self._all_token_ids)
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -78,18 +88,6 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
         )
-
-    @property
-    def output_token_ids(self) -> ConstantList[int]:
-        # Prevent directly appending to the output_token_ids since
-        # all_token_ids should also be updated simultaneously.
-        return ConstantList(self._output_token_ids)
-
-    @property
-    def all_token_ids(self) -> ConstantList[int]:
-        # Prevent directly appending to the all_token_ids since
-        # output_token_ids should also be updated simultaneously
-        return ConstantList(self._all_token_ids)
 
     def append_output_token_ids(
         self,
@@ -111,7 +109,7 @@ class Request:
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 
-    def get_finished_reason(self) -> Union[str, None]:
+    def get_finished_reason(self) -> Union[FinishReason, None]:
         return RequestStatus.get_finished_reason(self.status)
 
     def has_encoder_inputs(self) -> bool:
@@ -126,13 +124,9 @@ class Request:
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
 
-    @property
-    def kv_block_hashes(self) -> ConstantList["BlockHashType"]:
-        # Prevent directly appending to the kv_block_hashes.
-        return ConstantList(self._kv_block_hashes)
-
     def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
         self._kv_block_hashes = value
+        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
 
     def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
         self._kv_block_hashes.append(block_hash)
@@ -155,7 +149,8 @@ class RequestStatus(enum.IntEnum):
         return status > RequestStatus.PREEMPTED
 
     @staticmethod
-    def get_finished_reason(status: "RequestStatus") -> Union[str, None]:
+    def get_finished_reason(
+            status: "RequestStatus") -> Union[FinishReason, None]:
         return _FINISHED_REASON_MAP.get(status)
 
 
@@ -164,8 +159,8 @@ class RequestStatus(enum.IntEnum):
 # are longer than the model's length cap. Therefore, the stop
 # reason should also be "length" as in OpenAI API.
 _FINISHED_REASON_MAP = {
-    RequestStatus.FINISHED_STOPPED: "stop",
-    RequestStatus.FINISHED_LENGTH_CAPPED: "length",
-    RequestStatus.FINISHED_ABORTED: "abort",
-    RequestStatus.FINISHED_IGNORED: "length",
+    RequestStatus.FINISHED_STOPPED: FinishReason.STOP,
+    RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
+    RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
 }

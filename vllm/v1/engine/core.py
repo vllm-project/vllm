@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pickle
 import queue
 import signal
@@ -9,7 +11,6 @@ from typing import List, Tuple, Type
 import psutil
 import zmq
 import zmq.asyncio
-from msgspec import msgpack
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -20,11 +21,11 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
                             EngineCoreRequest, EngineCoreRequestType,
-                            EngineCoreRequestUnion)
+                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.serial_utils import MsgpackEncoder, PickleEncoder
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -42,7 +43,7 @@ class EngineCore:
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
-        logger.info("Initializing an LLM engine (v%s) with config: %s",
+        logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
         # Setup Model.
@@ -134,6 +135,9 @@ class EngineCore:
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
+
+    def reset_prefix_cache(self):
+        self.scheduler.reset_prefix_cache()
 
 
 class EngineCoreProc(EngineCore):
@@ -247,6 +251,8 @@ class EngineCoreProc(EngineCore):
             self.add_request(request)
         elif isinstance(request, EngineCoreProfile):
             self.model_executor.profile(request.is_start)
+        elif isinstance(request, EngineCoreResetPrefixCache):
+            self.reset_prefix_cache()
         else:
             # TODO: make an EngineCoreAbort wrapper
             assert isinstance(request, list)
@@ -271,7 +277,9 @@ class EngineCoreProc(EngineCore):
                     request = decoder_add_req.decode(request_data)
                 elif request_type == EngineCoreRequestType.ABORT.value:
                     request = decoder_abort_req.decode(request_data)
-                elif request_type == EngineCoreRequestType.PROFILE.value:
+                elif request_type in (
+                        EngineCoreRequestType.PROFILE.value,
+                        EngineCoreRequestType.RESET_PREFIX_CACHE.value):
                     request = pickle.loads(request_data)
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")
@@ -283,7 +291,7 @@ class EngineCoreProc(EngineCore):
         """Output socket IO thread."""
 
         # Msgpack serialization encoding.
-        encoder = msgpack.Encoder()
+        encoder = MsgpackEncoder()
         # Reuse send buffer.
         buffer = bytearray()
 

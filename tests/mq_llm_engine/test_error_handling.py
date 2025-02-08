@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test that various errors are handled properly."""
 
 import asyncio

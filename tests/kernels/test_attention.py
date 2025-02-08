@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import random
 from typing import List, Optional, Tuple
 
@@ -182,7 +184,7 @@ def test_paged_attention(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Using default kv_scale
-    k_scale = v_scale = 1.0
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
