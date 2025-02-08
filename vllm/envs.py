@@ -87,7 +87,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
-    VLLM_LOCAL_RANK_DEV_MAP: str = "{}"
+    VLLM_LOCAL_RANK_DEV_MAP: str = ""
 
 
 def get_default_cache_root():
@@ -574,8 +574,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
     lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
 
+    # String of comma separated ints mapping local-rank to device
     "VLLM_LOCAL_RANK_DEV_MAP":
-    lambda: os.getenv("VLLM_LOCAL_RANK_DEV_MAP", "{}")
+    lambda: os.getenv("VLLM_LOCAL_RANK_DEV_MAP", "")
 }
 # end-env-vars-definition
 

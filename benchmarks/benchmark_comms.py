@@ -1,4 +1,4 @@
-# pyright: basic
+# SPDX-License-Identifier: Apache-2.0
 import argparse
 import itertools
 import multiprocessing
@@ -74,7 +74,7 @@ class BMResult:
                         average=sum(bwlst) / len(bwlst))
 
     @staticmethod
-    def g_busbw_from_latencies(latencies: List[float], msize: int):
+    def g_busbw_from_latencies(latencies: List[float], msize: int, ndevs: int):
         # B = S/t * n = algbw * n
         bwlst = list(map(lambda x: (msize * 1e-9 / x), latencies))
         bwlst.sort()
@@ -85,7 +85,7 @@ class BMResult:
                         average=sum(bwlst) / len(bwlst))
 
     @staticmethod
-    def b_busbw_from_latencies(latencies: List[float], msize: int):
+    def b_busbw_from_latencies(latencies: List[float], msize: int, ndevs: int):
         # B = S/t * n = algbw * n
         bwlst = list(map(lambda x: (msize * 1e-9 / x), latencies))
         bwlst.sort()
@@ -94,6 +94,17 @@ class BMResult:
                         maximum=bwlst[-1],
                         median=bwlst[len(bwlst) // 2],
                         average=sum(bwlst) / len(bwlst))
+
+    @staticmethod
+    def collfn_from_latencies(latencies: List[float], msize: int, ndevs: int,
+                              bm_name: str):
+        d = {
+            "all_reduce": BMResult.ar_busbw_from_latencies,
+            "all_gather": BMResult.ag_busbw_from_latencies,
+            "broadcast": BMResult.b_busbw_from_latencies,
+            "gather": BMResult.g_busbw_from_latencies,
+        }
+        return d[bm_name](latencies, msize, ndevs)
 
 
 @dataclass
@@ -109,13 +120,9 @@ class BMConfig:
     bm_name: str
     bm_print: Callable[[List[BMResult], Self], None] | None
     bm_fn: Callable[[Self], List[BMResult]] | None
+    independent_tp_colls: bool
 
 
-# g0 and g1 are ranks in gc
-# when using pytorch, g0 and g1 are global_ranks, regardless of group argument
-# this is identical to pytorch's documentation.
-# IMO, this is dumb, but I'm sure there's a reason for it...
-# There also seem to be some lockups w/ passing in pg when doing pp...
 def measure_p2p_bw(buff: torch.Tensor, g0: int, g1: int, bmcfg: BMConfig,
                    gc: GroupCoordinator) -> BMResult:
     rank = gc.rank_in_group
@@ -194,103 +201,47 @@ def measure_tdict_bw(tdict: Dict[str, Union[torch.Tensor, Any]], g0: int,
     return BMResult.p2p_bw_from_latencies(latencies, bmcfg.msize)
 
 
-def measure_all_gather(buff: torch.Tensor, bmcfg: BMConfig,
-                       gc: GroupCoordinator) -> BMResult:
+def measure_collfn(buff: torch.Tensor, bmcfg: BMConfig, gc: GroupCoordinator,
+                   bm_name: str) -> BMResult:
     assert buff.nbytes == bmcfg.msize
-
-    ag_bm_iter = range(bmcfg.iters + bmcfg.warmups)
-    if gc.rank == 0:
-        ag_bm_iter = tqdm(ag_bm_iter, "All_gather")
-
-    latencies = []
+    wgc = pstate.get_world_group()
+    niter = bmcfg.iters if not bmcfg.independent_tp_colls else (bmcfg.pp_size *
+                                                                bmcfg.iters)
+    niter += bmcfg.warmups
     device = gc.device
-    for i in ag_bm_iter:
-        gc.barrier()
-        ts = time.perf_counter()
-        gc.all_gather(buff)
-        torch.cuda.synchronize(device)
-        tf = time.perf_counter() - ts
+    bmfn = getattr(gc, bm_name, None)
+    assert bmfn is not None, f"bad bm: {bm_name} "
 
-        if i >= bmcfg.warmups:
-            latencies.append(tf)
-
-    assert len(latencies) == bmcfg.iters
-
-    return BMResult.ag_busbw_from_latencies(latencies, bmcfg.msize,
-                                            bmcfg.tp_size)
-
-
-def measure_all_reduce(buff: torch.Tensor, bmcfg: BMConfig,
-                       gc: GroupCoordinator) -> BMResult:
-    assert buff.nbytes == bmcfg.msize
-
-    ar_bm_iter = range(bmcfg.iters + bmcfg.warmups)
+    ar_bm_iter = range(niter)
     if gc.rank == 0:
         ar_bm_iter = tqdm(ar_bm_iter, "All_reduce")
 
-    device = gc.device
+    def _participating(i):
+        if not bmcfg.independent_tp_colls:
+            return True
+        if i < bmcfg.warmups:
+            return True
+        return (i - bmcfg.warmups) // bmcfg.iters == gc.rank // bmcfg.tp_size
+
     latencies = []
     for i in ar_bm_iter:
-        gc.barrier()
-        ts = time.perf_counter()
-        gc.all_reduce(buff)
-        torch.cuda.synchronize(device)
-        tf = time.perf_counter() - ts
-        if i >= bmcfg.warmups:
-            latencies.append(tf)
+        if _participating(i):
+            gc.barrier()
+            ts = time.perf_counter()
+            bmfn(buff)
+            torch.cuda.synchronize(device)
+            tf = time.perf_counter() - ts
+            if i >= bmcfg.warmups:
+                latencies.append(tf)
+            wgc.barrier()
+        else:
+            wgc.barrier()
 
-    assert len(latencies) == bmcfg.iters
+    assert len(latencies) == bmcfg.iters, (
+        f"Expected {bmcfg.iters} latencies, found {len(latencies)}")
 
-    return BMResult.ar_busbw_from_latencies(latencies, bmcfg.msize,
-                                            bmcfg.tp_size)
-
-
-def measure_gather(buff: torch.Tensor, bmcfg: BMConfig,
-                   gc: GroupCoordinator) -> BMResult:
-    assert buff.nbytes == bmcfg.msize
-
-    ar_bm_iter = range(bmcfg.iters + bmcfg.warmups)
-    if gc.rank == 0:
-        ar_bm_iter = tqdm(ar_bm_iter, "Gather")
-
-    device = gc.device
-    latencies = []
-    for i in ar_bm_iter:
-        gc.barrier()
-        ts = time.perf_counter()
-        gc.gather(buff)
-        torch.cuda.synchronize(device)
-        tf = time.perf_counter() - ts
-        if i >= bmcfg.warmups:
-            latencies.append(tf)
-
-    assert len(latencies) == bmcfg.iters
-
-    return BMResult.g_busbw_from_latencies(latencies, bmcfg.msize)
-
-
-def measure_broadcast(buff: torch.Tensor, bmcfg: BMConfig,
-                      gc: GroupCoordinator) -> BMResult:
-    assert buff.nbytes == bmcfg.msize
-
-    ar_bm_iter = range(bmcfg.iters + bmcfg.warmups)
-    if gc.rank == 0:
-        ar_bm_iter = tqdm(ar_bm_iter, "Broadcast")
-
-    device = gc.device
-    latencies = []
-    for i in ar_bm_iter:
-        gc.barrier()
-        ts = time.perf_counter()
-        gc.broadcast(buff)
-        torch.cuda.synchronize(device)
-        tf = time.perf_counter() - ts
-        if i >= bmcfg.warmups:
-            latencies.append(tf)
-
-    assert len(latencies) == bmcfg.iters
-
-    return BMResult.b_busbw_from_latencies(latencies, bmcfg.msize)
+    return BMResult.collfn_from_latencies(latencies, bmcfg.msize,
+                                          bmcfg.tp_size, bm_name)
 
 
 def print_p2p_bm(results: List[BMResult], bmcfg: BMConfig):
@@ -348,8 +299,13 @@ def print_tp_colls(results: List[BMResult], bmcfg: BMConfig):
 
     header_str = "TP xCCL Collective Bus-Bandwidth, "
     header_str += f"msize: {bmcfg.msize} tp_size: {bmcfg.tp_size} "
-    header_str += f"pp_size: {bmcfg.pp_size}"
-    print(header_str)
+    header_str += f"pp_size: {bmcfg.pp_size}\n"
+    for tpgid in range(0, bmcfg.ndevs, bmcfg.tp_size):
+        tpglst = [
+            get_device_idx(i) for i in range(tpgid, tpgid + bmcfg.tp_size)
+        ]
+        header_str += f"    tp_group: {tpgid // bmcfg.pp_size} {tpglst}\n"
+    print(header_str, end="")
 
     for i in range(bmcfg.ndevs):
         ag_res = results[i * 4]
@@ -383,11 +339,10 @@ def bm_tp_colls(bmcfg: BMConfig) -> List[BMResult]:
 
     buff = alloc_dev_buf(msize, device)
 
-    ag_results = measure_all_gather(buff, bmcfg, tpgc)
-    ar_results = measure_all_reduce(buff, bmcfg, tpgc)
-    g_results = measure_gather(buff, bmcfg, tpgc)
-    b_results = measure_broadcast(buff, bmcfg, tpgc)
-    # TODO
+    ar_results = measure_collfn(buff, bmcfg, tpgc, "all_reduce")
+    ag_results = measure_collfn(buff, bmcfg, tpgc, "all_gather")
+    g_results = measure_collfn(buff, bmcfg, tpgc, "gather")
+    b_results = measure_collfn(buff, bmcfg, tpgc, "broadcast")
 
     tpgc.barrier()
 
@@ -507,7 +462,10 @@ def proc_fn(cfgtpl: Tuple[BMConfig, int, torch.device]):
     assert pstate.get_world_group().device == pstate.get_tp_group().device
     assert rank == pstate.get_world_group().rank
 
-    print(f"rank: {rank}, device: {device}")
+    print(f"rank: {rank}, device: {device} tpg: {rank // bmcfg.tp_size},",
+          " ppg: {rank // bmcfg.pp_size}",
+          flush=True)
+    pstate.get_world_group().barrier()
 
     if bmcfg.bm_name == "all":
         results = []
@@ -545,6 +503,7 @@ def main():
                         type=str,
                         choices=list(bm_dict.keys()) + ["all"],
                         default="all")
+    parser.add_argument("--independent-tp-colls", action="store_true")
     args = parser.parse_args()
 
     argsdict = vars(args)
