@@ -82,12 +82,12 @@ def get_max_dummy_image(ctx: InputContext):
     vit_image_size = prepro_config['vit_image_size']
 
     max_side = vit_image_size * dynamic_hd_size
-    dummy_image = dummy_image_for_phi4o(vit_image_size, max_side)
+    dummy_image = dummy_image_for_phi4mm(vit_image_size, max_side)
     return dummy_image
 
 
 # image token length
-def get_max_phi4o_image_tokens(ctx: InputContext):
+def get_max_phi4mm_image_tokens(ctx: InputContext):
     dummy_image = get_max_dummy_image(ctx)
 
     hf_config = ctx.get_hf_config()
@@ -930,7 +930,7 @@ def _get_image_id_to_input_ids(images, prompt, ctx: InputContext):
     return image_id_to_input_ids
 
 
-def input_processor_for_phio(
+def input_processor_for_phi4mm(
     ctx: InputContext, inputs: DecoderOnlyInputs
 ) -> TokenInputs:
     """
@@ -1016,7 +1016,7 @@ def input_processor_for_phio(
                             break
                 input_ids.extend(curr_token_ids)
         if has_audio and has_imag and has_user_text_input:
-            raise ValueError("PhiOForCausalLM does not support text + audio + image" +
+            raise ValueError("Phi4MMForCausalLM does not support text + audio + image" +
                               " inputs in the same prompt")
     # Handle the case where the prompt is already tokenized
     else:
@@ -1044,7 +1044,7 @@ def input_processor_for_phio(
             i += token_count
 
         if audio_cnt > 0 and img_cnt > 0 and user_text_input_cnt > 0:
-            raise ValueError("PhiOForCausalLM does not support text + audio + image" +
+            raise ValueError("Phi4MMForCausalLM does not support text + audio + image" +
                               " inputs in the same prompt")
         # If the below assertion fails, it might be that input pure-text
         # messages contain image/audio special tokens literally
@@ -1089,10 +1089,10 @@ def _compute_audio_embed_size(hf_config, audio_frames):
     return result
 
 
-def get_max_phi4o_audio_tokens(ctx: InputContext) -> int:
+def get_max_phi4mm_audio_tokens(ctx: InputContext) -> int:
     return 10000
 
-def dummy_audio_for_phi4o(audio_count: int) -> dict:
+def dummy_audio_for_phi4mm(audio_count: int) -> dict:
     """
     Create dummy audio data for the Phi-4O model, which is used for profiling.
 
@@ -1106,12 +1106,12 @@ def dummy_audio_for_phi4o(audio_count: int) -> dict:
     return [(dummy_audio, DUMMY_SAMPLING_FREQUENCY)] * audio_count
 
 
-def dummy_image_for_phi4o(width: int, height: int):
+def dummy_image_for_phi4mm(width: int, height: int):
     image = Image.new('RGB', (width, height), color='black')
     return image
 
 
-def dummy_data_for_phi4o(
+def dummy_data_for_phi4mm(
     ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
 ) -> DummyData:
     """
@@ -1139,7 +1139,7 @@ def dummy_data_for_phi4o(
 
     image_count = mm_counts["image"]
     dummy_image = get_max_dummy_image(ctx)
-    max_image_tokens = get_max_phi4o_image_tokens(ctx)
+    max_image_tokens = get_max_phi4mm_image_tokens(ctx)
     total_image_tokens = image_count * max_image_tokens
 
     if seq_len - audio_feature_size * audio_count - total_image_tokens < 0:
@@ -1154,7 +1154,7 @@ def dummy_data_for_phi4o(
             (0, seq_len - audio_feature_size * audio_count),
         )
         mm_data = {
-            "audio": dummy_audio_for_phi4o(audio_count),
+            "audio": dummy_audio_for_phi4mm(audio_count),
         }
     else:
         seq_data = SequenceData.from_prompt_token_counts(
@@ -1167,7 +1167,7 @@ def dummy_data_for_phi4o(
     return DummyData(seq_data, mm_data)
 
 
-def input_mapper_for_phi4o_audio(ctx: InputContext, data: object) -> MultiModalInputs:
+def input_mapper_for_phi4mm_audio(ctx: InputContext, data: object) -> MultiModalInputs:
     """
     This function is used to create the MultiModalInputs for the Phi-4O (audio) model.
     Specifically, for audio, we extract the audio features from the sound file and create
@@ -1219,7 +1219,7 @@ def input_mapper_for_phi4o_audio(ctx: InputContext, data: object) -> MultiModalI
     return MultiModalInputs({"audio_features": audio_features})
 
 
-def input_mapper_for_phi4o_image(ctx: InputContext, data: object):
+def input_mapper_for_phi4mm_image(ctx: InputContext, data: object):
     if not isinstance(data, list):
         data = [data]
     # data: list of PIL images
@@ -1269,17 +1269,17 @@ def cat_with_pad(tensors, dim, padding_value=0):
     return output
 
 
-@MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_phi4o_audio)
-@MULTIMODAL_REGISTRY.register_input_mapper("image", input_mapper_for_phi4o_image)
+@MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_phi4mm_audio)
+@MULTIMODAL_REGISTRY.register_input_mapper("image", input_mapper_for_phi4mm_image)
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "audio", get_max_phi4o_audio_tokens
+    "audio", get_max_phi4mm_audio_tokens
 )
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "image", get_max_phi4o_image_tokens
+    "image", get_max_phi4mm_image_tokens
 )
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4o)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_phio)
-class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4mm)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_phi4mm)
+class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     """
     Implements the Phi-4-multimodal-instruct model in VLLM.
     """
@@ -1296,7 +1296,7 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     supported_lora_modules = [
         "qkv_proj", "o_proj", "gate_up_proj", "down_proj"
     ]
-    # PhiOForCausalLM does not apply LoRA to the embedding layer.
+    # Phi4MMForCausalLM does not apply LoRA to the embedding layer.
     embedding_modules = {}
     embedding_padding_modules = []
 
@@ -1448,7 +1448,7 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         """
         Create the audio embeddings from the audio input, where the audio input is pairs of
         audio features and audio embed lengths.  The audio input is created by
-        `input_mapper_for_phi4o_audio`.
+        `input_mapper_for_phi4mm_audio`.
 
         Args:
             input_ids (torch.Tensor): Input IDs (the prompt in this case, before the audio token
