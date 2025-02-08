@@ -110,10 +110,15 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
-    # MoE layers will use the specified number of EPs, with TP
-    # of tensor_parallel_size. Non-MoE layers will use TP of
+    # When the user does not specify the expert parallel size,
+    # the number of expert parallelism in MoE layers will be the same
+    # as the tensor parallelism size. However, when the user specifies
+    # the expert parallel size, the number of expert parallelism in MoE
+    # layers will be the same as the specified number, and tensor
+    # parallelism of tensor_parallel_size will be applied within each
+    # expert parallel rank. Non-MoE layers without experts will use TP of
     # tensor_parallel_size * expert_parallel_size.
-    expert_parallel_size: int = 1
+    expert_parallel_size: int = -1
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
@@ -419,15 +424,23 @@ class EngineArgs:
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
         parser.add_argument(
-            '--expert-parallel-size',
-            '-ep',
+            '--expertimental-expert-parallel-size',
+            # '-ep',
             type=int,
             default=EngineArgs.expert_parallel_size,
-            help='Number of expert parallelism for MoE layers. '
-            'Tensor parallelism in MoE layers will be applied '
-            'within each expert parallel rank. Non-MoE layers '
-            'without experts will use tensor parallelism of '
-            'tensor_parallel_size * expert_parallel_size.')
+            help='Force certain number of expert parallelism for MoE layers. '
+            'When not specified, the number of expert parallelism will be '
+            'the same as tensor parallelism size. '
+            'However, when specified, the number of expert parallelism in MoE '
+            'layers will be the same as the specified number, and tensor '
+            'parallelism specified by the --tensor-parallel-size argument will '
+            'be applied in the MoE layers within each expert parallel rank, '
+            'and non-MoE layers without experts will use tensor parallelism of '
+            'tensor_parallel_size * expert_parallel_size. For example, if '
+            'tensor_parallel_size is 2 and expert_parallel_size is 4, then '
+            'there will be 4 expert parallel ranks with 2 tensor parallel '
+            'devices each. Or, if expert_parallel_size is set to 1, MoE layers '
+            'will be run with tensor parallelism only.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,

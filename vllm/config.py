@@ -859,11 +859,6 @@ class ModelConfig:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
 
-    def get_num_routed_experts(self, parallel_config: "ParallelConfig") -> int:
-        num_routed_experts = getattr(self.hf_text_config, "n_routed_experts",
-                                     0)
-        return num_routed_experts // parallel_config.expert_parallel_size
-
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
@@ -1323,7 +1318,7 @@ class ParallelConfig:
 
     pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
-    expert_parallel_size: int = 1  # Number of expert parallel groups.
+    expert_parallel_size: int = -1  # Number of expert parallel groups.
 
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
@@ -1376,13 +1371,16 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
-        # MoE layers will use the specified number of EPs, with TP
-        # of tensor_parallel_size. Non-MoE layers will use TP of size
-        # tensor_parallel_size * expert_parallel_size. As such, the size
-        # of the tensor parallel group is set to the product of the
-        # user-specified tensor parallel and expert parallel sizes,
-        # prioritizing the non-MoE layer's TP size.
-        self.tensor_parallel_size *= self.expert_parallel_size
+        # When the user does not specify the expert parallel size,
+        # the number of expert parallelism in MoE layers will be the same
+        # as the tensor parallelism size. However, when the user specifies
+        # the expert parallel size, the number of expert parallelism in MoE
+        # layers will be the same as the specified number, and tensor
+        # parallelism of tensor_parallel_size will be applied within each
+        # expert parallel rank. Non-MoE layers without experts will use TP of
+        # tensor_parallel_size * expert_parallel_size.
+        if self.expert_parallel_size == -1:
+            self.expert_parallel_size = self.tensor_parallel_size
 
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size

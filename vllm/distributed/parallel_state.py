@@ -996,7 +996,7 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
-    expert_model_parallel_size: int = 1,
+    expert_model_parallel_size: int = -1,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -1065,6 +1065,10 @@ def initialize_model_parallel(
                                     use_custom_allreduce=False,
                                     group_name="pp")
 
+    # If expert_model_parallel_size is not specified,
+    # use tensor_model_parallel_size as expert_model_parallel_size.
+    if expert_model_parallel_size == -1:
+        expert_model_parallel_size = tensor_model_parallel_size
     global _EP_SIZE
     _EP_SIZE = expert_model_parallel_size
 
@@ -1092,7 +1096,7 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
-    expert_model_parallel_size: Optional[int] = 1,
+    expert_model_parallel_size: Optional[int] = -1,
     backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,

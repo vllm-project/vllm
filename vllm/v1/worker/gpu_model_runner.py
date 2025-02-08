@@ -85,8 +85,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             parallel_config, LayerBlockType.attention)
         self.num_query_heads = model_config.get_num_attention_heads(
             parallel_config)
-        self.num_routed_experts = \
-            model_config.get_num_routed_experts(parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
