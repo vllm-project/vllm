@@ -47,6 +47,7 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        print("EXECUTOR_READY")
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks = self._initialize_kv_caches(
@@ -168,18 +169,13 @@ class EngineCoreProc(EngineCore):
                 EngineCoreRequestUnion] = queue.Queue()
             self.output_queue: queue.Queue[Union[
                 bytes, EngineCoreOutputs]] = queue.Queue()
+            self.errored_sent_event = threading.Event()
             threading.Thread(target=self.process_input_socket,
                              args=(input_path, ),
                              daemon=True).start()
             threading.Thread(target=self.process_output_socket,
                              args=(output_path, ),
                              daemon=True).start()
-
-            # Signal from process_output_socket that EngineDead
-            # message was sent. Since process_output_socket is a
-            # daemon thread, we need to ensure this message is
-            # sent before we exit from the main thread.
-            self.errored_sent_event = threading.Event()
 
             # Send Readiness signal to EngineClient.
             ready_pipe.send({"status": "READY"})

@@ -289,7 +289,7 @@ class AsyncMPClient(MPClient):
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
 
-        return outputs
+        return self.decoder.decode(outputs)
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:

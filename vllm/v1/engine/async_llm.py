@@ -376,7 +376,11 @@ class AsyncLLM(EngineClient):
 
     @property
     def is_running(self) -> bool:
-        return not self.errored
+        # Have not started the loop yet.
+        if self.output_handler is None:
+            return True
+
+        return not self.output_handler.done()
 
     @property
     def is_stopped(self) -> bool:
@@ -384,7 +388,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return self.engine_core.is_engine_dead
+        return (self.engine_core.is_engine_dead or not self.is_running)
 
     @property
     def dead_error(self) -> BaseException:

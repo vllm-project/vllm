@@ -80,7 +80,7 @@ class MultiprocExecutor(Executor):
         for unready_worker in unready_workers:
             # NOTE: the WorkerProc wraps startup in a try ... catch
             # so if there are any issues in loading in a WorkerProcess
-            # (e.g. OOM), an Exception will be raised here.
+            # (e.g. OOM), an Exception will be caught here.
             worker = WorkerProc.wait_for_ready(unready_worker)
             self.workers.append(worker)
 
@@ -302,7 +302,6 @@ class WorkerProc:
 
             # Extract the message queue handle.
             mq_handle = pickle.loads(response["handle"])
-            print(f"{mq_handle=}")
             worker_response_mq = MessageQueue.create_from_handle(mq_handle, 0)
             return WorkerProcHandle.from_unready_handle(
                 unready_proc_handle, worker_response_mq)
@@ -378,9 +377,9 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
-        method, args, kwargs = self.rpc_broadcast_mq.dequeue()
-
         while True:
+            method, args, kwargs = self.rpc_broadcast_mq.dequeue()
+
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)

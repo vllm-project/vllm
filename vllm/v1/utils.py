@@ -102,13 +102,13 @@ class BackgroundProcHandle:
         process_kwargs: Dict[Any, Any],
     ):
         context = get_mp_context()
-        self.reader, writer = context.Pipe(duplex=False)
+        self.reader, self.writer = context.Pipe(duplex=False)
         self.process_name = process_name
 
         assert ("ready_pipe" not in process_kwargs
                 and "input_path" not in process_kwargs
                 and "output_path" not in process_kwargs)
-        process_kwargs["ready_pipe"] = writer
+        process_kwargs["ready_pipe"] = self.writer
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
 
@@ -143,6 +143,9 @@ class BackgroundProcHandle:
         except EOFError:
             e.__suppress_context__ = True
             raise e from None
+        finally:
+            self.reader.close()
+            self.writer.close()
 
 
 # Note(rob): shutdown function cannot be a bound method,
