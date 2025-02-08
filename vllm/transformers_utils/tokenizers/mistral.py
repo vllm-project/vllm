@@ -88,7 +88,8 @@ def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
 
 
 def find_tokenizer_file(files: List[str]):
-    file_pattern = re.compile(r"^tokenizer\.model\.v.*$|^tekken\.json$")
+    file_pattern = re.compile(
+        r"^tokenizer\.model\.v.*$|^tekken\.json$|^tokenizer\.mm\.model\.v.*$")
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
@@ -291,6 +292,16 @@ class MistralTokenizer:
 
         from mistral_common.protocol.instruct.request import (
             ChatCompletionRequest)
+
+        # mistral-common requires AssistantMessage content to be string [1].
+        #
+        # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
+        for message in messages:
+            if message.get("role") == "assistant":
+                content = message.get("content")
+                if isinstance(content, list):
+                    content = "\n".join(chunk.get("text") for chunk in content)
+                    message["content"] = content
         request = ChatCompletionRequest(messages=messages,
                                         tools=tools)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
