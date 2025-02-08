@@ -446,27 +446,32 @@ class Scheduler:
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            token_ids = sampled_token_ids[req_index]
-            # num_computed_tokens_step is the number of tokens computed
-            # in the current step.
-            # num_computed_tokens_step =
-            #   num_scheduled_tokens - num_tokens_rejected,
-            # where num_tokens_rejected =
-            #   len(request.spec_token_ids) + 1 - len(token_ids).
-            # We use this way of calculating num_computed_tokens_step because of
-            # chunked prefill. In chunked prefill, number of computed tokens
-            # is not equal to the number of generated/sampled tokens.
-            # Here, len(request.spec_token_ids) + 1 is the maximum number of
-            # tokens generated  in the current step,
-            # len(request.spec_token_ids) + 1 - len(token_ids) is the number of
-            # tokens rejected in the current step.
-            num_computed_tokens_step = num_scheduled_tokens[req_id] - (
-                len(request.spec_token_ids) + 1 - len(token_ids))
-            request.num_computed_tokens += num_computed_tokens_step
-            # When the request's num_computed_tokens catches up its num_tokens,
-            # the request generates output tokens. Otherwise, we ignore the
-            # sampler output for the request.
-            assert request.num_computed_tokens <= request.num_tokens
+            spec_token_ids = request.spec_token_ids
+            generated_token_ids = sampled_token_ids[req_index]
+            if not spec_token_ids:
+                # When the request's num_computed_tokens catches up
+                # its num_tokens, the request generates output tokens.
+                # Otherwise, we ignore the sampler output for the request.
+                request.num_computed_tokens += num_tokens_scheduled
+                assert request.num_computed_tokens <= request.num_tokens
+            else:
+                # num_computed_tokens_step is the number of tokens computed
+                # in the current step.
+                # num_computed_tokens_step =
+                #   num_scheduled_tokens - num_tokens_rejected,
+                # where num_tokens_rejected =
+                #   len(request.spec_token_ids) + 1 - len(generated_token_ids).
+                # We use this way of calculating num_computed_tokens_step
+                # because of chunked prefill. In chunked prefill, number of
+                # computed tokens is not equal to the number of
+                # generated/sampled tokens. Here, len(request.spec_token_ids)
+                # + 1 is the maximum number of tokens generated in the current
+                # step, len(request.spec_token_ids) + 1 -
+                # len(generated_token_ids) is the number of tokens rejected
+                # in the current step.
+                num_computed_tokens_step = num_scheduled_tokens[req_id] - (
+                    len(request.spec_token_ids) + 1 - len(generated_token_ids))
+                request.num_computed_tokens += num_computed_tokens_step
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
@@ -489,8 +494,8 @@ class Scheduler:
                 request.clear_spec_tokens()
 
                 new_token_ids = []
-                for output_token_id in token_ids:
-                    request.append_output_token_ids(token_ids)
+                for output_token_id in generated_token_ids:
+                    request.append_output_token_ids(output_token_id)
                     new_token_ids.append(output_token_id)
 
                     stopped = self._check_stop(request, output_token_id)
