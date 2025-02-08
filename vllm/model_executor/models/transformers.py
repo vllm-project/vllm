@@ -51,10 +51,10 @@ def vllm_flash_attention_forward(
         value: torch.Tensor,
         attention_mask: torch.Tensor,
         # Transformers kwargs
-        scaling: float = None,
+        scaling: Optional[float] = None,
         # vLLM kwargs
-        attn_metadata: AttentionMetadata = None,
-        attention_instances: list[Attention] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+        attention_instances: Optional[list[Attention]] = None,
         **kwargs):
     self_attn = attention_instances[module.layer_idx]
     if scaling is not None:
