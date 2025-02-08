@@ -33,6 +33,8 @@ repos:
   rev: v0.9.27
   hooks:
   - id: pymarkdown
+    # NOTE: If you get an AssertionError when applying fixes,
+    # try setting args to [scan] and fix the lint errors manually
     args: [fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
