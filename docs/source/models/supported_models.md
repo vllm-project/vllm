@@ -719,7 +719,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `THUDM/glm-4v-9b` etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `H2OVLChatModel`
   * H2OVL
   * T + I<sup>E+</sup>

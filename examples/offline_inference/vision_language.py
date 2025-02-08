@@ -106,7 +106,9 @@ def run_glm4v(question: str, modality: str):
               trust_remote_code=True,
               enforce_eager=True,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
-    prompt = question
+    prompt = f"<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
+        {question}<|assistant|>"
+
     stop_token_ids = [151329, 151336, 151338]
     return llm, prompt, stop_token_ids
 
