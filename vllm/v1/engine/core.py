@@ -153,7 +153,7 @@ class EngineCore:
             if req.num_computed_tokens < req.num_tokens - 1:
                 continue
             # Ignore requests that already have spec tokens.
-            if len(req.spec_token_ids) > 0:
+            if req.spec_token_ids:
                 continue
             spec_tokens = self.proposer.propose(
                 req.all_token_ids,
