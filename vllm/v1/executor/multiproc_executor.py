@@ -21,7 +21,6 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
-from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
 from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
@@ -42,22 +41,6 @@ class MultiprocExecutor(Executor):
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
-
-        # The child processes will send SIGUSR1 when unrecoverable
-        # errors happen.
-        def sigusr1_handler(signum, frame):
-            logger.fatal(
-                "MulitprocExecutor got fatal signal from worker processes, "
-                "shutting down. See stack trace above for root cause issue.")
-            # Shutdown first (avoid SysExit exceptions in __del__).
-            self.shutdown()
-            if VLLM_ENABLE_V1_MULTIPROCESSING:
-                # TODO(rob): move this to the VLLMConfig.
-                # Propagate up if using the mp engine. Note that
-                # sending in non-mp mode crashes caller process.
-                psutil.Process().parent().send_signal(signal.SIGUSR1)
-
-        signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -81,12 +64,25 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
-        self.workers: List[WorkerProcHandle] = []
+        unready_workers: List[UnreadyWorkerProcHandle] = []
         for rank in range(self.world_size):
-            worker = WorkerProc.make_worker_process(self.vllm_config, rank,
-                                                    rank,
-                                                    distributed_init_method,
-                                                    scheduler_output_handle)
+            unready_worker = WorkerProc.make_worker_process(
+                vllm_config=self.vllm_config,
+                local_rank=rank,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                input_shm_handle=scheduler_output_handle,
+            )
+            unready_workers.append(unready_worker)
+
+        # All workers are created before wait_for_ready, since
+        # initialization calls self.init_device(), which does a sync.
+        self.workers: List[WorkerProcHandle] = []
+        for unready_worker in unready_workers:
+            # NOTE: the WorkerProc wraps startup in a try ... catch
+            # so if there are any issues in loading in a WorkerProcess
+            # (e.g. OOM), an Exception will be raised here.
+            worker = WorkerProc.wait_for_ready(unready_worker)
             self.workers.append(worker)
 
         # Ensure message queues are ready. Will deadlock if re-ordered
@@ -179,11 +175,28 @@ class MultiprocExecutor(Executor):
 
 
 @dataclass
+class UnreadyWorkerProcHandle:
+    """WorkerProcess handle before READY."""
+    proc: BaseProcess
+    rank: int
+    ready_pipe: Tuple[Connection, Connection]
+
+
+@dataclass
 class WorkerProcHandle:
     proc: BaseProcess
     rank: int
-    ready_pipe: Connection
     worker_response_mq: MessageQueue  # The worker process writes to this MQ
+
+    @classmethod
+    def from_unready_handle(
+            cls, unready_handle: UnreadyWorkerProcHandle,
+            worker_response_mq: MessageQueue) -> "WorkerProcHandle":
+        return cls(
+            proc=unready_handle.proc,
+            rank=unready_handle.rank,
+            worker_response_mq=worker_response_mq,
+        )
 
 
 class WorkerProc:
@@ -228,20 +241,15 @@ class WorkerProc:
             self.worker_response_mq = MessageQueue(1, 1)
             worker_response_mq_handle = self.worker_response_mq.export_handle()
 
-            # Load model before we send readiness signal, such that
-            # we can catch any errors.
-            print("ABOUT TO INIT DEVICE")
+            # Initialize device and loads weights
             self.worker.init_device()
-            print("ABOUT TO LOAD MODEL")
             self.worker.load_model()
 
-            print("SENDING TO READINESS PIPE")
-            # Send Readiness signal to Executor.
+            # Send READY once we know everything is loaded
             ready_pipe.send({
                 "status": "READY",
                 "handle": pickle.dumps(worker_response_mq_handle)
             })
-            print("SENT TO READINESS PIPE")
 
         except Exception as e:
             logger.exception("WorkerProc got error at startup:", exc_info=e)
@@ -254,9 +262,10 @@ class WorkerProc:
             rank: int,
             distributed_init_method: str,
             input_shm_handle,  # Receive SchedulerOutput
-    ) -> WorkerProcHandle:
+    ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
-        reader, writer = context.Pipe(duplex=False)
+        # (reader, writer)
+        pipe_tuple = context.Pipe(duplex=False)
 
         process_kwargs = {
             "vllm_config": vllm_config,
@@ -264,7 +273,7 @@ class WorkerProc:
             "rank": rank,
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
-            "ready_pipe": writer,
+            "ready_pipe": pipe_tuple[1],
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
@@ -272,13 +281,38 @@ class WorkerProc:
                                daemon=True)
         proc.start()
 
-        # Wait for startup
-        worker_response_mq_handle = WorkerProc.wait_for_startup(proc, reader)
+        return UnreadyWorkerProcHandle(proc, rank, pipe_tuple)
 
-        worker_response_mq = MessageQueue.create_from_handle(
-            worker_response_mq_handle, 0)
+    @staticmethod
+    def wait_for_ready(
+            unready_proc_handle: UnreadyWorkerProcHandle) -> WorkerProcHandle:
 
-        return WorkerProcHandle(proc, rank, reader, worker_response_mq)
+        e = Exception("WorkerProc initialization failed due to "
+                      "an exception in a background process. "
+                      "See stack trace for root cause.")
+
+        ready_pipe = unready_proc_handle.ready_pipe[0]
+        try:
+            response = ready_pipe.recv()
+            if getattr(response, "status", None) != "READY_TO_LOAD":
+                raise e
+
+            assert hasattr(response, "handle")
+            mq_handle = pickle.loads(response["handle"])
+            assert isinstance(mq_handle, Handle)
+
+            worker_response_mq = MessageQueue.create_from_handle(mq_handle, 0)
+            return WorkerProcHandle.from_unready_handle(
+                unready_proc_handle, worker_response_mq)
+
+        except EOFError:
+            e.__suppress_context__ = True
+            raise e from None
+
+        finally:
+            # Close connection.
+            unready_proc_handle.ready_pipe[0].close()
+            unready_proc_handle.ready_pipe[1].close()
 
     def shutdown(self):
         self.rpc_broadcast_mq = None
@@ -340,30 +374,6 @@ class WorkerProc:
             if worker is not None:
                 worker.shutdown()
                 worker = None
-
-    @staticmethod
-    def wait_for_startup(
-        process_name: str,
-        reader: Connection,
-    ) -> WorkerProcHandle:
-        """Wait until the Worker is ready."""
-
-        e = Exception(f"{process_name} initialization failed due to "
-                      "an exception in a background process. See stack trace "
-                      "for root cause.")
-
-        try:
-            response = reader.recv()
-            if getattr(response, "status", None) != "READY":
-                raise e
-            assert hasattr(response, "handle")
-            handle = pickle.loads(response["handle"])
-            assert isinstance(handle, WorkerProcHandle)
-            return handle
-
-        except EOFError:
-            e.__suppress_context__ = True
-            raise e from None
 
     class ResponseStatus(Enum):
         SUCCESS = auto()
