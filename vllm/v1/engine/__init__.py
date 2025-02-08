@@ -93,6 +93,13 @@ class EngineCoreOutputs(
     outputs: List[EngineCoreOutput]
     scheduler_stats: SchedulerStats
 
+    @classmethod
+    def make_empty(cls):
+        cls(outputs=[], scheduler_stats=SchedulerStats())
+
+
+ENGINE_CORE_DEAD = b'ENGINE_CORE_DEAD'
+
 
 @dataclass
 class EngineCoreProfile:

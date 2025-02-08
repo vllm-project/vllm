@@ -6,9 +6,8 @@ import signal
 import threading
 import time
 from multiprocessing.connection import Connection
-from typing import List, Tuple, Type
+from typing import List, Tuple, Type, Union
 
-import psutil
 import zmq
 import zmq.asyncio
 
@@ -16,10 +15,10 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import get_exception_traceback, zmq_socket_ctx
+from vllm.utils import zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+from vllm.v1.engine import (ENGINE_CORE_DEAD, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion,
                             EngineCoreResetPrefixCache)
@@ -132,7 +131,8 @@ class EngineCore:
         return engine_core_outputs
 
     def shutdown(self):
-        self.model_executor.shutdown()
+        if model_executor := getattr(self, "model_executor", None):
+            model_executor.shutdown()
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
@@ -165,8 +165,8 @@ class EngineCoreProc(EngineCore):
             # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
             self.input_queue: queue.Queue[
                 EngineCoreRequestUnion] = queue.Queue()
-            self.output_queue: queue.Queue[
-                List[EngineCoreOutput]] = queue.Queue()
+            self.output_queue: queue.Queue[Union[
+                bytes, EngineCoreOutputs]] = queue.Queue()
             threading.Thread(target=self.process_input_socket,
                              args=(input_path, ),
                              daemon=True).start()
@@ -174,12 +174,16 @@ class EngineCoreProc(EngineCore):
                              args=(output_path, ),
                              daemon=True).start()
 
+            self.errored_sent_event = threading.Event()
+
             # Send Readiness signal to EngineClient.
             ready_pipe.send({"status": "READY"})
 
         except Exception as e:
             logger.exception("EngineCore got error at startup:", exc_info=e)
             ready_pipe.send({"status": "FAILED"})
+        finally:
+            ready_pipe.close()
 
     @staticmethod
     def run_engine_core(*args, **kwargs):
@@ -203,20 +207,12 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        parent_process = psutil.Process().parent()
-        engine_core = None
+        engine_core = EngineCoreProc(*args, **kwargs)
         try:
-            engine_core = EngineCoreProc(*args, **kwargs)
             engine_core.run_busy_loop()
-
-        except SystemExit:
-            logger.debug("EngineCore interrupted.")
-
-        except Exception:
-            traceback = get_exception_traceback()
-            logger.error("EngineCore hit an exception: %s", traceback)
-            parent_process.send_signal(signal.SIGUSR1)
-
+        except Exception as e:
+            logger.exception("EngineCore got an Exception:", exc_info=e)
+            engine_core._send_engine_dead()
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
@@ -266,6 +262,19 @@ class EngineCoreProc(EngineCore):
             assert isinstance(request, list)
             self.abort_requests(request)
 
+    def _send_engine_dead(self):
+        """Send EngineDead status to the EngineCoreClient."""
+
+        # Put ENGINE_CORE_DEAD to the front of the queue.
+        with self.output_queue.mutex:
+            self.output_queue.queue.clear()
+            self.output_queue.put_nowait(ENGINE_CORE_DEAD)
+
+        # Wait until msg sent by the daemon before shutdown.
+        if not self.errored_sent_event.wait(timeout=10):
+            logger.fatal("vLLM shutdown signal from EngineCore failed "
+                         "to send. Please report this issue.")
+
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
 
@@ -306,5 +315,12 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 outputs = self.output_queue.get()
+                if outputs == ENGINE_CORE_DEAD:
+                    socket.send_multipart((ENGINE_CORE_DEAD, ), copy=False)
+                    break
+
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)
+
+        # Signal to main thread that ENGINE_CORE_DEAD was sent.
+        self.errored_sent_event.set()

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
-import signal
 import weakref
 from abc import ABC, abstractmethod
 from typing import List, Optional, Type, Union
@@ -11,9 +10,10 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path, make_zmq_socket
-from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
-                            EngineCoreRequest, EngineCoreRequestType,
-                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
+from vllm.v1.engine import (ENGINE_CORE_DEAD, EngineCoreOutputs,
+                            EngineCoreProfile, EngineCoreRequest,
+                            EngineCoreRequestType, EngineCoreRequestUnion,
+                            EngineCoreResetPrefixCache)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.abstract import Executor
@@ -167,7 +167,7 @@ class MPClient(EngineCoreClient):
                                             zmq.constants.PUSH)
 
         # Start EngineCore in background process.
-        self.engine_core_errored = False
+        self.is_engine_dead = False
         self.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
@@ -186,22 +186,13 @@ class MPClient(EngineCoreClient):
         self.proc_handle.shutdown()
         self._finalizer()
 
-    def _sigusr1_handler(self):
-        """
-        EngineCoreProc sends SIGUSR1 if it encounters an Exception.
-        Set self in errored state and begin shutdown.
-        """
-        logger.fatal("Got fatal signal from EngineCore, shutting down.")
-        self.engine_core_errored = True
-        self.shutdown()
-
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
 
         return (EngineDeadError(
             "EngineCore encountered an issue. See stack trace "
             "for the root cause.",
-            suppress_context=True) if self.engine_core_errored else e)
+            suppress_context=True) if self.is_engine_dead else e)
 
 
 class SyncMPClient(MPClient):
@@ -209,12 +200,6 @@ class SyncMPClient(MPClient):
 
     def __init__(self, vllm_config: VllmConfig,
                  executor_class: Type[Executor]):
-
-        # Setup EngineCore signal handler.
-        def sigusr1_handler(signum, frame):
-            self._sigusr1_handler()
-
-        signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         super().__init__(
             asyncio_mode=False,
@@ -227,6 +212,9 @@ class SyncMPClient(MPClient):
 
         try:
             (frame, ) = self.output_socket.recv_multipart(copy=False)
+            if frame == ENGINE_CORE_DEAD:
+                self.is_engine_dead = True
+                raise EngineDeadError
             engine_core_outputs = self.decoder.decode(frame.buffer)
             return engine_core_outputs
         except Exception as e:
@@ -266,16 +254,6 @@ class AsyncMPClient(MPClient):
     def __init__(self, vllm_config: VllmConfig,
                  executor_class: Type[Executor]):
 
-        # EngineCore sends SIGUSR1 when it gets an Exception.
-        # NOTE: super().__init__ blocks the event loop until
-        # background procs are setup. This handler allows us
-        # to catch  issues during startup (e.g. OOM). We switch
-        # to a signal handler in the event loop __init__.
-        def sigusr1_handler(signum, frame):
-            self._sigusr1_handler()
-
-        # signal.signal(signal.SIGUSR1, sigusr1_handler)
-
         # Initialize EngineCore + all background processes.
         super().__init__(
             asyncio_mode=True,
@@ -300,6 +278,9 @@ class AsyncMPClient(MPClient):
         try:
             while True:
                 (frame, ) = await self.output_socket.recv_multipart(copy=False)
+                if frame == ENGINE_CORE_DEAD:
+                    self.is_engine_dead = True
+                    raise EngineDeadError
                 outputs = self.decoder.decode(frame.buffer)
                 self.outputs_queue.put_nowait(outputs)
         except Exception as e:

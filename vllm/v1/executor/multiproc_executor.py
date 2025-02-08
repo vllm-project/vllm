@@ -362,7 +362,6 @@ class WorkerProc:
             # which triggers system shutdown.
             # TODO(rob): handle case where the MQ itself breaks.
 
-            # Log so stack trace order is: Worker -> EngineCore -> AsyncLLM
             logger.exception("WorkerProc got an Exception:", exc_info=e)
 
             # The parent sends a SIGTERM to all worker processes if

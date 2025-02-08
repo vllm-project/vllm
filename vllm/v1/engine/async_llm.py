@@ -384,7 +384,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return self.engine_core.engine_core_errored
+        return self.engine_core.is_engine_dead
 
     @property
     def dead_error(self) -> BaseException:
