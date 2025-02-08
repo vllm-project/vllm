@@ -6,14 +6,12 @@ from vllm import KVTransferParams
 
 def test_all_none():
     """None should be allowed"""
-    KVTransferParams(
-        prefix_prompt_ids=None,
-        kvcache_load_keys=None,
-        kvcache_store_keys=None)
-    KVTransferParams(
-        prefix_prompt_ids=[None],
-        kvcache_load_keys=[None],
-        kvcache_store_keys=[None])
+    KVTransferParams(prefix_prompt_ids=None,
+                     kvcache_load_keys=None,
+                     kvcache_store_keys=None)
+    KVTransferParams(prefix_prompt_ids=[None],
+                     kvcache_load_keys=[None],
+                     kvcache_store_keys=[None])
 
 
 if __name__ == "__main__":
