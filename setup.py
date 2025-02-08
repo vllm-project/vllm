@@ -374,12 +374,7 @@ def _is_hip() -> bool:
 
 
 def _is_neuron() -> bool:
-    torch_neuronx_installed = True
-    try:
-        subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
-        torch_neuronx_installed = False
-    return torch_neuronx_installed or VLLM_TARGET_DEVICE == "neuron"
+    return VLLM_TARGET_DEVICE == "neuron"
 
 
 def _is_tpu() -> bool:

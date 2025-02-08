@@ -23,9 +23,11 @@ WORKDIR ${APP_MOUNT}/vllm
 RUN python3 -m pip install --upgrade pip
 RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas
 RUN python3 -m pip install sentencepiece transformers==4.45.2 -U
-RUN python3 -m pip install transformers-neuronx --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
 RUN python3 -m pip install neuronx-cc==2.16.345.0 --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
 RUN python3 -m pip install pytest
+
+# uninstall transformers-neuronx package explicitly to avoid version conflict
+RUN python3 -m pip uninstall -y transformers-neuronx
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -42,6 +44,10 @@ RUN --mount=type=bind,source=.git,target=.git \
 
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils
+
+# install transformers-neuronx package as an optional dependencies (for V0)
+# FIXME: `--no-deps` argument is temporarily added to resolve transformers package version conflict
+RUN python3 -m pip install transformers-neuronx==0.13.* --extra-index-url=https://pip.repos.neuron.amazonaws.com -U --no-deps
 
 # overwrite entrypoint to run bash script
 RUN echo "import subprocess; import sys; subprocess.check_call(sys.argv[1:])" > /usr/local/bin/dockerd-entrypoint.py
