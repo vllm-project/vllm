@@ -28,6 +28,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -99,7 +100,7 @@ def replace_linear_class(
     vllm_linear_cls = {
         "colwise": ColumnParallelLinear,
         "rowwise": RowParallelLinear,
-    }.get(style)
+    }.get(style, ReplicatedLinear)
 
     if vllm_linear_cls is None:
         logger.warning(
@@ -119,6 +120,7 @@ def replace_linear_class(
         input_size=linear.in_features,
         output_size=linear.out_features,
         bias=linear.bias is not None,
+        quant_config=quant_config,
     )
 
 
@@ -127,13 +129,17 @@ class TransformersModel(nn.Module):
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
 
+    packed_modules_mapping = {}
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         logger.info("Using Transformers backend.")
 
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+
+        config = model_config.hf_config
 
         self.config = config
         self.quant_config = quant_config
@@ -144,6 +150,7 @@ class TransformersModel(nn.Module):
             self.config,
             attn_implementation="vllm",
             trust_remote_code=vllm_config.model_config.trust_remote_code,
+            torch_dtype=model_config.dtype,
         )
         prefix = self.model.base_model_prefix
 
