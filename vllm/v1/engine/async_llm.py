@@ -215,13 +215,13 @@ class AsyncLLM(EngineClient):
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
-                if isinstance(out, EngineDeadError):
+                if isinstance(out, Exception):
                     raise out
 
                 # Coalesce any additional queued outputs
                 while not q.empty():
                     next_out = q.get_nowait()
-                    if isinstance(next_out, EngineDeadError):
+                    if isinstance(next_out, Exception):
                         raise out
                     if sampling_params.output_kind == RequestOutputKind.DELTA:
                         out.add(next_out)
