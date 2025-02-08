@@ -94,9 +94,6 @@ class EngineCoreOutputs(
     scheduler_stats: SchedulerStats
 
 
-ENGINE_CORE_DEAD = b'ENGINE_CORE_DEAD'
-
-
 @dataclass
 class EngineCoreProfile:
     is_start: bool

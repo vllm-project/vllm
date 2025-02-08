@@ -10,10 +10,9 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path, make_zmq_socket
-from vllm.v1.engine import (ENGINE_CORE_DEAD, EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion,
-                            EngineCoreResetPrefixCache)
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.abstract import Executor
@@ -187,7 +186,7 @@ class MPClient(EngineCoreClient):
         self._finalizer()
 
     def _validate_alive(self, frame: Any):
-        if frame == ENGINE_CORE_DEAD:
+        if frame == EngineCoreProc.ENGINE_CORE_DEAD:
             self.is_engine_dead = True
             raise EngineDeadError()
 

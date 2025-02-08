@@ -18,10 +18,9 @@ from vllm.transformers_utils.config import (
 from vllm.utils import zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (ENGINE_CORE_DEAD, EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion,
-                            EngineCoreResetPrefixCache)
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -143,6 +142,8 @@ class EngineCore:
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
+
+    ENGINE_CORE_DEAD = b'ENGINE_CORE_DEAD'
 
     def __init__(
         self,
@@ -274,7 +275,7 @@ class EngineCoreProc(EngineCore):
         # Put ENGINE_CORE_DEAD to the front of the queue.
         with self.output_queue.mutex:
             self.output_queue.queue.clear()
-            self.output_queue.put_nowait(ENGINE_CORE_DEAD)
+            self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
 
         # Wait until msg sent by the daemon before shutdown.
         if not self.errored_sent_event.wait(timeout=10):
@@ -321,8 +322,8 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 outputs = self.output_queue.get()
-                if outputs == ENGINE_CORE_DEAD:
-                    socket.send_multipart((ENGINE_CORE_DEAD, ), copy=False)
+                if outputs == EngineCoreProc.ENGINE_CORE_DEAD:
+                    socket.send_multipart((outputs, ), copy=False)
                     break
 
                 encoder.encode_into(outputs, buffer)
