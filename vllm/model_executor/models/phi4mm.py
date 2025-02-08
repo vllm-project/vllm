@@ -42,7 +42,7 @@ from transformers.utils import logging
 
 from .interfaces import SupportsMultiModal, SupportsPP, SupportsLoRA
 from .vision_siglip_navit import get_siglip_vision_model
-from .phi4o_utils import AudioEmbedding
+from .phi4mm_utils import AudioEmbedding
 from .utils import PPMissingLayer, maybe_prefix
 
 
