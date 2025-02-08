@@ -25,12 +25,15 @@ class RejectionSampler(nn.Module):
                 "Only greedy sampling is supported for now.")
 
         if is_flashinfer_available:
-            return self.flashinfer_sample(logits, sampling_metadata)
+            return RejectionSampler.flashinfer_sample(logits,
+                                                      sampling_metadata)
         else:
-            return self.greedy_sample_ref(logits, sampling_metadata)
+            return RejectionSampler.greedy_sample_ref(logits,
+                                                      sampling_metadata)
 
+    @staticmethod
     def flashinfer_sample(
-            self, logits: torch.Tensor,
+            logits: torch.Tensor,
             sampling_metadata: SamplingMetadata) -> SamplerOutput:
         spec_token_ids = sampling_metadata.spec_token_ids
         spec_lengths = torch.tensor([len(s) for s in spec_token_ids],
@@ -60,12 +63,10 @@ class RejectionSampler(nn.Module):
 
         vocab_size = logits.size(-1)
         draft_token_ids = draft_token_ids.to(logits.device)
-        draft_probs = self._create_greedy_token_probs(draft_token_ids,
-                                                      vocab_size,
-                                                      logits.device)
-        target_probs = self._create_greedy_token_probs(target_token_ids,
-                                                       vocab_size,
-                                                       logits.device)
+        draft_probs = RejectionSampler._create_greedy_token_probs(
+            draft_token_ids, vocab_size, logits.device)
+        target_probs = RejectionSampler._create_greedy_token_probs(
+            target_token_ids, vocab_size, logits.device)
         uniform_samples = torch.zeros(batch_size,
                                       max_spec_len + 1,
                                       device=logits.device)
@@ -79,8 +80,9 @@ class RejectionSampler(nn.Module):
         return SamplerOutput(sampled_token_ids=sampled_token_ids,
                              logprobs_tensors=None)
 
+    @staticmethod
     def greedy_sample_ref(
-            self, logits: torch.Tensor,
+            logits: torch.Tensor,
             sampling_metadata: SamplingMetadata) -> SamplerOutput:
         # num_reqs x [num_speculated_tokens]
         spec_token_ids = sampling_metadata.spec_token_ids
@@ -123,8 +125,8 @@ class RejectionSampler(nn.Module):
         return SamplerOutput(sampled_token_ids=sampled_token_ids,
                              logprobs_tensors=None)
 
-    def _create_greedy_token_probs(self, token_ids: torch.Tensor,
-                                   vocab_size: int,
+    @staticmethod
+    def _create_greedy_token_probs(token_ids: torch.Tensor, vocab_size: int,
                                    out_device: torch.device) -> torch.Tensor:
         batch_size, num_tokens = token_ids.shape
 
