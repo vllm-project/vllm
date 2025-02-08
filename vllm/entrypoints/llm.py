@@ -1,5 +1,6 @@
 import itertools
 import warnings
+import os
 from contextlib import contextmanager
 from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
                     Tuple, Type, Union, cast, overload)
@@ -241,6 +242,38 @@ class LLM:
             engine_args, usage_context=UsageContext.LLM_CLASS)
 
         self.request_counter = Counter()
+
+        self.profiler = self._setup_profiler()
+    
+    def _setup_profiler(self):
+        enable_profile = os.getenv("VLLM_DEVICE_PROFILER_ENABLED",
+                                   "false").lower() in ["true", "1"]
+        if not enable_profile:
+            return None
+        warmup = int(os.getenv("VLLM_DEVICE_PROFILER_WARMUP_STEPS", "0"))
+        steps = int(os.getenv("VLLM_DEVICE_PROFILER_STEPS", "1"))
+        repeat = int(os.getenv("VLLM_DEVICE_PROFILER_REPEAT", "1"))
+        schedule = torch.profiler.schedule(wait=0,
+                                           warmup=warmup,
+                                           active=steps,
+                                           repeat=repeat)
+        activities = [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.HPU
+        ]
+        #from habana_frameworks.torch.activity_profiler import DebugActivity
+        #debug_activities=[DebugActivity.BRIDGE_FUNCTION_CALLS]
+        profiler = torch.profiler.profile(
+            schedule=schedule,
+            activities=activities,
+            #debug_activities=debug_activities,
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                '.', use_gzip=True),
+            record_shapes=False,
+            with_modules=False,
+            profile_memory=False,
+            with_stack=True)
+        return profiler
 
     @staticmethod
     def get_engine_class() -> Type[LLMEngine]:
@@ -1384,6 +1417,8 @@ class LLM:
         outputs: List[Union[RequestOutput, PoolingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
+        if self.profiler:
+            self.profiler.start()
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
@@ -1403,9 +1438,15 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
+            if self.profiler:
+                self.profiler.step()
 
         if use_tqdm:
             pbar.close()
+
+        if self.profiler:
+            torch.hpu.synchronize()
+            self.profiler.stop()
 
         # Make sure that all workers are finished.
         self.llm_engine.stop_remote_worker_execution_loop()
