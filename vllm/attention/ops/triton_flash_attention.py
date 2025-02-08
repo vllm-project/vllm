@@ -691,11 +691,7 @@ def attn_fwd(
             if continue_condition:
                 # If MQA / GQA, set the K and V head offsets appropriately.
                 GROUP_SIZE: tl.constexpr = HQ // HK
-                if GROUP_SIZE != 1:
-                    off_h_k = off_h_q // GROUP_SIZE
-                else:
-                    off_h_k = off_h_q
-
+                off_h_k = off_h_q // GROUP_SIZE if GROUP_SIZE != 1 else off_h_q
                 n_extra_tokens = 0
                 if seqlen_k < BLOCK_N:
                     n_extra_tokens = BLOCK_N - seqlen_k
@@ -778,10 +774,7 @@ def attn_fwd(
                 if INT8:
                     k_descale = tl.load(k_descale_ptrs)
                     v_descale = tl.load(v_descale_ptrs)
-                    if not INT8_KV:
-                        q_descale = tl.load(q_descale_ptrs)
-                    else:
-                        q_descale = None
+                    q_descale = None if INT8_KV else tl.load(q_descale_ptrs)
                     if USE_P_SCALE:
                         p_scale = tl.load(p_scale_ptrs)
                         p_descale = tl.load(p_descale_ptrs)
