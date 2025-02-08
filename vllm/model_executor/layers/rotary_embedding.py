@@ -206,9 +206,10 @@ class RotaryEmbedding(CustomOp):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from habana_frameworks.torch.hpex.kernels import (
             RotaryPosEmbeddingMode, apply_rotary_pos_emb)
-        positions = positions.flatten()
         if offsets is not None:
+            offsets = offsets.view(positions.shape[0], -1)
             positions = positions + offsets
+        positions = positions.flatten()
         num_tokens = positions.shape[0]
         cos_sin = self.cos_sin_cache.index_select(0, positions).view(
             num_tokens, 1, -1)
