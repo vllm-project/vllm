@@ -55,6 +55,7 @@ def test_custom_executor(model, tmp_path):
         engine_args = EngineArgs(
             model=model,
             distributed_executor_backend=CustomUniExecutor,
+            enforce_eager=True,  # reduce test time
         )
         engine = LLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
@@ -75,7 +76,10 @@ def test_custom_executor_async(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = AsyncEngineArgs(
-            model=model, distributed_executor_backend=CustomUniExecutorAsync)
+            model=model,
+            distributed_executor_backend=CustomUniExecutorAsync,
+            enforce_eager=True,  # reduce test time
+        )
         engine = AsyncLLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 
@@ -89,3 +93,18 @@ def test_custom_executor_async(model, tmp_path):
         assert os.path.exists(".marker")
     finally:
         os.chdir(cwd)
+
+
+@pytest.mark.parametrize("model", ["facebook/opt-125m"])
+def test_respect_ray(model):
+    # even for TP=1 and PP=1,
+    # if users specify ray, we should use ray.
+    # users might do this if they want to manage the
+    # resources using ray.
+    engine_args = EngineArgs(
+        model=model,
+        distributed_executor_backend="ray",
+        enforce_eager=True,  # reduce test time
+    )
+    engine = LLMEngine.from_engine_args(engine_args)
+    assert engine.model_executor.uses_ray
