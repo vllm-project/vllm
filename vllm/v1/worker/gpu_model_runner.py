@@ -551,7 +551,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if common_prefix_len == 0:
             # Common case.
             return 0
-        num_reqs = len(num_scheduled_tokens)
+
         # NOTE(woosuk): Cascade attention uses two attention kernels: one
         # for the common prefix and the other for the rest. For the first
         # kernel, we concatenate all the query tokens (possibly from
@@ -591,6 +591,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # and the second kernel will get an empty input. While this is not
         # a fundamental problem, our current implementation does not support
         # this case.
+        num_reqs = len(num_scheduled_tokens)
         common_prefix_len = min(
             common_prefix_len,
             self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
