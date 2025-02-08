@@ -990,14 +990,18 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # KVTransferParams data.
         kv_transfer_params_list = [
             data.kv_transfer_params for data in self.inter_data_list
-            if data.kv_transfer_params is not None]
+            if data.kv_transfer_params is not None
+        ]
         kv_transfer_params = KVTransferParams(
             prefix_prompt_ids=[
-                item.prefix_prompt_ids for item in kv_transfer_params_list],
+                item.prefix_prompt_ids for item in kv_transfer_params_list
+            ],
             kvcache_load_keys=[
-                item.kvcache_load_keys for item in kv_transfer_params_list],
+                item.kvcache_load_keys for item in kv_transfer_params_list
+            ],
             kvcache_store_keys=[
-                item.kvcache_store_keys for item in kv_transfer_params_list])
+                item.kvcache_store_keys for item in kv_transfer_params_list
+            ])
 
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,

@@ -679,7 +679,7 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
-        self.kv_transfer_params=kv_transfer_params
+        self.kv_transfer_params = kv_transfer_params
         self.priority = priority
 
         self.cached_request_output = None

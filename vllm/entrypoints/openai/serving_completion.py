@@ -145,9 +145,9 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 # Create KVTransferParams based on input from request
                 kv_transfer_params = KVTransferParams(
-                    prefix_prompt_ids = request.prefix_prompt_ids,
-                    kvcache_load_keys = request.kvcache_load_keys,
-                    kvcache_store_keys = request.kvcache_store_keys,
+                    prefix_prompt_ids=request.prefix_prompt_ids,
+                    kvcache_load_keys=request.kvcache_load_keys,
+                    kvcache_store_keys=request.kvcache_store_keys,
                 )
 
                 if isinstance(sampling_params, BeamSearchParams):
