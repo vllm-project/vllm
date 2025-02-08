@@ -98,7 +98,6 @@ class ModelInputForGPU(ModelRunnerInputBase):
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
-    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
