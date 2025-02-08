@@ -760,9 +760,12 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "q_proj",
             "k_proj",
             "v_proj",
-        ]
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
     }
-
     # LoRA specific attributes, TODO: double check
     supported_lora_modules = [
         "qkv_proj",
