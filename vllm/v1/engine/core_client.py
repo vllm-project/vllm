@@ -272,7 +272,6 @@ class AsyncMPClient(MPClient):
             queue_task.cancel()
 
     async def get_output_async(self) -> EngineCoreOutputs:
-
         if self.queue_task is None:
 
             async def process_outputs_socket():
