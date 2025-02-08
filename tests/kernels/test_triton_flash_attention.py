@@ -3,21 +3,19 @@
 
 Run `pytest tests/kernels/test_triton_flash_attention.py`.
 """
-from typing import Optional, Type
-
 import pytest
 import torch
 
-from vllm.platforms import current_platform
-
-from vllm.attention.ops.triton_flash_attention import (triton_attention,
+from vllm.attention.ops.triton_flash_attention import (SUPPORTED_LAYOUTS,
                                                        MetaData,
-                                                       compute_alibi_tensor)
+                                                       compute_alibi_tensor,
+                                                       triton_attention)
 
 INT8_MAX = 127
 
 
 def get_shape_from_layout(q, k, metadata):
+    assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
     if metadata.layout == 'thd':
         nheads_q, nheads_k = q.shape[1], k.shape[1]
         head_size = q.shape[-1]
@@ -28,8 +26,6 @@ def get_shape_from_layout(q, k, metadata):
     elif metadata.layout == 'bshd':
         batch, _, nheads_q, head_size = q.shape
         nheads_k = k.shape[2]
-    else:
-        assert False, "Got unsupported layout."
     return batch, nheads_q, nheads_k, head_size
 
 
@@ -53,20 +49,13 @@ def quantize_int8(tensor: torch.Tensor,
     return tensor_quantized, scale, 1 / scale
 
 
-def quantize_input(q,
-                   k,
-                   v,
-                   input_metadata: MetaData,
-                   quantize_p=False,
-                   int8_kv=False):
-    assert not (quantize_p and int8_kv)
+def quantize_input(q, k, v, input_metadata: MetaData, int8_kv=False):
+    is_supported_layout = input_metadata.layout in SUPPORTED_LAYOUTS
+    assert is_supported_layout, "Got unsupported layout."
     if input_metadata.layout == 'bhsd':
         qunatization_dim = 1
     elif input_metadata.layout == 'bshd':
         qunatization_dim = 2
-    else:
-        assert False, 'Got unsupported tensor layout'
-    assert not (quantize_p and int8_kv)
 
     q_descale = None
     if not int8_kv:
@@ -74,21 +63,16 @@ def quantize_input(q,
     k, _, k_descale = quantize_int8(k, dim=qunatization_dim)
     v, _, v_descale = quantize_int8(v, dim=qunatization_dim)
 
-    # In real world use case, the p scale would be a parameter trained by the model.
+    # In real world use case, the p scale would be a parameter trained by the
+    # model.
     p_scale = p_descale = None
-    # The p shape is always bhqk
-    if quantize_p:
-        _, nheads_q, _, _ = get_shape_from_layout(q, k, input_metadata)
-        p_scale = torch.full((1, nheads_q, 1, 1),
-                             127,
-                             dtype=torch.float32,
-                             device="cuda")
-        p_descale = 1 / p_scale
 
-    # We are not multiplying the scales togather to get qk_desale / o_descale e.g.
+    # We are not multiplying the scales togather to get
+    # qk_desale / o_descale e.g.
     # qk_desale = q_descale * k_descale
     # o_desale = p_descale * v_descale
-    # it results in very small fp e.g. 0,0002, losing precision. They are applied on the run.
+    # it results in very small fp e.g. 0,0002, losing precision.
+    # They are applied on the run.
     input_metadata.set_int8_params(
         q_descale=q_descale,
         k_descale=k_descale,
@@ -109,6 +93,8 @@ def input_helper(Z,
                  dtype,
                  layout,
                  requires_grad=True):
+    assert layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
+
     torch.manual_seed(20)
 
     # Initialize q, k, v
@@ -118,8 +104,6 @@ def input_helper(Z,
     elif layout == 'bshd':
         q_tensor_shape = (Z, N_CTX_Q, HQ, D_HEAD)
         k_tensor_shape = (Z, N_CTX_K, HK, D_HEAD)
-    else:
-        assert False, 'Got unsupported tensor layout'
     q = torch.randn(q_tensor_shape,
                     dtype=dtype,
                     device="cuda",
@@ -151,7 +135,8 @@ def varlen_input_helper(Z,
                         equal_seqlens=False):
     torch.manual_seed(20)
 
-    # Random sequence lengths. Using N_CTX as kind of max of sum of individual seqs
+    # Random sequence lengths. Using N_CTX as kind of max of sum of individual
+    # seqs
     if not equal_seqlens:
         max_seqlens_q = N_CTX_Q // Z
         max_seqlens_k = N_CTX_K // Z
@@ -230,7 +215,8 @@ def test_op_fwd(Z,
         input_metadata.need_causal()
 
     if use_alibi:
-        # for n heads the set of slopes is the geometric sequence that starts 2^(-8/n)
+        # for n heads the set of slopes is the geometric sequence that starts
+        # 2^(-8/n)
         alibi_slopes = torch.tensor(
             [2**(-8 / HQ * i) for i in range(1, HQ + 1)],
             dtype=torch.float32,
@@ -242,9 +228,10 @@ def test_op_fwd(Z,
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _, _ = triton_attention(q, k, v, o, input_metadata)
+    tri_out, _ = triton_attention(q, k, v, o, input_metadata)
 
-    # Transpose here if layout is bshd so we have same reference code for all layouts
+    # Transpose here if layout is bshd so we have same reference code for all
+    # layouts
     if layout == 'bshd':
         q = q.transpose(1, 2).clone()
         k = k.transpose(1, 2).clone()
@@ -271,9 +258,10 @@ def test_op_fwd(Z,
 
     p = torch.softmax(scores, dim=-1)
     if causal:
-        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going into
-        # the softmax. This produces a row of NaNs as -inf - -inf == NaN. So we fix
-        # this by converting the NaNs to 0s, which is what they should be out of the softmax.
+        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going
+        # into the softmax. This produces a row of NaNs as -inf - -inf == NaN.
+        # So we fix this by converting the NaNs to 0s, which is what they
+        # should be out of the softmax.
         nan_mask = torch.isnan(p)
         p[nan_mask == 1] = 0
     ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
@@ -323,7 +311,8 @@ def test_op_persistent_fwd(Z,
         input_metadata.need_causal()
 
     if use_alibi:
-        # for n heads the set of slopes is the geometric sequence that starts 2^(-8/n)
+        # for n heads the set of slopes is the geometric sequence that starts
+        # 2^(-8/n)
         alibi_slopes = torch.tensor(
             [2**(-8 / HQ * i) for i in range(1, HQ + 1)],
             dtype=torch.float32,
@@ -337,9 +326,10 @@ def test_op_persistent_fwd(Z,
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _, _ = triton_attention(q, k, v, o, input_metadata)
+    tri_out, _ = triton_attention(q, k, v, o, input_metadata)
 
-    # Transpose here if layout is bshd so we have same reference code for all layouts
+    # Transpose here if layout is bshd so we have same reference code for all
+    # layouts
     if layout == 'bshd':
         q = q.transpose(1, 2).clone()
         k = k.transpose(1, 2).clone()
@@ -366,9 +356,10 @@ def test_op_persistent_fwd(Z,
 
     p = torch.softmax(scores, dim=-1)
     if causal:
-        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going into
-        # the softmax. This produces a row of NaNs as -inf - -inf == NaN. So we fix
-        # this by converting the NaNs to 0s, which is what they should be out of the softmax.
+        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going
+        # into the softmax. This produces a row of NaNs as -inf - -inf == NaN.
+        # So we fix this by converting the NaNs to 0s, which is what they
+        # should be out of the softmax.
         nan_mask = torch.isnan(p)
         p[nan_mask == 1] = 0
     ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
@@ -395,7 +386,6 @@ def test_op_persistent_fwd(Z,
     (4, 4, 128, 128, 65),
 ])
 @pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('quantize_p', [True, False])
 @pytest.mark.parametrize('layout', ['bhsd'])
 def test_op_fwd_int8(Z,
                      H,
@@ -403,7 +393,6 @@ def test_op_fwd_int8(Z,
                      N_CTX_K,
                      D_HEAD,
                      causal,
-                     quantize_p,
                      layout,
                      dtype=torch.float16):
     torch.manual_seed(20)
@@ -424,13 +413,15 @@ def test_op_fwd_int8(Z,
     o = torch.empty_like(q)
 
     q_quantized, k_quantized, v_quantized = quantize_input(
-        q, k, v, input_metadata, quantize_p=quantize_p)
+        q, k, v, input_metadata)
 
-    tri_out, _, best_configs = triton_attention(q_quantized, k_quantized,
-                                                v_quantized, o, input_metadata)
+    tri_out, _ = triton_attention(q_quantized, k_quantized, v_quantized, o,
+                                  input_metadata)
 
     # Compute scores
-    q_descale, k_descale, v_descale = input_metadata.q_descale, input_metadata.k_descale, input_metadata.v_descale
+    q_descale, k_descale, v_descale = (input_metadata.q_descale,
+                                       input_metadata.k_descale,
+                                       input_metadata.v_descale)
     scores = (torch.einsum('bhqd,bhkd->bhqk', q_quantized.half(),
                            k_quantized.half()) * q_descale *
               k_descale) * input_metadata.sm_scale
@@ -440,43 +431,10 @@ def test_op_fwd_int8(Z,
                           diagonal=N_CTX_K - N_CTX_Q)
         scores[:, :, mask == 0] = float("-inf")
 
-    # Quantization with tiling
-    if quantize_p:
-        tile_size = best_configs.kwargs[
-            "BLOCK_N"]  # We need the tiling to match Block_N to work
-        m_i = torch.full((Z, H, N_CTX_Q),
-                         float('-inf'),
-                         device='cuda',
-                         dtype=torch.float32)
-        acc = torch.zeros((Z, H, N_CTX_Q, D_HEAD),
-                          device='cuda',
-                          dtype=torch.float32)
-        l_i = torch.zeros_like(m_i)
-
-        for i in range(0, N_CTX_K, tile_size):
-            qk_tile = scores[:, :, :, i:i + tile_size]
-            v_tile = v_quantized[:, :, i:i + tile_size]
-            m_ij = torch.max(m_i, torch.max(qk_tile, dim=-1).values)
-            qk_tile -= m_ij.unsqueeze(-1)
-            p_tile = torch.exp(qk_tile)
-            l_ij = torch.sum(p_tile, dim=-1)
-            p_tile = (p_tile * input_metadata.p_scale).to(torch.int8)
-
-            alpha = torch.exp(m_i - m_ij)
-            # We need float here since both p and v are quantized. So they might overflow the fp16 range.
-            acc = acc * alpha.unsqueeze(-1) + torch.einsum(
-                'bhqk,bhkd->bhqd', p_tile.float(), v_tile.float())
-            m_i = m_ij
-            l_i = alpha * l_i + l_ij
-
-        l_recip = 1 / l_i.unsqueeze(-1)
-        acc = acc * input_metadata.p_descale * input_metadata.v_descale * l_recip
-        ref_out = acc.to(torch.float16)
-    else:
-        p = torch.softmax(scores, dim=-1)
-        ref_out = (
-            torch.einsum('bhqk,bhkd->bhqd', p.float(), v_quantized.float()) *
-            v_descale).to(torch.float16)
+    p = torch.softmax(scores, dim=-1)
+    ref_out = (
+        torch.einsum('bhqk,bhkd->bhqd', p.float(), v_quantized.float()) *
+        v_descale).to(torch.float16)
 
     if causal:
         nan_mask = torch.isnan(ref_out)
@@ -530,8 +488,8 @@ def test_op_fwd_int8_kv(Z,
     k_dequantized = (k_quantized * k_descale).half()
     v_dequantized = (v_quantized * v_descale).half()
 
-    tri_out, _, _ = triton_attention(q, k_quantized, v_quantized, o,
-                                     input_metadata)
+    tri_out, _ = triton_attention(q, k_quantized, v_quantized, o,
+                                  input_metadata)
 
     # Compute scores
     scores = torch.einsum('bhqd,bhkd->bhqk', q,
@@ -601,7 +559,7 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _, _ = triton_attention(q, k, v, o, input_metadata)
+    tri_out, _ = triton_attention(q, k, v, o, input_metadata)
     # reference implementation:171
 
     scores = torch.einsum('bhqd,bhkd->bhqk', q, k).float() * sm_scale
@@ -613,9 +571,10 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
         scores += input_metadata.bias
     p = torch.softmax(scores, dim=-1)
     if causal:
-        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going into
-        # the softmax. This produces a row of NaNs as -inf - -inf == NaN. So we fix
-        # this by converting the NaNs to 0s, which is what they should be out of the softmax.
+        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going
+        # into the softmax. This produces a row of NaNs as -inf - -inf == NaN.
+        # So we fix this by converting the NaNs to 0s, which is what they
+        # should be out of the softmax.
         nan_mask = torch.isnan(p)
         p[nan_mask == 1] = 0
 
@@ -646,10 +605,10 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
     ref_out = torch.empty_like(q)
 
     for i in range(0, input_metadata.num_contexts):
-        start_q, start_k = input_metadata.cu_seqlens_q[
-            i], input_metadata.cu_seqlens_k[i]
-        end_q, end_k = input_metadata.cu_seqlens_q[
-            i + 1], input_metadata.cu_seqlens_k[i + 1]
+        start_q, start_k = (input_metadata.cu_seqlens_q[i],
+                            input_metadata.cu_seqlens_k[i])
+        end_q, end_k = (input_metadata.cu_seqlens_q[i + 1],
+                        input_metadata.cu_seqlens_k[i + 1])
         scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q],
                               k[start_k:end_k]).float()
         p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
