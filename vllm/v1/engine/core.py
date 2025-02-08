@@ -17,9 +17,9 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
-from vllm.v1.core.guided_decoding import GuidedDecodingManager
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
                             EngineCoreRequest, EngineCoreRequestType,
                             EngineCoreRequestUnion, EngineCoreResetPrefixCache)

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 import enum
-from typing import TYPE_CHECKING, List, Optional, Union
+import functools
+from typing import TYPE_CHECKING, List, Optional, Union, Dict, Any, Tuple
 
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
@@ -44,7 +45,6 @@ class Request:
         eos_token_id: Optional[int],
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
-        grammar: Optional[Grammar] = None,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
@@ -89,10 +89,6 @@ class Request:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
-
-        # grammar objects
-        self.grammar: Optional[Union[Grammar, Future[Grammar]]] = grammar
-        self._grammar_bitmask = None
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -155,11 +151,7 @@ class Request:
     def use_guided_decoding(self) -> bool:
         return self.sampling_params.guided_decoding is not None
 
-    @property
-    def grammar_bitmask(self):
-        return self._grammar_bitmask
-
-    @cached_property
+    @functools.cached_property
     def guided_decoding_key(self) -> GuidedDecodingKey:
         params = self.sampling_params.guided_decoding
         assert params is not None, "params can't be None."
@@ -174,17 +166,10 @@ class Request:
         else:
             raise ValueError("No valid guided decoding parameter found")
 
-    def allocate_grammar_bitmask(self, vocab_size: int):
-        if self._grammar_bitmask is None:
-            self._grammar_bitmask = self.grammar.allocate_bitmask(
-                1, vocab_size=vocab_size)
-        return self._grammar_bitmask
-
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
     WAITING = 0
-    WAITING_FOR_FSM = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED (2) will be considered
