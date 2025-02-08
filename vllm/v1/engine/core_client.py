@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
-import weakref
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Type, Union
 
@@ -152,11 +151,6 @@ class MPClient(EngineCoreClient):
             zmq.asyncio.Context()  # type: ignore[attr-defined]
             if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
 
-        # Note(rob): shutdown function cannot be a bound method,
-        # else the gc cannot collect the object.
-        self._finalizer = weakref.finalize(self, lambda x: x.destroy(linger=0),
-                                           self.ctx)
-
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
@@ -177,13 +171,16 @@ class MPClient(EngineCoreClient):
                 "executor_class": executor_class,
                 "log_stats": log_stats,
             })
-        self.proc_handle.wait_for_startup()
+        self.proc_handle.wait_for_startup(self.shutdown)
 
     def shutdown(self):
         """Clean up background resources."""
 
-        self.proc_handle.shutdown()
-        self._finalizer()
+        if ctx := getattr(self, "ctx", None):
+            ctx.destroy(linger=0)
+
+        if proc_handle := getattr(self, "proc_handle", None):
+            proc_handle.shutdown()
 
     def _validate_alive(self, buffer: Any):
         if buffer == EngineCoreProc.ENGINE_CORE_DEAD:

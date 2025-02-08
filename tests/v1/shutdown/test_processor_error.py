@@ -46,12 +46,14 @@ async def test_async_llm_processor_error(monkeypatch):
         assert not async_llm.errored
 
         # This should be no problem.
+        EXPECTED_TOKENS = 5
         outputs = []
         async for out in async_llm.generate(
                 "Hello my name is",
                 request_id="abc",
-                sampling_params=SamplingParams(max_tokens=5)):
+                sampling_params=SamplingParams(max_tokens=EXPECTED_TOKENS)):
             outputs.append(out)
-        assert len(outputs) == 5
+        print(f"{outputs=}")
+        assert len(outputs) == EXPECTED_TOKENS
 
         async_llm.shutdown()

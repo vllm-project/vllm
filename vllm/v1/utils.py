@@ -112,11 +112,6 @@ class BackgroundProcHandle:
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
 
-        # Flag for shutdown state. BackgroundProcs send signals
-        # when errors occur which calls shutdown(). If we are in
-        # startup loop when signaled, this flag breaks us out.
-        self.shutting_down = False
-
         # Run busy loop in background process.
         self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
         self._finalizer = weakref.finalize(self, shutdown, self.proc,
@@ -124,24 +119,24 @@ class BackgroundProcHandle:
         self.proc.start()
 
     def shutdown(self):
-        self.shutting_down = True
         self._finalizer()
 
-    def wait_for_startup(self):
+    def wait_for_startup(self, shutdown_callback: Callable):
         """Wait until the background process is ready."""
 
         e = Exception(f"{self.process_name} initialization failed due to "
                       "an exception in a background process. See stack trace "
                       "for root cause.")
 
-        while not self.reader.poll(timeout=1):
-            if self.shutting_down:
-                raise e
         try:
             if self.reader.recv()["status"] != "READY":
                 raise e
         except EOFError:
             e.__suppress_context__ = True
+            shutdown_callback()
+            raise e from None
+        except Exception:
+            shutdown_callback()
             raise e from None
         finally:
             self.reader.close()
