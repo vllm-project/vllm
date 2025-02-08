@@ -189,14 +189,12 @@ class MPClient(EngineCoreClient):
     def _validate_alive(self, frame: Any):
         if frame == ENGINE_CORE_DEAD:
             self.is_engine_dead = True
-            raise EngineDeadError
+            raise EngineDeadError()
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
 
         return (EngineDeadError(
-            "EngineCore encountered an issue. See stack trace "
-            "for the root cause.",
             suppress_context=True) if self.is_engine_dead else e)
 
 
