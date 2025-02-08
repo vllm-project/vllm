@@ -163,15 +163,6 @@ class MultiprocExecutor(Executor):
             for p in active_procs:
                 p.kill()
 
-        self._cleanup_sockets()
-
-    def _cleanup_sockets(self):
-        for w in self.workers:
-            # Remove the zmq ipc socket file
-            socket_path = w.ready_path.replace("ipc://", "")
-            if os and os.path.exists(socket_path):
-                os.remove(socket_path)
-
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if not getattr(self, 'shutting_down', False):
@@ -237,11 +228,20 @@ class WorkerProc:
             self.worker_response_mq = MessageQueue(1, 1)
             worker_response_mq_handle = self.worker_response_mq.export_handle()
 
+            # Load model before we send readiness signal, such that
+            # we can catch any errors.
+            print("ABOUT TO INIT DEVICE")
             self.worker.init_device()
+            print("ABOUT TO LOAD MODEL")
             self.worker.load_model()
 
+            print("SENDING TO READINESS PIPE")
             # Send Readiness signal to Executor.
-            ready_pipe.send({"status": "READY"})
+            ready_pipe.send({
+                "status": "READY",
+                "handle": pickle.dumps(worker_response_mq_handle)
+            })
+            print("SENT TO READINESS PIPE")
 
         except Exception as e:
             logger.exception("WorkerProc got error at startup:", exc_info=e)
@@ -345,7 +345,7 @@ class WorkerProc:
     def wait_for_startup(
         process_name: str,
         reader: Connection,
-    ) -> Optional[Handle]:
+    ) -> WorkerProcHandle:
         """Wait until the Worker is ready."""
 
         e = Exception(f"{process_name} initialization failed due to "
@@ -353,8 +353,14 @@ class WorkerProc:
                       "for root cause.")
 
         try:
-            if reader.recv()["status"] != "READY":
+            response = reader.recv()
+            if getattr(response, "status", None) != "READY":
                 raise e
+            assert hasattr(response, "handle")
+            handle = pickle.loads(response["handle"])
+            assert isinstance(handle, WorkerProcHandle)
+            return handle
+
         except EOFError:
             e.__suppress_context__ = True
             raise e from None

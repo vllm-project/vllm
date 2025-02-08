@@ -140,6 +140,7 @@ class Worker(LocalOrDistributedWorkerBase):
         allocator.wake_up()
 
     def init_device(self) -> None:
+        print("init_device")
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow
@@ -162,11 +163,13 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
+        print("init_worker_dist_enviornment")
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
+        print("set_random_seed")
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
