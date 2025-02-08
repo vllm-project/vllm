@@ -10,6 +10,9 @@ import torch
 class SamplerOutput:
 
     # [num_reqs, max_num_generated_tokens]
+    # Different requests can have different number of generated tokens.
+    # All requests are padded to max_num_generated_tokens.
+    # INVALID_TOKEN_ID is used for padding.
     sampled_token_ids: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]

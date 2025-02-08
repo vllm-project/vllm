@@ -72,6 +72,11 @@ class KVCacheManager:
         self.req_to_blocks: DefaultDict[str,
                                         List[KVCacheBlock]] = defaultdict(list)
 
+        # {req_id: The number of cached blocks for this given request}
+        # This is used to track the number of cached blocks for each request,
+        # currently only used for speculative decoding.
+        self.cached_block_num: Dict[str, int] = defaultdict(int)
+
     @property
     def usage(self) -> float:
         return 1.0 - (self.free_block_queue.num_free_blocks /
@@ -122,8 +127,7 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[List[KVCacheBlock]] = None,
-        max_speculative_tokens: Optional[int] = None,
+        new_computed_blocks: Optional[List[KVCacheBlock]] = None
     ) -> Optional[List[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -216,41 +220,23 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
-        # Calculate the total number of complete blocks needed after appending
-        # new valid tokens.
-        max_speculative_tokens = max_speculative_tokens or 0
-
-        # We subtract max_speculative_tokens from num_computed_tokens to
-        # get the least number of tokens in the KV cache.
-        # All tokens before this number are guaranteed to be valid and
-        # stored in the cache.
-        min_num_last_step_computed_tokens = num_computed_tokens \
-                                - max_speculative_tokens
-        # Speculated tokens generated in the last step are counted in
-        # request.num_computed_tokens. Specualted tokens in the current step
-        # are not counted and cached because they are not verified/accepted
-        # yet.
-        num_tokens_wo_spec_tokens = num_tokens - max_speculative_tokens
-
-        min_num_last_step_computed_full_blocks = \
-                        min_num_last_step_computed_tokens // self.block_size
-        num_full_blocks_after_append = (
-            num_computed_tokens + num_tokens_wo_spec_tokens) // self.block_size
-
-        new_full_blocks = req_blocks[min_num_last_step_computed_full_blocks:
-                                     num_full_blocks_after_append]
+        num_cached_blocks = self.cached_block_num[
+            request.request_id] // self.block_size
+        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
+            request.spec_token_ids)) // self.block_size
+        new_full_blocks = req_blocks[
+            num_cached_blocks:num_full_blocks_after_append]
 
         if new_full_blocks:
             self._cache_full_blocks(
                 request=request,
-                blk_start_idx=min_num_last_step_computed_full_blocks,
+                blk_start_idx=num_cached_blocks,
                 # The new full blocks are the full blocks that are not computed.
                 full_blocks=new_full_blocks,
-                prev_block=(req_blocks[min_num_last_step_computed_full_blocks -
-                                       1]
-                            if min_num_last_step_computed_full_blocks > 0 else
-                            None))
-
+                prev_block=(req_blocks[num_cached_blocks -
+                                       1] if num_cached_blocks > 0 else None))
+        self.cached_block_num[
+            request.request_id] = num_full_blocks_after_append
         return new_blocks
 
     def free(self, request: Request) -> None:
@@ -273,6 +259,8 @@ class KVCacheManager:
             block.decr_ref()
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
+
+        self.cached_block_num.pop(request.request_id)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF

@@ -98,13 +98,14 @@ class Scheduler:
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
-        # Each request just has the num_computed_tokens and num_tokens.
-        # num_tokens  = len(prompt_token_ids) + len(output_token_ids) +
-        # len(spec_token_ids).
+        # Each request just has the num_computed_tokens and
+        # num_tokens_with_spec. num_tokens_with_spec =
+        # len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids).
         # At each step, the scheduler tries to assign tokens to the requests
         # so that each request's num_computed_tokens can catch up its
-        # num_tokens. This is general enough to cover chunked prefills,
-        # prefix caching, and the "jump decoding" optimization in the future.
+        # num_tokens_with_spec. This is general enough to cover
+        # chunked prefills, prefix caching, speculative decoding,
+        # and the "jump decoding" optimization in the future.
 
         scheduled_new_reqs: List[Request] = []
         scheduled_resumed_reqs: List[Request] = []
@@ -124,8 +125,6 @@ class Scheduler:
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        spec_lens = [len(req.spec_token_ids) for req in self.running]
-        max_speculative_tokens = max(spec_lens) if spec_lens else 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
             num_new_tokens = (request.num_tokens_with_spec -
@@ -150,9 +149,7 @@ class Scheduler:
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_new_tokens,
-                    max_speculative_tokens=max_speculative_tokens)
+                    request, num_new_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.

@@ -151,26 +151,6 @@ class Request:
     def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
         self._kv_block_hashes.append(block_hash)
 
-    def crop(self, num_total_token: int) -> None:
-        """Crops the token sequences to a specified total length while 
-           preserving prompt tokens.
-
-        Args:
-            num_total_token: The desired total number of tokens after cropping.
-            
-        Raises:
-            ValueError: If num_total_token is less than the number of prompt 
-              tokens, as prompt tokens cannot be cropped.
-        """
-
-        if num_total_token < self.num_prompt_tokens:
-            raise ValueError("Cannot crop the prompt tokens.")
-        num_output_token = num_total_token - self.num_prompt_tokens
-        self._output_token_ids = self._output_token_ids[:num_output_token]
-        self._all_token_ids = self._all_token_ids[:num_total_token]
-        self.output_token_ids = ConstantList(self._output_token_ids)
-        self.all_token_ids = ConstantList(self._all_token_ids)
-
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
