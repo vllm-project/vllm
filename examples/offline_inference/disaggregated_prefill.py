@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This file demonstrates the example usage of disaggregated prefilling
 We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
