@@ -2,7 +2,7 @@
 import asyncio
 import weakref
 from abc import ABC, abstractmethod
-from typing import List, Optional, Type, Union
+from typing import Any, List, Optional, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -186,6 +186,11 @@ class MPClient(EngineCoreClient):
         self.proc_handle.shutdown()
         self._finalizer()
 
+    def _validate_alive(self, frame: Any):
+        if frame == ENGINE_CORE_DEAD:
+            self.is_engine_dead = True
+            raise EngineDeadError
+
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
 
@@ -212,11 +217,8 @@ class SyncMPClient(MPClient):
 
         try:
             (frame, ) = self.output_socket.recv_multipart(copy=False)
-            if frame == ENGINE_CORE_DEAD:
-                self.is_engine_dead = True
-                raise EngineDeadError
-            engine_core_outputs = self.decoder.decode(frame.buffer)
-            return engine_core_outputs
+            self._validate_alive(frame)
+            return self.decoder.decode(frame.buffer)
         except Exception as e:
             raise self._format_exception(e) from None
 
@@ -253,8 +255,6 @@ class AsyncMPClient(MPClient):
 
     def __init__(self, vllm_config: VllmConfig,
                  executor_class: Type[Executor]):
-
-        # Initialize EngineCore + all background processes.
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
@@ -262,39 +262,35 @@ class AsyncMPClient(MPClient):
             log_stats=True,
         )
 
-        # ZMQ IO. Run it in background task so that we can
-        # overlap with AsyncLLM.output_handler_loop. This
-        # works because ZMQ IO releases the GIL.
-        self.queue_task: Optional[asyncio.Task] = None
         self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs,
                                                 Exception]] = asyncio.Queue()
+        self.queue_task: Optional[asyncio.Task] = None
 
     def shutdown(self):
         super().shutdown()
         if queue_task := getattr(self, "queue_task", None):
             queue_task.cancel()
 
-    async def _process_outputs_socket_loop(self):
-        try:
-            while True:
-                (frame, ) = await self.output_socket.recv_multipart(copy=False)
-                if frame == ENGINE_CORE_DEAD:
-                    self.is_engine_dead = True
-                    raise EngineDeadError
-                outputs = self.decoder.decode(frame.buffer)
-                self.outputs_queue.put_nowait(outputs)
-        except Exception as e:
-            self.outputs_queue.put_nowait(e)
-
     async def get_output_async(self) -> EngineCoreOutputs:
 
-        # Start output loop on the first call.
         if self.queue_task is None:
-            self.queue_task = asyncio.create_task(
-                self._process_outputs_socket_loop())
 
-        # NOTE: if an exception arises processing the socket,
-        # the exception is forwarded to the queue.
+            async def process_outputs_socket():
+                try:
+                    (frame, ) = await self.output_socket.recv_multipart(
+                        copy=False)
+                    self._validate_alive(frame)
+                    self.outputs_queue.put_nowait(frame.buffer)
+                except Exception as e:
+                    self.outputs_queue.put_nowait(e)
+
+            # Run ZMQ IO (which releases the GIL) in a background task
+            # to overlap with this task (run_output_handler).
+            self.queue_task = asyncio.create_task(process_outputs_socket())
+
+        # If an exception arises in process_outputs_socket task,
+        # it is forwarded to the outputs_queue so we can raise it
+        # from this (run_output_handler) task to shut down the server.
         outputs = await self.outputs_queue.get()
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None

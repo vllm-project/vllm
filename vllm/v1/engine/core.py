@@ -174,6 +174,10 @@ class EngineCoreProc(EngineCore):
                              args=(output_path, ),
                              daemon=True).start()
 
+            # Signal from process_output_socket that EngineDead
+            # message was sent. Since process_output_socket is a
+            # daemon thread, we need to ensure this message is
+            # sent before we exit from the main thread.
             self.errored_sent_event = threading.Event()
 
             # Send Readiness signal to EngineClient.
@@ -182,6 +186,8 @@ class EngineCoreProc(EngineCore):
         except Exception as e:
             logger.exception("EngineCore got error at startup:", exc_info=e)
             ready_pipe.send({"status": "FAILED"})
+            raise e
+
         finally:
             ready_pipe.close()
 

@@ -295,14 +295,14 @@ class WorkerProc:
 
         ready_pipe = unready_proc_handle.ready_pipe[0]
         try:
+            # Wait until the WorkerProc is ready.
             response = ready_pipe.recv()
-            if getattr(response, "status", None) != "READY_TO_LOAD":
+            if response["status"] != "READY":
                 raise e
 
-            assert hasattr(response, "handle")
+            # Extract the message queue handle.
             mq_handle = pickle.loads(response["handle"])
-            assert isinstance(mq_handle, Handle)
-
+            print(f"{mq_handle=}")
             worker_response_mq = MessageQueue.create_from_handle(mq_handle, 0)
             return WorkerProcHandle.from_unready_handle(
                 unready_proc_handle, worker_response_mq)
@@ -352,9 +352,6 @@ class WorkerProc:
             worker.worker_response_mq.wait_until_ready()
 
             worker.worker_busy_loop()
-
-        except SystemExit:
-            logger.debug("Worker interrupted.")
 
         except Exception as e:
             # NOTE: if an Exception arises in busy_loop, we send
