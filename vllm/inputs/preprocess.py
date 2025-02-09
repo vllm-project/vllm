@@ -518,7 +518,7 @@ class InputPreprocessor:
             encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
             decoder_inputs = inputs
         else:
-            raise AssertionError("This line should be unreachable.")
+            assert_never(inputs)
         return encoder_inputs, decoder_inputs
 
     def _process_encoder_decoder_prompt(
