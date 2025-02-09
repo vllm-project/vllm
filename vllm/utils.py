@@ -2252,11 +2252,13 @@ def import_pynvml():
         import pynvml
         if pynvml.__file__.endswith("__init__.py"):
             # this is pynvml < 12.0
-            raise RuntimeError(
-                "You are using a deprecated `pynvml` package. "
-                "Please uninstall `pynvml` or upgrade to at least"
-                " version 12.0. See https://pypi.org/project/pynvml "
-                "for more information.")
+            print(
+                "ERROR: You are using a deprecated `pynvml` package. "
+                "Please uninstall `pynvml` or upgrade to at least version 12.0. "
+                "See https://pypi.org/project/pynvml for more information.",
+                file=sys.stderr,
+            )
+            sys.exit(1)  # Forcefully terminate the script
         return sys.modules["pynvml"]
     import importlib.util
     import os
