@@ -18,8 +18,8 @@ from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.utils import with_cancellation
-from vllm.entrypoints.whisper_helper import (load_audio_from_bytes,
-                                             validate_length)
+from vllm.entrypoints.whisper_server.helper import (load_audio_from_bytes,
+                                                    validate_length)
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.usage.usage_lib import UsageContext
