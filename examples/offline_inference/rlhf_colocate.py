@@ -22,9 +22,6 @@ from vllm.worker.worker import Worker
 
 class MyWorker(Worker):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
     def report_device_id(self) -> str:
         from vllm.platforms import current_platform
         self.device_uuid = current_platform.get_device_uuid(self.device.index)
