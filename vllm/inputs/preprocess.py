@@ -566,6 +566,7 @@ class InputPreprocessor:
                 request_id=request_id,
             )
             if self.model_config.is_multimodal_model:
+                encoder_inputs = cast(MultiModalEncDecInputs, encoder_inputs)
                 encoder_inputs["prompt_token_ids"] = encoder_inputs[
                     "encoder_prompt_token_ids"]
             if (decoder_input := prompt["decoder_prompt"]) is None:
@@ -620,6 +621,7 @@ class InputPreprocessor:
                     encoder_task, decoder_task)
 
             if self.model_config.is_multimodal_model:
+                encoder_inputs = cast(MultiModalEncDecInputs, encoder_inputs)
                 encoder_inputs["prompt_token_ids"] = encoder_inputs[
                     "encoder_prompt_token_ids"]
 
