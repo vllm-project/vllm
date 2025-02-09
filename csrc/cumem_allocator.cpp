@@ -26,6 +26,7 @@ CUresult error_code = no_error;  // store error code
       snprintf(error_msg, sizeof(error_msg), "CUDA Error: %s at %s:%d", \
                error_string, __FILE__, __LINE__);                       \
       std::cerr << error_msg << std::endl;                              \
+      return;                                                           \
     }                                                                   \
   } while (0)
 
