@@ -22,8 +22,15 @@ namespace vllm {
 
 using namespace cute;
 
-template <typename SchedulerType, typename OutType, int GroupSizeM_, int GroupSizeN_, int GroupSizeK_,
-          int TileSizeM_ = 128, class ClusterShape = Shape<_1, _2, _1>>
+<<<<<<< HEAD
+template <typename SchedulerType, typename OutType, int GroupSizeM_,
+          int GroupSizeN_, int GroupSizeK_, int TileSizeM_ = 128,
+          class ClusterShape = Shape<_1, _2, _1>>
+=======
+template <typename SchedulerType, typename OutType, int GroupSizeM_,
+          int GroupSizeN_, int GroupSizeK_, int TileSizeM_ = 128,
+          class ClusterShape = Shape<_1, _2, _1>>
+>>>>>>> 68f18b41 (Add streamK for block-quantized CUTLASS kernels)
 struct cutlass_3x_gemm_fp8_blockwise {
   using GroupSizeM = Int<GroupSizeM_>;
   using GroupSizeN = Int<GroupSizeN_>;
@@ -155,10 +162,19 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
 }
 
 template <typename Gemm>
-void cutlass_gemm_caller_blockwise_streamK(torch::Tensor& out, torch::Tensor const& a,
-                                   torch::Tensor const& b,
-                                   torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales) {
+<<<<<<< HEAD
+void cutlass_gemm_caller_blockwise_streamK(torch::Tensor& out,
+                                           torch::Tensor const& a,
+                                           torch::Tensor const& b,
+                                           torch::Tensor const& a_scales,
+                                           torch::Tensor const& b_scales) {
+=======
+void cutlass_gemm_caller_blockwise_streamK(torch::Tensor& out,
+                                           torch::Tensor const& a,
+                                           torch::Tensor const& b,
+                                           torch::Tensor const& a_scales,
+                                           torch::Tensor const& b_scales) {
+>>>>>>> 68f18b41 (Add streamK for block-quantized CUTLASS kernels)
   using GemmKernel = typename Gemm::GemmKernel;
 
   using ElementAB = typename Gemm::ElementAB;
@@ -212,8 +228,13 @@ void cutlass_gemm_caller_blockwise_streamK(torch::Tensor& out, torch::Tensor con
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
 
-  c3x::cutlass_gemm_caller_streamK<GemmKernel>(a.device(), prob_shape, mainloop_args,
-                                       epilogue_args);
+<<<<<<< HEAD
+  c3x::cutlass_gemm_caller_streamK<GemmKernel>(a.device(), prob_shape,
+                                               mainloop_args, epilogue_args);
+=======
+  c3x::cutlass_gemm_caller_streamK<GemmKernel>(a.device(), prob_shape,
+                                               mainloop_args, epilogue_args);
+>>>>>>> 68f18b41 (Add streamK for block-quantized CUTLASS kernels)
 }
 
 template <typename OutType>
@@ -226,11 +247,23 @@ void cutlass_gemm_blockwise_sm90_fp8_dispatch(torch::Tensor& out,
   auto n = b_scales.size(1);
 
   if (k > 3 * n) {
-    cutlass_gemm_caller_blockwise_streamK<
-        cutlass_3x_gemm_fp8_blockwise<cutlass::gemm::StreamKScheduler, OutType, 1, 128, 128>>(out, a, b, a_scales, b_scales);
-  } else{
-    cutlass_gemm_caller_blockwise<
-        cutlass_3x_gemm_fp8_blockwise<cutlass::gemm::PersistentScheduler, OutType, 1, 128, 128>>(out, a, b, a_scales, b_scales);
+<<<<<<< HEAD
+    cutlass_gemm_caller_blockwise_streamK<cutlass_3x_gemm_fp8_blockwise<
+        cutlass::gemm::StreamKScheduler, OutType, 1, 128, 128>>(
+        out, a, b, a_scales, b_scales);
+  } else {
+    cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
+        cutlass::gemm::PersistentScheduler, OutType, 1, 128, 128>>(
+        out, a, b, a_scales, b_scales);
+=======
+    cutlass_gemm_caller_blockwise_streamK<cutlass_3x_gemm_fp8_blockwise<
+        cutlass::gemm::StreamKScheduler, OutType, 1, 128, 128>>(
+        out, a, b, a_scales, b_scales);
+  } else {
+    cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
+        cutlass::gemm::PersistentScheduler, OutType, 1, 128, 128>>(
+        out, a, b, a_scales, b_scales);
+>>>>>>> 68f18b41 (Add streamK for block-quantized CUTLASS kernels)
   }
 }
 
