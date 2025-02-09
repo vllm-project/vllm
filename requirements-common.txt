@@ -38,3 +38,4 @@ compressed-tensors == 0.9.1 # required for compressed-tensors
 depyf==0.18.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
 types-protobuf
+git+https://github.com/cncf/xds.git#subdirectory=python
