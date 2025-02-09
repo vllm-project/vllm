@@ -21,7 +21,8 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
                             EngineCoreRequest, EngineCoreRequestType,
-                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
+                            EngineCoreRequestUnion, EngineCoreResetPrefixCache,
+                            EngineCoreSleep, EngineCoreWakeup)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -139,6 +140,12 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
+    def sleep(self, level: int = 1):
+        self.model_executor.sleep(level)
+
+    def wake_up(self):
+        self.model_executor.wake_up()
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -253,6 +260,10 @@ class EngineCoreProc(EngineCore):
             self.model_executor.profile(request.is_start)
         elif isinstance(request, EngineCoreResetPrefixCache):
             self.reset_prefix_cache()
+        elif isinstance(request, EngineCoreSleep):
+            self.sleep(request.level)
+        elif isinstance(request, EngineCoreWakeup):
+            self.wake_up()
         else:
             # TODO: make an EngineCoreAbort wrapper
             assert isinstance(request, list)
@@ -279,7 +290,10 @@ class EngineCoreProc(EngineCore):
                     request = decoder_abort_req.decode(request_data)
                 elif request_type in (
                         EngineCoreRequestType.PROFILE.value,
-                        EngineCoreRequestType.RESET_PREFIX_CACHE.value):
+                        EngineCoreRequestType.RESET_PREFIX_CACHE.value,
+                        EngineCoreRequestType.SLEEP.value,
+                        EngineCoreRequestType.WAKEUP.value,
+                ):
                     request = pickle.loads(request_data)
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")

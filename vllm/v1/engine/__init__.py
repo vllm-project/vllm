@@ -104,6 +104,16 @@ class EngineCoreResetPrefixCache:
     pass
 
 
+@dataclass
+class EngineCoreSleep:
+    level: int = 1
+
+
+@dataclass
+class EngineCoreWakeup:
+    pass
+
+
 class EngineCoreRequestType(enum.Enum):
     """
     Request types defined as hex byte strings, so it can be sent over sockets
@@ -113,7 +123,10 @@ class EngineCoreRequestType(enum.Enum):
     ABORT = b'\x01'
     PROFILE = b'\x02'
     RESET_PREFIX_CACHE = b'\x03'
+    SLEEP = b'\x04'
+    WAKEUP = b'\x05'
 
 
 EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile,
-                               EngineCoreResetPrefixCache, List[str]]
+                               EngineCoreResetPrefixCache, List[str],
+                               EngineCoreSleep, EngineCoreWakeup]

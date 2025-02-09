@@ -582,6 +582,20 @@ if envs.VLLM_SERVER_DEV_MODE:
         await engine_client(raw_request).reset_prefix_cache()
         return Response(status_code=200)
 
+    @router.post("/sleep")
+    async def sleep(raw_request: Request):
+        # get POST params
+        level = raw_request.query_params.get("level", "1")
+        logger.info("sleep the engine with level %s", level)
+        await engine_client(raw_request).sleep(int(level))
+        return Response(status_code=200)
+
+    @router.post("/wake_up")
+    async def wake_up(raw_request: Request):
+        logger.info("wake up the engine")
+        await engine_client(raw_request).wake_up()
+        return Response(status_code=200)
+
 
 @router.post("/invocations")
 async def invocations(raw_request: Request):
