@@ -688,15 +688,19 @@ class MQLLMEngineClient(EngineClient):
 
     async def sleep(self, level: int = 1) -> None:
         """Sleep the engine for a given level"""
-
-        await self._send_one_way_rpc_request(request=RPCSleepRequest(level),
-                                             socket=self.input_socket)
+        await self._send_get_data_rpc_request(
+            request=RPCSleepRequest(level),
+            expected_type=type(None),
+            error_message="Unable to sleep the engine",
+            socket=self.input_socket)
 
     async def wake_up(self) -> None:
         """Wake up the engine"""
-
-        await self._send_one_way_rpc_request(request=RPCWakeUpRequest.WAKE_UP,
-                                             socket=self.input_socket)
+        await self._send_get_data_rpc_request(
+            request=RPCWakeUpRequest.WAKE_UP,
+            expected_type=type(None),
+            error_message="Unable to wake up the engine",
+            socket=self.input_socket)
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
