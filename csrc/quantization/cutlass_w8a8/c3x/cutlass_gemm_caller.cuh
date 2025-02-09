@@ -53,6 +53,38 @@ void cutlass_gemm_caller(torch::Device device,
   CUTLASS_CHECK(status);
 }
 
+template <typename GemmKernel>
+void cutlass_gemm_caller_streamK(
+    torch::Device device, cute::Shape<int, int, int, int> prob_shape,
+    typename GemmKernel::MainloopArguments mainloop_args,
+    typename GemmKernel::EpilogueArguments epilogue_args) {
+  typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
+                                      prob_shape, mainloop_args, epilogue_args};
+
+  // add args for StreamK
+  using DecompositionMode = cutlass::gemm::kernel::detail::
+      PersistentTileSchedulerSm90StreamKParams::DecompositionMode;
+  using ReductionMode = cutlass::gemm::kernel::detail::
+      PersistentTileSchedulerSm90StreamKParams::ReductionMode;
+  args.scheduler.decomposition_mode = DecompositionMode::StreamK;
+  args.scheduler.reduction_mode = ReductionMode::Nondeterministic;
+
+  // Launch the CUTLASS GEMM kernel.
+  using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+  GemmOp gemm_op;
+  CUTLASS_CHECK(gemm_op.can_implement(args));
+
+  size_t workspace_size = gemm_op.get_workspace_size(args);
+  auto const workspace_options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(device);
+  auto workspace = torch::empty(workspace_size, workspace_options);
+
+  auto stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
+  CUTLASS_CHECK(status);
+}
+
 template <typename Gemm, typename... EpilogueArgs>
 void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
                          torch::Tensor const& b,

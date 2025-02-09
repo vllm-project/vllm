@@ -22,8 +22,9 @@ namespace vllm {
 
 using namespace cute;
 
-template <typename OutType, int GroupSizeM_, int GroupSizeN_, int GroupSizeK_,
-          int TileSizeM_ = 128, class ClusterShape = Shape<_1, _2, _1>>
+template <typename SchedulerType, typename OutType, int GroupSizeM_,
+          int GroupSizeN_, int GroupSizeK_, int TileSizeM_ = 128,
+          class ClusterShape = Shape<_1, _2, _1>>
 struct cutlass_3x_gemm_fp8_blockwise {
   using GroupSizeM = Int<GroupSizeM_>;
   using GroupSizeN = Int<GroupSizeN_>;
@@ -84,7 +85,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
 
   using KernelType = enable_sm90_or_later<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
-      cutlass::gemm::PersistentScheduler>>;
+      SchedulerType>>;
 
   struct GemmKernel : public KernelType {};
 
@@ -154,15 +155,87 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
                                        epilogue_args);
 }
 
+template <typename Gemm>
+void cutlass_gemm_caller_blockwise_streamK(torch::Tensor& out,
+                                           torch::Tensor const& a,
+                                           torch::Tensor const& b,
+                                           torch::Tensor const& a_scales,
+                                           torch::Tensor const& b_scales) {
+  using GemmKernel = typename Gemm::GemmKernel;
+
+  using ElementAB = typename Gemm::ElementAB;
+  using ElementD = typename Gemm::ElementD;
+
+  auto prob_shape = c3x::get_problem_shape(a, b);
+  int32_t m = get<0>(prob_shape), n = get<1>(prob_shape),
+          k = get<2>(prob_shape);
+
+  int64_t lda = a.stride(0);
+  int64_t ldb = b.stride(1);
+  int64_t ldc = out.stride(0);
+
+  using StrideA = Stride<int64_t, Int<1>, int64_t>;
+  using StrideB = Stride<int64_t, Int<1>, int64_t>;
+  using StrideC = typename Gemm::StrideC;
+
+  StrideA a_stride{lda, Int<1>{}, 0};
+  StrideB b_stride{ldb, Int<1>{}, 0};
+  StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
+
+  auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
+  auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
+  auto a_scales_ptr = static_cast<float*>(a_scales.data_ptr());
+  auto b_scales_ptr = static_cast<float*>(b_scales.data_ptr());
+
+  // Check is the t is contiguous and is 1D or 2D with one of the dimensions
+  // being 1 (i.e. a row or column vector)
+  auto is_contiguous_vector = [](const torch::Tensor& t) {
+    auto t_sizes = t.sizes();
+    return t.is_contiguous() &&
+           (t.dim() == 1 ||
+            (t.dim() == 2 &&
+             *std::min_element(t_sizes.begin(), t_sizes.end()) == 1));
+  };
+
+  // TODO(lucas): lets clean-up the kernel so that we pass in Strides so
+  //  we don't have to deal with enforcing implicit layouts
+  TORCH_CHECK(a_scales.size(0) == m / Gemm::GroupSizeM::value);
+  TORCH_CHECK(a_scales.size(1) == k / Gemm::GroupSizeK::value);
+  TORCH_CHECK(a_scales.stride(0) == 1 || is_contiguous_vector(a_scales),
+              "a_scales must be M major");
+  TORCH_CHECK(b_scales.size(0) == k / Gemm::GroupSizeK::value);
+  TORCH_CHECK(b_scales.size(1) == n / Gemm::GroupSizeN::value);
+  TORCH_CHECK(b_scales.stride(0) == 1 || is_contiguous_vector(b_scales),
+              "b_scales must be K major");
+  typename GemmKernel::MainloopArguments mainloop_args{
+      a_ptr, a_stride, b_ptr, b_stride, a_scales_ptr, b_scales_ptr};
+
+  auto c_ptr = static_cast<ElementD*>(out.data_ptr());
+  typename GemmKernel::EpilogueArguments epilogue_args{
+      {}, c_ptr, c_stride, c_ptr, c_stride};
+
+  c3x::cutlass_gemm_caller_streamK<GemmKernel>(a.device(), prob_shape,
+                                               mainloop_args, epilogue_args);
+}
+
 template <typename OutType>
 void cutlass_gemm_blockwise_sm90_fp8_dispatch(torch::Tensor& out,
                                               torch::Tensor const& a,
                                               torch::Tensor const& b,
                                               torch::Tensor const& a_scales,
                                               torch::Tensor const& b_scales) {
-  cutlass_gemm_caller_blockwise<
-      cutlass_3x_gemm_fp8_blockwise<OutType, 1, 128, 128>>(out, a, b, a_scales,
-                                                           b_scales);
+  auto k = a_scales.size(1);
+  auto n = b_scales.size(1);
+
+  if (k > 3 * n) {
+    cutlass_gemm_caller_blockwise_streamK<cutlass_3x_gemm_fp8_blockwise<
+        cutlass::gemm::StreamKScheduler, OutType, 1, 128, 128>>(
+        out, a, b, a_scales, b_scales);
+  } else {
+    cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
+        cutlass::gemm::PersistentScheduler, OutType, 1, 128, 128>>(
+        out, a, b, a_scales, b_scales);
+  }
 }
 
 }  // namespace vllm
