@@ -176,15 +176,17 @@ assert training_actor_device_ids[:2] == inference_engine_device_ids[0]
 # on the same GPUs as the second inference engine
 assert training_actor_device_ids[2:] == inference_engine_device_ids[1]
 
-# gather all the IPC handles from the training actors
+print("gather all the IPC handles from the training actors")
 ipc_handles = {}
 for actor in training_actors:
     ipc_handles.update(ray.get(actor.get_weight_ipc_handles.remote()))
 
-# update the weights of the inference engines
+print("update the weights of the inference engines")
 for llm in inference_engines:
     ray.get(
         llm.collective_rpc.remote("update_weights_from_ipc_handles",
                                   args=(ipc_handles, )))
+print("check if the weights are updated")
+for llm in inference_engines:
     assert ray.get(
         llm.collective_rpc.remote("check_weights_changed", args=tuple()))
