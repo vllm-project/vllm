@@ -3,7 +3,6 @@
 
 # Dependencies for NVIDIA GPUs
 ray[default] >= 2.9
-nvidia-ml-py >= 12.560.30 # for pynvml package
 torch == 2.5.1
 torchaudio==2.5.1
 # These must be updated alongside torch
