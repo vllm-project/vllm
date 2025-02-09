@@ -5,6 +5,7 @@ from itertools import chain
 import math
 from typing import Callable, DefaultDict, Dict, Iterator, List, Optional, Tuple, Type, TypeVar
 
+from vllm.core.block.common import BlockPool
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          PrefixLength, PrefixLengthRange,
@@ -16,18 +17,6 @@ from vllm.v1.request import Request
 from vllm.v1.utils import ConstantList
 
 T = TypeVar("T")
-
-
-@dataclass
-class BlockPoolOperations:
-    get_cached_block: Callable[[BlockHashType], Optional[KVCacheBlock]]
-    get_null_block: Callable[[], KVCacheBlock]
-    cache_full_blocks: Callable[[
-        Request, List[BlockHashType], int, List[KVCacheBlock], KVCacheBlock,
-        int
-    ], None]
-    get_new_blocks: Callable[[int], List[KVCacheBlock]]
-    touch: Callable[[List[KVCacheBlock]], None]
 
 
 class SpecializedManager(ABC):
@@ -44,14 +33,14 @@ class SpecializedManager(ABC):
         max_model_len: int,
         enable_caching: bool,
         kv_cache_group_id: int,
-        block_pool_operations: BlockPoolOperations,
+        block_pool: BlockPool,
     ) -> None:
         """
         Initializes the SpecializedManager.
 
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
-            block_pool_operations: Operations to interact with the block pool.
+            block_pool: The block pool.
 
         Returns:
             None
@@ -59,7 +48,7 @@ class SpecializedManager(ABC):
 
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.block_pool_operations = block_pool_operations
+        self.block_pool = block_pool
         self.max_num_blocks_per_req = cdiv(max_model_len, self.block_size)
         self.enable_caching = enable_caching
         self.kv_cache_group_id = kv_cache_group_id
@@ -124,7 +113,7 @@ class SpecializedManager(ABC):
             new_computed_blocks = []
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self.block_pool_operations.touch(new_computed_blocks)
+            self.block_pool.touch(new_computed_blocks)
         else:
             assert len(new_computed_blocks) == 0, (
                 "Computed blocks should be empty when "
@@ -154,8 +143,7 @@ class SpecializedManager(ABC):
 
             assert num_new_blocks >= 0
 
-            new_blocks = self.block_pool_operations.get_new_blocks(
-                num_new_blocks)
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
 
         if not self.enable_caching:
@@ -171,9 +159,10 @@ class SpecializedManager(ABC):
 
         new_full_blocks = req_blocks[num_computed_full_blocks:num_full_blocks]
         if new_full_blocks:
-            self.block_pool_operations.cache_full_blocks(
+            self.block_pool.cache_full_blocks(
                 request=request,
                 block_hashes=self.req_to_block_hashes[request.request_id],
+                block_size=self.block_size,
                 blk_start_idx=num_computed_full_blocks,
                 # The new full blocks are the full blocks that are not
                 # computed.
@@ -265,8 +254,7 @@ class FullAttentionManager(SpecializedManager):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
-            if cached_block := self.block_pool_operations.get_cached_block(
-                    block_hash):
+            if cached_block := self.block_pool.get_cached_block(block_hash):
                 computed_blocks.append(cached_block)
             else:
                 break
@@ -295,17 +283,17 @@ class SlidingWindowManager(FullAttentionManager):
         max_model_len: int,
         enable_caching: bool,
         kv_cache_group_id: int,
-        block_pool_operations: BlockPoolOperations,
+        block_pool: BlockPool,
     ) -> None:
         super().__init__(
             kv_cache_spec=kv_cache_spec,
             max_model_len=max_model_len,
             enable_caching=enable_caching,
             kv_cache_group_id=kv_cache_group_id,
-            block_pool_operations=block_pool_operations,
+            block_pool=block_pool,
         )
         self.sliding_window = kv_cache_spec.sliding_window
-        self._null_block = block_pool_operations.get_null_block()
+        self._null_block = block_pool.get_null_block()
 
     def get_possible_cached_prefix(
         self, block_hashes: ConstantList[BlockHashType]
@@ -323,8 +311,7 @@ class SlidingWindowManager(FullAttentionManager):
         # cached.
         for i, block_hash in enumerate(chain(block_hashes,
                                              [dummy_block_hash])):
-            if cached_block := self.block_pool_operations.get_cached_block(
-                    block_hash):
+            if cached_block := self.block_pool.get_cached_block(block_hash):
                 computed_blocks.append(cached_block)
             else:
                 if start == 0:
@@ -380,16 +367,16 @@ def transpose_output(outputs: List[Tuple[T]]) -> Tuple[List[T]]:
 class GroupedManager:
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
-                 enable_caching: bool,
-                 block_pool_operations: BlockPoolOperations) -> None:
+                 enable_caching: bool, block_pool: BlockPool) -> None:
         self.enable_caching = enable_caching
         self.managers: List[SpecializedManager] = []
         self.kv_cache_config = kv_cache_config
         for i, g in enumerate(kv_cache_config.groups):
             manager_class = spec_manager_map[type(g.kv_cache_spec)]
             manager = manager_class(g.kv_cache_spec, max_model_len,
-                                    enable_caching, i, block_pool_operations)
+                                    enable_caching, i, block_pool)
             self.managers.append(manager)
+        self.block_pool = block_pool
 
     # Simple broadcast functions
     # TODO: a better way to handle the broadcast functions
@@ -444,9 +431,44 @@ class GroupedManager:
             for manager in self.managers
         ]
 
+    def remove_useless_blocks(self, request: Request,
+                              num_computed_tokens: int) -> None:
+        """
+        Frees memory blocks that are not needed. E.g., sliding window 
+        layer with window size 2 and block size 1, we have req_blocks as 
+        [[1, 2, 3]], this function will free block 1 and change the req_blocks
+        to [[-1, 2, 3]] (-1 refers to null block)
+
+        Args:
+            req_blocks: The KV cache blocks of one request.
+            num_computed_tokens: The number of computed tokens.
+        """
+        return [
+            manager.remove_useless_blocks(request, num_computed_tokens)
+            for i, manager in enumerate(self.managers)
+        ]
+
+    def pop_blocks_of_request(
+            self, request_id: int) -> Optional[List[List[KVCacheBlock]]]:
+        blocks = [
+            manager.req_to_blocks.pop(request_id, None)
+            for manager in self.managers
+        ]
+        if all(blks is None for blks in blocks):
+            return None
+        assert all(blks is not None for blks in blocks)
+        return blocks
+
+    def pop_block_hashes_of_request(self, request_id: int) -> None:
+        for manager in self.managers:
+            manager.req_to_block_hashes.pop(request_id, None)
+
+    def construct(self, lambda_fn: Callable[[], T]) -> List[T]:
+        return [lambda_fn() for _ in range(len(self.managers))]
+
     # Complex functions
-    def _get_common_computed_tokens(self,
-                                    prefix_length: List[PrefixLength]) -> int:
+    def get_common_computed_tokens(self,
+                                   prefix_length: List[PrefixLength]) -> int:
         """
         Find the longest prefix that is cached by all KV cache groups. Returns 
         the number of tokens in that prefix.
@@ -525,37 +547,9 @@ class GroupedManager:
 
         return ordered_blocks
 
-    def _remove_useless_blocks(self, request: Request,
-                               num_computed_tokens: int) -> None:
-        """
-        Frees memory blocks that are not needed. E.g., sliding window 
-        layer with window size 2 and block size 1, we have req_blocks as 
-        [[1, 2, 3]], this function will free block 1 and change the req_blocks
-        to [[-1, 2, 3]] (-1 refers to null block)
-
-        Args:
-            req_blocks: The KV cache blocks of one request.
-            num_computed_tokens: The number of computed tokens.
-        """
-        return [
-            manager.remove_useless_blocks(request, num_computed_tokens)
-            for i, manager in enumerate(self.managers)
-        ]
-
-    def pop_blocks_of_request(
-            self, request_id: int) -> Optional[List[List[KVCacheBlock]]]:
-        blocks = [
-            manager.req_to_blocks.pop(request_id, None)
-            for manager in self.managers
-        ]
-        if all(blks is None for blks in blocks):
-            return None
-        assert all(blks is not None for blks in blocks)
-        return blocks
-
-    def pop_block_hashes_of_request(self, request_id: int) -> None:
-        for manager in self.managers:
-            manager.req_to_block_hashes.pop(request_id, None)
-
-    def construct(self, lambda_fn: Callable[[], T]) -> List[T]:
-        return [lambda_fn() for _ in range(len(self.managers))]
+    def free_blocks(self,
+                    blocks_to_free: List[List[KVCacheBlock]],
+                    need_reverse: bool = False) -> None:
+        ordered_blocks = self._sort_blocks_by_eviction_order(
+            blocks_to_free, need_reverse)
+        self.block_pool.free_blocks(ordered_blocks)
