@@ -53,10 +53,12 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: List[StatLoggerBase] = [
-            LoggingStatLogger(),
-            PrometheusStatLogger(vllm_config.model_config),
-        ]
+        self.stat_loggers: List[StatLoggerBase] = []
+        if self.log_stats:
+            self.stat_loggers.extend([
+                LoggingStatLogger(),
+                PrometheusStatLogger(vllm_config.model_config),
+            ])
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -85,6 +87,7 @@ class AsyncLLM(EngineClient):
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
+            log_stats=self.log_stats,
         )
 
         self.output_handler: Optional[asyncio.Task] = None
@@ -246,7 +249,7 @@ class AsyncLLM(EngineClient):
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
 
-                iteration_stats = IterationStats(self.log_stats)
+                iteration_stats = IterationStats() if self.log_stats else None
 
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
@@ -277,7 +280,6 @@ class AsyncLLM(EngineClient):
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
-                assert iteration_stats is not None
                 self._log_stats(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
@@ -299,12 +301,14 @@ class AsyncLLM(EngineClient):
 
     def _log_stats(
         self,
-        scheduler_stats: SchedulerStats,
-        iteration_stats: IterationStats,
+        scheduler_stats: Optional[SchedulerStats],
+        iteration_stats: Optional[IterationStats],
     ):
         if not self.log_stats:
             return
 
+        assert scheduler_stats is not None
+        assert iteration_stats is not None
         for logger in self.stat_loggers:
             logger.log(scheduler_stats=scheduler_stats,
                        iteration_stats=iteration_stats)

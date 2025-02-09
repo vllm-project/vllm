@@ -633,7 +633,7 @@ def test_iteration_stats(dummy_test_vectors):
 
     # First iteration has 2 prefills.
     outputs = engine_core.get_outputs()[:num_active]
-    iteration_stats = IterationStats(output_processor.log_stats)
+    iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp,
                                      iteration_stats)
     total_prompt_tokens = sum([
@@ -646,7 +646,7 @@ def test_iteration_stats(dummy_test_vectors):
 
     # Just decodes in this step.
     outputs = engine_core.get_outputs()[:num_active]
-    iteration_stats = IterationStats(output_processor.log_stats)
+    iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp,
                                      iteration_stats)
 
@@ -657,7 +657,7 @@ def test_iteration_stats(dummy_test_vectors):
     output_processor.add_request(inactive_request)
     num_active += 1
     outputs = engine_core.get_outputs()[:num_active]
-    iteration_stats = IterationStats(output_processor.log_stats)
+    iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp,
                                      iteration_stats)
     total_prompt_tokens = len(dummy_test_vectors.prompt_tokens[num_active - 1])
@@ -667,7 +667,7 @@ def test_iteration_stats(dummy_test_vectors):
 
     # Just decodes in this step.
     outputs = engine_core.get_outputs()[:num_active]
-    iteration_stats = IterationStats(output_processor.log_stats)
+    iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp,
                                      iteration_stats)
 

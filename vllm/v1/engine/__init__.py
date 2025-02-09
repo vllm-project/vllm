@@ -117,7 +117,7 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
-    scheduler_stats: SchedulerStats
+    scheduler_stats: Optional[SchedulerStats]
     timestamp: float = 0.0
 
     def __post_init__(self):

@@ -11,7 +11,8 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
-from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
+                            EngineCoreOutput, EngineCoreOutputs)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -27,10 +28,12 @@ class Scheduler:
         model_config: ModelConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        log_stats: bool,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.log_stats = log_stats
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -46,7 +49,8 @@ class Scheduler:
             num_gpu_blocks=num_gpu_blocks,
             max_model_len=self.max_model_len,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+            enable_caching=self.cache_config.enable_prefix_caching,
+            log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
@@ -249,7 +253,7 @@ class Scheduler:
                 self.running.append(request)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
-                    request.scheduled(scheduled_timestamp)
+                    self.request_scheduled(request, scheduled_timestamp)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
@@ -546,7 +550,7 @@ class Scheduler:
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
-        request.queued()
+        self.request_queued(request)
 
     def finish_requests(
         self,
@@ -594,7 +598,22 @@ class Scheduler:
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
 
-    def make_stats(self) -> SchedulerStats:
+    def request_queued(self, request: Request):
+        if not self.log_stats:
+            return
+        request.events.append(
+            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED))
+
+    def request_scheduled(self, request: Request, timestamp: float):
+        if not self.log_stats:
+            return
+        request.events.append(
+            EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
+                                      timestamp))
+
+    def make_stats(self) -> Optional[SchedulerStats]:
+        if not self.log_stats:
+            return None
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
