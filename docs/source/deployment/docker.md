@@ -10,7 +10,7 @@ vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai](https://hub.docker.com/r/vllm/vllm-openai/tags).
 
 ```console
-$ docker run --runtime nvidia --gpus all \
+$ docker run --runtime=nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
     -p 8000:8000 \
