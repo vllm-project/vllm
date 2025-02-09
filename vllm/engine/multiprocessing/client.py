@@ -692,7 +692,7 @@ class MQLLMEngineClient(EngineClient):
             request=RPCSleepRequest(level),
             expected_type=type(None),
             error_message="Unable to sleep the engine",
-            socket=self.input_socket)
+            socket=self.output_socket)
 
     async def wake_up(self) -> None:
         """Wake up the engine"""
@@ -700,7 +700,7 @@ class MQLLMEngineClient(EngineClient):
             request=RPCWakeUpRequest.WAKE_UP,
             expected_type=type(None),
             error_message="Unable to wake up the engine",
-            socket=self.input_socket)
+            socket=self.output_socket)
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
