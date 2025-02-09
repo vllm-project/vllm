@@ -12,8 +12,9 @@ extern "C" {
 #include <cuda_runtime_api.h>
 #include <cuda.h>
 
-char error_msg[10240];    // 10KB buffer to store error messages
-CUresult error_code = 0;  // store error code
+char error_msg[10240];  // 10KB buffer to store error messages
+CUresult no_error = CUresult(0);
+CUresult error_code = no_error;  // store error code
 
 #define CUDA_CHECK(condition)                                           \
   do {                                                                  \
@@ -264,7 +265,7 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle);
 
   if (error_code != 0) {
-    error_code = 0;
+    error_code = no_error;
     PyErr_SetString(PyExc_RuntimeError, error_msg);
     return nullptr;
   }
@@ -294,7 +295,7 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
   create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle);
 
   if (error_code != 0) {
-    error_code = 0;
+    error_code = no_error;
     PyErr_SetString(PyExc_RuntimeError, error_msg);
     return nullptr;
   }
