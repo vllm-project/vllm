@@ -487,7 +487,7 @@ class InputPreprocessor:
             decoder=decoder_inputs,
         )
 
-    def _handle_multimodal_enc_dec_inputs(
+    def _separate_enc_dec_inputs_from_mm_processor_outputs(
         self,
         inputs: SingletonInputs,
     ) -> Tuple[SingletonInputs, SingletonInputs]:
@@ -581,7 +581,8 @@ class InputPreprocessor:
             if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
-                    self._handle_multimodal_enc_dec_inputs(inputs))
+                    self._separate_enc_dec_inputs_from_mm_processor_outputs(
+                        inputs))
             else:
                 encoder_inputs = inputs
 
@@ -623,7 +624,8 @@ class InputPreprocessor:
             if self._can_process_multimodal():
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
-                    self._handle_multimodal_enc_dec_inputs(inputs))
+                    self._separate_enc_dec_inputs_from_mm_processor_outputs(
+                        inputs))
             else:
                 encoder_inputs = inputs
 
