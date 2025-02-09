@@ -8,8 +8,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock, PrefixLength,
-                                         ReqKVCacheBlocks,
+                                         KVCacheBlock, ReqKVCacheBlocks,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens, intersect_ranges)
@@ -101,8 +100,7 @@ class KVCacheManager:
         prefix_length, computed_blocks = self.managers.get_possible_cached_prefix(
             block_hashes)
 
-        num_computed_tokens = self.managers.get_common_computed_tokens(
-            prefix_length)
+        num_computed_tokens = prefix_length[-1].end
 
         computed_blocks = self.managers.truncate_computed_blocks(
             computed_blocks, num_computed_tokens)
@@ -217,23 +215,8 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        num_used_blocks = (self.num_gpu_blocks -
-                           self.block_pool.get_num_free_blocks())
-        if num_used_blocks > 0:
-            logger.warning(
-                "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks)
-            return False
 
-        # Remove all hashes so that no new blocks will hit.
-        self.cached_block_hash_to_block = defaultdict(dict)
-
-        # Remove all hashes from all blocks.
-        for block in self.block_pool:
-            block.reset_hash()
-
-        logger.info("Successfully reset prefix cache")
-        return True
+        return self.block_pool.reset_prefix_cache()
 
     def get_num_common_prefix_blocks(
         self,

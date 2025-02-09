@@ -5,12 +5,11 @@ from itertools import chain
 import math
 from typing import Callable, DefaultDict, Dict, Iterator, List, Optional, Tuple, Type, TypeVar
 
-from vllm.core.block.common import BlockPool
+from vllm.v1.core.block_pool import BlockPool
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         PrefixLength, PrefixLengthRange,
-                                         ReqKVCacheBlocks, hash_request_tokens,
-                                         intersect_ranges)
+                                         PrefixLengthRange, ReqKVCacheBlocks,
+                                         hash_request_tokens, intersect_ranges)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
@@ -188,7 +187,7 @@ class SpecializedManager(ABC):
     @abstractmethod
     def get_possible_cached_prefix(
         self, block_hashes: ConstantList[BlockHashType]
-    ) -> Tuple[PrefixLength, List[KVCacheBlock]]:
+    ) -> Tuple[List[PrefixLengthRange], List[KVCacheBlock]]:
         """
         Get the possible cached prefixes of a request based on its block hashes.
         If no cached prefixes are found, returns a tuple with a prefix length 
@@ -364,7 +363,7 @@ def transpose_output(outputs: List[Tuple[T]]) -> Tuple[List[T]]:
     return tuple(map(list, zip(*outputs)))
 
 
-class GroupedManager:
+class GroupedManager(SpecializedManager):
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  enable_caching: bool, block_pool: BlockPool) -> None:
@@ -385,15 +384,6 @@ class GroupedManager:
         return [
             manager.hash_request_tokens(request) for manager in self.managers
         ]
-
-    def get_possible_cached_prefix(self,
-                                   block_hashes: List[List[BlockHashType]]):
-        outputs = [
-            manager.get_possible_cached_prefix(block_hashes[i])
-            for i, manager in enumerate(self.managers)
-        ]
-
-        return transpose_output(outputs)
 
     def truncate_computed_blocks(self, computed_blocks: ReqKVCacheBlocks,
                                  num_computed_tokens: int) -> ReqKVCacheBlocks:
@@ -466,9 +456,9 @@ class GroupedManager:
     def construct(self, lambda_fn: Callable[[], T]) -> List[T]:
         return [lambda_fn() for _ in range(len(self.managers))]
 
-    # Complex functions
-    def get_common_computed_tokens(self,
-                                   prefix_length: List[PrefixLength]) -> int:
+    def _get_common_prefix_length(
+        self, prefix_length: List[List[PrefixLengthRange]]
+    ) -> List[PrefixLengthRange]:
         """
         Find the longest prefix that is cached by all KV cache groups. Returns 
         the number of tokens in that prefix.
@@ -482,7 +472,7 @@ class GroupedManager:
         """
         if len(self.kv_cache_config.groups
                ) == 1:  # TODO: split num_group=1 case
-            return prefix_length[0][-1].end
+            return prefix_length[0]
 
         intersection = intersect_ranges(prefix_length)
 
@@ -492,15 +482,17 @@ class GroupedManager:
         alignment = math.lcm(
             *[manager.block_size for manager in self.managers])
 
-        # Get the longest common prefix that is aligned with the block size.
-        num_computed_tokens = 0
+        aligned_intersection = []
         for range_ in intersection:
             aligned_end = cdiv(range_.end, alignment) * alignment
             if aligned_end >= range_.start:
-                num_computed_tokens = aligned_end
-                break
+                aligned_intersection.append(
+                    PrefixLengthRange(range_.start, aligned_end))
 
-        return num_computed_tokens
+        if len(aligned_intersection) == 0:
+            aligned_intersection.append(PrefixLengthRange(0, 0))
+
+        return aligned_intersection
 
     def iter_all(self, x: List[List[T]]) -> Iterator[T]:
         return chain.from_iterable(x)
@@ -553,3 +545,27 @@ class GroupedManager:
         ordered_blocks = self._sort_blocks_by_eviction_order(
             blocks_to_free, need_reverse)
         self.block_pool.free_blocks(ordered_blocks)
+
+    def get_possible_cached_prefix(
+        self, block_hashes: List[List[BlockHashType]]
+    ) -> Tuple[List[PrefixLengthRange], List[List[KVCacheBlock]]]:
+        output = [
+            manager.get_possible_cached_prefix(block_hashes[i])
+            for i, manager in enumerate(self.managers)
+        ]
+        prefix_length, computed_blocks = transpose_output(output)
+        common_prefix_length = self._get_common_prefix_length(prefix_length)
+
+        return common_prefix_length, computed_blocks
+
+    def get_num_new_blocks(self, num_computed_tokens: int,
+                           num_append_tokens: int,
+                           num_allocated_blocks: int) -> int:
+        raise NotImplementedError
+
+
+def get_specialized_manager(kv_cache_config: KVCacheConfig, max_model_len: int,
+                            enable_caching: bool,
+                            block_pool: BlockPool) -> SpecializedManager:
+    return GroupedManager(kv_cache_config, max_model_len, enable_caching,
+                          block_pool)

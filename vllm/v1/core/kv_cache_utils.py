@@ -602,9 +602,6 @@ class PrefixLengthRange:
     end: int
 
 
-PrefixLength = List[PrefixLengthRange]
-
-
 def intersect_two_ranges(
         a: List[PrefixLengthRange],
         b: List[PrefixLengthRange]) -> List[PrefixLengthRange]:

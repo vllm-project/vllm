@@ -1,8 +1,11 @@
 from collections import defaultdict
 from typing import Dict, List, Optional
 
+from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHashType, FreeKVCacheBlockQueue, KVCacheBlock, generate_block_hash_extra_keys, hash_block_tokens
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class BlockPool:
@@ -66,7 +69,7 @@ class BlockPool:
         metadata to be updated and cached. Given a request, it computes the
         block hashes for the blocks starting from `blk_start_idx` to the end
         of the request's full blocks, updating the metadata for each block
-        and caching them in the `cached_block_hash_to_block`.
+        and caching them in the `_cached_block_hash_to_block`.
 
         Args:
             request: The request to cache the blocks.
@@ -173,7 +176,7 @@ class BlockPool:
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
-        If a block is cached in `cached_block_hash_to_block`, we reset its hash
+        If a block is cached in `_cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
@@ -221,3 +224,21 @@ class BlockPool:
 
     def get_null_block(self) -> KVCacheBlock:
         return self._null_block
+
+    def reset_prefix_cache(self):
+        num_used_blocks = (self.num_gpu_blocks - self.get_num_free_blocks())
+        if num_used_blocks > 0:
+            logger.warning(
+                "Failed to reset prefix cache because some "
+                "blocks (%d) are not freed yet", num_used_blocks)
+            return False
+
+        # Remove all hashes so that no new blocks will hit.
+        self._cached_block_hash_to_block = defaultdict(dict)
+
+        # Remove all hashes from all blocks.
+        for block in self.block_pool:
+            block.reset_hash()
+
+        logger.info("Successfully reset prefix cache")
+        return True
