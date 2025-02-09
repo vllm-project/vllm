@@ -12,15 +12,20 @@ extern "C" {
 #include <cuda_runtime_api.h>
 #include <cuda.h>
 
-#define CUDA_CHECK(condition)                                                  \
-  do {                                                                         \
-    CUresult error = condition;                                                \
-    if (error != 0) {                                                          \
-      char* error_string;                                                      \
-      cuGetErrorString(error, (const char**)&error_string);                    \
-      std::cerr << "CUDA Error: " << error_string << " at " << __FILE__ << ":" \
-                << __LINE__ << std::endl;                                      \
-    }                                                                          \
+char error_msg[10240];    // 10KB buffer to store error messages
+CUresult error_code = 0;  // store error code
+
+#define CUDA_CHECK(condition)                                           \
+  do {                                                                  \
+    CUresult error = condition;                                         \
+    if (error != 0) {                                                   \
+      error_code = error;                                               \
+      char* error_string;                                               \
+      cuGetErrorString(error, (const char**)&error_string);             \
+      snprintf(error_msg, sizeof(error_msg), "CUDA Error: %s at %s:%d", \
+               error_string, __FILE__, __LINE__);                       \
+      std::cerr << error_msg << std::endl;                              \
+    }                                                                   \
   } while (0)
 
 // Global references to Python callables
@@ -258,6 +263,12 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
 
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle);
 
+  if (error_code != 0) {
+    error_code = 0;
+    PyErr_SetString(PyExc_RuntimeError, error_msg);
+    return nullptr;
+  }
+
   Py_RETURN_NONE;
 }
 
@@ -281,6 +292,12 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
 
   create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle);
+
+  if (error_code != 0) {
+    error_code = 0;
+    PyErr_SetString(PyExc_RuntimeError, error_msg);
+    return nullptr;
+  }
 
   Py_RETURN_NONE;
 }
