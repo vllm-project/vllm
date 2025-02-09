@@ -132,6 +132,8 @@ for bundle_index in [0, 1, 2, 3]:
         ),
     )(RayTrainingActor).remote()
     training_actors.append(training_actor)
+
+for bundle_index, training_actor in enumerate(training_actors):
     device_id = ray.get(training_actor.report_device_id.remote())
     print(f"training actor {bundle_index} is on {device_id}")
     training_actor_device_ids.append(device_id)
