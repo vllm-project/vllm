@@ -446,6 +446,8 @@ def test_contexted_kv_attention(
         n_kv_head=num_kv_heads,
         head_size=head_size,
         mixed_precision=mixed_precision,
+        LARGE_TILE_SZ=LARGE_TILE_SZ,
+        return_debug_tensors=return_debug_tensors,
     )
 
     if return_debug_tensors:

@@ -611,7 +611,6 @@ def flash_attn_varlen_nkifunc(
     attn_mask,
     n_kv_head=None,
     head_size=None,
-    B_P_SIZE=128,
     LARGE_TILE_SZ=2048,
     return_debug_tensors=False,
     mixed_precision=True,
