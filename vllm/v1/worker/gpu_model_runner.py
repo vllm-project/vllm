@@ -1127,7 +1127,6 @@ class GPUModelRunner:
         Args:
             kv_cache_config: Configuration for the KV cache, including the KV 
             cache size of each layer
-        # TODO: two "buffer" is confusing
         """
         self.kv_cache_config = kv_cache_config
         # Initialize the memory buffer for KV cache

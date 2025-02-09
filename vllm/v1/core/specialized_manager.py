@@ -503,10 +503,6 @@ class GroupedManager(SpecializedManager):
         Returns:
             The number of tokens in the common prefix.
         """
-        if len(self.kv_cache_config.groups
-               ) == 1:  # TODO: split num_group=1 case
-            return prefix_length[0]
-
         intersection = intersect_ranges(prefix_length)
 
         # Since incomplete blocks are not eligible for sharing,
@@ -549,11 +545,6 @@ class GroupedManager(SpecializedManager):
             blocks = [
                 list(reversed(blocks_of_group)) for blocks_of_group in blocks
             ]
-
-        # TODO: seperate group_size = 1
-        if len(blocks) == 1:
-            # Fast path for single kv cache group models.
-            return blocks[0]
 
         if self.enable_caching:
             # NOTE (Chen): A simple strategy that interleaves the blocks of
