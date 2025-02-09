@@ -83,6 +83,12 @@ class MllamaImagePixelInputs(TypedDict):
 # TODO: support LlamaImageEmbeddingInputs
 
 
+def calc_token_per_chunk(image_size: int) -> int:
+    assert image_size % 14 == 0, "chunk size should be multiple of 14"
+    token_per_chunk = (image_size // 14)**2 + 1
+    return token_per_chunk
+
+
 class MllamaProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self) -> MllamaConfig:
@@ -94,14 +100,18 @@ class MllamaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
+    def get_token_per_chunk_from_config(self) -> int:
+        image_size = self.get_hf_config().vision_config.image_size
+        return calc_token_per_chunk(image_size)
+
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        hf_config = self.get_hf_config()
-        token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
-        mm_max_tokens = hf_config.vision_config.max_num_tiles * token_per_chunk
+        vision_config = self.get_hf_config().vision_config
+        token_per_chunk = self.get_token_per_chunk_from_config()
+        mm_max_tokens = vision_config.max_num_tiles * token_per_chunk
         return {"image": mm_max_tokens}
 
     def get_num_tiles_per_image(self, image_height: int,
@@ -234,10 +244,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        vision_config = self.info.get_hf_config().vision_config
-        assert vision_config.image_size % 14 == 0, (
-            "chunk size should be multiple of 14")
-        token_per_chunk = (vision_config.image_size // 14)**2 + 1
+        token_per_chunk = self.info.get_token_per_chunk_from_config()
         hf_processor = self.info.get_hf_processor()
         image_token_id = hf_processor.image_token_id
 
@@ -1372,7 +1379,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             # See input_processor_for_mllama() for more details.
             num_tiles_tensor = kwargs.pop("num_tiles")
             num_tiles = [t.tolist() for t in num_tiles_tensor]
-            num_tokens_per_tile = (self.image_size // 14)**2 + 1
+            num_tokens_per_tile = calc_token_per_chunk(self.image_size)
             actual_encoder_seq_lens = [
                 sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
             ]
