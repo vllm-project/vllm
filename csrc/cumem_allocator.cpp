@@ -26,7 +26,6 @@ CUresult error_code = no_error;  // store error code
       snprintf(error_msg, sizeof(error_msg), "CUDA Error: %s at %s:%d", \
                error_string, __FILE__, __LINE__);                       \
       std::cerr << error_msg << std::endl;                              \
-      return;                                                           \
     }                                                                   \
   } while (0)
 
@@ -61,14 +60,22 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 
   // Allocate memory using cuMemCreate
   CUDA_CHECK(cuMemCreate(p_memHandle, size, &prop, 0));
+  if (error_code != 0) {
+    return;
+  }
   CUDA_CHECK(cuMemMap(d_mem, size, 0, *p_memHandle, 0));
-
+  if (error_code != 0) {
+    return;
+  }
   CUmemAccessDesc accessDesc = {};
   accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   accessDesc.location.id = device;
   accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
 
   CUDA_CHECK(cuMemSetAccess(d_mem, size, &accessDesc, 1));
+  if (error_code != 0) {
+    return;
+  }
   // std::cout << "create_and_map: device=" << device << ", size=" << size << ",
   // d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
 }
@@ -80,7 +87,13 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   // ", d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
   ensure_context(device);
   CUDA_CHECK(cuMemUnmap(d_mem, size));
+  if (error_code != 0) {
+    return;
+  }
   CUDA_CHECK(cuMemRelease(*p_memHandle));
+  if (error_code != 0) {
+    return;
+  }
 }
 
 PyObject* create_tuple_from_c_integers(unsigned long long a,
@@ -128,12 +141,16 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   size_t granularity;
   CUDA_CHECK(cuMemGetAllocationGranularity(&granularity, &prop,
                                            CU_MEM_ALLOC_GRANULARITY_MINIMUM));
-
+  if (error_code != 0) {
+    return nullptr;
+  }
   size_t alignedSize = ((size + granularity - 1) / granularity) * granularity;
 
   CUdeviceptr d_mem;
   CUDA_CHECK(cuMemAddressReserve(&d_mem, alignedSize, 0, 0, 0));
-
+  if (error_code != 0) {
+    return nullptr;
+  }
   // allocate the CUmemGenericAllocationHandle
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)malloc(
@@ -215,6 +232,9 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
 
   // free address and the handle
   CUDA_CHECK(cuMemAddressFree(d_mem, size));
+  if (error_code != 0) {
+    return nullptr;
+  }
   free(p_memHandle);
 }
 
