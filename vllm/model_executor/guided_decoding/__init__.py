@@ -63,6 +63,14 @@ def maybe_backend_fallback(
                 "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
 
+            # @jacobthebanana: revisit this check after adding support for
+            # trigger_token in outline.
+            if guided_params.trigger_token is not None:
+                raise AttributeError(
+                    "trigger_token requires xgrammar, but xgrammar does not "
+                    "support advanced JSON schema features like patterns or "
+                    "numeric ranges.")
+
         # xgrammar only supports GBNF grammars, so we must convert Lark.
         # We must check if the grammar is likely Lark and if that
         # grammar is convertible to GBNF

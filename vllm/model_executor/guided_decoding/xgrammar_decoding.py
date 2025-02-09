@@ -161,6 +161,7 @@ class GrammarConfig:
     json_object: bool | None = None
     max_threads: int = 8
     tokenizer_data: TokenizerData | None = None
+    trigger_token_id: int | None = None
 
     @classmethod
     def from_guided_params(cls,
@@ -171,6 +172,13 @@ class GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
         tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
+
+        if guided_params.trigger_token:
+            # might raise KeyError e.g., if more than one tokens are specified.
+            vocab = tokenizer.get_vocab()
+            trigger_token_id = vocab[guided_params.trigger_token]
+        else:
+            trigger_token_id = None
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
@@ -190,7 +198,8 @@ class GrammarConfig:
                        vocab_size=model_config.hf_text_config.vocab_size,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
-                       tokenizer_data=tokenizer_data)
+                       tokenizer_data=tokenizer_data,
+                       trigger_token_id=trigger_token_id)
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -217,7 +226,8 @@ class GrammarConfig:
                        vocab_size=model_config.hf_text_config.vocab_size,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
-                       tokenizer_data=tokenizer_data)
+                       tokenizer_data=tokenizer_data,
+                       trigger_token_id=trigger_token_id)
         elif guided_params.json_object:
             return cls(
                 json_object=True,
@@ -225,6 +235,7 @@ class GrammarConfig:
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
+                trigger_token_id=trigger_token_id,
             )
         else:
             raise ValueError(
@@ -243,6 +254,9 @@ class XGrammarLogitsProcessor:
     batch_size: int = field(default=1)
     prefilled: bool = field(default=False)
 
+    # Same length as batch_size (one boolean value for each item in batch)
+    is_triggered: list[bool] = field(default=None)  # type: ignore[assignment]
+
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
 
@@ -254,6 +268,11 @@ class XGrammarLogitsProcessor:
         self.batch_size = 1
         self.token_bitmask = None  # type: ignore[assignment]
         self.prefilled = False
+
+        if self.config.trigger_token_id is not None:
+            self.is_triggered = [False] * self.batch_size
+        else:
+            self.is_triggered = [True] * self.batch_size
 
     def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
@@ -286,12 +305,15 @@ class XGrammarLogitsProcessor:
             self.prefilled = True
         else:
             for i, matcher in enumerate(self.matchers):
-                if not matcher.is_terminated():
-                    sampled_token = input_ids[-1]
+                sampled_token = input_ids[-1]
+                if (self.is_triggered[i]) and (not matcher.is_terminated()):
                     assert self.matchers[i].accept_token(sampled_token)
 
+                if sampled_token == self.config.trigger_token_id:
+                    self.is_triggered[i] = True
+
         for i, matcher in enumerate(self.matchers):
-            if not matcher.is_terminated():
+            if (self.is_triggered[i]) and (not matcher.is_terminated()):
                 # @ubospica: ideally, fill_next_token_bitmask should be
                 # parallelized with model decoding
                 # See https://github.com/vllm-project/vllm/pull/10785/files#r1864278303

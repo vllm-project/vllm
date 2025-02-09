@@ -37,6 +37,7 @@ class GuidedDecodingParams:
     """These are other options that can be set"""
     backend: Optional[str] = None
     whitespace_pattern: Optional[str] = None
+    trigger_token: Optional[str] = None
 
     @staticmethod
     def from_optional(
@@ -47,6 +48,7 @@ class GuidedDecodingParams:
         json_object: Optional[bool] = None,
         backend: Optional[str] = None,
         whitespace_pattern: Optional[str] = None,
+        trigger_token: Optional[str] = None
     ) -> Optional["GuidedDecodingParams"]:
         if all(arg is None
                for arg in (json, regex, choice, grammar, json_object)):
@@ -62,6 +64,7 @@ class GuidedDecodingParams:
             json_object=json_object,
             backend=backend,
             whitespace_pattern=whitespace_pattern,
+            trigger_token=trigger_token,
         )
 
     def __post_init__(self):

@@ -13,6 +13,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+MODEL_FOR_REASONING_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
 
@@ -21,6 +22,18 @@ def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
+
+    with llm.deprecate_legacy_api():
+        yield weakref.proxy(llm)
+        del llm
+    cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(scope="module")
+def llm_for_reasoning():
+    # pytest caches the fixture so we use weakref.proxy to
+    # enable garbage collection
+    llm = LLM(model=MODEL_FOR_REASONING_NAME, max_model_len=1024)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -142,6 +155,57 @@ def test_guided_definition_json_completion(sample_definition_json_schema, llm,
         assert generated_text is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json,
+                            schema=sample_definition_json_schema)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend", ["xgrammar"])
+def test_guided_json_for_reasoning(
+    sample_definition_json_schema,
+    llm_for_reasoning,
+    guided_decoding_backend: str,
+):
+    """Skip R1-styled <think>reasoning</think> before guided decoding."""
+    from vllm.entrypoints.openai.reasoning_parsers import (
+        DeepSeekR1ReasoningParser)
+
+    reasoning_parser = DeepSeekR1ReasoningParser(
+        llm_for_reasoning.get_tokenizer())
+
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=1000,
+        guided_decoding=GuidedDecodingParams(
+            json=sample_definition_json_schema,
+            backend=guided_decoding_backend,
+            trigger_token=reasoning_parser.think_end_token,
+        ),
+    )
+    outputs = llm_for_reasoning.generate(
+        prompts=[("Solve 8x + 7 = -23. Summarize your steps in JSON format. " +
+                  reasoning_parser.think_start_token)] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
+
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+        assert generated_text is not None
+        assert reasoning_parser.think_end_token in generated_text
+        reasoning_output, structured_output = generated_text.split(
+            reasoning_parser.think_end_token, maxsplit=1)
+        print(f"Reasoning output: {reasoning_output!r}, "
+              f"Structured output: {structured_output!r}")
+        output_json = json.loads(structured_output)
         jsonschema.validate(instance=output_json,
                             schema=sample_definition_json_schema)
 

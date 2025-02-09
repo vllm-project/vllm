@@ -336,6 +336,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be either "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_decoding_trigger_token: Optional[str] = Field(
+        default=None,
+        description=("If specified, guided decoding begins only after this "
+                     "token is produced."))
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
         description=(
@@ -464,7 +468,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             grammar=self.guided_grammar,
             json_object=guided_json_object,
             backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern)
+            whitespace_pattern=self.guided_whitespace_pattern,
+            trigger_token=self.guided_decoding_trigger_token,
+        )
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -712,6 +718,10 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be one of "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_decoding_trigger_token: Optional[str] = Field(
+        default=None,
+        description=("If specified, guided decoding begins only after this "
+                     "token is produced."))
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
         description=(
@@ -827,7 +837,9 @@ class CompletionRequest(OpenAIBaseModel):
             grammar=self.guided_grammar,
             json_object=guided_json_object,
             backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern)
+            whitespace_pattern=self.guided_whitespace_pattern,
+            trigger_token=self.guided_decoding_trigger_token,
+        )
 
         return SamplingParams.from_optional(
             n=self.n,
