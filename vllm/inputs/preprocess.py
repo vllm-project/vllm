@@ -565,7 +565,9 @@ class InputPreprocessor:
                 prompt["encoder_prompt"],
                 request_id=request_id,
             )
-
+            if self.model_config.is_multimodal_model:
+                encoder_inputs["prompt_token_ids"] = encoder_inputs[
+                    "encoder_prompt_token_ids"]
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
@@ -616,6 +618,11 @@ class InputPreprocessor:
 
                 encoder_inputs, decoder_inputs = await asyncio.gather(
                     encoder_task, decoder_task)
+
+            if self.model_config.is_multimodal_model:
+                encoder_inputs["prompt_token_ids"] = encoder_inputs[
+                    "encoder_prompt_token_ids"]
+
         else:
             inputs = await self._prompt_to_llm_inputs_async(
                 prompt,
