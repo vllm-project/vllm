@@ -238,6 +238,18 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
+    async def _parallel_sampling_batch(
+        self,
+        prompt: PromptType,
+        sampling_params: SamplingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        pass
+
     async def generate(
         self,
         prompt: PromptType,
@@ -248,9 +260,19 @@ class AsyncLLM(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
-        async for output in self._generate(prompt, sampling_params, request_id,
-                                           lora_request, trace_headers,
-                                           prompt_adapter_request, priority):
+        n = sampling_params.n
+        if n is None or sampling_params.n == 1:
+            generator = self._generate(prompt, sampling_params, request_id,
+                                       lora_request, trace_headers,
+                                       prompt_adapter_request, priority)
+        else:
+            generator = self._parallel_sampling_batch(prompt, sampling_params,
+                                                      request_id, lora_request,
+                                                      trace_headers,
+                                                      prompt_adapter_request,
+                                                      priority)
+
+        async for output in generator:
             yield output
 
     async def _run_output_handler(self):
