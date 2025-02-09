@@ -62,8 +62,8 @@ def maybe_backend_fallback(
                 guided_params.backend = "outlines"
 
             # xgrammar doesn't support some JSON schema features
-            elif (guided_params.json is not None
-                  and has_xgrammar_unsupported_json_features(guided_params.json)):
+            elif (guided_params.json is not None and
+                  has_xgrammar_unsupported_json_features(guided_params.json)):
                 logger.warning(
                     "xgrammar does not support advanced JSON schema features like "
                     "patterns or numeric ranges. "
