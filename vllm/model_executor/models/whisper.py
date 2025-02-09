@@ -617,6 +617,8 @@ def input_mapper_for_whisper(
     if not isinstance(multi_modal_data, list):
         multi_modal_data = [multi_modal_data]
 
+    assert len(multi_modal_data) == 1
+
     if len(multi_modal_data) == 0:
         return MultiModalKwargs()
 
