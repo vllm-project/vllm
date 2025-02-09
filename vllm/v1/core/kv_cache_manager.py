@@ -1,18 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import math
-from collections import defaultdict
-from typing import DefaultDict, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock, ReqKVCacheBlocks,
-                                         generate_block_hash_extra_keys,
-                                         hash_block_tokens,
-                                         hash_request_tokens, intersect_ranges)
-from vllm.v1.core.specialized_manager import GroupedManager
+from vllm.v1.core.kv_cache_utils import MayGroupedKVCacheBlocks
+from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 
@@ -64,7 +58,7 @@ class KVCacheManager:
 
         # Specialized managers for each kv cache group, which handle the
         # different kv cache management logic of different attention layers.
-        self.managers = GroupedManager(
+        self.managers = get_specialized_manager(
             kv_cache_config,
             max_model_len,
             enable_caching,
@@ -76,8 +70,8 @@ class KVCacheManager:
         return 1.0 - (self.block_pool.get_num_free_blocks() /
                       self.num_gpu_blocks)
 
-    def get_computed_blocks(self,
-                            request: Request) -> Tuple[ReqKVCacheBlocks, int]:
+    def get_computed_blocks(
+            self, request: Request) -> Tuple[MayGroupedKVCacheBlocks, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -91,7 +85,7 @@ class KVCacheManager:
         """
         if not self.enable_caching:
             # Prefix caching is disabled.
-            return self.managers.construct(list), 0
+            return self.managers.new_block_list(), 0
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
@@ -110,9 +104,9 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[ReqKVCacheBlocks] = None,
+        new_computed_blocks: Optional[MayGroupedKVCacheBlocks] = None,
         num_new_computed_tokens: int = 0,
-    ) -> Optional[ReqKVCacheBlocks]:
+    ) -> Optional[MayGroupedKVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
         Args:
@@ -140,8 +134,8 @@ class KVCacheManager:
         if num_tokens == 0:
             raise ValueError("num_tokens must be greater than 0")
 
-        new_computed_blocks = new_computed_blocks or self.managers.construct(
-            list)
+        new_computed_blocks = new_computed_blocks or self.managers.new_block_list(
+        )
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
@@ -258,7 +252,6 @@ class KVCacheManager:
         Returns:
             List[int]: The number of common prefix blocks per KV cache group.
         """
-        assert request.status == RequestStatus.RUNNING
         return self.managers.get_num_common_prefix_blocks(
             request, num_running_requests)
 

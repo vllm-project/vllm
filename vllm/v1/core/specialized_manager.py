@@ -8,11 +8,11 @@ from typing import Callable, DefaultDict, Dict, Iterator, List, Optional, Tuple,
 from vllm.v1.core.block_pool import BlockPool
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         PrefixLengthRange, ReqKVCacheBlocks,
+                                         PrefixLengthRange,
                                          hash_request_tokens, intersect_ranges)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, SlidingWindowSpec)
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import ConstantList
 
 T = TypeVar("T")
@@ -91,8 +91,9 @@ class SpecializedManager(ABC):
                                           self.block_size]
         return computed_blocks
 
-    def get_req_num_new_blocks(self, request, new_computed_blocks,
-                               num_computed_tokens, num_tokens):
+    def get_req_num_new_blocks(self, request: Request,
+                               new_computed_blocks: List[KVCacheBlock],
+                               num_computed_tokens: int, num_tokens: int):
         req_blocks = self.req_to_blocks[request.request_id]
         return self.get_num_new_blocks(
             num_computed_tokens, num_tokens,
@@ -174,6 +175,7 @@ class SpecializedManager(ABC):
 
     def get_num_common_prefix_blocks(self, request: Request,
                                      num_running_requests: int) -> int:
+        assert request.status == RequestStatus.RUNNING
         blocks = self.req_to_blocks[request.request_id]
         num_common_blocks = 0
         for block in blocks:
@@ -182,6 +184,27 @@ class SpecializedManager(ABC):
             else:
                 break
         return num_common_blocks
+
+    def new_block_list(self) -> List[KVCacheBlock]:
+        return []
+
+    def pop_blocks_of_request(self,
+                              request_id: int) -> Optional[List[KVCacheBlock]]:
+        blocks = self.req_to_blocks.pop(request_id, None)
+        return blocks
+
+    def free_blocks(self,
+                    blocks_to_free: List[KVCacheBlock],
+                    need_reverse: bool = False) -> None:
+        if need_reverse:
+            blocks_to_free = list(reversed(blocks_to_free))
+        self.block_pool.free_blocks(blocks_to_free)
+
+    def iter_all(self, x: List[T]) -> Iterator[T]:
+        return iter(x)
+
+    def pop_block_hashes_of_request(self, request_id: int) -> None:
+        self.req_to_block_hashes.pop(request_id, None)
 
     @abstractmethod
     def get_possible_cached_prefix(
@@ -384,8 +407,9 @@ class GroupedManager(SpecializedManager):
             manager.hash_request_tokens(request) for manager in self.managers
         ]
 
-    def truncate_computed_blocks(self, computed_blocks: ReqKVCacheBlocks,
-                                 num_computed_tokens: int) -> ReqKVCacheBlocks:
+    def truncate_computed_blocks(
+            self, computed_blocks: List[List[KVCacheBlock]],
+            num_computed_tokens: int) -> List[List[KVCacheBlock]]:
         return [
             manager.truncate_computed_blocks(computed_blocks[i],
                                              num_computed_tokens)
@@ -393,7 +417,7 @@ class GroupedManager(SpecializedManager):
         ]
 
     def get_req_num_new_blocks(self, request: Request,
-                               new_computed_blocks: ReqKVCacheBlocks,
+                               new_computed_blocks: List[List[KVCacheBlock]],
                                num_computed_tokens: int, num_tokens: int):
         num_new_blocks = [
             manager.get_req_num_new_blocks(request, new_computed_blocks[i],
@@ -401,27 +425,6 @@ class GroupedManager(SpecializedManager):
             for i, manager in enumerate(self.managers)
         ]
         return sum(max(x, 0) for x in num_new_blocks)
-
-    def allocate_slots(self, request: Request,
-                       new_computed_blocks: Optional[ReqKVCacheBlocks],
-                       num_new_blocks: int, num_preallocate_blocks: int,
-                       num_computed_tokens: int, num_tokens: int):
-        # NOTE: the input _num_new_blocks is the sum of all groups.
-        # recompute instead
-        num_new_blocks_per_group = [
-            manager.get_req_num_new_blocks(request, new_computed_blocks[i],
-                                           num_computed_tokens, num_tokens)
-            for i, manager in enumerate(self.managers)
-        ]
-        assert num_new_blocks == sum(
-            max(x, 0) for x in num_new_blocks_per_group)
-        return [
-            manager.allocate_slots(
-                request, new_computed_blocks[i] if new_computed_blocks
-                is not None else None, num_new_blocks_per_group[i],
-                num_preallocate_blocks, num_computed_tokens, num_tokens)
-            for i, manager in enumerate(self.managers)
-        ]
 
     def get_num_common_prefix_blocks(self, request: Request,
                                      num_running_requests: int):
@@ -447,10 +450,13 @@ class GroupedManager(SpecializedManager):
             for i, manager in enumerate(self.managers)
         ]
 
+    def new_block_list(self) -> List[List[KVCacheBlock]]:
+        return [manager.new_block_list() for manager in self.managers]
+
     def pop_blocks_of_request(
             self, request_id: int) -> Optional[List[List[KVCacheBlock]]]:
         blocks = [
-            manager.req_to_blocks.pop(request_id, None)
+            manager.pop_blocks_of_request(request_id)
             for manager in self.managers
         ]
         if all(blks is None for blks in blocks):
@@ -460,10 +466,28 @@ class GroupedManager(SpecializedManager):
 
     def pop_block_hashes_of_request(self, request_id: int) -> None:
         for manager in self.managers:
-            manager.req_to_block_hashes.pop(request_id, None)
+            manager.pop_block_hashes_of_request(request_id)
 
-    def construct(self, lambda_fn: Callable[[], T]) -> List[T]:
-        return [lambda_fn() for _ in range(len(self.managers))]
+    def allocate_slots(self, request: Request,
+                       new_computed_blocks: Optional[List[List[KVCacheBlock]]],
+                       num_new_blocks: int, num_preallocate_blocks: int,
+                       num_computed_tokens: int, num_tokens: int):
+        # NOTE: the input _num_new_blocks is the sum of all groups.
+        # recompute instead
+        num_new_blocks_per_group = [
+            manager.get_req_num_new_blocks(request, new_computed_blocks[i],
+                                           num_computed_tokens, num_tokens)
+            for i, manager in enumerate(self.managers)
+        ]
+        assert num_new_blocks == sum(
+            max(x, 0) for x in num_new_blocks_per_group)
+        return [
+            manager.allocate_slots(
+                request, new_computed_blocks[i] if new_computed_blocks
+                is not None else None, num_new_blocks_per_group[i],
+                num_preallocate_blocks, num_computed_tokens, num_tokens)
+            for i, manager in enumerate(self.managers)
+        ]
 
     def _get_common_prefix_length(
         self, prefix_length: List[List[PrefixLengthRange]]
@@ -570,11 +594,16 @@ class GroupedManager(SpecializedManager):
     def get_num_new_blocks(self, num_computed_tokens: int,
                            num_append_tokens: int,
                            num_allocated_blocks: int) -> int:
-        raise NotImplementedError
+        raise RuntimeError("This method should not be called")
 
 
 def get_specialized_manager(kv_cache_config: KVCacheConfig, max_model_len: int,
                             enable_caching: bool,
                             block_pool: BlockPool) -> SpecializedManager:
-    return GroupedManager(kv_cache_config, max_model_len, enable_caching,
-                          block_pool)
+    if len(kv_cache_config.groups) == 1:
+        return spec_manager_map[type(kv_cache_config.groups[0].kv_cache_spec)](
+            kv_cache_config.groups[0].kv_cache_spec, max_model_len,
+            enable_caching, 0, block_pool)
+    else:
+        return GroupedManager(kv_cache_config, max_model_len, enable_caching,
+                              block_pool)

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, List
+from typing import Callable, List, Union
 
 import numpy as np
 import torch
@@ -144,3 +144,20 @@ class GroupedBlockTable:
 
     def __getitem__(self, idx: int) -> "BlockTable":
         return self.block_tables[idx]
+
+
+def initialize_block_table(
+    max_num_reqs: int,
+    max_model_len: int,
+    max_num_tokens: int,
+    pin_memory: bool,
+    device: torch.device,
+    kv_cache_config: KVCacheConfig,
+) -> Union[BlockTable, GroupedBlockTable]:
+    if len(kv_cache_config.groups) == 1:
+        return BlockTable(max_num_reqs, max_model_len, max_num_tokens,
+                          pin_memory, device,
+                          kv_cache_config.groups[0].kv_cache_spec)
+    else:
+        return GroupedBlockTable(max_num_reqs, max_model_len, max_num_tokens,
+                                 pin_memory, device, kv_cache_config)

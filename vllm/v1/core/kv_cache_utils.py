@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -90,11 +90,11 @@ sliding window attention), the attention layers will be split to multiple
 can use the same KVCacheBlock. There will be only one group if all layers use 
 the same type of KV cache.
 See KVCacheConfig class for more examples of "KV cache group".
-KVCacheBlocks: the blocks of one group of layer in one request
-ReqKVCacheBlocks: the blocks of all groups of layers in one request.
+List[KVCacheBlocks]: the blocks of one group of layer in one request
+List[List[KVCacheBlocks]]: the blocks of all groups of layers in one request.
 """
-KVCacheBlocks = List[KVCacheBlock]
-ReqKVCacheBlocks = List[KVCacheBlocks]
+MayGroupedKVCacheBlocks = Union[List["KVCacheBlock"],
+                                List[List["KVCacheBlock"]]]
 
 
 class FreeKVCacheBlockQueue:

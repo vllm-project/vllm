@@ -12,8 +12,9 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, GroupedBlockIDs,
-                                        KVCacheConfig)
+from vllm.v1.kv_cache_interface import (BlockIDGenerator, FullAttentionSpec,
+                                        GroupedBlockIDs, KVCacheConfig,
+                                        MayGroupedBlockIDs, MayGroupedInt)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -54,6 +55,7 @@ class Scheduler:
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching)
+        BlockIDGenerator.num_kv_cache_groups = len(kv_cache_config.groups)
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
@@ -166,8 +168,7 @@ class Scheduler:
             # Schedule the request.
             scheduled_running_reqs.append(request)
             req_to_new_block_ids[
-                request.request_id] = GroupedBlockIDs.from_kv_cache_blocks(
-                    new_blocks)
+                request.request_id] = BlockIDGenerator.generate(new_blocks)
 
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -250,9 +251,9 @@ class Scheduler:
                         f"Invalid request status: {request.status}")
 
                 req_to_new_block_ids[
-                    request.request_id] = GroupedBlockIDs.from_kv_cache_blocks(
-                        computed_blocks
-                    ) + GroupedBlockIDs.from_kv_cache_blocks(new_blocks)
+                    request.request_id] = BlockIDGenerator.generate(
+                        computed_blocks) + BlockIDGenerator.generate(
+                            new_blocks)
 
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
@@ -584,14 +585,14 @@ class NewRequestData:
     mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
-    block_ids: GroupedBlockIDs
+    block_ids: MayGroupedBlockIDs
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: GroupedBlockIDs,
+        block_ids: MayGroupedBlockIDs,
         num_computed_tokens: int,
     ) -> "NewRequestData":
         return cls(
@@ -615,7 +616,7 @@ class CachedRequestData:
     # the request's block IDs. If True, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
-    new_block_ids: GroupedBlockIDs
+    new_block_ids: MayGroupedBlockIDs
     num_computed_tokens: int
 
     @classmethod
@@ -623,7 +624,7 @@ class CachedRequestData:
         cls,
         request: Request,
         resumed_from_preemption: bool,
-        new_block_ids: GroupedBlockIDs,
+        new_block_ids: MayGroupedBlockIDs,
         num_computed_tokens: int,
     ) -> "CachedRequestData":
         return cls(
@@ -645,7 +646,7 @@ class SchedulerOutput:
     scheduled_encoder_inputs: Dict[str, List[int]]
     # Number of common prefix blocks per kv cache group
     # See KVCacheConfig class for the meaning of "group"
-    num_common_prefix_blocks: List[int]
+    num_common_prefix_blocks: MayGroupedInt
 
     finished_req_ids: Set[str]
     free_encoder_input_ids: List[Tuple[str, int]]
