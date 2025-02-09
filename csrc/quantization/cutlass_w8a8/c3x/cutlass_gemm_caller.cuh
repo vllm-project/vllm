@@ -54,7 +54,6 @@ void cutlass_gemm_caller(torch::Device device,
 }
 
 template <typename GemmKernel>
-<<<<<<< HEAD
 void cutlass_gemm_caller_streamK(
     torch::Device device, cute::Shape<int, int, int, int> prob_shape,
     typename GemmKernel::MainloopArguments mainloop_args,
@@ -67,20 +66,7 @@ void cutlass_gemm_caller_streamK(
       PersistentTileSchedulerSm90StreamKParams::DecompositionMode;
   using ReductionMode = cutlass::gemm::kernel::detail::
       PersistentTileSchedulerSm90StreamKParams::ReductionMode;
-=======
-void cutlass_gemm_caller_streamK(
-    torch::Device device, cute::Shape<int, int, int, int> prob_shape,
-    typename GemmKernel::MainloopArguments mainloop_args,
-    typename GemmKernel::EpilogueArguments epilogue_args) {
-  typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
-                                      prob_shape, mainloop_args, epilogue_args};
 
-  // add args for StreamK
-  using DecompositionMode = cutlass::gemm::kernel::detail::
-      PersistentTileSchedulerSm90StreamKParams::DecompositionMode;
-  using ReductionMode = cutlass::gemm::kernel::detail::
-      PersistentTileSchedulerSm90StreamKParams::ReductionMode;
->>>>>>> 68f18b41 (Add streamK for block-quantized CUTLASS kernels)
   args.scheduler.decomposition_mode = DecompositionMode::StreamK;
   args.scheduler.reduction_mode = ReductionMode::Nondeterministic;
 
