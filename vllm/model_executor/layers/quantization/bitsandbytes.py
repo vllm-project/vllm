@@ -133,8 +133,16 @@ def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
     components = prefix.split('.')
 
     # Check if any of the skip modules exactly matches any component
-    return any(module_name in components
-               for module_name in llm_int8_skip_modules)
+    vllm_check = any(
+        module_name in components
+        for module_name in llm_int8_skip_modules
+    )
+
+    # Allow certain layers to not be quantized
+    components = set(".".join(components[:i+1]) for i in range(len(components)))
+    unsloth_check = len(set(llm_int8_skip_modules) & components) != 0
+    
+    return vllm_check or unsloth_check
 
 
 class BitsAndBytesLinearMethod(LinearMethodBase):
