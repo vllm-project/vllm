@@ -185,5 +185,6 @@ for actor in training_actors:
 for llm in inference_engines:
     ray.get(
         llm.collective_rpc.remote("update_weights_from_ipc_handles",
-                                  ipc_handles))
-    assert ray.get(llm.collective_rpc.remote("check_weights_changed"))
+                                  args=(ipc_handles, )))
+    assert ray.get(
+        llm.collective_rpc.remote("check_weights_changed", args=tuple()))
