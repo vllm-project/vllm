@@ -233,7 +233,7 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   // free address and the handle
   CUDA_CHECK(cuMemAddressFree(d_mem, size));
   if (error_code != 0) {
-    return nullptr;
+    return;
   }
   free(p_memHandle);
 }
