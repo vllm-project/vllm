@@ -1302,7 +1302,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
-    ) -> str:
+    ) -> Union[str, list[int]]:
         """Create input prompt for the encoder."""
         raise NotImplementedError
 

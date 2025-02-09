@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers.models.mllama.configuration_mllama as config_mllama
+from PIL.Image import Image
 from torch import nn
 from transformers import BatchFeature, MllamaConfig
 from transformers.modeling_outputs import (BaseModelOutput,
@@ -54,7 +55,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
-                                   MultiModalDataItems)
+                                   MultiModalDataDict, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement)
@@ -234,9 +235,10 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
     def create_encoder_prompt(
         self,
         prompt: Union[str, list[int]],
-        mm_data: MultiModalDataItems,
+        mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
-        num_images = len(mm_data.get_items("image")) if mm_data else 0
+        data = mm_data.get("image", [])
+        num_images = 1 if isinstance(data, Image) else len(data)
         image_token_id = self.info.get_hf_config().image_token_index
         return [image_token_id] * num_images
 
