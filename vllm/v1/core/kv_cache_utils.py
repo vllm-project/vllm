@@ -16,14 +16,6 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-class Grouped:
-    num_kv_cache_groups: int
-
-    @classmethod
-    def construct(cls, lambda_fn):
-        return [lambda_fn() for _ in range(Grouped.num_kv_cache_groups)]
-
-
 class BlockHashType(NamedTuple):
     """Hash value of a block (int), the token IDs in the block, and extra keys.
     We keep a tuple of token IDs and extra keys to reduce the likelihood of

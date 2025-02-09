@@ -196,7 +196,7 @@ def test_hash_block_tokens():
                                    extra_keys)
     assert isinstance(block_hash, BlockHashType)
     assert block_hash.hash_value == hash(
-        (parent_block_hash, 0, curr_block_token_ids, extra_keys))
+        (parent_block_hash, curr_block_token_ids, 0, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
     assert block_hash.extra_keys == extra_keys
 
@@ -257,8 +257,8 @@ def test_hash_tokens_different_mm_input():
         mm_hashes=["hash3", "hash2"],
     )
     block_size = 3
-    block_hashes1 = hash_request_tokens(block_size, request1)
-    block_hashes2 = hash_request_tokens(block_size, request2)
+    block_hashes1 = hash_request_tokens(block_size, request1, 0)
+    block_hashes2 = hash_request_tokens(block_size, request2, 0)
     assert block_hashes1[0] != block_hashes2[0]
     assert block_hashes1[1] != block_hashes2[1]
 

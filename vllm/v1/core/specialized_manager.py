@@ -6,7 +6,7 @@ import math
 from typing import Callable, DefaultDict, Dict, Iterator, List, Optional, Tuple, Type, TypeVar
 
 from vllm.utils import cdiv
-from vllm.v1.core.kv_cache_utils import (BlockHashType, Grouped, KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          PrefixLength, PrefixLengthRange,
                                          ReqKVCacheBlocks, hash_request_tokens,
                                          intersect_ranges)
@@ -22,8 +22,12 @@ T = TypeVar("T")
 class BlockPoolOperations:
     get_cached_block: Callable[[BlockHashType], Optional[KVCacheBlock]]
     get_null_block: Callable[[], KVCacheBlock]
-    cache_full_blocks: Callable[
-        [Request, int, List[KVCacheBlock], KVCacheBlock, int], None]
+    cache_full_blocks: Callable[[
+        Request, List[BlockHashType], int, List[KVCacheBlock], KVCacheBlock,
+        int
+    ], None]
+    get_new_blocks: Callable[[int], List[KVCacheBlock]]
+    touch: Callable[[List[KVCacheBlock]], None]
 
 
 class SpecializedManager(ABC):
@@ -120,7 +124,7 @@ class SpecializedManager(ABC):
             new_computed_blocks = []
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self._touch(new_computed_blocks)
+            self.block_pool_operations.touch(new_computed_blocks)
         else:
             assert len(new_computed_blocks) == 0, (
                 "Computed blocks should be empty when "
@@ -149,9 +153,9 @@ class SpecializedManager(ABC):
             )
 
             assert num_new_blocks >= 0
-            assert num_new_blocks <= self.free_block_queue.num_free_blocks
 
-            new_blocks = self._get_new_blocks(num_new_blocks)
+            new_blocks = self.block_pool_operations.get_new_blocks(
+                num_new_blocks)
             req_blocks.extend(new_blocks)
 
         if not self.enable_caching:
@@ -169,6 +173,7 @@ class SpecializedManager(ABC):
         if new_full_blocks:
             self.block_pool_operations.cache_full_blocks(
                 request=request,
+                block_hashes=self.req_to_block_hashes[request.request_id],
                 blk_start_idx=num_computed_full_blocks,
                 # The new full blocks are the full blocks that are not
                 # computed.
@@ -179,22 +184,6 @@ class SpecializedManager(ABC):
             )
 
         return new_blocks
-
-    def _touch(self, blocks: ReqKVCacheBlocks) -> None:
-        """Touch a block increases its reference count by 1, and may remove
-        the block from the free queue. This is used when a block is hit by
-        another request with the same prefix.
-
-        Args:
-            blocks: A list of blocks to touch.
-        """
-        for blocks_of_group in blocks:
-            for block in blocks_of_group:
-                # ref_cnt=0 means this block is in the free list (i.e. eviction
-                # candidate), so remove it.
-                if block.ref_cnt == 0 and block != self._null_block:
-                    self.free_block_queue.remove(block)
-                block.incr_ref()
 
     def get_num_common_prefix_blocks(self, request: Request,
                                      num_running_requests: int) -> int:
@@ -428,12 +417,12 @@ class GroupedManager:
         ]
 
     def get_req_num_new_blocks(self, request: Request,
-                               new_computed_blocks: Optional[ReqKVCacheBlocks],
+                               new_computed_blocks: ReqKVCacheBlocks,
                                num_computed_tokens: int, num_tokens: int):
         return [
-            manager.get_req_num_new_blocks(request, new_computed_blocks,
+            manager.get_req_num_new_blocks(request, new_computed_blocks[i],
                                            num_computed_tokens, num_tokens)
-            for manager in self.managers
+            for i, manager in enumerate(self.managers)
         ]
 
     def allocate_slots(self, request: Request,

@@ -41,7 +41,7 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
         tensors={},
         groups=[
             KVCacheGroup(['layer'],
-                         FullAttentionSpec(block_size, 1, 1, torch.float32))
+                         FullAttentionSpec(block_size, 1, 1, 1, torch.float32))
         ],
     )
 
@@ -63,7 +63,8 @@ def test_prefill():
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
-    assert len(manager.req_to_block_hashes[0][req0.request_id]) == 3
+    assert len(
+        manager.managers.managers[0].req_to_block_hashes[req0.request_id]) == 3
     assert not computed_blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, 55, computed_blocks,
@@ -89,7 +90,8 @@ def test_prefill():
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
-    assert len(manager.req_to_block_hashes[0][req1.request_id]) == 3
+    assert len(
+        manager.managers.managers[0].req_to_block_hashes[req1.request_id]) == 3
     assert [b.block_id for b in computed_blocks[0]] == [0, 1, 2]
     assert num_computed_tokens == 3 * 16
     num_new_tokens = 53 - 3 * 16
@@ -121,7 +123,8 @@ def test_prefill():
     unique_token_ids = [3] * 6
     req2 = make_request("2", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
-    assert len(manager.req_to_block_hashes[0][req2.request_id]) == 3
+    assert len(
+        manager.managers.managers[0].req_to_block_hashes[req2.request_id]) == 3
     assert [b.block_id for b in computed_blocks[0]] == [0, 1, 2]
     assert num_computed_tokens == 3 * 16
     num_new_tokens = 53 - 3 * 16
@@ -182,7 +185,8 @@ def test_decode():
         req0.append_output_token_ids(8)
     new_blocks = manager.allocate_slots(req0, 4)
     assert new_blocks is not None and len(new_blocks[0]) == 0
-    assert manager.req_to_blocks[req0.request_id][0][-2].block_hash is None
+    assert manager.managers.managers[0].req_to_blocks[
+        req0.request_id][-2].block_hash is None
 
     # Append slots without allocating a new block, but start using the
     # preallocated block.
@@ -193,7 +197,8 @@ def test_decode():
         req0.append_output_token_ids(7)
     new_blocks = manager.allocate_slots(req0, 15)
     assert new_blocks is not None and len(new_blocks[0]) == 0
-    assert manager.req_to_blocks[req0.request_id][0][-2].block_hash is not None
+    assert manager.managers.managers[0].req_to_blocks[
+        req0.request_id][-2].block_hash is not None
 
     # Append slots with allocating a new block.
     req0.num_computed_tokens = 74
@@ -441,13 +446,14 @@ def test_cache_blocks():
     #  Block 2: [8, 9, 10, 11]
     #  Block 3: [12, 13]
     req = make_request("0", list(range(14)))
-    req.set_kv_block_hashes([[]])
 
     # Test that blocks are cached correctly for 2 full blocks from the start.
     blocks = [KVCacheBlock(block_id=i) for i in range(2)]
+    block_hashes = []
 
     manager._cache_full_blocks(
         request=req,
+        block_hashes=block_hashes,
         blk_start_idx=0,
         full_blocks=blocks,
         prev_block=None,
@@ -461,6 +467,7 @@ def test_cache_blocks():
     blocks = [KVCacheBlock(block_id=2)]
     manager._cache_full_blocks(
         request=req,
+        block_hashes=block_hashes,
         blk_start_idx=2,
         full_blocks=blocks,
         prev_block=None,
@@ -633,7 +640,8 @@ def test_reset_prefix_cache():
     all_token_ids = full_block_token_ids + unique_token_ids
     req1 = make_request("1", all_token_ids)
     computed_blocks, _ = manager.get_computed_blocks(req1)
-    assert len(manager.req_to_block_hashes[0][req1.request_id]) == 3
+    assert len(
+        manager.managers.managers[0].req_to_block_hashes[req1.request_id]) == 3
     assert len(computed_blocks[0]) == 3
     blocks = manager.allocate_slots(req1, 7, computed_blocks)
     assert [b.block_id for b in blocks[0]] == [4]

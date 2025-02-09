@@ -12,7 +12,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens, intersect_ranges)
-from vllm.v1.core.specialized_manager import BlockPoolOperations, GroupedManager, Grouped
+from vllm.v1.core.specialized_manager import BlockPoolOperations, GroupedManager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 
@@ -72,6 +72,8 @@ class KVCacheManager:
                 get_cached_block=self._get_cached_block,
                 get_null_block=self.get_null_block,
                 cache_full_blocks=self._cache_full_blocks,
+                get_new_blocks=self._get_new_blocks,
+                touch=self._touch,
             ),
         )
 
@@ -116,13 +118,13 @@ class KVCacheManager:
         """
         if not self.enable_caching:
             # Prefix caching is disabled.
-            return Grouped.construct(list), 0
+            return self.managers.construct(list), 0
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.managers.hash_request_tokens(request)
 
-        computed_blocks, prefix_length = self.managers.get_possible_cached_prefix(
+        prefix_length, computed_blocks = self.managers.get_possible_cached_prefix(
             block_hashes)
 
         num_computed_tokens = self.managers._get_common_computed_tokens(
@@ -202,7 +204,8 @@ class KVCacheManager:
         # have at least `num_new_blocks` free blocks for each group.
         num_preallocate_blocks = min(
             self.num_preallocate_blocks,
-            (self.free_block_queue.num_free_blocks - total_new_blocks) //
+            (self.free_block_queue.num_free_blocks -
+             num_evictable_computed_blocks - total_new_blocks) //
             len(self.kv_cache_config.groups))
 
         new_blocks = self.managers.allocate_slots(request, new_computed_blocks,
@@ -388,6 +391,7 @@ class KVCacheManager:
     def _cache_full_blocks(
         self,
         request: Request,
+        block_hashes: List[BlockHashType],
         blk_start_idx: int,
         full_blocks: List[KVCacheBlock],
         prev_block: Optional[KVCacheBlock],
@@ -409,8 +413,7 @@ class KVCacheManager:
             prev_block: The previous block in the chain.
             kv_cache_group_id: The KV cache group that the blocks belong to
         """
-        block_hashes = self.req_to_block_hashes[request.request_id]
-        num_cached_block_hashes = len(block_hashes[kv_cache_group_id])
+        num_cached_block_hashes = len(block_hashes)
 
         # Update the new blocks with the block hashes through the chain.
         prev_block_hash_value = None
@@ -445,7 +448,7 @@ class KVCacheManager:
                 # this request (either the prompt tokens or the previously
                 # generated tokens with preemption). In this case we simply
                 # reuse the block hash.
-                block_hash = block_hashes[kv_cache_group_id][blk_idx]
+                block_hash = block_hashes[blk_idx]
             else:
                 # Otherwise compute the block hash and cache it in the request
                 # in case it will be preempted in the future.
@@ -468,12 +471,27 @@ class KVCacheManager:
                 block_hash = hash_block_tokens(prev_block_hash_value,
                                                block_tokens, kv_cache_group_id,
                                                extra_keys)
-                block_hashes[kv_cache_group_id].append(block_hash)
+                block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
             prev_block_hash_value = block_hash.hash_value
+
+    def _touch(self, blocks: ReqKVCacheBlocks) -> None:
+        """Touch a block increases its reference count by 1, and may remove
+        the block from the free queue. This is used when a block is hit by
+        another request with the same prefix.
+
+        Args:
+            blocks: A list of blocks to touch.
+        """
+        for block in blocks:
+            # ref_cnt=0 means this block is in the free list (i.e. eviction
+            # candidate), so remove it.
+            if block.ref_cnt == 0 and block != self._null_block:
+                self.free_block_queue.remove(block)
+            block.incr_ref()
 
     def free_block_hashes(self, request: Request) -> None:
         """Discard the block hashes for the request.
