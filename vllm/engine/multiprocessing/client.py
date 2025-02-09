@@ -689,6 +689,7 @@ class MQLLMEngineClient(EngineClient):
     async def send_request_and_get_response(self, request: Any) -> Any:
         # Create output queue for this requests.
         queue: asyncio.Queue[Union[None, BaseException]] = asyncio.Queue()
+        self.output_queues[id(request)] = queue
 
         # Send the request
         request_bytes = pickle.dumps(request)
@@ -696,6 +697,7 @@ class MQLLMEngineClient(EngineClient):
 
         # Wait for the response
         request_output = await queue.get()
+        self.output_queues.pop(id(request))
 
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
