@@ -598,11 +598,16 @@ def input_processor_for_whisper(ctx: InputContext, inputs):
     audio, orig_sr = multi_modal_data["audio"]
     processor = cached_get_processor(ctx.model_config.model)
     target_sr = processor.feature_extractor.sampling_rate
-    audio = resample_audio(audio, orig_sr=orig_sr, target_sr=target_sr)
+    # NOTE: resampling is expensive (~1s), so skip it if the
+    # audio data sent to the Engine is already in Whisper's
+    # SAMPLE_RATE=16000.
+    if orig_sr != target_sr:
+        audio = resample_audio(audio, orig_sr=orig_sr, target_sr=target_sr)
     multi_modal_data["audio"] = (audio, target_sr)
     # Pre-allocate placeholder tokens in encoder sequence
     num_tokens = get_max_whisper_audio_tokens(ctx)
     inputs["encoder"]["prompt_token_ids"] = [0] * num_tokens
+
     return inputs
 
 
