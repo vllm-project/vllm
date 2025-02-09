@@ -25,5 +25,8 @@ def test_sleep_mode():
                                 "VLLM_SERVER_DEV_MODE": "1",
                                 "CUDA_VISIBLE_DEVICES": "0"
                             }) as remote_server:
-        requests.post(remote_server.url_for("/sleep"), data={"level": "1"})
-        requests.post(remote_server.url_for("/wake_up"))
+        response = requests.post(remote_server.url_for("/sleep"),
+                                 data={"level": "1"})
+        assert response.status_code == 200
+        response = requests.post(remote_server.url_for("/wake_up"))
+        assert response.status_code == 200
