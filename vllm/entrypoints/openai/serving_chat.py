@@ -3,10 +3,10 @@
 import asyncio
 import json
 import time
-from typing import (Tuple, AsyncGenerator, AsyncIterator, Callable, Dict, Final, List,
+from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, List,
                     Optional)
 from typing import Sequence as GenericSequence
-from typing import Union
+from typing import Tuple, Union
 
 from fastapi import Request
 
@@ -21,8 +21,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, PromptTokenUsageInfo,
-    RequestResponseMetadata, ToolCall, UsageInfo, InBandMetrics, InBandMetrics)
+    DeltaToolCall, ErrorResponse, FunctionCall, InBandMetrics,
+    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
                                                        ReasoningParserManager)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
@@ -56,7 +56,7 @@ class OpenAIServingChat(OpenAIServing):
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
-        in_band_metrics: Optional[str]=None,
+        in_band_metrics: Optional[str] = None,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
@@ -115,7 +115,7 @@ class OpenAIServingChat(OpenAIServing):
         request: ChatCompletionRequest,
         raw_request: Optional[Request] = None,
     ) -> Tuple[Union[AsyncGenerator[str, None], ChatCompletionResponse,
-               ErrorResponse],Optional[InBandMetrics]]:
+                     ErrorResponse], Optional[InBandMetrics]]:
         """
         Chat Completion API similar to OpenAI's API.
 
@@ -675,7 +675,8 @@ class OpenAIServingChat(OpenAIServing):
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> Tuple[Union[ErrorResponse, ChatCompletionResponse],Optional[InBandMetrics]]:
+    ) -> Tuple[Union[ErrorResponse, ChatCompletionResponse],
+               Optional[InBandMetrics]]:
 
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
@@ -690,9 +691,11 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         assert final_res is not None
-        
-        req_inband_metrics = InBandMetrics(cpu_kv_cache_utilisation=final_res.metrics.cpu_kv_cache_utilization,
-                                           gpu_kv_cache_utilisation=final_res.metrics.gpu_kv_cache_utilization)
+
+        req_inband_metrics = InBandMetrics(cpu_kv_cache_utilisation=final_res.
+                                           metrics.cpu_kv_cache_utilization,
+                                           gpu_kv_cache_utilisation=final_res.
+                                           metrics.gpu_kv_cache_utilization)
 
         choices: List[ChatCompletionResponseChoice] = []
 
@@ -839,7 +842,7 @@ class OpenAIServingChat(OpenAIServing):
                 cached_tokens=final_res.num_cached_tokens)
 
         request_metadata.final_usage_info = usage
-        
+
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,

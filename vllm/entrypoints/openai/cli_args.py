@@ -269,10 +269,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action='store_true',
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.")
-    
-    parser.add_argument('--enable-inband-metrics', choices=['BIN', 'JSON', 'TEXT'],
-            default=None, help='Format for inband metrics reporting according to orca format')
-    
+
+    parser.add_argument(
+        '--enable-inband-metrics',
+        choices=['BIN', 'JSON', 'TEXT'],
+        default=None,
+        help='Format for inband metrics reporting according to orca format')
+
     return parser
 
 

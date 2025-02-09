@@ -63,7 +63,8 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         request: CompletionRequest,
         raw_request: Optional[Request] = None,
-    ) -> Tuple[Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse],Optional[InBandMetrics]]:
+    ) -> Tuple[Union[AsyncGenerator[str, None], CompletionResponse,
+                     ErrorResponse], Optional[InBandMetrics]]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/completions/create
@@ -188,7 +189,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 model_name,
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
-                request_metadata=request_metadata)
+                request_metadata=request_metadata), None
 
         # Non-streaming response
         final_res_batch: List[Optional[RequestOutput]] = [None] * num_prompts
@@ -208,20 +209,21 @@ class OpenAIServingCompletion(OpenAIServing):
             final_res_batch_checked = cast(List[RequestOutput],
                                            final_res_batch)
 
-            response, in_band_metrics = self.request_output_to_completion_response(
-                final_res_batch_checked,
-                request,
-                request_id,
-                created_time,
-                model_name,
-                tokenizer,
-                request_metadata,
-            )
+            (response,
+             in_band_metrics) = self.request_output_to_completion_response(
+                 final_res_batch_checked,
+                 request,
+                 request_id,
+                 created_time,
+                 model_name,
+                 tokenizer,
+                 request_metadata,
+             )
         except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
+            return self.create_error_response("Client disconnected"), None
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
@@ -232,7 +234,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 yield f"data: {response_json}\n\n"
                 yield "data: [DONE]\n\n"
 
-            return fake_stream_generator()
+            return fake_stream_generator(), None
 
         return response, in_band_metrics
 
@@ -390,13 +392,13 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> Tuple[CompletionResponse,Optional[InBandMetrics]]:
+    ) -> Tuple[CompletionResponse, Optional[InBandMetrics]]:
         choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
-        
 
-        latest_in_band_metric : Tuple[int, InBandMetrics] = (0, InBandMetrics(format=self.in_band_metrics))
+        latest_in_band_metric: Tuple[int, InBandMetrics] = (
+            0, InBandMetrics(format=self.in_band_metrics))
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -408,14 +410,21 @@ class OpenAIServingCompletion(OpenAIServing):
                             if logprob_values.logprob == float('-inf'):
                                 logprob_values.logprob = -9999.0
             prompt_text = final_res.prompt
-            if final_res.metrics.cpu_kv_cache_utilization is not None or final_res.metrics.gpu_kv_cache_utilization is not None:
-                in_band_metric_timestamp, in_band_metric = final_res.metrics.last_token_time, InBandMetrics(
-                    cpu_kv_cache_utilisation=final_res.metrics.cpu_kv_cache_utilization, 
-                    gpu_kv_cache_utilisation=final_res.metrics.gpu_kv_cache_utilization,
-                    format = self.in_band_metrics)
-                if not latest_in_band_metric[1] or latest_in_band_metric[0]<in_band_metric_timestamp:
-                    latest_in_band_metric = (in_band_metric_timestamp, in_band_metric)    
-                
+            if final_res.metrics and (
+                    final_res.metrics.cpu_kv_cache_utilization is not None
+                    or final_res.metrics.gpu_kv_cache_utilization is not None):
+                in_band_metric_timestamp, in_band_metric = (
+                    final_res.metrics.last_token_time,
+                    InBandMetrics(cpu_kv_cache_utilisation=final_res.metrics.
+                                  cpu_kv_cache_utilization,
+                                  gpu_kv_cache_utilisation=final_res.metrics.
+                                  gpu_kv_cache_utilization,
+                                  format=self.in_band_metrics))
+                if not latest_in_band_metric[1] or latest_in_band_metric[
+                        0] < in_band_metric_timestamp:
+                    latest_in_band_metric = (in_band_metric_timestamp,
+                                             in_band_metric)
+
             token_ids: GenericSequence[int]
             out_logprobs: Optional[GenericSequence[Optional[Dict[int,
                                                                  Logprob]]]]

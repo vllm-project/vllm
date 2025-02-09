@@ -98,7 +98,7 @@ class OpenAIServing:
         self._tokenize_prompt_input_or_inputs_async = make_async(
             self._tokenize_prompt_input_or_inputs,
             executor=self._tokenizer_executor)
-        
+
         self.in_band_metrics = in_band_metrics
 
     def create_error_response(

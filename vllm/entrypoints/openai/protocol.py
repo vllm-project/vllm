@@ -115,10 +115,12 @@ class ModelList(OpenAIBaseModel):
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: Optional[int] = None
 
+
 class InBandMetrics(OpenAIBaseModel):
     cpu_kv_cache_utilisation: float = 0.0
     gpu_kv_cache_utilisation: float = 0.0
     format: Optional[str] = None
+
 
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0

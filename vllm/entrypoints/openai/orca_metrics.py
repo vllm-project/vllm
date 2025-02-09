@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This file contains the command line arguments for the vLLM's
 OpenAI-compatible server. It is kept in a separate file for documentation
@@ -9,7 +10,7 @@ import json
 from typing import List, Mapping, Optional, Tuple
 
 from xds.data.orca.v3 import orca_load_report_pb2
-from google.protobuf.json_format import MessageToJson 
+
 from vllm.entrypoints.openai.protocol import InBandMetrics
 from vllm.logger import init_logger
 
@@ -65,13 +66,16 @@ def create_orca_header(format: str,
 
         # Populate named_metrics in orca_report_proto directly
         for metric_name, value in orca_report["named_metrics"].items():
-            if isinstance(value, float): # Ensure value is a float (still good practice)
-                orca_report_proto.named_metrics[metric_name] = value # Direct assignment
+            if isinstance(
+                    value,
+                    float):  # Ensure value is a float (still good practice)
+                orca_report_proto.named_metrics[
+                    metric_name] = value  # Direct assignment
 
         serialized_report = orca_report_proto.SerializeToString()
-        base64_report = base64.b64encode(serialized_report).decode('utf-8') # Base64 encode for header safety
+        base64_report = base64.b64encode(serialized_report).decode(
+            'utf-8')  # Base64 encode for header safety
         header["endpoint-load-metrics"] = f"BIN {base64_report}"
-        logger.info(f"base64_report f{base64_report}, serialized_report {serialized_report}")
 
     # output example:
     # endpoint-load-metrics: TEXT named_metrics.kv_cache_utilization=0.4
