@@ -13,7 +13,7 @@ def exact_div(x, y):
     return x // y
 
 
-# Audio hyperparameters
+# hard-coded audio hyperparameters
 SAMPLE_RATE = 16000
 N_FFT = 400
 HOP_LENGTH = 160
@@ -60,3 +60,11 @@ def load_audio_from_bytes(audio_bytes: str, sample_rate: int = SAMPLE_RATE):
 
     return np.frombuffer(stdout, np.int16).flatten().astype(
         np.float32) / 32768.0
+
+
+def validate_length(array, max_length: int = N_SAMPLES, axis: int = -1):
+    audio_length = array.shape[axis]
+    if audio_length > max_length:
+        raise ValueError(
+            f"Length of audio {audio_length} is bigger than the maximum "
+            f"length of {max_length} = MAX_LENGTH * SAMPLING_RATE")

@@ -18,7 +18,8 @@ from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.utils import with_cancellation
-from vllm.entrypoints.whisper_helper import load_audio_from_bytes
+from vllm.entrypoints.whisper_helper import (load_audio_from_bytes,
+                                             validate_length)
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.usage.usage_lib import UsageContext
@@ -35,13 +36,13 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
 
 
-def format_prompt(audio_data: np.ndarray, sampling_rate: int):
+def format_prompt(waveform: np.ndarray, sampling_rate: int):
     assert sampling_rate == SAMPLING_RATE
     return {
         "encoder_prompt": {
             "prompt": "",
             "multi_modal_data": {
-                "audio": (audio_data, sampling_rate),
+                "audio": (waveform, sampling_rate),
             }
         },
         "decoder_prompt": TRANSCRIBE_PROMPT,
@@ -53,50 +54,49 @@ class TranscriptionResponse(BaseModel):
     text: str
 
 
-class FromFile(BaseModel):
+class TranscribeFromFile(BaseModel):
     """The audio file (flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm)."""
     file: UploadFile
 
     async def to_prompt(self):
         audio_bytes = await self.file.read()
-        audio_data = load_audio_from_bytes(audio_bytes, sr=SAMPLING_RATE)
+        audio_data = load_audio_from_bytes(audio_bytes, SAMPLING_RATE)
+        validate_length(audio_data)
         return format_prompt(audio_data, SAMPLING_RATE)
 
 
-class FromNumpy(BaseModel):
+class TranscribeFromWaveform(BaseModel):
     """Numpy array of audio waveform to be transcribed."""
 
-    audio_data: np.ndarray
-    sampling_rate: int
+    waveform_bytes: UploadFile
+    sampling_rate: Annotated[str, Form()]
 
-    def to_prompt(self):
-        if self.sampling_rate != SAMPLING_RATE:
+    async def to_prompt(self):
+        waveform = np.frombuffer(await self.waveform_bytes.read(),
+                                 dtype=np.float32)
+        sampling_rate = int(self.sampling_rate)
+        if sampling_rate != SAMPLING_RATE:
             raise ValueError(
-                f"Model uses sampling rate of {SAMPLING_RATE}, but got"
-                f"sampling_rate = {self.sampling_rate}.")
-        return format_prompt(self.audio_data, self.sampling_rate)
-
-
-@app.get("/health")
-async def health() -> Response:
-    """Health check."""
-    return Response(status_code=200)
+                f"Model uses sampling rate of {SAMPLING_RATE}, but got "
+                f"sampling_rate = {sampling_rate}.")
+        return format_prompt(waveform, SAMPLING_RATE)
 
 
 @app.post("/generate_from_waveform")
-async def generate_from_waveform(
-    data: FromNumpy,
-    raw_request: Request,
-):
-    prompt = data.to_prompt()
+async def generate_from_waveform(data: Annotated[TranscribeFromWaveform,
+                                                 Form()],
+                                 raw_request: Request):
+    """Transcribe from a waveform."""
+
+    prompt = await data.to_prompt()
     return await _generate(prompt, raw_request=raw_request)
 
 
 @app.post("/generate_from_file")
-async def generate_from_file(
-    data: Annotated[FromFile, Form()],
-    raw_request: Request,
-):
+async def generate_from_file(data: Annotated[TranscribeFromFile,
+                                             Form()], raw_request: Request):
+    """Transcribe from a file."""
+
     prompt = await data.to_prompt()
     return await _generate(prompt, raw_request=raw_request)
 
@@ -105,19 +105,20 @@ async def generate_from_file(
 async def _generate(prompt, raw_request: Request) -> Response:
 
     sampling_params = SamplingParams(temperature=0,
+                                     max_tokens=440,
                                      output_kind=RequestOutputKind.DELTA)
     request_id = random_uuid()
 
     engine = raw_request.app.state.engine
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
-    # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
             assert len(request_output.outputs) == 1
             chunk = TranscriptionResponse(text=request_output.outputs[0].text)
             response_json = chunk.model_dump_json(exclude_unset=False)
             yield f"data: {response_json}\n\n"
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(stream_results())
 
@@ -192,10 +193,6 @@ async def run_server(args: Namespace, **uvicorn_kwargs: Any) -> None:
             host=args.host,
             port=args.port,
             timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-            ssl_keyfile=args.ssl_keyfile,
-            ssl_certfile=args.ssl_certfile,
-            ssl_ca_certs=args.ssl_ca_certs,
-            ssl_cert_reqs=args.ssl_cert_reqs,
             **uvicorn_kwargs,
         )
 
