@@ -686,27 +686,7 @@ class MQLLMEngineClient(EngineClient):
             request=RPCResetPrefixCacheRequest.RESET_PREFIX_CACHE,
             socket=self.input_socket)
 
-    async def sleep(self, level: int = 1) -> None:
-        """Sleep the engine for a given level"""
-        await self._send_get_data_rpc_request(
-            request=RPCSleepRequest(level),
-            expected_type=type(None),
-            error_message="Unable to sleep the engine",
-            socket=self.output_socket)
-
-    async def wake_up(self) -> None:
-        """Wake up the engine"""
-        await self._send_get_data_rpc_request(
-            request=RPCWakeUpRequest.WAKE_UP,
-            expected_type=type(None),
-            error_message="Unable to wake up the engine",
-            socket=self.output_socket)
-
-    async def add_lora(self, lora_request: LoRARequest) -> None:
-        """Load a new LoRA adapter into the engine for future requests."""
-        # Uses the same I/O as generate requests
-        request = RPCLoadAdapterRequest(lora_request)
-
+    async def send_request_and_get_response(self, request: Any) -> Any:
         # Create output queue for this requests.
         queue: asyncio.Queue[Union[None, BaseException]] = asyncio.Queue()
         self.output_queues[request.request_id] = queue
@@ -722,3 +702,21 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+
+        return request_output
+
+    async def sleep(self, level: int = 1) -> None:
+        """Sleep the engine for a given level"""
+        return await self.send_request_and_get_response(
+            request=RPCSleepRequest(level))
+
+    async def wake_up(self) -> None:
+        """Wake up the engine"""
+        return await self.send_request_and_get_response(
+            request=RPCWakeUpRequest.WAKE_UP)
+
+    async def add_lora(self, lora_request: LoRARequest) -> None:
+        """Load a new LoRA adapter into the engine for future requests."""
+        # Uses the same I/O as generate requests
+        request = RPCLoadAdapterRequest(lora_request)
+        return await self.send_request_and_get_response(request)
