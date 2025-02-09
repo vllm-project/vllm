@@ -76,7 +76,7 @@ class OpenAIServingCompletion(OpenAIServing):
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
-            return error_check_ret
+            return error_check_ret, None
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
@@ -87,7 +87,7 @@ class OpenAIServingCompletion(OpenAIServing):
         # Return error for unsupported features.
         if request.suffix is not None:
             return self.create_error_response(
-                "suffix is not currently supported")
+                "suffix is not currently supported"), None
 
         request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
@@ -113,7 +113,7 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[RequestOutput, None]] = []
@@ -165,7 +165,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
         result_generator = merge_async_iterators(*generators)
 
@@ -397,7 +397,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompt_tokens = 0
         num_generated_tokens = 0
 
-        latest_in_band_metric: Tuple[int, InBandMetrics] = (
+        latest_in_band_metric: Tuple[float, InBandMetrics] = (
             0, InBandMetrics(format=self.in_band_metrics))
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids

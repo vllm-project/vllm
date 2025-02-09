@@ -117,8 +117,8 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
 
 
 class InBandMetrics(OpenAIBaseModel):
-    cpu_kv_cache_utilisation: float = 0.0
-    gpu_kv_cache_utilisation: float = 0.0
+    cpu_kv_cache_utilisation: Optional[float] = 0.0
+    gpu_kv_cache_utilisation: Optional[float] = 0.0
     format: Optional[str] = None
 
 
