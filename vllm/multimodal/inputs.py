@@ -141,9 +141,9 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
     """Equality check between :data:`NestedTensors` objects."""
     if isinstance(a, torch.Tensor):
-        return isinstance(b, torch.Tensor) and bool((a == b).all().item())
+        return isinstance(b, torch.Tensor) and torch.equal(a, b)
     elif isinstance(b, torch.Tensor):
-        return isinstance(a, torch.Tensor) and bool((b == a).all().item())
+        return isinstance(a, torch.Tensor) and torch.equal(b, a)
 
     if isinstance(a, list):
         return (isinstance(b, list)
