@@ -158,7 +158,7 @@ class KVCacheManager:
 
         num_new_blocks = self.managers.get_req_num_new_blocks(
             request, new_computed_blocks, num_computed_tokens, num_tokens)
-        total_new_blocks = sum(max(x, 0) for x in num_new_blocks)
+        num_new_blocks = max(num_new_blocks, 0)
 
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it cannot be counted as a free block
@@ -167,7 +167,7 @@ class KVCacheManager:
             1 for blk in self.managers.iter_all(new_computed_blocks)
             if blk.ref_cnt == 0)
 
-        if (total_new_blocks > self.block_pool.get_num_free_blocks() -
+        if (num_new_blocks > self.block_pool.get_num_free_blocks() -
                 num_evictable_computed_blocks):
             # Cannot allocate new blocks.
             return None
@@ -177,7 +177,7 @@ class KVCacheManager:
         num_preallocate_blocks = min(
             self.num_preallocate_blocks,
             (self.block_pool.get_num_free_blocks() -
-             num_evictable_computed_blocks - total_new_blocks) //
+             num_evictable_computed_blocks - num_new_blocks) //
             len(self.kv_cache_config.groups))
 
         new_blocks = self.managers.allocate_slots(request, new_computed_blocks,

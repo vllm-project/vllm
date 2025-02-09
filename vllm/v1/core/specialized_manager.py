@@ -94,7 +94,6 @@ class SpecializedManager(ABC):
     def get_req_num_new_blocks(self, request, new_computed_blocks,
                                num_computed_tokens, num_tokens):
         req_blocks = self.req_to_blocks[request.request_id]
-        new_computed_blocks = new_computed_blocks if new_computed_blocks is not None else []
         return self.get_num_new_blocks(
             num_computed_tokens, num_tokens,
             len(req_blocks) + len(new_computed_blocks))
@@ -396,20 +395,30 @@ class GroupedManager(SpecializedManager):
     def get_req_num_new_blocks(self, request: Request,
                                new_computed_blocks: ReqKVCacheBlocks,
                                num_computed_tokens: int, num_tokens: int):
-        return [
+        num_new_blocks = [
             manager.get_req_num_new_blocks(request, new_computed_blocks[i],
                                            num_computed_tokens, num_tokens)
             for i, manager in enumerate(self.managers)
         ]
+        return sum(max(x, 0) for x in num_new_blocks)
 
     def allocate_slots(self, request: Request,
                        new_computed_blocks: Optional[ReqKVCacheBlocks],
                        num_new_blocks: int, num_preallocate_blocks: int,
                        num_computed_tokens: int, num_tokens: int):
+        # NOTE: the input _num_new_blocks is the sum of all groups.
+        # recompute instead
+        num_new_blocks_per_group = [
+            manager.get_req_num_new_blocks(request, new_computed_blocks[i],
+                                           num_computed_tokens, num_tokens)
+            for i, manager in enumerate(self.managers)
+        ]
+        assert num_new_blocks == sum(
+            max(x, 0) for x in num_new_blocks_per_group)
         return [
             manager.allocate_slots(
                 request, new_computed_blocks[i] if new_computed_blocks
-                is not None else None, num_new_blocks[i],
+                is not None else None, num_new_blocks_per_group[i],
                 num_preallocate_blocks, num_computed_tokens, num_tokens)
             for i, manager in enumerate(self.managers)
         ]
