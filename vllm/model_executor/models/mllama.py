@@ -66,7 +66,6 @@ from .llama import LlamaDecoderLayer, LlamaMLP
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
-MLLAMA_IMAGE_TOKEN_ID = 128256
 
 
 class MllamaImagePixelInputs(TypedDict):
@@ -232,11 +231,14 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
             num_tiles=MultiModalFieldConfig.batched("image"),
         )
 
-    def create_encoder_prompt(self, prompt: str) -> str:
-        hf_processor = self.info.get_hf_processor()
-        image_token = hf_processor.image_token
-        num_images = prompt.count(image_token)
-        return image_token * num_images
+    def create_encoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataItems,
+    ) -> Union[str, list[int]]:
+        num_images = len(mm_data.get_items("image")) if mm_data else 0
+        image_token_id = self.info.get_hf_config().image_token_index
+        return [image_token_id] * num_images
 
     def _get_prompt_replacements(
         self,
@@ -245,8 +247,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         token_per_chunk = self.info.get_token_per_chunk_from_config()
-        hf_processor = self.info.get_hf_processor()
-        image_token_id = hf_processor.image_token_id
+        image_token_id = self.info.get_hf_config().image_token_index
 
         def get_replacement_mllama(item_idx):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -1150,7 +1151,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config: MllamaConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.quant_config = quant_config
         self.vocab_size = config.text_config.vocab_size
@@ -1160,6 +1161,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.pad_token_id = \
             config.pad_token_id if config.pad_token_id is not None else -1
         self.image_size = config.vision_config.image_size
+        self.image_token_id = config.image_token_index
 
         self.vision_model = MllamaVisionModel(config.vision_config,
                                               quant_config,
@@ -1306,7 +1308,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             batch_token_ids.append(token_ids[start:start + seq_len])
             start += seq_len
         sparse_mask = [
-            get_cross_attention_token_mask(t, MLLAMA_IMAGE_TOKEN_ID)
+            get_cross_attention_token_mask(t, self.image_token_id)
             for t in batch_token_ids
         ]
 
