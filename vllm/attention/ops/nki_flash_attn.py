@@ -17,11 +17,17 @@ class FlashConfig:
 
     seq_tile_size: int = 2048
     should_transpose_v: bool = False
+    should_transpose_context_mask: bool = True
 
     __annotations__ = {
         "seq_tile_size": int,
         "should_transpose_v": bool,
+        "should_transpose_context_mask": bool,
     }
+
+
+def ceil_div(a, b):
+    return (a + b - 1) // b
 
 
 @nki.jit
@@ -200,7 +206,7 @@ def _flash_attention_core(
     for k_i in nl.affine_range(LARGE_TILE_SZ // B_P_SIZE):
         pv_psum[:, :] += nl.matmul(
             p_local_transposed[:, nl.ds(k_i * B_P_SIZE, B_P_SIZE)],
-            v[k_i, :, :],
+            v[:, nl.ds(k_i * B_D_SIZE, B_D_SIZE)],
             transpose_x=True,
         )  # (128, 128) (p(Br), d)
 
@@ -219,27 +225,38 @@ def _flash_attention_core(
 
 
 @nki.jit
-def load_v_tile(v_hbm_tile, cur_v_tile, j, v_i, config):
+def load_v_tile(v_hbm_tile, cur_v_tile, large_tile_idx, v_i, config):
     LARGE_TILE_SZ = config.seq_tile_size
     B_P_SIZE = 128
 
     if not config.should_transpose_v:
-        cur_v_tile[v_i, :, :] = nl.load(
-            v_hbm_tile[nl.ds(j * LARGE_TILE_SZ + B_P_SIZE * v_i, B_P_SIZE), :],
+        B_D_SIZE = v_hbm_tile.shape[-1]
+        cur_v_tile[:, nl.ds(v_i * B_D_SIZE, B_D_SIZE)] = nl.load(
+            v_hbm_tile[
+                nl.ds(large_tile_idx * LARGE_TILE_SZ +
+                      B_P_SIZE * v_i, B_P_SIZE),
+                :,
+            ],
             dtype=cur_v_tile.dtype,
         )
         return
 
+    B_D_SIZE = B_P_SIZE
     if nisa.get_nc_version() == nisa.nc_version.gen3:
-        cur_v_tile_transposed = nisa.dma_transpose(
-            v_hbm_tile[:,
-                       nl.ds(j * LARGE_TILE_SZ + B_P_SIZE * v_i, B_P_SIZE)])
-        cur_v_tile[v_i, :, :] = nisa.tensor_copy(cur_v_tile_transposed,
-                                                 dtype=cur_v_tile.dtype)
+        cur_v_tile_transposed = nisa.dma_transpose(v_hbm_tile[
+            :,
+            nl.ds(large_tile_idx * LARGE_TILE_SZ + B_P_SIZE * v_i, B_P_SIZE),
+        ])
+        cur_v_tile[:, nl.ds(v_i * B_D_SIZE, B_D_SIZE)] = nisa.tensor_copy(
+            cur_v_tile_transposed,
+            dtype=cur_v_tile.dtype,
+        )
         return
 
-    cur_v_tile[v_i, :, :] = nl.load_transpose2d(
-        v_hbm_tile[:, nl.ds(j * LARGE_TILE_SZ + B_P_SIZE * v_i, B_P_SIZE)],
+    cur_v_tile[:, nl.ds(v_i * B_D_SIZE, B_D_SIZE)] = nl.load_transpose2d(
+        v_hbm_tile[:,
+                   nl.ds(large_tile_idx * LARGE_TILE_SZ +
+                         B_P_SIZE * v_i, B_P_SIZE)],
         dtype=cur_v_tile.dtype,
     )
 
@@ -253,6 +270,89 @@ def load_block_tables(block_tables_hbm, num_tiles):
         (num_tiles, num_blocks_per_tile))
     block_tables_buffer = nl.load(block_tables_hbm, dtype=nl.int32)
     return block_tables_buffer
+
+
+@nki.jit
+def transform_block_tables_for_indirect_load(
+    block_tables,
+    block_size_tiling_factor,
+    num_head,
+    head_id,
+):
+    """
+    KV cache has shape `(num_block, num_head, block_size, D)` When loading M
+    blocks of a given `head_id` from HBM the load `cache[block_tables, head_id]`
+    has shape `(M, block_size, D)` If M < B_P_SIZE = 128, DMA may not fully
+    utilize hardware parallelization The solution is to tile `block_size` into
+    `(block_size_tiling_factor, tiled_block_size)` s.t. `M *
+    block_size_tiling_factor = B_P_SIZE` After tiling, KV cache has shape
+    `(num_block, num_head, block_size_tiling_factor, tiled_block_size, D)` Note:
+    we assume block_size >= block_size_tiling_factor and we don't further tile D
+    dimension
+    
+    This function does two things: 1. calculate new `block_tables` for a
+    `head_id` after flattening `num_block`, `num_head`, and
+    `block_size_tiling_factor` dimensions 2. transpose the result so that
+    `block_table` is mapped to SBUF Partition dimension
+    """
+    B_P_SIZE = 128
+    num_tiles, num_blocks_per_tile = block_tables.shape
+
+    # fuse num_block and num_head dimension
+    if num_head > 1:
+        head_id = nisa.iota(head_id, dtype=nl.int32).reshape((1, 1))
+        head_id = nl.transpose(head_id.broadcast_to((1, num_tiles)))
+        block_tables = block_tables * num_head + head_id.broadcast_to(
+            (num_tiles, num_blocks_per_tile))
+
+    # tile block size dimension
+    if block_size_tiling_factor > 1:
+        assert num_blocks_per_tile * block_size_tiling_factor == B_P_SIZE
+        broadcast_shape = (
+            num_tiles,
+            num_blocks_per_tile,
+            block_size_tiling_factor,
+        )
+        block_tables = ((block_tables * block_size_tiling_factor).reshape(
+            (num_tiles, num_blocks_per_tile, 1)).broadcast_to(broadcast_shape))
+        offset = nisa.iota(nl.arange(block_size_tiling_factor)[None, None, :],
+                           dtype=nl.int32).broadcast_to(broadcast_shape)
+        new_block_tables = block_tables + offset
+        new_block_tables = new_block_tables.reshape((num_tiles, B_P_SIZE))
+    else:
+        new_block_tables = block_tables
+
+    # transpose the block table so that it can be used by vector DGE
+    num_loads = ceil_div(num_blocks_per_tile, B_P_SIZE)
+    block_tables_transposed = nl.ndarray(
+        (num_loads, par_dim(B_P_SIZE), num_tiles),
+        dtype=nl.int32,
+    )
+    for i in nl.affine_range(num_loads):
+        block_tables_transposed[i, :, :] = nl.transpose(
+            new_block_tables[:, nl.ds(i * B_P_SIZE, B_P_SIZE)])
+    return block_tables_transposed
+
+
+@nki.jit
+def transpose_kv_token_mask(mask, tiled_block_size):
+    size_q, size_kv = mask.shape
+    assert size_kv % tiled_block_size == 0
+    num_block = size_kv // tiled_block_size
+    B_P_SIZE = 128
+    assert num_block >= B_P_SIZE
+    num_batch = num_block // B_P_SIZE
+    i_f1 = nl.arange(num_batch)[None, :, None, None]
+    i_f2 = nl.arange(B_P_SIZE)[None, None, :, None]
+    i_f3 = nl.arange(tiled_block_size)[None, None, None, :]
+    new_mask = nl.ndarray((size_q, size_kv), dtype=mask.dtype)
+    # transpose f2 and f3
+    transpose_range = B_P_SIZE * tiled_block_size
+    i_f_src = i_f1 * transpose_range + i_f2 * tiled_block_size + i_f3
+    i_f_dst = i_f1 * transpose_range + i_f3 * B_P_SIZE + i_f2
+    i_p = nl.arange(size_q)[:, None, None, None]
+    new_mask[i_p, i_f_dst] = nl.copy(mask[i_p, i_f_src])
+    return new_mask
 
 
 def is_power_of_2(x):
@@ -282,12 +382,11 @@ def flash_paged_attention(
       - query: shape   (1, n_heads, d, seq_q)
       - key:   shape   (1, n_kv_heads, d, seq_k)
       - value: shape   (1, n_kv_heads, seq_v, d)
-      - key_cache: (num_blocks, block_size, n_kv_heads, d)
-      - value_cache: (num_blocks, block_size, n_kv_heads, d)
+      - key_cache: (num_blocks, n_kv_heads, block_size, d)
+      - value_cache: (num_blocks, n_kv_heads, block_size, d)
       - block_tables: (num_active_blocks, )
-      - mask: (seq_q, num_active_blocks * block_size)
+      - mask: (seq_q, num_active_blocks * block_size + seq_q)
       - o: shape (1, n_heads, seq_q, d)
-      - l_m: shape (1, n_heads, seq_q, 2)
 
       - This kernel requires seq_k == seq_v
       - We use continuous batching by default, so the batch dimension is
@@ -329,22 +428,35 @@ def flash_paged_attention(
     B_D_SIZE = d
     LARGE_TILE_SZ = config.seq_tile_size
     n_tile_q = seqlen_q // B_P_SIZE  # since q will be loaded on tensor engine
-    num_blocks, block_size, k_h, _ = key_cache.shape
+    num_blocks, k_h, block_size, _ = key_cache.shape
     q_h_per_k_h = h // k_h
+    assert b == 1, f"invalid batch size {b=}"
+    assert d <= 128, f" we do not support head_dim > 128, got head dim {d=}"
     assert tuple(key_cache.shape) == (
         num_blocks,
-        block_size,
         k_h,
+        block_size,
         d,
-    ), "Input shape mismatch!"
+    ), "key_cache shape mismatch!"
     assert tuple(value_cache.shape) == (
         num_blocks,
-        block_size,
         k_h,
+        block_size,
         d,
-    ), "Input shape mismatch!"
-    assert b == 1, f"invalid batch size {b=}"
-    assert d <= 128, f" we do not support head_dim > 128, got head dim {d}"
+    ), "value_cache shape mismatch!"
+    if key is not None or value is not None:
+        assert tuple(key.shape) == (
+            1,
+            k_h,
+            d,
+            seqlen_q,
+        ), "key shape mismatch!"
+        assert tuple(value.shape) == (
+            1,
+            k_h,
+            seqlen_q,
+            d,
+        ), "value shape mismatch!"
     kernel_dtype = nl.bfloat16 if mixed_precision else query.dtype
     acc_type = np.dtype(np.float32) if mixed_precision else kernel_dtype
 
@@ -398,10 +510,36 @@ def flash_paged_attention(
     assert block_size % 32 == 0, "block_size is expected to be a multiple of 32"
     assert is_power_of_2(
         num_blocks_per_large_tile
-    ), "The number of blocks in each large tile is expected of be power of 2"
-    assert is_power_of_2(seqlen_q), "seqlen_q is expected to be power of 2"
+    ), f"{num_blocks_per_large_tile=} is expected of be power of 2"
+    assert is_power_of_2(seqlen_q), f"{seqlen_q=} is expected to be power of 2"
 
     block_tables_sbuf = load_block_tables(block_tables, num_large_k_tile)
+
+    # On Neuron, we need B_P_SIZE=128 blocks to make DMA efficient
+    if num_blocks_per_large_tile < B_P_SIZE:
+        # we checked num_blocks_per_tile is a power of 2
+        assert B_P_SIZE % num_blocks_per_large_tile == 0
+        block_size_tiling_factor = B_P_SIZE // num_blocks_per_large_tile
+        assert block_size % block_size_tiling_factor == 0
+    else:
+        block_size_tiling_factor = 1
+    tiled_block_size = block_size // block_size_tiling_factor
+
+    # On Neuron, indirect DMA load must be placed along Partition Dimension
+    block_tables_sbuf = transform_block_tables_for_indirect_load(
+        block_tables_sbuf,
+        block_size_tiling_factor=block_size_tiling_factor,
+        num_head=k_h,
+        head_id=head_id,
+    )
+
+    # flatten KV cache to be 2D for loading into SBUF
+    new_cache_shape = (
+        num_blocks * k_h * block_size_tiling_factor,
+        tiled_block_size * d,
+    )
+    key_cache = key_cache.reshape(new_cache_shape)
+    value_cache = value_cache.reshape(new_cache_shape)
 
     # Global Flash Attention accumulators
     o_buffer = nl.zeros(
@@ -411,7 +549,7 @@ def flash_paged_attention(
         lazy_initialization=True,
     )
     l_buffer = nl.zeros(
-        (par_dim(B_P_SIZE), n_tile_q, q_h_per_k_h),
+        (n_tile_q, q_h_per_k_h, par_dim(B_P_SIZE), 1),
         dtype=acc_type,
         buffer=nl.sbuf,
         lazy_initialization=True,
@@ -423,50 +561,60 @@ def flash_paged_attention(
         lazy_initialization=True,
     )
 
-    for j in nl.sequential_range(0, num_large_k_tile):
+    for large_k_tile_idx in nl.sequential_range(0, num_large_k_tile):
         cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_TILE_SZ),
                                 dtype=kernel_dtype)
+        num_loads = ceil_div(num_blocks_per_large_tile, B_P_SIZE)
         cur_v_tile = nl.ndarray(
-            (LARGE_TILE_SZ // B_P_SIZE, par_dim(B_P_SIZE), B_D_SIZE),
-            dtype=kernel_dtype,
-        )
-
-        for k_i in nl.affine_range(num_blocks_per_large_tile):
-            loaded = nl.load(key_cache[block_tables_sbuf[j, k_i], :,
-                                       head_id, :])
-            cur_k_tile[:, nl.ds(k_i *
-                                block_size, block_size)] = nl.transpose(loaded)
-
-        load_tile_size = B_P_SIZE
-        num_blocks_per_partition = load_tile_size // block_size
-        for partition_idx in nl.affine_range(LARGE_TILE_SZ // load_tile_size):
-            for block_in_partition in nl.affine_range(
-                    num_blocks_per_partition):
-                v_i = (partition_idx * num_blocks_per_partition +
-                       block_in_partition)
-                loaded_v = nl.load(value_cache[block_tables_sbuf[j, v_i], :,
-                                               head_id, :])
-                cur_v_tile[
-                    partition_idx,
-                    nl.ds(block_in_partition * block_size, block_size),
+            (par_dim(B_P_SIZE), num_loads * tiled_block_size * B_D_SIZE),
+            dtype=kernel_dtype)
+        # load key cache
+        for load_idx in nl.affine_range(num_loads):
+            i_p = nl.arange(B_P_SIZE)[:, None]
+            i_f = nl.arange(tiled_block_size * B_D_SIZE)[None, :]
+            loaded = nl.load(key_cache[block_tables_sbuf[load_idx, i_p,
+                                                         large_k_tile_idx],
+                                       i_f])
+            # Transpose SBUF tensor using PE
+            for tb_i in nl.affine_range(tiled_block_size):
+                cur_k_tile[
                     :,
-                ] = loaded_v
+                    nl.ds(
+                        load_idx * B_P_SIZE * tiled_block_size +
+                        tb_i * B_P_SIZE,
+                        B_P_SIZE,
+                    ),
+                ] = nl.transpose(loaded[:, nl.ds(tb_i * B_D_SIZE, B_D_SIZE)])
+        # load value cache
+        for load_idx in nl.affine_range(num_loads):
+            i_p = nl.arange(B_P_SIZE)[:, None]
+            i_f = nl.arange(tiled_block_size * B_D_SIZE)[None, :]
+            cur_v_tile[
+                :,
+                nl.ds(
+                    load_idx * tiled_block_size * B_D_SIZE,
+                    tiled_block_size * B_D_SIZE,
+                ),
+            ] = nl.load(value_cache[block_tables_sbuf[load_idx, i_p,
+                                                      large_k_tile_idx], i_f])
 
         for i in nl.affine_range(n_tile_q):
-            cur_mask = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ),
-                                  dtype=mask.dtype)
-            for m_i in nl.affine_range(LARGE_TILE_SZ // B_F_SIZE):
-                cur_mask[:, nl.ds(m_i * B_F_SIZE, B_F_SIZE)] = nl.load(mask[
+            cur_mask = nl.load(
+                mask[
                     nl.ds(i * B_P_SIZE, B_P_SIZE),
-                    nl.ds(j * LARGE_TILE_SZ + m_i * B_F_SIZE, B_F_SIZE),
-                ])
+                    nl.ds(large_k_tile_idx * LARGE_TILE_SZ, LARGE_TILE_SZ),
+                ],
+                dtype=mask.dtype,
+            )
+            if config.should_transpose_context_mask and tiled_block_size > 1:
+                cur_mask = transpose_kv_token_mask(cur_mask, tiled_block_size)
             for i_q_h in nl.affine_range(q_h_per_k_h):
                 q_tile = nl.ndarray((B_D_SIZE, B_P_SIZE), dtype=kernel_dtype)
                 q_hbm_tile = query[batch_id, head_id * q_h_per_k_h + i_q_h]
                 q_sbuf_tile = nl.load(
                     q_hbm_tile[:, nl.ds(i * B_P_SIZE, B_P_SIZE)],
                     dtype=kernel_dtype,
-                )  # load (d, 128) tile in SBUF
+                )  # load (B_D_SIZE, 128) tile in SBUF
                 q_tile[:, :] = q_sbuf_tile * softmax_scale
 
                 _flash_attention_core(
@@ -474,7 +622,7 @@ def flash_paged_attention(
                     k=cur_k_tile,
                     v=cur_v_tile,
                     o_buffer=o_buffer[i, i_q_h],
-                    l_buffer=l_buffer[:, i, i_q_h],
+                    l_buffer=l_buffer[i, i_q_h],
                     m_buffer=m_buffer[i, i_q_h],
                     q_tile_idx=i,
                     kernel_dtype=kernel_dtype,
@@ -482,7 +630,7 @@ def flash_paged_attention(
                     flash_config=config,
                     use_causal_mask=False,
                     tile_mask=cur_mask,
-                    initialize=j == 0,
+                    initialize=large_k_tile_idx == 0,
                     B_P_SIZE=B_P_SIZE,
                     B_F_SIZE=B_F_SIZE,
                     B_D_SIZE=B_D_SIZE,
@@ -500,19 +648,18 @@ def flash_paged_attention(
         cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_TILE_SZ),
                                 dtype=kernel_dtype)
         cur_v_tile = nl.ndarray(
-            (LARGE_TILE_SZ // B_P_SIZE, par_dim(B_P_SIZE), B_D_SIZE),
+            (par_dim(B_P_SIZE), LARGE_TILE_SZ // B_P_SIZE * B_D_SIZE),
             dtype=kernel_dtype,
         )
 
         cur_k_tile[:, :] = nl.load(key[batch_id, head_id, :, :])
 
-        load_tile_size = B_P_SIZE
         v_hbm_tile = value[batch_id, head_id]
-        for v_i in nl.affine_range(LARGE_TILE_SZ // load_tile_size):
+        for v_i in nl.affine_range(LARGE_TILE_SZ // B_P_SIZE):
             load_v_tile(
                 v_hbm_tile=v_hbm_tile,
                 cur_v_tile=cur_v_tile,
-                j=0,
+                large_tile_idx=0,
                 v_i=v_i,
                 config=active_config,
             )
@@ -532,14 +679,14 @@ def flash_paged_attention(
                 q_sbuf_tile = nl.load(
                     q_hbm_tile[:, nl.ds(i * B_P_SIZE, B_P_SIZE)],
                     dtype=kernel_dtype,
-                )  # load (d, 128) tile in SBUF
+                )  # load (B_D_SIZE, 128) tile in SBUF
                 q_tile[:, :] = q_sbuf_tile * softmax_scale
                 _flash_attention_core(
                     q_local_tile=q_tile,
                     k=cur_k_tile,
                     v=cur_v_tile,
                     o_buffer=o_buffer[i, i_q_h],
-                    l_buffer=l_buffer[:, i, i_q_h],
+                    l_buffer=l_buffer[i, i_q_h],
                     m_buffer=m_buffer[i, i_q_h],
                     q_tile_idx=i,
                     kernel_dtype=kernel_dtype,
@@ -559,8 +706,8 @@ def flash_paged_attention(
     for i_q_h in nl.affine_range(q_h_per_k_h):
         for i in nl.affine_range(n_tile_q):
             out = nl.multiply(
-                o_buffer[i, i_q_h, :, :],
-                nl.exp(m_buffer[i, i_q_h, :, :] - l_buffer[:, i, i_q_h]),
+                o_buffer[i, i_q_h],
+                nl.exp(m_buffer[i, i_q_h] - l_buffer[i, i_q_h]),
                 dtype=kernel_dtype,
             )
 
@@ -589,7 +736,7 @@ def flash_paged_attention(
                         head_id * q_h_per_k_h + i_q_h,
                         nl.ds(i * B_P_SIZE, B_P_SIZE),
                     ],
-                    l_buffer[:, i, i_q_h],
+                    l_buffer[i, i_q_h],
                 )
                 nl.store(
                     hbm_qk_res[batch_id, head_id * q_h_per_k_h + i_q_h, :, :],
@@ -614,10 +761,12 @@ def flash_attn_varlen_nkifunc(
     LARGE_TILE_SZ=2048,
     return_debug_tensors=False,
     mixed_precision=True,
+    context_mask_transposed=False,
 ):
     config = FlashConfig(
         seq_tile_size=LARGE_TILE_SZ,
         should_transpose_v=False,
+        should_transpose_context_mask=not context_mask_transposed,
     )
     kwargs = dict(
         query=query,

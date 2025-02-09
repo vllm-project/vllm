@@ -182,12 +182,14 @@ def ref_context_attention(
 @pytest.mark.parametrize(
     "num_heads,num_queries_per_kv,head_size,mixed_precision",
     [
+        (4, 4, 128, True),
         (4, 2, 8, False),
         (4, 2, 8, True),
         (32, 8, 64, True),
         (16, 2, 128, True),
     ],
 )
+@pytest.mark.parametrize("reorder_context_mask", [False, True])
 @torch.inference_mode()
 def test_contexted_kv_attention(
     num_heads: int,
@@ -196,6 +198,7 @@ def test_contexted_kv_attention(
     block_size: int,
     large_tile_size,
     mixed_precision: bool,
+    reorder_context_mask: bool,
 ) -> None:
     import os
 
@@ -328,6 +331,7 @@ def test_contexted_kv_attention(
     return_debug_tensors = False
     B_P_SIZE = 128
     LARGE_TILE_SZ = large_tile_size
+    assert LARGE_TILE_SZ >= B_P_SIZE
 
     def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
                                 num_blocks):
@@ -405,40 +409,50 @@ def test_contexted_kv_attention(
     prior_mask, active_mask = (
         BlockDiagonalCausalFromBottomRightMask.from_seqlens(
             query_lens, seq_lens, block_size=block_size))
-    attn_mask = torch.concat(
-        [
-            F.pad(
-                prior_mask,
-                (
-                    0,
-                    context_kv_len - prior_mask.shape[1],
-                    0,
-                    max_num_queries - prior_mask.shape[0],
-                ),
-                "constant",
-                0,
-            ).bool(),
-            F.pad(
-                active_mask,
-                (
-                    0,
-                    max_num_queries - active_mask.shape[1],
-                    0,
-                    max_num_queries - active_mask.shape[0],
-                ),
-                "constant",
-                0,
-            ).bool(),
-        ],
-        dim=1,
-    )
+    prior_mask_padded = F.pad(
+        prior_mask,
+        (
+            0,
+            context_kv_len - prior_mask.shape[1],
+            0,
+            max_num_queries - prior_mask.shape[0],
+        ),
+        "constant",
+        0,
+    ).bool()
+    # assuming LARGE_TILE_SIZE >= B_P_SIZE
+    num_tiled_blocks = max(B_P_SIZE, LARGE_TILE_SZ // block_size)
+    tiled_block_size = LARGE_TILE_SZ // num_tiled_blocks
+    if reorder_context_mask and tiled_block_size > 1:
+        # reorder mask is needed somewhere as long as tiled_block_size > 1
+        prior_mask_padded = prior_mask_padded.view(
+            max_num_queries,
+            context_kv_len // LARGE_TILE_SZ,
+            num_tiled_blocks // B_P_SIZE,
+            B_P_SIZE,
+            tiled_block_size,
+        )
+        prior_mask_padded = prior_mask_padded.transpose(3, 4).reshape(
+            max_num_queries, context_kv_len)
+    active_mask_padded = F.pad(
+        active_mask,
+        (
+            0,
+            max_num_queries - active_mask.shape[1],
+            0,
+            max_num_queries - active_mask.shape[0],
+        ),
+        "constant",
+        0,
+    ).bool()
+    attn_mask = torch.concat([prior_mask_padded, active_mask_padded], dim=1)
 
     input_args = (
         query.to(device=device),
         k.to(device=device),
         v.to(device=device),
-        k_cache.to(device=device),
-        v_cache.to(device=device),
+        k_cache.permute(0, 2, 1, 3).to(device=device),
+        v_cache.permute(0, 2, 1, 3).to(device=device),
         active_block_table.to(torch.int32).to(device=device),
         attn_mask.to(device=device),
     )
@@ -448,6 +462,7 @@ def test_contexted_kv_attention(
         mixed_precision=mixed_precision,
         LARGE_TILE_SZ=LARGE_TILE_SZ,
         return_debug_tensors=return_debug_tensors,
+        context_mask_transposed=reorder_context_mask,
     )
 
     if return_debug_tensors:
