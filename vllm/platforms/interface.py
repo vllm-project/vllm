@@ -211,16 +211,17 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def seed_everything(cls, seed: int) -> None:
+    def seed_everything(cls, seed: Optional[int] = None) -> None:
         """
         Set the seed of each random module.
         `torch.manual_seed` will set seed on all devices.
 
         Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
         """
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
