@@ -1,24 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This is a demo script showing how to use the PrithviGeospatialMAE model with vLLM
-This script is based on: https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11/blob/main/inference.py
+This is a demo script showing how to use the
+PrithviGeospatialMAE model with vLLM
+This script is based on: https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11/blob/main/inference.py # noqa
 
-Target model weights: https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11/resolve/main/Prithvi-EO-V2-300M-TL-Sen1Floods11.pt
+Target model weights: https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11/resolve/main/Prithvi-EO-V2-300M-TL-Sen1Floods11.pt # noqa
 
 The requirements for running this script are:
 - Installing [terratorch, albumentations, rasterio] in your python environment
-- downloading the model weights in a 'model' folder local to the script (temporary measure until the proper config.json file is uploaded to HF)
-- download an input example image (India_900498_S2Hand.tif) and place it in the same folder with the script (or specify with the --data_file argument)
+- downloading the model weights in a 'model' folder local to the script
+  (temporary measure until the proper config.json file is uploaded to HF)
+- download an input example image (India_900498_S2Hand.tif) and place it in
+  the same folder with the script (or specify with the --data_file argument)
 
 Run the example:
 python prithvi_geospatial_mae.py
 
-"""
+""" # noqa: E501
 import argparse
 import datetime
 import os
 import re
-import time
 from typing import List, Union
 
 import albumentations
@@ -106,7 +108,8 @@ model_config = """{
 }
 """
 
-# Temporarily creating the "config.json" for the model. This is going to disappear
+# Temporarily creating the "config.json" for the model.
+# This is going to disappear once the correct config.json is available on HF
 with open(os.path.join(os.path.dirname(__file__), "./model/config.json"),
           'w') as config_file:
     config_file.write(model_config)
@@ -161,12 +164,9 @@ class PrithviMAE:
 
         prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}
 
-        start = time.time()
         outputs = self.model.encode(prompt, use_tqdm=False)
-        end = time.time()
-        elapsed = end - start
         print(
-            f"################ Inference done (it took {round(elapsed,2)} seconds)  ##############"
+            "################ Inference done (it took seconds)  ##############"
         )
 
         return outputs[0].outputs.data
@@ -188,7 +188,8 @@ def generate_datamodule():
 def process_channel_group(orig_img, channels):
     """
     Args:
-        orig_img: torch.Tensor representing original image (reference) with shape = (bands, H, W).
+        orig_img: torch.Tensor representing original image (reference)
+                  with shape = (bands, H, W).
         channels: list of indices representing RGB channels.
 
     Returns:
@@ -228,7 +229,7 @@ def read_geotiff(file_path: str):
         meta = src.meta
         try:
             coords = src.lnglat()
-        except:
+        except Exception:
             # Cannot read coords
             coords = None
 
@@ -268,8 +269,10 @@ def load_example(
 
     Args:
         file_paths: list of file paths .
-        mean: list containing mean values for each band in the images in *file_paths*.
-        std: list containing std values for each band in the images in *file_paths*.
+        mean: list containing mean values for each band in the images
+              in *file_paths*.
+        std: list containing std values for each band in the images
+             in *file_paths*.
 
     Returns:
         np.array containing created example
@@ -311,7 +314,7 @@ def load_example(
             print(f'Could not extract timestamp for {file} ({e})')
 
     imgs = np.stack(imgs, axis=0)  # num_frames, H, W, C
-    imgs = np.moveaxis(imgs, -1, 0).astype("float32")  # C, num_frames, H, W
+    imgs = np.moveaxis(imgs, -1, 0).astype("float32")
     imgs = np.expand_dims(imgs, axis=0)  # add batch di
 
     return imgs, temporal_coords, location_coords, metas
@@ -335,7 +338,8 @@ def run_model(input_data,
     # Build sliding window
     batch_size = 1
     batch = torch.tensor(input_data, device="cpu")
-    windows = batch.unfold(3, img_size, img_size).unfold(4, img_size, img_size)
+    windows = (batch.unfold(3, img_size,
+                            img_size).unfold(4, img_size, img_size))
     h1, w1 = windows.shape[3:5]
     windows = rearrange(windows,
                         "b c t h1 w1 h w -> (b h1 w1) c t h w",
@@ -421,13 +425,13 @@ def main(
 ):
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load model ---------------------------------------------------------------------------------
+    # Load model ---------------------------------------------------------------
 
     model_obj = PrithviMAE()
     datamodule = generate_datamodule()
     img_size = 256  # Size of Sen1Floods11
 
-    # Loading data ---------------------------------------------------------------------------------
+    # Loading data -------------------------------------------------------------
 
     input_data, temporal_coords, location_coords, meta_data = load_example(
         file_paths=[data_file],
@@ -439,7 +443,7 @@ def main(
     if input_data.mean() > 1:
         input_data = input_data / 10000  # Convert to range 0-1
 
-    # Running model --------------------------------------------------------------------------------
+    # Running model ------------------------------------------------------------
 
     channels = [
         datamodule_config['bands'].index(b) for b in ["RED", "GREEN", "BLUE"]
@@ -482,9 +486,8 @@ def main(
     # Save image rgb
     if rgb_outputs:
         rgb_file = os.path.join(
-            output_dir,
-            f"original_rgb_{os.path.splitext(os.path.basename(data_file))[0]}.tiff"
-        )
+            output_dir, "original_rgb_"
+            f"{os.path.splitext(os.path.basename(data_file))[0]}.tiff")
         save_geotiff(
             image=_convert_np_uint8(rgb_orig),
             output_path=rgb_file,
@@ -513,7 +516,8 @@ if __name__ == "__main__":
         type=int,
         nargs="+",
         help=
-        "0-based indices of the six Prithvi channels to be selected from the input. By default selects [1,2,3,8,11,12] for S2L1C data.",
+        "0-based indices of the six Prithvi channels to be selected from the  "
+        "input. By default selects [1,2,3,8,11,12] for S2L1C data.",
     )
     parser.add_argument(
         "--rgb_outputs",
