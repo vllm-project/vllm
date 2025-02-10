@@ -1,3 +1,4 @@
 lm_eval
 pytest
 tokenizers<0.20.2
+transformers<=4.46.3

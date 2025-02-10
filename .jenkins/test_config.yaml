@@ -69,6 +69,20 @@ stages:
       - name: test_long_context
         flavor: g2
         command: VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_long_context_hpu.py::test_quality
+  - name: tests_multimodal
+    steps:
+      - name: multimodal_small_g3_tp1
+        flavor: g3
+        command: cd .jenkins/vision && bash run-tests.sh -c configs/models-small.txt -t 1
+      - name: multimodal_small_g3_tp2
+        flavor: g3.s
+        command: cd .jenkins/vision && bash run-tests.sh -c configs/models-small.txt -t 2
+      - name: multimodal_small_g3_tp1_mss
+        flavor: g3
+        command: cd .jenkins/vision && bash run-tests.sh -c configs/models-mss.txt -t 1
+      - name: multimodal_small_g3_tp2_mss
+        flavor: g3.s
+        command: cd .jenkins/vision && bash run-tests.sh -c configs/models-mss.txt -t 2
   - name: tests_int4_quantization
     steps:
       - name: test_awq
