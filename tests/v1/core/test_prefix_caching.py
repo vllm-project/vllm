@@ -51,7 +51,7 @@ def test_prefill():
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
-    assert len(req0.kv_block_hashes) == 3
+    assert len(manager.req_to_block_hashes[req0.request_id]) == 3
     assert not computed_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, 55, computed_blocks)
@@ -76,7 +76,7 @@ def test_prefill():
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
-    assert len(req1.kv_block_hashes) == 3
+    assert len(manager.req_to_block_hashes[req1.request_id]) == 3
     assert [b.block_id for b in computed_blocks] == [0, 1, 2]
     assert num_computed_tokens == 3 * 16
     num_new_tokens = 53 - 3 * 16
@@ -107,7 +107,7 @@ def test_prefill():
     unique_token_ids = [3] * 6
     req2 = make_request("2", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
-    assert len(req2.kv_block_hashes) == 3
+    assert len(manager.req_to_block_hashes[req2.request_id]) == 3
     assert [b.block_id for b in computed_blocks] == [0, 1, 2]
     assert num_computed_tokens == 3 * 16
     num_new_tokens = 53 - 3 * 16
@@ -494,10 +494,11 @@ def test_mm_prefix_caching():
     # Completed block should have hashes with extra keys.
     assert not computed_blocks
     assert num_computed_tokens == 0
-    assert len(req0.kv_block_hashes) == 3
-    assert req0.kv_block_hashes[0].extra_keys == ("aaa", )
-    assert req0.kv_block_hashes[1].extra_keys == ("aaa", "bbb")
-    assert req0.kv_block_hashes[2].extra_keys == ("bbb", )
+    block_hashes = manager.req_to_block_hashes[req0.request_id]
+    assert len(block_hashes) == 3
+    assert block_hashes[0].extra_keys == ("aaa", )
+    assert block_hashes[1].extra_keys == ("aaa", "bbb")
+    assert block_hashes[2].extra_keys == ("bbb", )
 
     blocks = manager.allocate_slots(req0, 59, computed_blocks)
     assert [b.block_id for b in blocks] == [0, 1, 2, 3, 4]
@@ -510,8 +511,8 @@ def test_mm_prefix_caching():
     assert new_blocks is not None and len(new_blocks) == 0
 
     # The just completed block should have hashes with extra keys.
-    assert len(req0.kv_block_hashes) == 4
-    assert req0.kv_block_hashes[3].extra_keys == ("ccc", )
+    assert len(block_hashes) == 4
+    assert block_hashes[3].extra_keys == ("ccc", )
 
     # Cache hit.
     unique_token_ids = [-1] * 7 + [200] * 5
@@ -613,7 +614,7 @@ def test_reset_prefix_cache():
     all_token_ids = full_block_token_ids + unique_token_ids
     req1 = make_request("1", all_token_ids)
     computed_blocks, _ = manager.get_computed_blocks(req1)
-    assert len(req1.kv_block_hashes) == 3
+    assert len(manager.req_to_block_hashes[req1.request_id]) == 3
     assert len(computed_blocks) == 3
     blocks = manager.allocate_slots(req1, 7, computed_blocks)
     assert [b.block_id for b in blocks] == [4]
@@ -629,33 +630,3 @@ def test_reset_prefix_cache():
     assert manager.reset_prefix_cache()
     assert not manager.cached_block_hash_to_block
     assert all([blk.block_hash is None for blk in manager.block_pool])
-
-
-def test_uncache_blocks():
-    manager = KVCacheManager(
-        block_size=16,
-        num_gpu_blocks=10,
-        max_model_len=8192,
-        sliding_window=None,
-        enable_caching=True,
-        num_preallocate_tokens=0,
-    )
-
-    req0 = make_request("0", list(range(30)))
-    blocks = manager.allocate_slots(req0, 30)
-    assert [b.block_id for b in blocks] == [0, 1]
-    assert len(manager.cached_block_hash_to_block) == 1
-
-    req0.num_computed_tokens = 30
-
-    # Simulate speculative tokens.
-    for _ in range(5):
-        req0.append_output_token_ids(8)
-    manager.allocate_slots(req0, 5)
-    assert len(manager.cached_block_hash_to_block) == 2
-
-    # After sampling, assuming only 1 token is accepted.
-    req0.num_computed_tokens = 31
-    num_uncached_blocks = manager.uncache_blocks(req0)
-    assert num_uncached_blocks == 1
-    assert len(manager.cached_block_hash_to_block) == 1
