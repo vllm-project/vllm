@@ -265,7 +265,7 @@ class OpenAIServingTranscription(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        result_generator: AsyncGenerator[RequestOutput, None] = None
+        result_generator: AsyncGenerator[RequestOutput, None] | None = None
         try:
             # TODO(rob): subtract len of tokenized prompt.
             default_max_tokens = self.model_config.max_model_len
