@@ -429,7 +429,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `TeleChat2ForCausalLM`
   * TeleChat2
-  * `TeleAI/TeleChat2-3B`, `TeleAI/TeleChat2-7B`, `TeleAI/TeleChat2-35B`, etc.
+  * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
   * ✅︎
   * ✅︎
 - * `XverseForCausalLM`
@@ -719,7 +719,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `THUDM/glm-4v-9b` etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `H2OVLChatModel`
   * H2OVL
   * T + I<sup>E+</sup>
