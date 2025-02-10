@@ -105,7 +105,7 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size,
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)
 
         # Monkeypatch an error in the model.
-        monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
+        m.setattr(LlamaForCausalLM, "forward", evil_forward)
 
         llm = LLM(model="meta-llama/Llama-3.2-1B",
                   enforce_eager=True,
