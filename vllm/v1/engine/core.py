@@ -269,6 +269,7 @@ class EngineCoreProc(EngineCore):
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
+        add_lora_decoder = MsgpackDecoder(LoRARequest)
         generic_decoder = MsgpackDecoder()
 
         with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
@@ -278,9 +279,14 @@ class EngineCoreProc(EngineCore):
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                 # Deserialize the request data.
-                decoder = add_request_decoder if (
-                    request_type
-                    == EngineCoreRequestType.ADD) else generic_decoder
+                decoder = None
+                if request_type == EngineCoreRequestType.ADD:
+                    decoder = add_request_decoder
+                elif request_type == EngineCoreRequestType.ADD_LORA:
+                    decoder = add_lora_decoder
+                else:
+                    decoder = generic_decoder
+
                 request = decoder.decode(data_frame.buffer)
 
                 # Push to input queue for core busy loop.
