@@ -63,7 +63,7 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
         tasks = [generate(f"request-{idx}") for idx in range(NUM_REQS)]
         outputs = await asyncio.gather(*tasks)
 
-        # Every request should have get an EngineDeadError.
+        # Every request should get an EngineDeadError.
         for output in outputs:
             assert isinstance(output, EngineDeadError)
 
