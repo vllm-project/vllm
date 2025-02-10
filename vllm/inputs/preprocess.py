@@ -581,14 +581,13 @@ class InputPreprocessor:
                 if decoder_inputs is None:
                     decoder_inputs = decoder_inputs_with_mm
                 elif decoder_inputs_with_mm["type"] == "multimodal":
+                    del decoder_inputs["type"]
                     decoder_inputs = MultiModalInputs(
                         type="multimodal",
-                        prompt=decoder_inputs["prompt"],
-                        prompt_token_ids=decoder_inputs_with_mm[
-                            "prompt_token_ids"],
                         mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
                         mm_placeholders=decoder_inputs_with_mm[
                             "mm_placeholders"],
+                        **decoder_inputs,
                     )
         else:
             inputs = self._prompt_to_llm_inputs(
@@ -634,8 +633,6 @@ class InputPreprocessor:
                 encoder_inputs, decoder_inputs = await asyncio.gather(
                     encoder_task, decoder_task)
 
-            # For multimodal model, override decoder prompt from processor
-            # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:
                 encoder_inputs, decoder_inputs_with_mm = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
@@ -643,14 +640,13 @@ class InputPreprocessor:
                 if decoder_inputs is None:
                     decoder_inputs = decoder_inputs_with_mm
                 elif decoder_inputs_with_mm["type"] == "multimodal":
+                    del decoder_inputs["type"]
                     decoder_inputs = MultiModalInputs(
                         type="multimodal",
-                        prompt=decoder_inputs["prompt"],
-                        prompt_token_ids=decoder_inputs_with_mm[
-                            "prompt_token_ids"],
                         mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
                         mm_placeholders=decoder_inputs_with_mm[
                             "mm_placeholders"],
+                        **decoder_inputs,
                     )
         else:
             inputs = await self._prompt_to_llm_inputs_async(
