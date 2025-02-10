@@ -153,7 +153,6 @@ class EngineCore:
                 new_token_ids=[],
                 new_logprobs = [],
                 new_prompt_logprobs_tensors = [],
-                finished=[],
                 finish_reason={},
                 scheduler_stats=self.scheduler.make_stats()
             )

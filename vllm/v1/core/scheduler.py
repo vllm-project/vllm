@@ -487,7 +487,6 @@ class Scheduler:
                                    new_token_ids=[],
                                    new_logprobs = [],
                                    new_prompt_logprobs_tensors = [],
-                                   finished=[],
                                    finish_reason={},
                                    scheduler_stats=None
                                    )
@@ -581,11 +580,10 @@ class Scheduler:
                 new_ids = request.output_token_ids[-num_new_tokens:]
                 output.new_token_ids += new_ids
 
-                # XXXXXXXXX list/None
+                # TODO: This is not right
                 output.new_logprobs += new_logprobs
                 output.new_prompt_logprobs_tensors += (prompt_logprobs_tensors if prompt_logprobs_tensors is not None else [])
 
-                output.finished.append(request.is_finished())
                 if request.get_finished_reason() is not None:
                     output.finish_reason[req_id] = request.get_finished_reason()
                 #print(f"req stop = {request.stop_reason}, {request.status}")

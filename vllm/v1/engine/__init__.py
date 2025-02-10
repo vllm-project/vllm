@@ -134,7 +134,6 @@ class EngineCoreOutputs(
     # TODO: need offsets for logprobs?
     new_logprobs: List[Optional[LogprobsLists]]
     new_prompt_logprobs_tensors: List[Optional[LogprobsTensors]]
-    finished: List[bool]
     finish_reason: Dict[str, FinishReason]  # Union[List, Dict]?
     events: List[Optional[List[EngineCoreEvent]]]
     scheduler_stats: SchedulerStats
