@@ -3311,13 +3311,13 @@ class VllmConfig:
                     not self.model_config.enforce_eager:
 
                 possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
-                if envs.VLLM_CAPTURE_ADDITIONAL_SMALL_GRAPHS:
+                if envs.VLLM_EXTRA_CUDA_GRAPH_SIZES and len(
+                        envs.VLLM_EXTRA_CUDA_GRAPH_SIZES) > 0:
                     logger.info(
-                        "Capturing additional cuda graphs. This will significantly increase the GPU memory utilization"
-                    )
+                        "Capturing additional cuda graphs. "
+                        "This may lead to an increase in GPU memory usage")
                     possible_sizes = sorted(
-                        set(possible_sizes + list(range(1, 8)) +
-                            list(range(8, 16, 2)) + list(range(16, 32, 4))))
+                        set(possible_sizes + envs.VLLM_EXTRA_CUDA_GRAPH_SIZES))
                 # find the minimum size that is larger than max_num_seqs,
                 # which then becomes the max_batchsize_to_capture
                 larger_sizes = [
