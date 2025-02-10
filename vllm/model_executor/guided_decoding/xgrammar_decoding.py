@@ -255,7 +255,7 @@ class XGrammarLogitsProcessor:
     prefilled: bool = field(default=False)
 
     # Same length as batch_size (one boolean value for each item in batch)
-    is_triggered: list[bool] = field(default=None)  # type: ignore[assignment]
+    is_triggered: list[bool] = field(default=[True])
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
