@@ -52,7 +52,7 @@ def get_lora_op_configs(op_type: str, batch: int,
 
 
 @lru_cache
-def set_cuda_device(device: torch.device):
+def _set_cuda_device(device: torch.device):
     """
     Sets the current CUDA device.
     """

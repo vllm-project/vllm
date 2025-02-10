@@ -14,7 +14,7 @@ import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
 
-from .utils import _get_lora_b_ptr, set_cuda_device
+from .utils import _get_lora_b_ptr, _set_cuda_device
 
 
 @triton.jit
@@ -218,7 +218,7 @@ def _sgmv_expand(
         batches,
         len(lora_b_weights),
     )
-    set_cuda_device(inputs.device)
+    _set_cuda_device(inputs.device)
     _sgmv_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,
