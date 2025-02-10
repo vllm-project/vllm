@@ -297,7 +297,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ?
-  * [✗](gh-issue:7968>)
+  * [✗](gh-issue:7968)
   * ?
   * ✅
   *

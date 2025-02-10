@@ -89,7 +89,7 @@ def _test_processing_correctness(
         mm_data = {
             k:
             [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
-             for _ in range(rng.randint(limit))]
+             for _ in range(rng.randint(limit + 1))]
             for k, limit in limit_mm_per_prompt.items()
         }
 
