@@ -581,13 +581,12 @@ class InputPreprocessor:
                 if decoder_inputs is None:
                     decoder_inputs = decoder_inputs_with_mm
                 elif decoder_inputs_with_mm["type"] == "multimodal":
+                    decoder_inputs_with_mm = cast(MultiModalInputs,
+                                                  decoder_inputs_with_mm)
                     decoder_inputs = MultiModalInputs(
                         type="multimodal",
-                        prompt=decoder_inputs.get("prompt", ""),
-                        prompt_token_ids=decoder_inputs.get(
-                            "prompt_token_ids", []),
-                        token_type_ids=decoder_inputs.get(
-                            "token_type_ids", []),
+                        prompt=decoder_inputs["prompt"],
+                        prompt_token_ids=decoder_inputs["prompt_token_ids"],
                         mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
                         mm_placeholders=decoder_inputs_with_mm[
                             "mm_placeholders"],
@@ -643,13 +642,12 @@ class InputPreprocessor:
                 if decoder_inputs is None:
                     decoder_inputs = decoder_inputs_with_mm
                 elif decoder_inputs_with_mm["type"] == "multimodal":
+                    decoder_inputs_with_mm = cast(MultiModalInputs,
+                                                  decoder_inputs_with_mm)
                     decoder_inputs = MultiModalInputs(
                         type="multimodal",
-                        prompt=decoder_inputs.get("prompt", ""),
-                        prompt_token_ids=decoder_inputs.get(
-                            "prompt_token_ids", []),
-                        token_type_ids=decoder_inputs.get(
-                            "token_type_ids", []),
+                        prompt=decoder_inputs["prompt"],
+                        prompt_token_ids=decoder_inputs["prompt_token_ids"],
                         mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
                         mm_placeholders=decoder_inputs_with_mm[
                             "mm_placeholders"],
