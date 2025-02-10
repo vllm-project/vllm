@@ -856,7 +856,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
-  * `fixie-ai/ultravox-v0_3`
+  * `fixie-ai/ultravox-v0_5-llama-3_2-1b`
   * ✅︎
   * ✅︎
   * ✅︎
