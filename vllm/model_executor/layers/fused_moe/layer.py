@@ -19,7 +19,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
 if VLLM_USE_AITER_MOE:
-    from aiter.fused_moe_bf16_asm import asm_moe
+    from aiter import ck_moe
     from aiter.ops.shuffle import shuffle_weight
 
 if current_platform.is_cuda_alike():
@@ -178,10 +178,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias=e_score_correction_bias)
 
         if VLLM_USE_AITER_MOE:
-            return asm_moe(hidden_states=x,
+            return ck_moe(hidden_states=x,
                            w1=layer.w13_weight,
                            w2=layer.w2_weight,
-                           topk_weight=topk_weights,
+                           topk_weights=topk_weights,
                            topk_ids=topk_ids)
 
         return fused_experts(hidden_states=x,
