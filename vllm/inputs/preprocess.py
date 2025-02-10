@@ -583,11 +583,11 @@ class InputPreprocessor:
                 elif decoder_inputs_with_mm["type"] == "multimodal":
                     decoder_inputs = MultiModalInputs(
                         type="multimodal",
-                        prompt=decoder_inputs.get("prompt", None),
+                        prompt=decoder_inputs.get("prompt", ""),
                         prompt_token_ids=decoder_inputs.get(
-                            "prompt_token_ids", None),
+                            "prompt_token_ids", []),
                         token_type_ids=decoder_inputs.get(
-                            "token_type_ids", None),
+                            "token_type_ids", []),
                         mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
                         mm_placeholders=decoder_inputs_with_mm[
                             "mm_placeholders"],
@@ -645,11 +645,11 @@ class InputPreprocessor:
                 elif decoder_inputs_with_mm["type"] == "multimodal":
                     decoder_inputs = MultiModalInputs(
                         type="multimodal",
-                        prompt=decoder_inputs.get("prompt", None),
+                        prompt=decoder_inputs.get("prompt", ""),
                         prompt_token_ids=decoder_inputs.get(
-                            "prompt_token_ids", None),
+                            "prompt_token_ids", []),
                         token_type_ids=decoder_inputs.get(
-                            "token_type_ids", None),
+                            "token_type_ids", []),
                         mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
                         mm_placeholders=decoder_inputs_with_mm[
                             "mm_placeholders"],
