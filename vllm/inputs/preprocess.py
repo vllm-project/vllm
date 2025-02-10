@@ -581,13 +581,16 @@ class InputPreprocessor:
                 if decoder_inputs is None:
                     decoder_inputs = decoder_inputs_with_mm
                 elif decoder_inputs_with_mm["type"] == "multimodal":
-                    del decoder_inputs["type"]
                     decoder_inputs = MultiModalInputs(
                         type="multimodal",
+                        prompt=decoder_inputs.get("prompt", None),
+                        prompt_token_ids=decoder_inputs.get(
+                            "prompt_token_ids", None),
+                        token_type_ids=decoder_inputs.get(
+                            "token_type_ids", None),
                         mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
                         mm_placeholders=decoder_inputs_with_mm[
                             "mm_placeholders"],
-                        **decoder_inputs,
                     )
         else:
             inputs = self._prompt_to_llm_inputs(
@@ -640,13 +643,16 @@ class InputPreprocessor:
                 if decoder_inputs is None:
                     decoder_inputs = decoder_inputs_with_mm
                 elif decoder_inputs_with_mm["type"] == "multimodal":
-                    del decoder_inputs["type"]
                     decoder_inputs = MultiModalInputs(
                         type="multimodal",
+                        prompt=decoder_inputs.get("prompt", None),
+                        prompt_token_ids=decoder_inputs.get(
+                            "prompt_token_ids", None),
+                        token_type_ids=decoder_inputs.get(
+                            "token_type_ids", None),
                         mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
                         mm_placeholders=decoder_inputs_with_mm[
                             "mm_placeholders"],
-                        **decoder_inputs,
                     )
         else:
             inputs = await self._prompt_to_llm_inputs_async(
