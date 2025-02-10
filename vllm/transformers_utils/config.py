@@ -126,6 +126,8 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
                 raise
             time.sleep(retry_delay)
             retry_delay *= 2
+            continue
+    return False
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
