@@ -42,7 +42,7 @@ class NaiveBlockAllocator(BlockAllocator):
         # similar to deque, heap removes the first element in O(1)
         # it ensure that the smallest block id is always at the top
         # which is the next block to be allocated
-        # it can improve the performance of block allocation 
+        # it can improve the performance of block allocation
         # in some cases while do not affect the overall performance
         self._free_block_indices: List[BlockId] = list(block_ids)
         heapq.heapify(self._free_block_indices)
