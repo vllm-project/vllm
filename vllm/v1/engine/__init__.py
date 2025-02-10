@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import msgspec
 
@@ -80,6 +80,18 @@ class EngineCoreOutput(
         return self.finish_reason is not None
 
 
+class UtilityOutput(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        gc=False):  # type: ignore[call-arg]
+
+    call_id: int
+
+    # Non-None implies the call failed, result should be None.
+    failure_message: Optional[str]
+    result: Any
+
+
 class EngineCoreOutputs(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -90,8 +102,10 @@ class EngineCoreOutputs(
     # e.g. columnwise layout
 
     # [num_reqs]
-    outputs: List[EngineCoreOutput]
-    scheduler_stats: SchedulerStats
+    outputs: List[EngineCoreOutput] = []
+    scheduler_stats: Optional[SchedulerStats] = None
+
+    utility_output: Optional[UtilityOutput] = None
 
 
 class EngineCoreRequestType(enum.Enum):
@@ -101,5 +115,4 @@ class EngineCoreRequestType(enum.Enum):
     """
     ADD = b'\x00'
     ABORT = b'\x01'
-    PROFILE = b'\x02'
-    RESET_PREFIX_CACHE = b'\x03'
+    UTILITY = b'\x02'

@@ -2,10 +2,14 @@
 
 import asyncio
 import os
+import queue
 import signal
+import uuid
 import weakref
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional, Type
+from concurrent.futures import Future
+from threading import Thread
+from typing import Any, Dict, List, Optional, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -15,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType)
+                            EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -193,6 +197,17 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
+        self.utility_results: Dict[int, Union[asyncio.Future[Any],
+                                              Future]] = {}
+
+    def _process_utility_output(self, output: UtilityOutput):
+        future = self.utility_results.pop(output.call_id)
+        if output.failure_message is not None:
+            future.set_exception(
+                ValueError(f"Failed: {output.failure_message}"))
+        else:
+            future.set_result(output.result)
+
     def shutdown(self):
         """Clean up background resources."""
         if hasattr(self, "proc_handle"):
@@ -213,10 +228,22 @@ class SyncMPClient(MPClient):
             log_stats=False,
         )
 
-    def get_output(self) -> EngineCoreOutputs:
+        self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
 
-        (frame, ) = self.output_socket.recv_multipart(copy=False)
-        return self.decoder.decode(frame.buffer)
+        def process_outputs_socket():
+            while True:
+                (frame, ) = self.output_socket.recv_multipart(copy=False)
+                outputs = self.decoder.decode(frame.buffer)
+                if outputs.utility_output:
+                    self._process_utility_output(outputs.utility_output)
+                else:
+                    self.outputs_queue.put_nowait(outputs)
+
+        # Process outputs from engine in separate thread.
+        Thread(target=process_outputs_socket, daemon=True).start()
+
+    def get_output(self) -> EngineCoreOutputs:
+        return self.outputs_queue.get()
 
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: Any) -> None:
@@ -224,6 +251,17 @@ class SyncMPClient(MPClient):
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
         self.input_socket.send_multipart(msg, copy=False)
+
+    def _call_utility(self, method: str, *args, unary: bool = False) -> Any:
+        call_id = uuid.uuid4().int
+        if not unary:
+            future: Future[Any] = Future()
+            self.utility_results[call_id] = future
+
+        self._send_input(EngineCoreRequestType.UTILITY,
+                         (call_id, method, unary, args))
+
+        return future.result() if unary else None
 
     def add_request(self, request: EngineCoreRequest) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
@@ -236,10 +274,10 @@ class SyncMPClient(MPClient):
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     def profile(self, is_start: bool = True) -> None:
-        self._send_input(EngineCoreRequestType.PROFILE, is_start)
+        self._call_utility("profile", is_start)
 
     def reset_prefix_cache(self) -> None:
-        self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
+        self._call_utility("reset_prefix_cache")
 
 
 class AsyncMPClient(MPClient):
@@ -271,13 +309,31 @@ class AsyncMPClient(MPClient):
 
             self.queue_task = asyncio.create_task(process_outputs_socket())
 
-        return self.decoder.decode(await self.outputs_queue.get())
+        while True:
+            outputs = self.decoder.decode(await self.outputs_queue.get())
+            if not outputs.utility_output:
+                return outputs
+
+            self._process_utility_output(outputs.utility_output)
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
 
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
+
+    async def _call_utility_async(self,
+                                  method: str,
+                                  *args,
+                                  unary: bool = False) -> Any:
+        call_id = uuid.uuid4().int
+        if not unary:
+            future = asyncio.get_running_loop().create_future()
+            self.utility_results[call_id] = future
+        await self._send_input(EngineCoreRequestType.UTILITY,
+                               (call_id, method, unary, args))
+
+        return await future if unary else None
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
@@ -290,7 +346,7 @@ class AsyncMPClient(MPClient):
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     async def profile_async(self, is_start: bool = True) -> None:
-        await self._send_input(EngineCoreRequestType.PROFILE, is_start)
+        await self._call_utility_async("profile", is_start)
 
     async def reset_prefix_cache_async(self) -> None:
-        await self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
+        await self._call_utility_async("reset_prefix_cache")

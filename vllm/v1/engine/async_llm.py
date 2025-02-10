@@ -278,6 +278,7 @@ class AsyncLLM(EngineClient):
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
                 assert iteration_stats is not None
+                assert outputs.scheduler_stats is not None
                 self._log_stats(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,

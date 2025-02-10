@@ -19,7 +19,7 @@ from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType)
+                            EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -251,10 +251,17 @@ class EngineCoreProc(EngineCore):
             self.add_request(request)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
-        elif request_type == EngineCoreRequestType.RESET_PREFIX_CACHE:
-            self.reset_prefix_cache()
-        elif request_type == EngineCoreRequestType.PROFILE:
-            self.model_executor.profile(request)
+        elif request_type == EngineCoreRequestType.UTILITY:
+            method, args, unary, caller_id = request
+            output = UtilityOutput(caller_id)
+            try:
+                output.result = getattr(self, method)(*args)
+            except BaseException as e:
+                logger.exception("Invocation of {method} method failed")
+                output.failure_message = str(e)
+            if unary:
+                self.output_queue.put_nowait(
+                    EngineCoreOutputs(utility_output=output))
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
