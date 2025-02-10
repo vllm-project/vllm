@@ -2239,34 +2239,13 @@ def import_pynvml():
         This causes errors when both of them are installed.
         Starting from version 12.0, it migrates to a new module
         named `pynvml_utils` to avoid the conflict.
-    
-    TL;DR: if users have pynvml<12.0 installed, it will cause problems.
-    Otherwise, `import pynvml` will import the correct module.
-    We take the safest approach here, to manually import the correct
-    `pynvml.py` module from the `nvidia-ml-py` package.
+    It is so confusing that many packages in the community use the
+    unofficial one by mistake, and we have to handle this case.
+    For example, `nvcr.io/nvidia/pytorch:24.12-py3` uses the unofficial
+    one, and it will cause errors, see the issue
+    https://github.com/vllm-project/vllm/issues/12847 for example.
+    After all the troubles, we decide to copy the official `pynvml`
+    module to our codebase, and use it directly.
     """
-    if TYPE_CHECKING:
-        import pynvml
-        return pynvml
-    if "pynvml" in sys.modules:
-        import pynvml
-        if pynvml.__file__.endswith("__init__.py"):
-            # this is pynvml < 12.0
-            raise RuntimeError(
-                "You are using a deprecated `pynvml` package. "
-                "Please uninstall `pynvml` or upgrade to at least"
-                " version 12.0. See https://pypi.org/project/pynvml "
-                "for more information.")
-        return sys.modules["pynvml"]
-    import importlib.util
-    import os
-    import site
-    for site_dir in site.getsitepackages():
-        pynvml_path = os.path.join(site_dir, "pynvml.py")
-        if os.path.exists(pynvml_path):
-            spec = importlib.util.spec_from_file_location(
-                "pynvml", pynvml_path)
-            pynvml = importlib.util.module_from_spec(spec)
-            sys.modules["pynvml"] = pynvml
-            spec.loader.exec_module(pynvml)
-            return pynvml
+    import vllm.third_party.pynvml as pynvml
+    return pynvml
