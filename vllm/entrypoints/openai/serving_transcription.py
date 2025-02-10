@@ -1,19 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import io
-from typing import Any, AsyncGenerator, Dict, Optional, Union
+from typing import AsyncGenerator, Optional, Union, cast
 
 from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (RequestResponseMetadata,
+from vllm.entrypoints.openai.protocol import (ErrorResponse,
+                                              RequestResponseMetadata,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
                                               TranscriptionResponseVerbose)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.utils import PlaceholderModule
@@ -168,7 +170,7 @@ class OpenAIServingTranscription(OpenAIServing):
         self,
         request: TranscriptionRequest,
         audio_data: bytes,
-    ) -> Dict[Any, Any]:
+    ) -> PromptType:
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
@@ -199,7 +201,7 @@ class OpenAIServingTranscription(OpenAIServing):
                 f"Maximum clip duration ({MAX_AUDIO_CLIP_DURATION_S}s) "
                 "exceeded.")
 
-        return {
+        prompt = {
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
@@ -209,18 +211,19 @@ class OpenAIServingTranscription(OpenAIServing):
             "decoder_prompt":
             f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
         }
+        return cast(PromptType, prompt)
 
     # TODO (varun) : Make verbose response work !
     async def create_transcription(
         self, audio_data: bytes, request: TranscriptionRequest,
         raw_request: Request
-    ) -> Union[TranscriptionResponse, TranscriptionResponseVerbose]:
+    ) -> Union[TranscriptionResponse, TranscriptionResponseVerbose,
+               ErrorResponse]:
         """Transcription API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranscription
         for the API specification. This API mimics the OpenAI transcription API.
         """
-
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -273,11 +276,12 @@ class OpenAIServingTranscription(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 default_max_tokens, default_params)
 
-            self._log_inputs(request_id,
-                             prompt['decoder_prompt'],
-                             params=sampling_params,
-                             lora_request=None,
-                             prompt_adapter_request=None)
+            self._log_inputs(
+                request_id,
+                prompt['decoder_prompt'],  # type: ignore
+                params=sampling_params,
+                lora_request=None,
+                prompt_adapter_request=None)
 
             result_generator = self.engine_client.generate(
                 prompt,
@@ -289,10 +293,6 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
         # TODO(rob): figure out a way to pipe streaming in.
-        stream = False
-        if stream:
-            return None
-
         # Non-streaming response.
         try:
             async for op in result_generator:
