@@ -14,7 +14,7 @@ import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
 
-from .utils import _get_lora_a_ptr
+from .utils import _get_lora_a_ptr,set_cuda_device
 
 
 @triton.jit
@@ -184,6 +184,7 @@ def _sgmv_shrink(
         SPLIT_K * len(lora_a_weights),
         batches,
     )
+    set_cuda_device(inputs.device)
     _sgmv_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,

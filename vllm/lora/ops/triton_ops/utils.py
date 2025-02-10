@@ -2,7 +2,7 @@
 
 import functools
 from typing import Dict, List, Tuple
-
+from functools import  lru_cache
 import torch
 
 
@@ -48,6 +48,14 @@ def get_lora_op_configs(op_type: str, batch: int,
     if not config:
         config = _get_default_config(op_type, batch, hidden_size)
     return config
+
+@lru_cache
+def set_cuda_device(device: torch.device):
+    """
+    Sets the current CUDA device.
+    """
+    torch.cuda.set_device(device)
+    
 
 
 _LORA_A_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}

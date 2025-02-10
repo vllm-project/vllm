@@ -12,7 +12,7 @@ import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
 
-from .utils import get_lora_op_configs
+from .utils import get_lora_op_configs,set_cuda_device
 
 
 @triton.jit
@@ -142,6 +142,7 @@ def _bgmv_expand(
         META["SPLIT_N"],
         batches,
     )
+    set_cuda_device(inputs.device)
     _bgmv_expand_kernel[grid](
         inputs,
         lora_b_weights,
