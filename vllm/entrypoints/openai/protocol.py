@@ -5,14 +5,13 @@
 import re
 import time
 from argparse import Namespace
-from typing import (Any, ClassVar, Dict, List, Literal, Optional, Set,
-                    TypeAlias, Union)
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
 
 import torch
 from fastapi import UploadFile
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
-from typing_extensions import Annotated
+from typing_extensions import Annotated, TypeAlias
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
