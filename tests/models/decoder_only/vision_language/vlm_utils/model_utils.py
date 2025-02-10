@@ -589,7 +589,7 @@ def _generate_greedy_logprobs_limit(
 
 
 ####### Molmo-specific HuggingFace runner patchers
-def mlomo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Molmo."""
     hf_processor = hf_model.processor
 
