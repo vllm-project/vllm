@@ -190,9 +190,9 @@ for output in outputs:
 
 A few important things to consider when using the EAGLE based draft models:
 
-1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) should be
-   able to be loaded and used directly by vLLM after [PR 12304](https://github.com/vllm-project/vllm/pull/12304). If
-   you are using vllm version before [PR 12304](https://github.com/vllm-project/vllm/pull/12304), please use the
+1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) should
+   be able to be loaded and used directly by vLLM after [PR 12304](https://github.com/vllm-project/vllm/pull/12304).
+   If you are using vllm version before [PR 12304](https://github.com/vllm-project/vllm/pull/12304), please use the
    [script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model,
    and specify `speculative_model="path/to/modified/eagle/model",`. If weight-loading problems still occur when using
    the latest version of vLLM, please leave a comment or raise an issue.
