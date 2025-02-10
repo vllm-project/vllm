@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import random
 from collections import defaultdict
 from types import SimpleNamespace

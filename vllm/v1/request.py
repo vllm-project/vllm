@@ -1,16 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
-    from vllm.v1.core.kv_cache_utils import BlockHashType
 
 
 class Request:
@@ -61,10 +62,6 @@ class Request:
         if self.mm_hashes:
             assert len(self.mm_inputs) == len(self.mm_hashes)
 
-        # Cache the computed kv block hashes of the request to avoid
-        # recomputing.
-        self._kv_block_hashes: List[BlockHashType] = []
-
         # Read-only views
         # Prevent directly appending to the these lists since
         # they should also be updated simultaneously.
@@ -106,7 +103,7 @@ class Request:
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 
-    def get_finished_reason(self) -> Union[str, None]:
+    def get_finished_reason(self) -> Union[FinishReason, None]:
         return RequestStatus.get_finished_reason(self.status)
 
     def has_encoder_inputs(self) -> bool:
@@ -120,17 +117,6 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
-
-    @property
-    def kv_block_hashes(self) -> ConstantList["BlockHashType"]:
-        # Prevent directly appending to the kv_block_hashes.
-        return ConstantList(self._kv_block_hashes)
-
-    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
-        self._kv_block_hashes = value
-
-    def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
-        self._kv_block_hashes.append(block_hash)
 
 
 class RequestStatus(enum.IntEnum):
@@ -150,7 +136,8 @@ class RequestStatus(enum.IntEnum):
         return status > RequestStatus.PREEMPTED
 
     @staticmethod
-    def get_finished_reason(status: "RequestStatus") -> Union[str, None]:
+    def get_finished_reason(
+            status: "RequestStatus") -> Union[FinishReason, None]:
         return _FINISHED_REASON_MAP.get(status)
 
 
@@ -159,8 +146,8 @@ class RequestStatus(enum.IntEnum):
 # are longer than the model's length cap. Therefore, the stop
 # reason should also be "length" as in OpenAI API.
 _FINISHED_REASON_MAP = {
-    RequestStatus.FINISHED_STOPPED: "stop",
-    RequestStatus.FINISHED_LENGTH_CAPPED: "length",
-    RequestStatus.FINISHED_ABORTED: "abort",
-    RequestStatus.FINISHED_IGNORED: "length",
+    RequestStatus.FINISHED_STOPPED: FinishReason.STOP,
+    RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
+    RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
 }

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from vllm.lora.ops.triton_ops.bgmv_expand import bgmv_expand
 from vllm.lora.ops.triton_ops.bgmv_expand_slice import bgmv_expand_slice
 from vllm.lora.ops.triton_ops.bgmv_shrink import bgmv_shrink

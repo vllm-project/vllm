@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Example of using the OpenAI entrypoint's rerank API which is compatible with
 Jina and Cohere https://jina.ai/reranker

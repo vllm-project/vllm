@@ -27,7 +27,7 @@ matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.0 # required for pixtral test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.4 # required for model evaluation test
-
+transformers==4.48.2 
 # quantization
 bitsandbytes>=0.45.0
 buildkite-test-collector==0.1.9

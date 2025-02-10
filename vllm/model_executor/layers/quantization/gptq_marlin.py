@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import torch
@@ -321,13 +323,18 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        # Currently assuming is_k_full is always True
-        # (input size per partition is the same as full input size)
-        # Supports only sym for now (no zp)
+        intermediate_size_full = extra_weight_attrs.pop(
+            "intermediate_size_full")
+
+        self.is_k_full = (not self.quant_config.desc_act) or (
+            intermediate_size_per_partition == intermediate_size_full)
+
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
-            scales_size2 = (intermediate_size_per_partition //
-                            self.quant_config.group_size)
+            w2_scales_size = (intermediate_size_full
+                              if self.quant_config.desc_act else
+                              intermediate_size_per_partition)
+            scales_size2 = (w2_scales_size // self.quant_config.group_size)
             strategy = FusedMoeWeightScaleSupported.GROUP.value
         else:
             scales_size13 = 1
@@ -383,6 +390,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
+        # dont shard the w2 scales when running act order
+        set_weight_attrs(w2_scales,
+                         {"load_full_w2": self.quant_config.desc_act})
         # up_proj scales
         w13_qzeros = torch.nn.Parameter(
             torch.empty(num_experts,
@@ -404,6 +414,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
+        # dont shard the w2 scales when running act order
+        set_weight_attrs(w2_qzeros,
+                         {"load_full_w2": self.quant_config.desc_act})
         w13_g_idx = torch.nn.Parameter(
             torch.empty(
                 num_experts,
@@ -573,4 +586,4 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.quant_config.quant_type.size_bits,
-        ).to(orig_dtype)
+            is_k_full=self.is_k_full).to(orig_dtype)
