@@ -470,6 +470,9 @@ class CLIPVisionTransformer(nn.Module):
 
 class CLIPVisionModel(nn.Module):
 
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
 
@@ -483,6 +486,7 @@ class CLIPVisionModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
