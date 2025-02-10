@@ -298,7 +298,7 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 :end-before: end-chat-embedding-extra-params
 :::
 
-(tokenizer-api)=
+(transcriptions-api)=
 
 ### Transcriptions API
 
@@ -308,6 +308,8 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 <!-- TODO: api enforced limits + uploading audios -->
 
 Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
+
+(tokenizer-api)=
 
 ### Tokenizer API
 
