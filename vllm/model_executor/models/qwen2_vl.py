@@ -885,14 +885,10 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
-        num_frames = min(max(max_total_frames // max(max_videos, 1), 1),
-                         _MAX_FRAMES_PER_VIDEO)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
 
-        # Temporary workaround for https://github.com/huggingface/transformers/issues/35412
-        if num_frames > 1 and num_frames % 2 == 1:
-            num_frames += 1
-
-        return num_frames
+        return max(max_frames_per_video, 1)
 
     def get_max_video_tokens(self, seq_len: int) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
