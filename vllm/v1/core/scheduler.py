@@ -118,7 +118,7 @@ class Scheduler:
         scheduled_encoder_inputs: Dict[str, List[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
 
-        # Spec Decode-related.
+        # Spec Decode-related. spec_decode: if any request in the scheduled batch uses speculative decoding.
         spec_decode = False
         scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
 
