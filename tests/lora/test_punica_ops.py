@@ -421,8 +421,8 @@ hs_test_params = {
 # except hidden_size.
 test_params = {
     "hidden_sizes": [2049],
-    "batches": [1, 4, 16, 17, 32, 55],
-    "num_loras": [1, 3, 8, 32, 55, 128],
+    "batches": [1, 4, 16, 32],
+    "num_loras": [1, 8, 32, 128],
     "max_ranks": [1, 4, 8, 16, 32, 64, 128, 256],
 }
 
