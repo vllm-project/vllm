@@ -1110,8 +1110,8 @@ class MolmoProcessorWrapper:
         return_tensors: Optional[Union[str, TensorType]] = None,
         **kwargs,
     ) -> BatchFeature:
-        outputs = self.processor.process(text, images,
-                                         **kwargs)  # type: ignore
+        outputs = self.processor.process(  # type: ignore
+            text, images, **kwargs)
 
         return BatchFeature(
             {
