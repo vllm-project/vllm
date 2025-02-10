@@ -215,7 +215,7 @@ class OutputProcessor:
                 # Free completed requests.
                 if request_output.finished:
                     self.request_states.pop(req_id)
-                    if not engine_core_outputs.finished[i]:
+                    if finish_reason is not None:
                         # If req not finished in EngineCore, but Detokenizer
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
