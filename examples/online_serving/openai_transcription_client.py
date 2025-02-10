@@ -3,8 +3,8 @@ from openai import OpenAI
 
 from vllm.assets.audio import AudioAsset
 
-mary_had_lamb = AudioAsset('mary_had_lamb').get_asset_path()
-winning_call = AudioAsset('winning_call').get_asset_path()
+mary_had_lamb = AudioAsset('mary_had_lamb').get_local_path()
+winning_call = AudioAsset('winning_call').get_local_path()
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"

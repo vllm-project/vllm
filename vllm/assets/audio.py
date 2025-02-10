@@ -29,7 +29,7 @@ class AudioAsset:
                                             s3_prefix=ASSET_DIR)
         return librosa.load(audio_path, sr=None)
 
-    def get_asset_path(self) -> Path:
+    def get_local_path(self) -> Path:
         return get_vllm_public_assets(filename=f"{self.name}.ogg",
                                       s3_prefix=ASSET_DIR)
 
