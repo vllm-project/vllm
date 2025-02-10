@@ -72,10 +72,12 @@ if triton.__version__ >= "2.1.0":
 
         cur_kv_head = cur_head // num_queries_per_kv
 
-        cur_batch_ctx_len = tl.load(B_Ctxlen + cur_batch)
         cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
         cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
-        cur_batch_query_len = cur_batch_seq_len - cur_batch_ctx_len
+        cur_batch_in_all_stop_index = tl.load(B_Start_Loc + cur_batch + 1)
+        cur_batch_query_len = (cur_batch_in_all_stop_index -
+                               cur_batch_in_all_start_index)
+        cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
 
         # start position inside of the query
         # generally, N goes over kv, while M goes over query_len
@@ -511,9 +513,12 @@ if triton.__version__ >= "2.1.0":
         # cur_batch_seq_len: the length of prompts
         # cur_batch_ctx_len: the length of prefix
         # cur_batch_in_all_start_index: the start id of the dim=0
-        cur_batch_ctx_len = tl.load(B_Ctxlen + cur_batch)
         cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
         cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
+        cur_batch_in_all_stop_index = tl.load(B_Start_Loc + cur_batch + 1)
+        cur_batch_query_len = (cur_batch_in_all_stop_index -
+                               cur_batch_in_all_start_index)
+        cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
 
         block_start_loc = BLOCK_M * start_m
 
@@ -763,6 +768,7 @@ if triton.__version__ >= "2.1.0":
         batch, head = b_seq_len.shape[0], q.shape[1]
         num_queries_per_kv = q.shape[1] // k.shape[1]
 
+        assert batch + 1 == len(b_start_loc)
         grid = (batch, head, triton.cdiv(max_input_len, BLOCK))  # batch, head,
 
         # 0 means "disable"

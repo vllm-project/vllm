@@ -100,7 +100,7 @@ def test_contexted_kv_attention(
         BS, max_block_per_request)
     b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
     b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
-    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens[:-1],
+    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
                                             dtype=torch.long),
                                dim=0)
     max_input_len = MAX_SEQ_LEN
@@ -333,7 +333,7 @@ def test_contexted_kv_attention_alibi(
         BS, max_block_per_request)
     b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
     b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
-    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens[:-1],
+    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
                                             dtype=torch.long),
                                dim=0)
     max_input_len = MAX_SEQ_LEN
