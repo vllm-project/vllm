@@ -490,6 +490,7 @@ class InputPreprocessor:
     def _separate_enc_dec_inputs_from_mm_processor_outputs(
         self,
         inputs: SingletonInputs,
+        decoder_inputs_to_override: Optional[SingletonInputs] = None,
     ) -> Tuple[SingletonInputs, SingletonInputs]:
         """
         For encoder/decoder models only:
@@ -506,17 +507,27 @@ class InputPreprocessor:
                 prompt=inputs["encoder_prompt"],
                 prompt_token_ids=inputs["encoder_prompt_token_ids"],
             )
-            decoder_inputs = MultiModalInputs(
-                type="multimodal",
-                prompt=inputs["prompt"],
-                prompt_token_ids=inputs["prompt_token_ids"],
-                mm_kwargs=inputs["mm_kwargs"],
-                mm_placeholders=inputs["mm_placeholders"],
-            )
+            if decoder_inputs_to_override is not None:
+                decoder_inputs = MultiModalInputs(
+                    type="multimodal",
+                    prompt=decoder_inputs_to_override.get("prompt", ""),
+                    prompt_token_ids=decoder_inputs_to_override[
+                        "prompt_token_ids"],
+                    mm_kwargs=inputs["mm_kwargs"],
+                    mm_placeholders=inputs["mm_placeholders"],
+                )
+            else:
+                decoder_inputs = MultiModalInputs(
+                    type="multimodal",
+                    prompt=inputs["prompt"],
+                    prompt_token_ids=inputs["prompt_token_ids"],
+                    mm_kwargs=inputs["mm_kwargs"],
+                    mm_placeholders=inputs["mm_placeholders"],
+                )
         elif inputs["type"] == "token":
             # Text-only inputs
             encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
-            decoder_inputs = inputs
+            decoder_inputs = decoder_inputs_to_override or inputs
         else:
             assert_never(inputs)  # type: ignore[arg-type]
         return encoder_inputs, decoder_inputs
@@ -574,29 +585,16 @@ class InputPreprocessor:
                 )
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
-            if self.model_config.is_multimodal_model:
-                encoder_inputs, decoder_inputs_with_mm = (
+            if self._can_process_multimodal():
+                encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
-                        encoder_inputs))
-                if decoder_inputs is None:
-                    decoder_inputs = decoder_inputs_with_mm
-                elif decoder_inputs_with_mm["type"] == "multimodal":
-                    decoder_inputs_with_mm = cast(MultiModalInputs,
-                                                  decoder_inputs_with_mm)
-                    decoder_inputs = MultiModalInputs(
-                        type="multimodal",
-                        prompt=decoder_inputs["prompt"],
-                        prompt_token_ids=decoder_inputs["prompt_token_ids"],
-                        mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
-                        mm_placeholders=decoder_inputs_with_mm[
-                            "mm_placeholders"],
-                    )
+                        encoder_inputs, decoder_inputs))
         else:
             inputs = self._prompt_to_llm_inputs(
                 prompt,
                 request_id=request_id,
             )
-            if self.model_config.is_multimodal_model:
+            if self._can_process_multimodal():
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
@@ -635,23 +633,12 @@ class InputPreprocessor:
                 encoder_inputs, decoder_inputs = await asyncio.gather(
                     encoder_task, decoder_task)
 
-            if self.model_config.is_multimodal_model:
-                encoder_inputs, decoder_inputs_with_mm = (
+            # For multimodal model, override decoder prompt from processor
+            # with explicit decoder prompt.
+            if self._can_process_multimodal():
+                encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
-                        encoder_inputs))
-                if decoder_inputs is None:
-                    decoder_inputs = decoder_inputs_with_mm
-                elif decoder_inputs_with_mm["type"] == "multimodal":
-                    decoder_inputs_with_mm = cast(MultiModalInputs,
-                                                  decoder_inputs_with_mm)
-                    decoder_inputs = MultiModalInputs(
-                        type="multimodal",
-                        prompt=decoder_inputs["prompt"],
-                        prompt_token_ids=decoder_inputs["prompt_token_ids"],
-                        mm_kwargs=decoder_inputs_with_mm["mm_kwargs"],
-                        mm_placeholders=decoder_inputs_with_mm[
-                            "mm_placeholders"],
-                    )
+                        encoder_inputs, decoder_inputs))
         else:
             inputs = await self._prompt_to_llm_inputs_async(
                 prompt,
