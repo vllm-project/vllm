@@ -24,6 +24,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import (ParallelSamplingOutputProcessor,
+                                              ParentRequestState)
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
@@ -50,6 +52,8 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
+        self.enable_prefix_caching = (
+            vllm_config.cache_config.enable_prefix_caching)
 
         self.log_requests = log_requests
         self.log_stats = log_stats
@@ -167,7 +171,7 @@ class AsyncLLM(EngineClient):
     # requests we don't need to send multiple messages to core proc,
     # and so we don't need multiple streams which then get
     # re-multiplexed in the API server anyhow.
-    async def generate(
+    async def _generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -237,6 +241,87 @@ class AsyncLLM(EngineClient):
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
+
+    async def _parallel_sampling_batch(
+        self,
+        prompt: PromptType,
+        sampling_params: SamplingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        parent_state = ParentRequestState(request_id, sampling_params)
+        output_processor = ParallelSamplingOutputProcessor(parent_state)
+        n = parent_state.n
+
+        if self.enable_prefix_caching:
+            # If engine uses APC, generate a “warmup request” with
+            # max_tokens=1 which populates the APC
+            w_sampling_params = parent_state.get_child_sampling_params({
+                "max_tokens":
+                1,
+                "n":
+                1,
+                "output_kind":
+                RequestOutputKind.FINAL_ONLY
+            })
+            async for _ in self._generate(
+                    prompt,
+                    w_sampling_params,
+                    parent_state.get_warmup_request_id(),
+                    lora_request,
+                    trace_headers,
+                    prompt_adapter_request,
+                    priority,
+            ):
+                # Exhaust the generator
+                pass
+
+        seed = 42
+        for idx in range(n):
+            c_sampling_params = parent_state.get_child_sampling_params({
+                "n":
+                1,
+                "seed":
+                seed
+            })
+            seed += 1
+            async for out in self._generate(
+                    prompt,
+                    c_sampling_params,
+                    parent_state.get_child_request_id(idx),
+                    lora_request,
+                    trace_headers,
+                    prompt_adapter_request,
+                    priority,
+            ):
+                if req_out := output_processor.process_output(out, idx):
+                    yield req_out
+
+    async def generate(
+        self,
+        prompt: PromptType,
+        sampling_params: SamplingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        n = sampling_params.n
+        if n is None or sampling_params.n == 1:
+            async for out in self._generate(prompt, sampling_params,
+                                            request_id, lora_request,
+                                            trace_headers,
+                                            prompt_adapter_request, priority):
+                yield out
+        else:
+            async for out in self._parallel_sampling_batch(
+                    prompt, sampling_params, request_id, lora_request,
+                    trace_headers, prompt_adapter_request, priority):
+                yield out
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
