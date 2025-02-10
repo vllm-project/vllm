@@ -11,6 +11,13 @@ from vllm.platforms import current_platform
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
 
+# The condition to determine if it is on a platform that supports
+# torch._scaled_mm rowwise feature.
+# The condition is determined once as the operations
+# are time consuming.
+USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
+                               and current_platform.has_device_capability(94))
+
 
 def sparse_cutlass_supported() -> bool:
     if not current_platform.is_cuda():
@@ -171,6 +178,26 @@ def apply_fp8_linear(
 
             return torch.narrow(output, 0, 0,
                                 input_2d.shape[0]).view(*output_shape)
+
+        elif (use_per_token_if_dynamic and not per_tensor_weights
+              and not per_tensor_activations and USE_ROWWISE_TORCH_SCALED_MM):
+            # For now validated on ROCm platform
+            # fp8 rowwise scaling in torch._scaled_mm is introduced in
+            # https://github.com/pytorch/pytorch/pull/144432 using
+            # hipBLASLt and ROCm 6.3, which only exists in torch 2.7 and above.
+            # For CUDA platform please validate if the
+            # torch._scaled_mm support rowwise scaled GEMM
+            # Fused GEMM_DQ Rowwise GEMM
+            output = torch._scaled_mm(qinput,
+                                      weight,
+                                      out_dtype=input.dtype,
+                                      scale_a=x_scale,
+                                      scale_b=weight_scale.t(),
+                                      bias=bias)
+
+            output = torch.narrow(output, 0, 0, input_2d.shape[0])
+            output = output.view(*output_shape)
+            return output
 
         else:
             # Fallback for channelwise case, where we use unfused DQ
