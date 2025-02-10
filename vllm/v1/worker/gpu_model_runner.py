@@ -363,8 +363,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.condense(removed_req_indices)
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
-    def _prepare_inputs(self, scheduler_output: "SchedulerOutput") \
-                        -> Tuple[FlashAttentionMetadata, torch.Tensor]:
+    def _prepare_inputs(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> Tuple[FlashAttentionMetadata, torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -895,7 +896,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampled_token_ids = sampled_token_ids.tolist()
         for i, req_state, seq_len, gen_len in request_seq_lens:
             del sampled_token_ids[i][gen_len:]
-            for j, token_id in enumerate(token_ids):
+            for j, token_id in enumerate(sampled_token_ids[i]):
                 self.input_batch.token_ids_cpu[i, seq_len - gen_len + j +
                                                1] = token_id
                 req_state.output_token_ids[-gen_len + j] = token_id
