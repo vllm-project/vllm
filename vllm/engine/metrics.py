@@ -248,11 +248,11 @@ class Metrics:
             labelnames=labelnames,
             buckets=build_1_2_5_buckets(max_model_len),
         )
-        self.gauge_max_token_capacity_request = self._gauge_cls(
-            name="vllm:max_token_capacity_tokens",
-            documentation="Maximum token capacity in tokens.",
-            labelnames=labelnames,
-            multiprocess_mode="sum")
+        self.gauge_max_token_capacity_per_batch = self._gauge_cls(
+            name="vllm:max_token_capacity_per_batch",
+            documentation=
+            "Maximum tokens processed by the model server at max batch size",
+            labelnames=labelnames)
         self.gauge_total_tokens_in_current_batch_request = self._gauge_cls(
             name="vllm_total_tokens_in_current_batch",
             documentation=
@@ -640,10 +640,10 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_histogram(self.metrics.histogram_model_execute_time_request,
                             stats.model_execute_time_requests)
         self._log_gauge(
-                self.metrics.gauge_total_tokens_in_current_batch_request,
-                sum(stats.total_tokens_in_current_batch_requests))
+            self.metrics.gauge_total_tokens_in_current_batch_request,
+            sum(stats.total_tokens_in_current_batch_requests))
         self._log_gauge(self.metrics.gauge_total_tokens_in_queue_request,
-                            sum(stats.total_tokens_in_queue_requests))
+                        sum(stats.total_tokens_in_queue_requests))
         num_requests_with_evictions = len(
             [x for x in stats.request_with_evicted_tokens_requests
              if x]) if stats.request_with_evicted_tokens_requests else 0
@@ -672,9 +672,8 @@ class PrometheusStatLogger(StatLoggerBase):
             stats.max_num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_max_tokens_request,
                             stats.max_tokens_requests)
-        if stats.max_token_capacity_requests:
-            self._log_gauge(self.metrics.gauge_max_token_capacity_request,
-                            max(stats.max_token_capacity_requests))
+        self._log_gauge(self.metrics.gauge_max_token_capacity_per_batch,
+                        stats.max_token_capacity_per_batch)
 
     def log(self, stats: Stats):
         """Logs to prometheus and tracked stats every iteration."""

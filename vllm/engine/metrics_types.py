@@ -63,7 +63,7 @@ class Stats:
     n_requests: List[int]
     max_num_generation_tokens_requests: List[int]
     max_tokens_requests: List[int]
-    max_token_capacity_requests: List[int]
+    max_token_capacity_per_batch: int
     total_tokens_in_current_batch_requests: List[int]
     total_tokens_in_queue_requests: List[int]
     request_with_evicted_tokens_requests: List[bool]

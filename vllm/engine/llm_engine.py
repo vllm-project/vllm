@@ -1623,7 +1623,10 @@ class LLMEngine:
         n_requests: List[int] = []
         max_num_generation_tokens_requests: List[int] = []
         max_tokens_requests: List[int] = []
-        max_token_capacity_requests: List[int] = []
+        max_token_capacity_per_batch: int = min(
+            self.model_config.max_model_len *
+            self.scheduler_config.max_num_seqs,
+            self.scheduler_config.max_num_batched_tokens)
         total_tokens_in_current_batch_requests: List[int] = []
         total_tokens_in_queue_requests: List[int] = []
         request_with_evicted_tokens_requests: List[bool] = []
@@ -1785,14 +1788,6 @@ class LLMEngine:
                         n_requests.append(seq_group.sampling_params.n)
                         max_tokens_requests.append(
                             seq_group.sampling_params.max_tokens)
-                        # Update max token capacity as prompt tokens +
-                        # max generation tokens
-                        max_token_capacity = len(
-                            seq_group.prompt_token_ids
-                        ) + seq_group.sampling_params.max_tokens
-                        seq_group.metrics.max_token_capacity = (
-                            max_token_capacity)
-                    max_token_capacity_requests.append(max_token_capacity)
                     finished_reason_requests.extend([
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
@@ -1875,7 +1870,7 @@ class LLMEngine:
             max_num_generation_tokens_requests,
             n_requests=n_requests,
             max_tokens_requests=max_tokens_requests,
-            max_token_capacity_requests=max_token_capacity_requests,
+            max_token_capacity_per_batch=max_token_capacity_per_batch,
             total_tokens_in_current_batch_requests=
             total_tokens_in_current_batch_requests,
             total_tokens_in_queue_requests=total_tokens_in_queue_requests,
