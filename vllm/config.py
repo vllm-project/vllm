@@ -3315,7 +3315,7 @@ class VllmConfig:
                         envs.VLLM_EXTRA_CUDA_GRAPH_SIZES) > 0:
                     logger.info(
                         "Capturing additional cuda graphs. "
-                        "This may lead to an increase in GPU memory usage")
+                        "This may lead to an increase in GPU memory usage.")
                     possible_sizes = sorted(
                         set(possible_sizes + envs.VLLM_EXTRA_CUDA_GRAPH_SIZES))
                 # find the minimum size that is larger than max_num_seqs,
