@@ -133,15 +133,14 @@ def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
     components = prefix.split('.')
 
     # Check if any of the skip modules exactly matches any component
-    substr_check = any(
-        module_name in components
-        for module_name in llm_int8_skip_modules
-    )
+    substr_check = any(module_name in components
+                       for module_name in llm_int8_skip_modules)
 
     # Allow certain layers to not be quantized
-    components = set(".".join(components[:i+1]) for i in range(len(components)))
+    components = set(".".join(components[:i + 1])
+                     for i in range(len(components)))
     prefix_check = len(set(llm_int8_skip_modules) & components) != 0
-    
+
     return substr_check or prefix_check
 
 
