@@ -214,7 +214,7 @@ def measure_collfn(buff: torch.Tensor, bmcfg: BMConfig, gc: GroupCoordinator,
 
     ar_bm_iter = range(niter)
     if gc.rank == 0:
-        ar_bm_iter = tqdm(ar_bm_iter, "All_reduce")
+        ar_bm_iter = tqdm(ar_bm_iter, bm_name)
 
     def _participating(i):
         if not bmcfg.independent_tp_colls:

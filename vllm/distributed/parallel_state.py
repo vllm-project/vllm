@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Copyright 2023 The vLLM team.
-# Copyright 2024, GigaIO Networks, Inc. All rights reserved.
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
@@ -163,7 +162,6 @@ class GroupCoordinator:
         self,
         group_ranks: List[List[int]],
         local_rank: int,
-        device: torch.device,
         torch_distributed_backend: Union[str, Backend],
         use_pynccl: bool,
         use_custom_allreduce: bool,
@@ -172,6 +170,7 @@ class GroupCoordinator:
         use_xpu_communicator: bool,
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
+        device: Optional[torch.device] = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -179,7 +178,6 @@ class GroupCoordinator:
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
-        self.device = device
         self.device_group = None
         self.cpu_group = None
 
@@ -201,7 +199,8 @@ class GroupCoordinator:
 
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
-            self.device = torch.device(self.device)
+            self.device = device if device else torch.device(
+                f"cuda:{local_rank}")
         else:
             self.device = torch.device("cpu")
 
@@ -852,12 +851,11 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
-def init_world_group(ranks: List[int], local_rank: int, device: torch.device,
-                     backend: str) -> GroupCoordinator:
+def init_world_group(ranks: List[int], local_rank: int, backend: str,
+                     device: Optional[torch.device]) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
         local_rank=local_rank,
-        device=device,
         torch_distributed_backend=backend,
         use_pynccl=False,
         use_custom_allreduce=False,
@@ -865,6 +863,7 @@ def init_world_group(ranks: List[int], local_rank: int, device: torch.device,
         use_hpu_communicator=False,
         use_xpu_communicator=False,
         group_name="world",
+        device=device,
     )
 
 
@@ -883,7 +882,6 @@ def init_model_parallel_group(
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
-        device=device,
         torch_distributed_backend=backend,
         use_pynccl=current_platform.is_cuda_alike(),
         use_custom_allreduce=current_platform.is_cuda_alike()
@@ -893,6 +891,7 @@ def init_model_parallel_group(
         use_xpu_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        device=device,
     )
 
 
@@ -962,16 +961,16 @@ def set_custom_all_reduce(enable: bool):
 def init_distributed_environment(
     world_size: int = -1,
     rank: int = -1,
-    distributed_init_method: str = "env://",
+    distributed_init_method: Optional[str] = "env://",
     local_rank: int = -1,
-    device: Optional[torch.device] = None,
     backend: str = "nccl",
+    device: Optional[torch.device] = None,
 ):
 
     logger.debug(
-        "world_size=%d rank=%d local_rank=%d %r "
-        "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
-        device, distributed_init_method, backend)
+        "world_size=%d rank=%d local_rank=%d "
+        "distributed_init_method=%s backend=%s, device=%r", world_size, rank,
+        local_rank, distributed_init_method, backend, device)
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
@@ -993,15 +992,10 @@ def init_distributed_environment(
         else:
             local_rank = rank
 
-    if device is None:
-        dstr = f"cuda:{local_rank}"
-        logger.warning("device not found, setting to %s", dstr)
-        device = torch.device(dstr)
-
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(ranks, local_rank, device, backend)
+        _WORLD = init_world_group(ranks, local_rank, backend, device)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
@@ -1021,23 +1015,22 @@ def _get_rank_dev_map() -> Optional[Dict[int, int]]:
         _RANK_DEV_MAP = {}
         return None
 
-    estr = "VLLM_LOCAL_RANK_DEV_MAP ERROR: "
     n_local_devs = torch.cuda.device_count()
     rdm = {}
     rdm_splt_lst = rdm_str.split(",")
 
     assert len(rdm_splt_lst) == n_local_devs, (
-        estr + f"{len(rdm_splt_lst)} dev specified, expected {n_local_devs}")
+        f"{len(rdm_splt_lst)} dev specified, expected {n_local_devs}")
 
     for i, devstr in enumerate(rdm_splt_lst):
-        assert devstr.isdigit(), estr + f"'{devstr}' is not digit "
+        assert devstr.isdigit(), f"'{devstr}' is not digit "
         dev = int(devstr)
         assert dev >= 0 and dev < n_local_devs, (
-            estr + f"{dev} ord invalid (0 - {n_local_devs - 1})")
+            f"{dev} ord invalid (0 - {n_local_devs - 1})")
         rdm[i] = dev
 
     assert len(set(rdm.values())) == len(
-        rdm.values()), (estr + "device double mapped")
+        rdm.values()), ("device double mapped")
 
     _RANK_DEV_MAP = rdm
     return _RANK_DEV_MAP.copy()
@@ -1045,7 +1038,6 @@ def _get_rank_dev_map() -> Optional[Dict[int, int]]:
 
 def get_device_idx(local_rank: int) -> int:
     rdm = _get_rank_dev_map()
-
     return rdm[local_rank] if rdm else local_rank
 
 

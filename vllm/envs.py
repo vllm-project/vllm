@@ -575,6 +575,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
 
     # String of comma separated ints mapping local-rank to device
+    # e.g "0,2,1,3" assigns 'cuda:0' to local_rank:0
+    #               assigns 'cuda:2' to local_rank:1
+    #               assigns 'cuda:1' to local_rank:2
+    #               assigns 'cuda:3' to local_rank:03
     "VLLM_LOCAL_RANK_DEV_MAP":
     lambda: os.getenv("VLLM_LOCAL_RANK_DEV_MAP", "")
 }
