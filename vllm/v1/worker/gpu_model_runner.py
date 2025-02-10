@@ -179,6 +179,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                        self.max_model_len,
                                        self.max_num_tokens),
                                    dtype=np.int32)
+        self.arange_cpu = torch.from_numpy(self.arange_np)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
@@ -380,12 +381,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens_list: List[int] = []
         max_num_scheduled_tokens = 0
+        all_spec_token_ids: List[int] = []
+        num_spec_tokens: List[int] = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens_list.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id, [])
+            all_spec_token_ids.extend(spec_token_ids)
+            num_spec_tokens.append(len(spec_token_ids))
+
         num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
                                                     dtype=np.int32)
         assert max_num_scheduled_tokens > 0
@@ -425,28 +433,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
 
-        # Add spec decode tokens to input_batch.token_ids_cpu.
-        # Get spec decode logits indices.
-        spec_query_end_loc = 0
-        spec_decode_logits_indices: List[int] = []
-        for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
-            assert req_id is not None
-            req_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
-                req_id]
-            num_compute_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            spec_query_end_loc += req_num_scheduled_tokens
-            spec_token_ids = (
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
-            for j, spec_token_id in enumerate(spec_token_ids):
-                # +1 here because the input for verification is
-                # [last_output_token_id] + spec_token_ids
-                self.input_batch.token_ids_cpu[i, num_compute_tokens + 1 +
-                                               j] = spec_token_id
-            # -1 here because the input for verification is
-            # [last_output_token_id] + spec_token_ids
-            spec_decode_logits_indices.extend(
-                range(spec_query_end_loc - len(spec_token_ids) - 1,
-                      spec_query_end_loc))
+        if scheduler_output.use_spec_decode and all_spec_token_ids:
+            # Currently, we assume all speculated tokens are verified.
+            # We don't support partial verification.
+            # 1. Get spec decode logits indices.
+            spec_decode_logits_indices = self.arange_cpu[:
+                                                         total_num_scheduled_tokens]
+            # 2. Write spec token ids to input_ids_cpu.
+            all_spec_token_ids = torch.tensor(all_spec_token_ids,
+                                              dtype=torch.int32)
+            # Step 1. Calculate the spec token indices within input_ids_cpu.
+            # E.g., num_spec_tokens:                 [3, 0, 2, 0, 1]
+            #       num_scheduled_tokens:            [4, 1, 3, 1, 2]
+            # cu_num_tokens - num_scheduled_tokens:  [0, 4, 5, 8, 9]
+            # cumsums_spec_offsets                   [0, 0, 0, 5, 5, 9]
+            cumsums_spec_offsets = np.repeat(
+                cu_num_tokens - num_scheduled_tokens, num_spec_tokens)
+
+            # Step 2. Write spec token ids to input_ids_cpu.
+            torch.index_select(
+                all_spec_token_ids,
+                0,
+                torch.from_numpy(cumsums_spec_offsets),
+                out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
@@ -542,8 +551,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if scheduler_output.use_spec_decode:
-            logits_indices = torch.tensor(spec_decode_logits_indices,
-                                          device=self.device)
+            logits_indices = spec_decode_logits_indices.to(self.device,
+                                                           non_blocking=True)
         else:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
             # partial requests. While we should not sample any token
