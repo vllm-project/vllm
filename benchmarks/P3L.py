@@ -183,7 +183,7 @@ def main(args: argparse.Namespace):
             print(MESSAGE)
 
         MESSAGE = (f"Iterations {c+1} through {c+len(CONTEXT)}" \
-            " of {my_n_patches} Intermediate" \
+            f" of {my_n_patches} Intermediate " \
             "Estimates:\n" \
             f"\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n" \
             f"\tPerplexity_intermediate=" \
