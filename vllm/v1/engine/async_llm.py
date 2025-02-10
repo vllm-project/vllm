@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import os
 from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
@@ -15,7 +17,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
@@ -24,7 +26,8 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
+from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
+                                     StatLoggerBase)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -46,13 +49,14 @@ class AsyncLLM(EngineClient):
 
         assert start_engine_loop
 
+        self.model_config = vllm_config.model_config
+
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers: List[StatLoggerBase] = [
             LoggingStatLogger(),
-            # TODO(rob): PrometheusStatLogger(),
+            PrometheusStatLogger(vllm_config.model_config),
         ]
-        self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -214,6 +218,14 @@ class AsyncLLM(EngineClient):
                 # task switching under load which helps performance).
                 out = q.get_nowait() if not q.empty() else await q.get()
 
+                # Coalesce any additional queued outputs
+                while not q.empty():
+                    next_out = q.get_nowait()
+                    if sampling_params.output_kind == RequestOutputKind.DELTA:
+                        out.add(next_out)
+                    else:
+                        out = next_out
+
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 finished = out.finished
@@ -264,7 +276,7 @@ class AsyncLLM(EngineClient):
 
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
-                # background thread once we add Prometheus.
+                # background thread once Prometheus overhead is non-trivial.
                 assert iteration_stats is not None
                 self._log_stats(
                     scheduler_stats=outputs.scheduler_stats,
@@ -294,7 +306,8 @@ class AsyncLLM(EngineClient):
             return
 
         for logger in self.stat_loggers:
-            logger.log(scheduler_stats=scheduler_stats)
+            logger.log(scheduler_stats=scheduler_stats,
+                       iteration_stats=iteration_stats)
 
     def encode(
         self,

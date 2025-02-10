@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List, Mapping, Optional, Type, Union
 
 from typing_extensions import TypeVar
@@ -43,6 +45,7 @@ class LLMEngine:
         multiprocess_mode: bool = False,
     ) -> None:
         self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(

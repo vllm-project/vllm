@@ -35,16 +35,18 @@ Studies have shown that FP8 E4M3 quantization typically only minimally degrades 
 Here is an example of how to enable FP8 quantization:
 
 ```python
+# To calculate kv cache scales on the fly enable the calculate_kv_scales
+# parameter
+
 from vllm import LLM, SamplingParams
 
 sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
-llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", kv_cache_dtype="fp8")
+llm = LLM(model="meta-llama/Llama-2-7b-chat-hf",
+          kv_cache_dtype="fp8",
+          calculate_kv_scales=True)
 prompt = "London is the capital of"
 out = llm.generate(prompt, sampling_params)[0].outputs[0].text
 print(out)
-
-# output w/ scaling factors:  England, the United Kingdom, and one of the world's leading financial,
-# output w/o scaling factors: England, located in the southeastern part of the country. It is known
 ```
 
 The `kv_cache_dtype` argument specifies the data type for KV cache storage:

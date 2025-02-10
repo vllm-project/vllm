@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 r"""Benchmark online serving throughput.
 
 On the server side, run one of the following commands:
@@ -200,7 +201,7 @@ def sample_sonnet_requests(
     return sampled_requests
 
 
-def sample_mmmu_pro_vision_requests(
+def sample_vision_arena_requests(
     dataset,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
@@ -212,13 +213,7 @@ def sample_mmmu_pro_vision_requests(
         if len(sampled_requests) == num_requests:
             break
 
-        # MMMU-Pro vision direct prompt
-        # Ref: https://github.com/MMMU-Benchmark/MMMU/blob/6ce42f4d8f70c1841c67867152648974415b5cac/mmmu-pro/prompts.yaml#L5
-        prompt = (
-            "Answer with the option letter from the given choices directly. "
-            "The last line of your response should be of the following "
-            "format: 'Answer: $LETTER' (without quotes) where LETTER is one of "
-            "options.")
+        prompt = data["turns"][0][0]['content']
 
         prompt_token_ids = tokenizer(prompt).input_ids
         if fixed_output_len is None:
@@ -230,10 +225,10 @@ def sample_mmmu_pro_vision_requests(
         output_len = fixed_output_len
 
         assert isinstance(
-            data["image"],
+            data["images"][0],
             Image), ("Input image format must be `PIL.Image.Image`, "
                      f"given {type(data['image'])}.")
-        image: Image = data["image"]
+        image: Image = data["images"][0]
         image = image.convert("RGB")
         image_data = io.BytesIO()
         image.save(image_data, format='JPEG')
@@ -252,7 +247,7 @@ def sample_mmmu_pro_vision_requests(
 
 def sample_hf_requests(
     dataset_path: str,
-    dataset_subset: str,
+    dataset_subset: Optional[str],
     dataset_split: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
@@ -260,19 +255,17 @@ def sample_hf_requests(
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
 
-    # Special case for MMMU-Pro vision dataset
-    if dataset_path == 'MMMU/MMMU_Pro' and dataset_subset == 'vision':
-        assert dataset_split == "test"
+    # Special case for vision_arena dataset
+    if dataset_path == 'lmarena-ai/vision-arena-bench-v0.1' \
+        and dataset_subset is None:
+        assert dataset_split == "train"
         dataset = load_dataset(dataset_path,
                                name=dataset_subset,
                                split=dataset_split,
                                streaming=True)
-        assert "image" in dataset.features, (
-            "MMMU/MMMU_Pro vision dataset must have 'image' column.")
-        filter_func = lambda x: isinstance(x["image"], Image)
-        dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
-        return sample_mmmu_pro_vision_requests(dataset, num_requests,
-                                               tokenizer, fixed_output_len)
+        dataset = dataset.shuffle(seed=random_seed)
+        return sample_vision_arena_requests(dataset, num_requests, tokenizer,
+                                            fixed_output_len)
 
     dataset = load_dataset(dataset_path,
                            name=dataset_subset,
@@ -544,6 +537,7 @@ async def benchmark(
     ignore_eos: bool,
     goodput_config_dict: Dict[str, float],
     max_concurrency: Optional[int],
+    lora_modules: Optional[List[str]],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -569,6 +563,7 @@ async def benchmark(
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
     )
+
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
         raise ValueError(
@@ -576,6 +571,11 @@ async def benchmark(
             f"are correctly specified. Error: {test_output.error}")
     else:
         print("Initial test run completed. Starting main benchmark run...")
+
+    if lora_modules:
+        # For each input request, choose a LoRA module at random.
+        lora_modules = iter(
+            [random.choice(lora_modules) for _ in range(len(input_requests))])
 
     if profile:
         print("Starting profiler...")
@@ -623,8 +623,13 @@ async def benchmark(
     tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate, burstiness):
         prompt, prompt_len, output_len, mm_content = request
-        request_func_input = RequestFuncInput(model=model_id,
-                                              model_name=model_name,
+        req_model_id, req_model_name = model_id, model_name
+        if lora_modules:
+            req_lora_module = next(lora_modules)
+            req_model_id, req_model_name = req_lora_module, req_lora_module
+
+        request_func_input = RequestFuncInput(model=req_model_id,
+                                              model_name=req_model_name,
                                               prompt=prompt,
                                               api_url=api_url,
                                               prompt_len=prompt_len,
@@ -907,6 +912,7 @@ def main(args: argparse.Namespace):
             ignore_eos=args.ignore_eos,
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
+            lora_modules=args.lora_modules,
         ))
 
     # Save config and results to json
@@ -934,8 +940,8 @@ def main(args: argparse.Namespace):
                     )
 
         # Traffic
-        result_json["request_rate"] = (
-            args.request_rate if args.request_rate < float("inf") else "inf")
+        result_json["request_rate"] = (args.request_rate if args.request_rate
+                                       < float("inf") else "inf")
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
 
@@ -1243,6 +1249,13 @@ if __name__ == "__main__":
                         help="The model name used in the API. "
                         "If not specified, the model name will be the "
                         "same as the ``--model`` argument. ")
+
+    parser.add_argument("--lora-modules",
+                        nargs='+',
+                        default=None,
+                        help="A subset of LoRA module names passed in when "
+                        "launching the server. For each request, the "
+                        "script chooses a LoRA module at random.")
 
     args = parser.parse_args()
     main(args)

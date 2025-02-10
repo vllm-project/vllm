@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import ctypes
 import importlib.util
 import logging
@@ -45,6 +47,11 @@ elif not (sys.platform.startswith("linux")
         "Building on %s, "
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
+elif (sys.platform.startswith("linux") and torch.version.cuda is None
+      and os.getenv("VLLM_TARGET_DEVICE") is None):
+    # if cuda is not available and VLLM_TARGET_DEVICE is not set,
+    # fallback to cpu
+    VLLM_TARGET_DEVICE = "cpu"
 
 MAIN_CUDA_VERSION = "12.1"
 
@@ -228,8 +235,11 @@ class cmake_build_ext(build_ext):
 
             # CMake appends the extension prefix to the install path,
             # and outdir already contains that prefix, so we need to remove it.
+            # We assume only the final component of extension prefix is added by
+            # CMake, this is currently true for current extensions but may not
+            # always be the case.
             prefix = outdir
-            for i in range(ext.name.count('.')):
+            if '.' in ext.name:
                 prefix = prefix.parent
 
             # prefix here should actually be the same for all components
@@ -298,7 +308,8 @@ class repackage_wheel(build_ext):
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
-                "vllm/vllm_flash_attn/vllm_flash_attn_c.abi3.so",
+                "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
+                "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/vllm_flash_attn/flash_attn_interface.py",
                 "vllm/vllm_flash_attn/__init__.py",
                 "vllm/cumem_allocator.abi3.so",
@@ -363,12 +374,7 @@ def _is_hip() -> bool:
 
 
 def _is_neuron() -> bool:
-    torch_neuronx_installed = True
-    try:
-        subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
-        torch_neuronx_installed = False
-    return torch_neuronx_installed or VLLM_TARGET_DEVICE == "neuron"
+    return VLLM_TARGET_DEVICE == "neuron"
 
 
 def _is_tpu() -> bool:
@@ -413,7 +419,7 @@ def get_rocm_version():
 
         if (get_rocm_core_version(ctypes.byref(major), ctypes.byref(minor),
                                   ctypes.byref(patch)) == 0):
-            return "%d.%d.%d" % (major.value, minor.value, patch.value)
+            return f"{major.value}.{minor.value}.{patch.value}"
         return None
     except Exception:
         return None
@@ -476,7 +482,6 @@ def get_vllm_version() -> str:
     version = get_version(
         write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
     )
-
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
@@ -514,7 +519,8 @@ def get_vllm_version() -> str:
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
-        version += f"{sep}cpu"
+        if envs.VLLM_TARGET_DEVICE == "cpu":
+            version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
     else:
@@ -550,7 +556,7 @@ def get_requirements() -> List[str]:
         return resolved_requirements
 
     if _no_device():
-        requirements = _read_requirements("requirements-cpu.txt")
+        requirements = _read_requirements("requirements-common.txt")
     elif _is_cuda():
         requirements = _read_requirements("requirements-cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
@@ -593,15 +599,22 @@ if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
 if _is_cuda():
-    ext_modules.append(
-        CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
+    ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
+    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.0"):
+        # FA3 requires CUDA 12.0 or later
+        ext_modules.append(
+            CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
-    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+    "vllm": [
+        "py.typed",
+        "model_executor/layers/fused_moe/configs/*.json",
+        "model_executor/layers/quantization/utils/configs/*.json",
+    ]
 }
 
 if _no_device():

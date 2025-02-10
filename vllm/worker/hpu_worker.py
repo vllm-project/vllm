@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
@@ -173,13 +175,13 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 cpu_fallback_ctx as cpu_fallback_local_metric:
                 output = LocalOrDistributedWorkerBase.execute_model(
                     self, execute_model_req)
-            if (log_graph_compilation and gc_local_metric.stats()[0][1] > 0
-                ) or log_graph_compilation_all:
+            if (log_graph_compilation and gc_local_metric.stats()[0][1]
+                    > 0) or log_graph_compilation_all:
                 msg = ("VLLM_HPU_STEP_GRAPH_COMPILATION: "
                        f"{gc_local_metric.stats()}, {input_stats}")
                 logger.warning(msg)
-            if (log_cpu_fallbacks and cpu_fallback_local_metric.stats()[0][1] >
-                    0) or log_cpu_fallbacks_all:
+            if (log_cpu_fallbacks and cpu_fallback_local_metric.stats()[0][1]
+                    > 0) or log_cpu_fallbacks_all:
                 msg = ("VLLM_HPU_STEP_CPU_FALLBACK: "
                        f"{cpu_fallback_local_metric.stats()}, {input_stats}")
                 logger.warning(msg)
