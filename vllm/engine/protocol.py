@@ -279,6 +279,16 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def sleep(self) -> None:
+        """Sleep the model"""
+        ...
+
+    @abstractmethod
+    async def wake_up(self) -> None:
+        """Wake up the model"""
+        ...
+
+    @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         ...

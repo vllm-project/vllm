@@ -73,6 +73,12 @@ class EngineCoreClient(ABC):
     def reset_prefix_cache(self) -> None:
         raise NotImplementedError
 
+    def sleep(self) -> None:
+        raise NotImplementedError
+
+    def wake_up(self) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
@@ -86,6 +92,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def reset_prefix_cache_async(self) -> None:
+        raise NotImplementedError
+
+    async def sleep_async(self) -> None:
+        raise NotImplementedError
+
+    async def wake_up_async(self) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -123,6 +135,12 @@ class InprocClient(EngineCoreClient):
 
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
+
+    def sleep(self) -> None:
+        self.engine_core.sleep()
+
+    def wake_up(self) -> None:
+        self.engine_core.wake_up()
 
 
 class MPClient(EngineCoreClient):
@@ -241,6 +259,12 @@ class SyncMPClient(MPClient):
     def reset_prefix_cache(self) -> None:
         self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
 
+    def sleep(self) -> None:
+        self._send_input(EngineCoreRequestType.SLEEP, None)
+
+    def wake_up(self) -> None:
+        self._send_input(EngineCoreRequestType.WAKE_UP, None)
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -294,3 +318,9 @@ class AsyncMPClient(MPClient):
 
     async def reset_prefix_cache_async(self) -> None:
         await self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
+
+    async def sleep_async(self) -> None:
+        await self._send_input(EngineCoreRequestType.SLEEP, None)
+
+    async def wake_up_async(self) -> None:
+        await self._send_input(EngineCoreRequestType.WAKE_UP, None)

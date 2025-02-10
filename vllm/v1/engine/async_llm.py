@@ -357,6 +357,12 @@ class AsyncLLM(EngineClient):
     async def reset_prefix_cache(self) -> None:
         await self.engine_core.reset_prefix_cache_async()
 
+    async def sleep(self) -> None:
+        await self.engine_core.sleep_async()
+
+    async def wake_up(self) -> None:
+        await self.engine_core.wake_up_async()
+
     @property
     def is_running(self) -> bool:
         return True

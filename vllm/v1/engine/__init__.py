@@ -103,3 +103,5 @@ class EngineCoreRequestType(enum.Enum):
     ABORT = b'\x01'
     PROFILE = b'\x02'
     RESET_PREFIX_CACHE = b'\x03'
+    SLEEP = b'\x04'
+    WAKE_UP = b'\x05'

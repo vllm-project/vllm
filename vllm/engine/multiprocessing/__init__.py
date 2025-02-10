@@ -127,6 +127,14 @@ class RPCResetPrefixCacheRequest(Enum):
     RESET_PREFIX_CACHE = 1
 
 
+class RPCSleepRequest(Enum):
+    SLEEP = 1
+
+
+class RPCWakeUpRequest(Enum):
+    WAKE_UP = 1
+
+
 @dataclass
 class RPCLoadAdapterRequest:
     lora_request: LoRARequest
@@ -141,6 +149,7 @@ class RPCAdapterLoadedResponse:
 
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
+                      RPCSleepRequest, RPCWakeUpRequest,
                       RPCResetPrefixCacheRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,

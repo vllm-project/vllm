@@ -582,6 +582,26 @@ if envs.VLLM_SERVER_DEV_MODE:
         await engine_client(raw_request).reset_prefix_cache()
         return Response(status_code=200)
 
+    @router.post("/sleep")
+    async def sleep(raw_request: Request):
+        """
+        Sleep the model. Note that we currently do not check if the
+        model is successfully put to sleep in the API server.
+        """
+        logger.info("Setting the model to sleep mode...")
+        await engine_client(raw_request).sleep()
+        return Response(status_code=200)
+
+    @router.post("/wake_up")
+    async def wake_up(raw_request: Request):
+        """
+        Wake up the model. Note that we currently do not check if the
+        model is successfully woken up in the API server.
+        """
+        logger.info("Waking up the model...")
+        await engine_client(raw_request).wake_up()
+        return Response(status_code=200)
+
 
 @router.post("/invocations")
 async def invocations(raw_request: Request):
