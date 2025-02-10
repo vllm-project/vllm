@@ -52,7 +52,8 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
-        self.enable_prefix_caching = vllm_config.cache_config.enable_prefix_caching
+        self.enable_prefix_caching = (
+            vllm_config.cache_config.enable_prefix_caching)
 
         self.log_requests = log_requests
         self.log_stats = log_stats
@@ -262,7 +263,9 @@ class AsyncLLM(EngineClient):
                 "max_tokens":
                 1,
                 "n":
-                1
+                1,
+                "output_kind":
+                RequestOutputKind.FINAL_ONLY
             })
             async for _ in self._generate(
                     prompt,
@@ -273,6 +276,7 @@ class AsyncLLM(EngineClient):
                     prompt_adapter_request,
                     priority,
             ):
+                # Exhaust the generator
                 pass
 
         seed = 42
@@ -293,7 +297,7 @@ class AsyncLLM(EngineClient):
                     prompt_adapter_request,
                     priority,
             ):
-                if req_out := output_processor.process_output(out):
+                if req_out := output_processor.process_output(out, idx):
                     yield req_out
 
     async def generate(

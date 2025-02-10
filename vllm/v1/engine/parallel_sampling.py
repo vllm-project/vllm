@@ -19,11 +19,12 @@ class ParentRequestState:
 
     def get_child_sampling_params(
         self,
-        kwargs: Dict[str, Any] = {},
+        kwargs: Optional[Dict[str, Any]] = None,
     ) -> SamplingParams:
         sampling_params = copy(self.sampling_params)
-        for kw in kwargs:
-            setattr(sampling_params, kw, kwargs[kw])
+        if kwargs is not None:
+            for kw in kwargs:
+                setattr(sampling_params, kw, kwargs[kw])
         return sampling_params
 
     def add_output(
@@ -85,6 +86,7 @@ class ParallelSamplingOutputProcessor:
     def process_output(
         self,
         child_req_output: RequestOutput,
+        index: int,
     ) -> Optional[RequestOutput]:
         if self.parent_state.output_kind == RequestOutputKind.FINAL_ONLY:
             # stream=false: accumulate child completions
@@ -95,5 +97,8 @@ class ParallelSamplingOutputProcessor:
                 return self.parent_state.request_output
         else:
             # stream=true: return child completions immediately
-            pass
+            child_req_output.request_id = self.parent_state.request_id
+            child_req_output.outputs[0].index = index
+            return child_req_output
+
         return None
