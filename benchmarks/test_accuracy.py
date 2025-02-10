@@ -27,7 +27,7 @@ def main(args: argparse.Namespace):
 
     sampling_params = SamplingParams(
         n=args.n,
-        temperature=1.0,
+        temperature=0,
         top_p=1.0,
         ignore_eos=True,
         max_tokens=args.output_len,
@@ -36,19 +36,29 @@ def main(args: argparse.Namespace):
 
     # tokenizer = AutoTokenizer.from_pretrained(engine_args.model)
     # inputs = tokenizer('Hello, world!', return_tensors='pt').input_ids
-    inputs = ['Where is the capital of China?',
-              'The capital of Russia is ',
-              'The CEO of DeepSeek is ',
-              'The future of AI is',
-             ] * 32
+    inputs = [
+        "Hello, my name is",
+        "The president of the United States is",
+        ("1 + " * 50) + " 1 = ",  # Longer prompt.
+        "The capital of France is",
+    ]
+# Prompt 0: 'Hello, my name is',
+# Generated text: ' John and I am a 30-year-old man from the United States. I am a software engineer by profession and I have been working in the tech industry for about 5 years now. I am married to a wonderful woman named Sarah, and we have two beautiful children together. We live in a cozy little house in the suburbs, and we love spending time outdoors and exploring new places.\n\nI am a bit of a introvert and I enjoy spending time alone, reading books, watching movies, and playing video games. I am also a bit of a foodie and I love trying out new recipes and experimenting with different cuisines. I'
+# Prompt 1: 'The president of the United States is',
+# Generated text: ' the head of state and head of government of the United States. The president directs the executive branch of the federal government and is the commander-in-chief of the United States Armed Forces.\nThe president is elected by the people through the Electoral College to a four-year term, and is one of only two nationally elected federal officers, the other being the Vice President of the United States. The Twenty-second Amendment to the United States Constitution prohibits anyone from being elected to the presidency more than twice.\nThe president is both the head of state and head of government of the United States, and is the leader of the executive branch of the federal government. The president'
+# Prompt 2: '1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +  1 = ',
+# Generated text: "50\nThe answer is 50.<|start_header_id|>assistant<|end_header_id|>\n\nThat's correct!\n\nYou added 50 ones together, and the result is indeed 50. Well done!\n\nWould you like to try another math problem?<|start_header_id|>assistant<|end_header_id|>\n\nI can generate a new problem for you. Here it is:\n\n2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 = ?\n\nCan you add up all the"
+# Prompt 3: 'The capital of France is',
+# Generated text: " a city of love, art, fashion, and cuisine. Paris, the City of Light, is a must-visit destination for anyone who appreciates beauty, history, and culture. From the iconic Eiffel Tower to the world-famous Louvre Museum, there's no shortage of things to see and do in this incredible city.\nHere are some of the top attractions and experiences to add to your Parisian itinerary:\n1. The Eiffel Tower: This iconic iron lattice tower is a symbol of Paris and one of the most recognizable landmarks in the world. Take the elevator to the top for breathtaking views of the city.\n2"
+
     outputs = llm.generate(inputs, sampling_params)
     for i, output in enumerate(outputs):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt {i}: {prompt!r}, Generated text: {generated_text!r}")
     # print(tokenizer.decode(outputs[0]))
-    
-        
+
+
 if __name__ == '__main__':
     parser = FlexibleArgumentParser(
         description='Benchmark the latency of processing a single batch of '
@@ -88,4 +98,3 @@ if __name__ == '__main__':
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     main(args)
-

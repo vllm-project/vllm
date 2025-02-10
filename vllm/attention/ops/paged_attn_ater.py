@@ -100,8 +100,8 @@ class PagedAttention:
                 value_cache,
                 slot_mapping.flatten(),
                 kv_cache_dtype,
-                k_scale,
-                v_scale,
+                k_scale.view(-1)[0].item(),
+                v_scale.view(-1)[0].item(),
                 True
             )
 
