@@ -164,7 +164,8 @@ class EngineCoreProc(EngineCore):
             # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
             self.input_queue: queue.Queue[Tuple[EngineCoreRequestType,
                                                 Any]] = queue.Queue()
-            self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
+            self.output_queue: queue.Queue[Union[EngineCoreOutputs,
+                                                 bytes]] = queue.Queue()
             self.errored_sent_event = threading.Event()
             threading.Thread(target=self.process_input_socket,
                              args=(input_path, ),
@@ -175,7 +176,7 @@ class EngineCoreProc(EngineCore):
 
             # Send Readiness signal to EngineClient.
             ready_pipe.send({"status": "READY"})
-        
+
         except Exception as e:
             logger.exception("EngineCore got error at startup:", exc_info=e)
             ready_pipe.send({"status": "FAILED"})
