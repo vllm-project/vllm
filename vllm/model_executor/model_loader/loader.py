@@ -153,6 +153,19 @@ def _initialize_model(
         return model_class(**kwargs)
 
 
+def _process_attention_weights_after_loading(
+        model: nn.Module, model_config: ModelConfig) -> None:
+    # Currently only used by MLA.
+    # NOTE: This intentionally happens before other modules so
+    # we can easily decompress the weights for MLA.
+    for _, module in model.named_modules():
+        if isinstance(module, Attention) and \
+            hasattr(module, "process_weights_after_loading"):
+            # TODO(lucas): see if there is a way to unify the signatures
+            # of process_weights_after_loading
+            module.process_weights_after_loading(model_config.dtype)
+
+
 class BaseModelLoader(ABC):
     """Base class for model loaders."""
 
@@ -394,6 +407,8 @@ class DefaultModelLoader(BaseModelLoader):
                         "Following weights were not initialized from "
                         f"checkpoint: {weights_not_loaded}")
 
+            _process_attention_weights_after_loading(model, model_config)
+
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
@@ -404,13 +419,6 @@ class DefaultModelLoader(BaseModelLoader):
                     # parameters onto device for processing and back off after.
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
-                if isinstance(module, Attention) and \
-                    hasattr(module, "process_weights_after_loading"):
-                    # When attention modules need to process weights after
-                    # currently only used by MLA
-                    # TODO(lucas): see if there is a way to unify the signatures
-                    # of process_weights_after_loading
-                    module.process_weights_after_loading(model_config.dtype)
         return model.eval()
 
 
@@ -436,6 +444,8 @@ class DummyModelLoader(BaseModelLoader):
             # random values to the weights.
             initialize_dummy_weights(model)
 
+            _process_attention_weights_after_loading(model, model_config)
+
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
@@ -447,11 +457,6 @@ class DummyModelLoader(BaseModelLoader):
                     with device_loading_context(
                             module, torch.device(device_config.device)):
                         quant_method.process_weights_after_loading(module)
-                if isinstance(module, Attention) and \
-                    hasattr(module, "process_weights_after_loading"):
-                    # When attention modules need to process weights after
-                    # currently only used by MLA
-                    module.process_weights_after_loading(model_config.dtype)
         return model.eval()
 
 
@@ -642,16 +647,11 @@ class ShardedStateLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(vllm_config=vllm_config)
+                _process_attention_weights_after_loading(model, model_config)
                 for _, module in model.named_modules():
                     quant_method = getattr(module, "quant_method", None)
                     if quant_method is not None:
                         quant_method.process_weights_after_loading(module)
-                    if isinstance(module, Attention) and \
-                        hasattr(module, "process_weights_after_loading"):
-                        # When attention modules need to process weights after
-                        # currently only used by MLA
-                        module.process_weights_after_loading(
-                            model_config.dtype)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
                 local_model_path,
@@ -1401,16 +1401,12 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 self._get_weights_iterator(model_weights,
                                            model_config.revision))
 
+            _process_attention_weights_after_loading(model, model_config)
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
-                if isinstance(module, Attention) and \
-                    hasattr(module, "process_weights_after_loading"):
-                    # When attention modules need to process weights after
-                    # currently only used by MLA
-                    module.process_weights_after_loading(model_config.dtype)
         return model.eval()
 
 

@@ -18,6 +18,8 @@ from vllm.distributed import (get_tensor_model_parallel_world_size,
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization.awq_marlin import (
+    AWQMarlinLinearMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -227,8 +229,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 and isinstance(layer.scheme, CompressedTensorsW8A8Fp8))
 
         def quantization_scheme_supported(layer: LinearBase) -> bool:
-            return isinstance(layer.quant_method, UnquantizedLinearMethod) or \
-                is_layer_fp8(layer)
+            return isinstance(layer.quant_method,
+                              (UnquantizedLinearMethod,
+                               AWQMarlinLinearMethod)) or is_layer_fp8(layer)
 
         # TODO(lucas) This is very gross, we need a more wide scale refactor of
         # all the FP8 code with a more standard way of
@@ -289,6 +292,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
                 return scaled_dequantize(weight, scales,
                                          weight_scale_group_shape)
+            elif isinstance(layer.quant_method, AWQMarlinLinearMethod):
+                return layer.quant_method.decompress_weights(layer).T
             else:
                 return layer.weight
 
@@ -296,12 +301,21 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             quantization_scheme_supported(self.q_proj) and\
                 quantization_scheme_supported(self.o_proj)):
             raise NotImplementedError(
-                "Only FP8 and UnquantizedLinearMethod are supported for MLA"
+                "Only FP8, AWQ, and Unquantized are supported for MLA"
                 ", please run with VLLM_MLA_DISABLE=1")
 
-        weight_dtype = self.kv_b_proj.weight.dtype
-        assert self.o_proj.weight.dtype == weight_dtype
-        assert self.q_proj.weight.dtype == weight_dtype
+        def get_layer_dtype(layer):
+            if hasattr(layer, "weight"):
+                return layer.weight.dtype
+            elif hasattr(layer, "qweight"):
+                return layer.qweight.dtype
+            else:
+                raise AttributeError(
+                    f"Layer '{layer}' has neither weight nor qweight")
+
+        weight_dtype = get_layer_dtype(self.kv_b_proj)
+        assert get_layer_dtype(self.o_proj) == weight_dtype
+        assert get_layer_dtype(self.q_proj) == weight_dtype
 
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
         assert kv_b_proj_weight.shape == (

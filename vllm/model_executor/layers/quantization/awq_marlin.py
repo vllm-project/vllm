@@ -234,6 +234,16 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         layer.output_size_per_partition = output_size_per_partition
         layer.num_groups = num_groups
 
+    def decompress_weights(self, layer: torch.nn.Module) -> torch.Tensor:
+        """
+        Decompress to recover the original unquantized weight.
+        NOTE: this is only to be used before process_weights_after_loading
+        """
+        # We can use AWQ's dequant since the unprocessed weights
+        # are in AWQ format
+        return ops.awq_dequantize(layer.qweight, layer.scales, layer.qzeros, 0,
+                                  0, 0)
+
     # TODO: Update this docs
     # Checkpoints are serialized in AutoAWQ format, which is different from the
     # marlin format. This function is called after the weights are loaded.

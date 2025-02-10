@@ -215,7 +215,7 @@ def rms_norm_dynamic_per_token_quant(
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
-    if envs.VLLM_USE_TRITON_AWQ:
+    if envs.VLLM_USE_TRITON_AWQ or qweight.dtype != torch.float16:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_dequantize_triton)
         return awq_dequantize_triton(qweight, scales, zeros)
