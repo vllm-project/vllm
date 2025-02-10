@@ -128,7 +128,7 @@ class EngineCore:
         return engine_core_outputs
 
     def shutdown(self):
-        if model_executor := getattr(self, "model_executor", None):
+        if self.model_executor:
             model_executor.shutdown()
 
     def profile(self, is_start: bool = True):
