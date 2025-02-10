@@ -3,6 +3,7 @@
 import enum
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Type, Union
 
@@ -100,15 +101,33 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
 
     # NB: file_exists will only check for the existence of the config file on
     # hf_hub. This will fail in offline mode.
-    try:
-        return file_exists(model,
-                           config_name,
-                           revision=revision,
-                           token=HF_TOKEN)
-    except huggingface_hub.errors.OfflineModeIsEnabled:
-        # Don't raise in offline mode, all we know is that we don't have this
-        # file cached.
-        return False
+
+    # Call HF to check if the file exists
+    # 2 retries and exponential backoff
+    max_retries = 2
+    retry_delay = 2
+    for attempt in range(max_retries):
+        try:
+            return file_exists(model,
+                               config_name,
+                               revision=revision,
+                               token=HF_TOKEN)
+        except huggingface_hub.errors.OfflineModeIsEnabled:
+            # Don't raise in offline mode,
+            # all we know is that we don't have this
+            # file cached.
+            return False
+        except Exception as e:
+            logger.error(
+                "Error checking file existence: %s, retrying %d of %d", e,
+                attempt + 1, max_retries)
+            if attempt == max_retries - 1:
+                logger.error("Error checking file existence: %s", e)
+                raise
+            time.sleep(retry_delay)
+            retry_delay *= 2
+            continue
+    return False
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -193,10 +212,26 @@ def get_config(
             # raise an offline mode error to indicate to the user that they
             # don't have files cached and may need to go online.
             # This is conveniently triggered by calling file_exists().
-            file_exists(model,
-                        HF_CONFIG_NAME,
-                        revision=revision,
-                        token=HF_TOKEN)
+
+            # Call HF to check if the file exists
+            # 2 retries and exponential backoff
+            max_retries = 2
+            retry_delay = 2
+            for attempt in range(max_retries):
+                try:
+                    file_exists(model,
+                                HF_CONFIG_NAME,
+                                revision=revision,
+                                token=HF_TOKEN)
+                except Exception as e:
+                    logger.error(
+                        "Error checking file existence: %s, retrying %d of %d",
+                        e, attempt + 1, max_retries)
+                    if attempt == max_retries:
+                        logger.error("Error checking file existence: %s", e)
+                        raise e
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
 
             raise ValueError(f"No supported config format found in {model}")
 
