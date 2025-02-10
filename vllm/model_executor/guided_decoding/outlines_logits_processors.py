@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024- the Outlines developers
 # This file is adapted from
 # https://github.com/outlines-dev/outlines/blob/main/outlines/serve/vllm.py

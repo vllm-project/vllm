@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import random
 import time
 from typing import List, Optional

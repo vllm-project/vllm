@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
-    from vllm.v1.engine import EngineCoreOutput
+    from vllm.v1.engine import EngineCoreOutput, FinishReason
 
 
 @dataclass
@@ -14,7 +16,7 @@ class SchedulerStats:
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
 
-    # gpu_cache_usage: float = 0.0
+    gpu_cache_usage: float = 0.0
     # gpu_prefix_cache_hit_rate: float = 0.0
 
 
@@ -30,6 +32,7 @@ class RequestStateStats:
 class FinishedRequestStats:
     """Stats associated with a finished request."""
 
+    finish_reason: "FinishReason"
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
 
@@ -57,22 +60,27 @@ class IterationStats:
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
-            # This relies on the invariant that EngineCore does
-            # not stream outputs for partially completed prefills
-            # (scheduler.update_from_output makes EngineCoreOutput
-            # iff num_computed_tokens == num_tokens).
-            assert (num_new_generation_tokens > 0)
-            self.num_prompt_tokens += prompt_len
-
-            self.time_to_first_tokens_iter.append(last_token_latency)
+            # TODO(andy): we used to assert that num_new_generation_tokens
+            # > 0 with an invariant that EngineCore does not stream outputs
+            # for partially completed prefills (scheduler.update_from_output
+            # makes EngineCoreOutput iff num_computed_tokens == num_tokens).
+            # When prompt logprobs are enabled, we currently stream out the
+            # partially completed prompt.
+            # This will be reverted in a follow up PR and we should re-enable
+            # this assertion / invariant.
+            if num_new_generation_tokens > 0:
+                self.num_prompt_tokens += prompt_len
+                self.time_to_first_tokens_iter.append(last_token_latency)
         else:
             self.time_per_output_tokens_iter.append(last_token_latency)
 
         request_state_stats.num_generation_tokens += num_new_generation_tokens
         request_state_stats.last_token_time = now
 
-    def update_from_finished_request(self, request_output: "RequestOutput",
+    def update_from_finished_request(self, finish_reason: "FinishReason",
+                                     request_output: "RequestOutput",
                                      request_state_stats: RequestStateStats):
         self.finished_requests.append(
-            FinishedRequestStats(len(request_output.prompt_token_ids),
+            FinishedRequestStats(finish_reason,
+                                 len(request_output.prompt_token_ids),
                                  request_state_stats.num_generation_tokens))

@@ -153,6 +153,7 @@ torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
 
 #ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
+bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 
 void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,

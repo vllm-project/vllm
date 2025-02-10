@@ -1,11 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import os
 import signal
 import weakref
 from abc import ABC, abstractmethod
-from typing import List, Optional, Type
+from typing import Any, List, Optional, Type
 
-import msgspec
 import zmq
 import zmq.asyncio
 
@@ -13,12 +14,11 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
-from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
-                            EngineCoreRequest, EngineCoreRequestType,
-                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
+                            EngineCoreRequestType)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
@@ -160,8 +160,8 @@ class MPClient(EngineCoreClient):
         signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         # Serialization setup.
-        self.encoder = PickleEncoder()
-        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+        self.encoder = MsgpackEncoder()
+        self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
         self.ctx = (
@@ -219,7 +219,7 @@ class SyncMPClient(MPClient):
         return self.decoder.decode(frame.buffer)
 
     def _send_input(self, request_type: EngineCoreRequestType,
-                    request: EngineCoreRequestUnion) -> None:
+                    request: Any) -> None:
 
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
@@ -236,12 +236,10 @@ class SyncMPClient(MPClient):
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     def profile(self, is_start: bool = True) -> None:
-        self._send_input(EngineCoreRequestType.PROFILE,
-                         EngineCoreProfile(is_start))
+        self._send_input(EngineCoreRequestType.PROFILE, is_start)
 
     def reset_prefix_cache(self) -> None:
-        self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE,
-                         EngineCoreResetPrefixCache())
+        self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
 
 
 class AsyncMPClient(MPClient):
@@ -276,7 +274,7 @@ class AsyncMPClient(MPClient):
         return self.decoder.decode(await self.outputs_queue.get())
 
     async def _send_input(self, request_type: EngineCoreRequestType,
-                          request: EngineCoreRequestUnion) -> None:
+                          request: Any) -> None:
 
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
@@ -292,9 +290,7 @@ class AsyncMPClient(MPClient):
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     async def profile_async(self, is_start: bool = True) -> None:
-        await self._send_input(EngineCoreRequestType.PROFILE,
-                               EngineCoreProfile(is_start))
+        await self._send_input(EngineCoreRequestType.PROFILE, is_start)
 
     async def reset_prefix_cache_async(self) -> None:
-        await self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE,
-                               EngineCoreResetPrefixCache())
+        await self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)

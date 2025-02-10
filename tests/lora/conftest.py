@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import tempfile
 from collections import OrderedDict
 from typing import Dict, List, TypedDict
@@ -313,3 +315,20 @@ def llama_2_7b_engine_extra_embeddings():
 def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
     yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
            model_runner.model)
+
+
+@pytest.fixture(params=[True, False])
+def run_with_both_engines_lora(request, monkeypatch):
+    # Automatically runs tests twice, once with V1 and once without
+    use_v1 = request.param
+    # Tests decorated with `@skip_v1` are only run without v1
+    skip_v1 = request.node.get_closest_marker("skip_v1")
+
+    if use_v1:
+        if skip_v1:
+            pytest.skip("Skipping test on vllm V1")
+        monkeypatch.setenv('VLLM_USE_V1', '1')
+    else:
+        monkeypatch.setenv('VLLM_USE_V1', '0')
+
+    yield

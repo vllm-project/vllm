@@ -50,9 +50,9 @@ steps:
   - tests/multimodal
   - tests/test_utils
   - tests/worker
-  - tests/standalone_tests/lazy_torch_compile.py
+  - tests/standalone_tests/lazy_imports.py
   commands:
-  - python3 standalone_tests/lazy_torch_compile.py
+  - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
@@ -128,6 +128,7 @@ steps:
   - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile
   - examples/offline_inference/rlhf.py
+  - examples/offline_inference/rlhf_colocate.py
   commands:
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
@@ -136,6 +137,7 @@ steps:
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - python3 ../examples/offline_inference/rlhf.py
+  - RAY_DEDUP_LOGS=0 python3 ../examples/offline_inference/rlhf_colocate.py
 
 - label: Metrics, Tracing Test # 10min
   num_gpus: 2 
@@ -193,6 +195,9 @@ steps:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - VLLM_USE_V1=1 pytest -v -s v1/e2e
+    # Integration test for streaming correctness (requires special branch).
+    - pip install -U git+https://github.com/robertgshaw2-neuralmagic/lm-evaluation-harness.git@streaming-api
+    - pytest -v -s entrypoints/openai/test_accuracy.py::test_lm_eval_accuracy_v1_engine
 
 - label: Examples Test # 25min
   working_dir: "/vllm-workspace/examples"
@@ -349,6 +354,7 @@ steps:
   - vllm/
   - tests/models
   commands:
+    - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_initialization.py
 
@@ -485,6 +491,7 @@ steps:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
+  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'

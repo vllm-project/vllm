@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import heapq
 from typing import FrozenSet, Iterable, List, Optional, Tuple, Union
 

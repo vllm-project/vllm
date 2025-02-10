@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
@@ -163,7 +165,11 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
                                 image_width=x[1], image_height=x[0]))
         return ImageSize(width=width, height=height)
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         max_image_size = self.get_image_size_with_most_features()
         max_image_tokens = self.get_num_image_tokens(
             image_height=max_image_size.height,

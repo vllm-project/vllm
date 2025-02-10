@@ -40,6 +40,82 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+### Transformers fallback
+
+After the merge of <gh-pr:11330>, `vllm` can fallback to models that are available in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
+
+To check if the backend is `transformers`, you can simply do this:
+
+```python 
+from vllm import LLM
+llm = LLM(model=..., task="generate")  # Name or path of your model
+llm.apply_model(lambda model: print(model.__class__))
+```
+
+If it is `TransformersModel` then it means it's based on `transformers`!
+
+#### Supported features
+
+##### LORA and quantization
+
+Both are not supported yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
+
+Usually `transformers` model load weights via the `load_adapters` API, that depends on PEFT. We need to work a bit to either use this api (for now this would result in some weights not being marked as loaded) or replace modules accordingly.
+
+Hints as to how this would look like:
+
+```python
+class TransformersModel(nn.Module, SupportsLoRA):
+  def __init__(*):
+    ...
+    self.model.load_adapter(vllm_config.load_config.model_loader_extra_config["qlora_adapter_name_or_path"])
+```
+
+Blocker is that you need to specify supported lora layers, when we would ideally want to load whatever is inside the checkpoint!
+
+##### Remote code
+
+This fallback also means that any model on the hub that can be used in `transformers` with `trust_remote_code=True` that correctly implements attention can be used in production!
+
+```python 
+from vllm import LLM
+llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of your model
+llm.apply_model(lambda model: print(model.__class__))
+```
+
+A model just needs the following two things:
+
+```python
+from transformers import PreTrainedModel
+from torch import nn
+
+class MyAttention(nn.Module):
+
+  def forward(self, hidden_states, **kwargs): # <- kwargs are required
+
+    ...
+    attention_interface = attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+    attn_output, attn_weights = attention_interface(
+      self,
+      query_states,
+      key_states,
+      value_states,
+      **kwargs,
+    )
+    ...
+
+class MyModel(PreTrainedModel):
+  _supports_attention_backend = True
+```
+
+Here is what happens in the background:
+
+1. The config is loaded
+2. `MyModel` python class is loaded from the `auto_map`, and we check that the model `_supports_attention_backend`.
+3. The `TransformersModel` backend is used. See `/model_executors/models/transformers`, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
+
+That's it!
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of HuggingFace Hub, set an environment variable:
@@ -353,7 +429,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `TeleChat2ForCausalLM`
   * TeleChat2
-  * `TeleAI/TeleChat2-3B`, `TeleAI/TeleChat2-7B`, `TeleAI/TeleChat2-35B`, etc.
+  * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
   * ✅︎
   * ✅︎
 - * `XverseForCausalLM`
@@ -643,21 +719,21 @@ See [this page](#generative-models) for more information on how to use generativ
   * `THUDM/glm-4v-9b` etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `H2OVLChatModel`
   * H2OVL
   * T + I<sup>E+</sup>
   * `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.
   *
   * ✅︎
-  *
+  * \*
 - * `Idefics3ForConditionalGeneration`
   * Idefics3
   * T + I
   * `HuggingFaceM4/Idefics3-8B-Llama3` etc.
   * ✅︎
   *
-  *
+  * ✅︎
 - * `InternVLChatModel`
   * InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
@@ -723,7 +799,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `NVLM_D_Model`
   * NVLM-D 1.0
-  * T + I<sup>E+</sup>
+  * T + I<sup>+</sup>
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
@@ -770,11 +846,18 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5_VLForConditionalGeneration`
+  * Qwen2.5-VL
+  * T + I<sup>E+</sup> + V<sup>E+</sup>
+  * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
   * `fixie-ai/ultravox-v0_3`
-  *
+  * ✅︎
   * ✅︎
   * ✅︎
 :::
@@ -783,7 +866,11 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{note}
-To use `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
+To use DeepSeek-VL2 series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
+:::
+
+:::{note}
+H2O-VL series models will be available in V1 once we support backends other than FlashAttention.
 :::
 
 :::{note}
@@ -796,8 +883,11 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 :::
 
 :::{note}
-The chat template for Pixtral-HF is incorrect (see [discussion](https://huggingface.co/mistral-community/pixtral-12b/discussions/22)).
-A corrected version is available at <gh-file:examples/template_pixtral_hf.jinja>.
+`mistral-community/pixtral-12b` does not support V1 yet.
+:::
+
+:::{note}
+To use Qwen2.5-VL series models, you have to install Huggingface `transformers` library from source via `pip install git+https://github.com/huggingface/transformers`.
 :::
 
 ### Pooling Models

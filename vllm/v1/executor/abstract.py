@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Type
 
 from vllm.config import VllmConfig
@@ -23,15 +25,14 @@ class Executor(ExecutorBase):
         parallel_config = vllm_config.parallel_config
         distributed_executor_backend = (
             parallel_config.distributed_executor_backend)
-        if distributed_executor_backend is None:
-            # If the user does not specify the distributed executor backend,
-            # we will choose the backend based on the world size.
-            if parallel_config.world_size > 1:
-                distributed_executor_backend = "mp"
-            else:
-                distributed_executor_backend = "uni"
-
-        if distributed_executor_backend == "ray":
+        # distributed_executor_backend must be set in VllmConfig.__post_init__
+        if isinstance(distributed_executor_backend, type):
+            if not issubclass(distributed_executor_backend, ExecutorBase):
+                raise TypeError(
+                    "distributed_executor_backend must be a subclass of "
+                    f"ExecutorBase. Got {distributed_executor_backend}.")
+            executor_class = distributed_executor_backend
+        elif distributed_executor_backend == "ray":
             executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor

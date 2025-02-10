@@ -1,12 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 import prometheus_client
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
+from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -69,11 +72,13 @@ class LoggingStatLogger(StatLoggerBase):
         logger.info(
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
-            "Running: %d reqs, Waiting: %d reqs ",
+            "Running: %d reqs, Waiting: %d reqs "
+            "GPU KV cache usage: %.1f%%.",
             prompt_throughput,
             generation_throughput,
             scheduler_stats.num_running_reqs,
             scheduler_stats.num_waiting_reqs,
+            scheduler_stats.gpu_cache_usage * 100,
         )
 
 
@@ -97,6 +102,11 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="Number of requests waiting to be processed.",
             labelnames=labelnames).labels(*labelvalues)
 
+        self.gauge_gpu_cache_usage = prometheus_client.Gauge(
+            name="vllm:gpu_cache_usage_perc",
+            documentation="GPU KV-cache usage. 1 means 100 percent usage.",
+            labelnames=labelnames).labels(*labelvalues)
+
         self.counter_prompt_tokens = prometheus_client.Counter(
             name="vllm:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
@@ -106,6 +116,17 @@ class PrometheusStatLogger(StatLoggerBase):
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_request_success: Dict[FinishReason,
+                                           prometheus_client.Counter] = {}
+        counter_request_success_base = prometheus_client.Counter(
+            name="vllm:request_success_total",
+            documentation="Count of successfully processed requests.",
+            labelnames=labelnames + ["finished_reason"])
+        for reason in FinishReason:
+            self.counter_request_success[
+                reason] = counter_request_success_base.labels(*(labelvalues +
+                                                                [str(reason)]))
 
         self.histogram_num_prompt_tokens_request = \
             prometheus_client.Histogram(
@@ -147,11 +168,14 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
+        self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(
             iteration_stats.num_generation_tokens)
 
         for finished_request in iteration_stats.finished_requests:
+            self.counter_request_success[finished_request.finish_reason].inc()
             self.histogram_num_prompt_tokens_request.observe(
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
