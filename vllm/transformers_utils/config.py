@@ -3,9 +3,10 @@
 import enum
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Type, Union
-import time
+
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download, list_repo_files,
                              try_to_load_from_cache)
@@ -101,22 +102,27 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     # NB: file_exists will only check for the existence of the config file on
     # hf_hub. This will fail in offline mode.
 
-    # Call HF to check if the file exists, with 3 retries and exponential backoff
-    max_retries = 3
+    # Call HF to check if the file exists
+    # 2 retries and exponential backoff
+    max_retries = 2
     retry_delay = 2
     for attempt in range(max_retries):
         try:
             return file_exists(model,
-                             config_name,
-                             revision=revision,
-                             token=HF_TOKEN)
+                               config_name,
+                               revision=revision,
+                               token=HF_TOKEN)
         except huggingface_hub.errors.OfflineModeIsEnabled:
-            # Don't raise in offline mode, all we know is that we don't have this
+            # Don't raise in offline mode,
+            # all we know is that we don't have this
             # file cached.
             return False
         except Exception as e:
-            logger.error(f"Error checking file existence: {e}")
+            logger.error(
+                "Error checking file existence: %s, retrying %d of %d", e,
+                attempt + 1, max_retries)
             if attempt == max_retries - 1:
+                logger.error("Error checking file existence: %s", e)
                 raise
             time.sleep(retry_delay)
             retry_delay *= 2
@@ -205,8 +211,9 @@ def get_config(
             # don't have files cached and may need to go online.
             # This is conveniently triggered by calling file_exists().
 
-            # Call HF to check if the file exists, with 3 retries and exponential backoff
-            max_retries = 3
+            # Call HF to check if the file exists
+            # 2 retries and exponential backoff
+            max_retries = 2
             retry_delay = 2
             for attempt in range(max_retries):
                 try:
@@ -215,8 +222,11 @@ def get_config(
                                 revision=revision,
                                 token=HF_TOKEN)
                 except Exception as e:
-                    logger.error(f"Error checking file existence: {e}")
-                    if attempt == max_retries - 1:
+                    logger.error(
+                        "Error checking file existence: %s, retrying %d of %d",
+                        e, attempt + 1, max_retries)
+                    if attempt == max_retries:
+                        logger.error("Error checking file existence: %s", e)
                         raise e
                     time.sleep(retry_delay)
                     retry_delay *= 2
