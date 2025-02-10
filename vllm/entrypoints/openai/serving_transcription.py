@@ -192,7 +192,8 @@ class OpenAIServingTranscription(OpenAIServing):
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
 
-        y, sr = librosa.load(io.BytesIO(audio_data))
+        with io.BytesIO(audio_data) as bytes_:
+            y, sr = librosa.load(bytes_)
         if librosa.get_duration(y=y, sr=sr) > MAX_AUDIO_CLIP_DURATION_S:
             raise ValueError(
                 f"Maximum clip duration ({MAX_AUDIO_CLIP_DURATION_S}s) "
