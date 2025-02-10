@@ -83,7 +83,7 @@ class MolmoImageInputs(TypedDict):
     """
     Starting and ending index of placeholder tokens.
 
-    Shape: `(2,)`
+    Shape: `(batch_size, 2)`
     """
 
 
@@ -1151,13 +1151,15 @@ class MolmoProcessorWrapper:
         idxs = inv_idxs.diff(prepend=torch.tensor([-1])).nonzero().squeeze(1)
         assert len(is_image_ids) == len(idxs) == len(counts)
 
-        image_start_end = list[tuple[int, int]]()
+        image_start_end_lst = list[tuple[int, int]]()
         for is_image_id, idx, count in zip(is_image_ids, idxs, counts):
             if is_image_id:
                 assert input_ids[idx] in image_ids
-                image_start_end.append((idx, idx + count))
+                image_start_end_lst.append((idx, idx + count))
 
-        outputs["image_start_end"] = torch.tensor(image_start_end)
+        image_start_end = torch.tensor(image_start_end_lst)
+        assert len(image_start_end) <= 1, "Multi-image input not supported yet"
+        outputs["image_start_end"] = image_start_end.squeeze(0)
 
         return BatchFeature(outputs, tensor_type=return_tensors)
 
