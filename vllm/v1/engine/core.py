@@ -234,8 +234,6 @@ class EngineCoreProc(EngineCore):
                         # Break out the loop so we can log_stats in step().
                         if self.log_stats:
                             break
-                    except Exception:
-                        raise
 
             # 2) Handle any new client requests.
             while not self.input_queue.empty():
