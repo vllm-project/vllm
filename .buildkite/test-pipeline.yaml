@@ -128,7 +128,7 @@ steps:
   - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile
   - examples/offline_inference/rlhf.py
-  - examples/offline_inference/ray_placement.py
+  - examples/offline_inference/rlhf_colocate.py
   commands:
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
@@ -137,7 +137,7 @@ steps:
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - python3 ../examples/offline_inference/rlhf.py
-  - RAY_DEDUP_LOGS=0 python3 ../examples/offline_inference/ray_placement.py
+  - RAY_DEDUP_LOGS=0 python3 ../examples/offline_inference/rlhf_colocate.py
 
 - label: Metrics, Tracing Test # 10min
   num_gpus: 2 
