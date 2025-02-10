@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
+
 import jax
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
@@ -22,8 +24,8 @@ def create_tensors(T, D, L, N):
         ref_output: jax.Array - shape (T, L) - inputs @ loras[idxs].T
     """
     inputs = jax.random.normal(jax.random.PRNGKey(0), (T, D))
-    loras = jax.random.normal(jax.random.PRNGKey(1), (N, 1, L, D))
-    idxs = jax.random.randint(jax.random.PRNGKey(2),
+    loras = jax.random.normal(jax.random.PRNGKey(0), (N, 1, L, D))
+    idxs = jax.random.randint(jax.random.PRNGKey(0),
                               shape=(T, ),
                               minval=0,
                               maxval=N)
@@ -50,7 +52,7 @@ def create_debug_tensors(T, D, L, N):
     """
     inputs = jnp.ones((T, D))
     loras = jnp.ones((N, 1, L, D)) * jnp.arange(0, N)[:, None, None, None]
-    idxs = jax.random.randint(jax.random.PRNGKey(2),
+    idxs = jax.random.randint(jax.random.PRNGKey(0),
                               shape=(T, ),
                               minval=0,
                               maxval=N)
@@ -60,17 +62,24 @@ def create_debug_tensors(T, D, L, N):
     return inputs, loras, idxs, ref_output
 
 
-def bgmv_kernel(idx_ref, inp_ref, lora_ref, out_ref, acc_ref):
-    del idx_ref
+def bgmv_kernel(bT: int, bL: int, idx_ref, inp_ref, lora_ref, out_ref, acc_ref,
+                mask_ref):
 
     @pl.when(pl.program_id(2) == 0)
     def _():
         acc_ref[...] = jnp.zeros_like(acc_ref[...], dtype=jnp.float32)
 
-    acc_ref[...] += jax.lax.dot_general(inp_ref[...],
-                                        lora_ref[0, 0, ...],
-                                        (((1, ), (1, )), ((), ())),
-                                        preferred_element_type=jnp.float32)
+    t = pl.program_id(0)
+
+    for i in range(bT):
+        idx = idx_ref[i + bT * t]
+        mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
+        mask_ref[i, :] = jnp.ones((bL, ), dtype=jnp.float32)
+
+        acc_ref[...] += jax.lax.dot_general(
+            inp_ref[...],
+            lora_ref[idx, 0, ...], (((1, ), (1, )), ((), ())),
+            preferred_element_type=jnp.float32) * mask_ref[...]
 
     @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
     def _():
@@ -89,23 +98,30 @@ def bgmv(inputs: jax.Array, lora: jax.Array, idxs: jax.Array):
     bL = 128
     bD = 128
 
-    return pl.pallas_call(
-        kernel=bgmv_kernel,
-        out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
-        grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=1,
-            grid=(T // bT, L // bL, D // bD),
-            in_specs=[
-                pl.BlockSpec((bT, bD), lambda i, j, k, block_idx: (i, k)),
-                pl.BlockSpec((1, 1, bL, bD), lambda i, j, k, block_idx:
-                             (block_idx[i * bT], 0, j, k)),
-            ],
-            out_specs=pl.BlockSpec((bT, bL), lambda i, j, k, block_idx:
-                                   (i, j)),
-            scratch_shapes=[pltpu.VMEM((bT, bL), jnp.float32)]),
-        compiler_params=pltpu.TPUCompilerParams(
-            dimension_semantics=("parallel", "parallel", "arbitrary")),
-        interpret=True)(idxs, inputs, lora)
+    return pl.pallas_call(kernel=functools.partial(bgmv_kernel, bT, bL),
+                          out_shape=jax.ShapeDtypeStruct((T, L),
+                                                         dtype=inputs.dtype),
+                          grid_spec=pltpu.PrefetchScalarGridSpec(
+                              num_scalar_prefetch=1,
+                              grid=(T // bT, L // bL, D // bD),
+                              in_specs=[
+                                  pl.BlockSpec((bT, bD),
+                                               lambda i, j, k, block_idx:
+                                               (i, k)),
+                                  pl.BlockSpec((N, 1, bL, bD),
+                                               lambda i, j, k, block_idx:
+                                               (0, 0, j, k)),
+                              ],
+                              out_specs=pl.BlockSpec(
+                                  (bT, bL), lambda i, j, k, block_idx: (i, j)),
+                              scratch_shapes=[
+                                  pltpu.VMEM((bT, bL), jnp.float32),
+                                  pltpu.VMEM((bT, bL), jnp.float32)
+                              ]),
+                          compiler_params=pltpu.TPUCompilerParams(
+                              dimension_semantics=("parallel", "parallel",
+                                                   "arbitrary")),
+                          interpret=True)(idxs, inputs, lora)
 
 
 if __name__ == "__main__":
@@ -126,5 +142,5 @@ if __name__ == "__main__":
     print(output_idxs)
     print(output_idxs == idxs)
 
-    breakpoint()
+    # breakpoint()
     # np.testing.assert_allclose(ref_output, output1, rtol=1e-2)
