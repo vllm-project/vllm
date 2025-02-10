@@ -8,7 +8,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 """
 import os
 from dataclasses import dataclass
-from typing import List, Literal, NamedTuple, Optional, Tuple
+from typing import List, Literal, NamedTuple, Optional
 
 import pytest
 
@@ -40,10 +40,22 @@ class PPTestOptions(NamedTuple):
 @dataclass
 class PPTestSettings:
     parallel_setups: List[ParallelSetup]
+    # NOTE: the length of distributed_backends and
+    # vllm_major_versions should be the same, and they
+    # are first zipped together to iterate over all
+    # test settings.
+    distributed_backends: List[str]
     # vllm major version: "0" for V0, "1" for V1
-    distributed_backends_and_major_versions: List[Tuple[str, str]]
+    vllm_major_versions: List[str]
     task: TaskOption
     test_options: PPTestOptions
+
+    def __post_init__(self):
+        if len(self.distributed_backends) != len(self.vllm_major_versions):
+            raise ValueError(
+                f"Length mismatch: distributed_backends "
+                f"({len(self.distributed_backends)}) != "
+                f"vllm_major_versions ({len(self.vllm_major_versions)})")
 
     @staticmethod
     def detailed(
@@ -80,8 +92,9 @@ class PPTestSettings:
                               eager_mode=True,
                               chunked_prefill=False),
             ],
-            distributed_backends_and_major_versions=[("mp", "0"), ("ray", "0"),
-                                                     ("ray", "1")],
+            # only ray is supported for V1
+            distributed_backends=["mp", "ray", "ray"],
+            vllm_major_versions=["0", "0", "1"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        trust_remote_code=trust_remote_code,
@@ -109,7 +122,8 @@ class PPTestSettings:
                               eager_mode=True,
                               chunked_prefill=False),
             ],
-            distributed_backends_and_major_versions=[("mp", "0")],
+            distributed_backends=["mp"],
+            vllm_major_versions=["0"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        trust_remote_code=trust_remote_code,
@@ -122,9 +136,10 @@ class PPTestSettings:
         opts = self.test_options
 
         for parallel_setup in self.parallel_setups:
-            for backend_and_ver in self.distributed_backends_and_major_versions:
-                yield (model_name, parallel_setup, backend_and_ver, self.task,
-                       opts)
+            for backend, vllm_major_version in zip(self.distributed_backends,
+                                                   self.vllm_major_versions):
+                yield (model_name, parallel_setup, backend, vllm_major_version,
+                       self.task, opts)
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
@@ -246,6 +261,7 @@ def _compare_tp(
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
+    vllm_major_version: str,
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available: int,
@@ -298,9 +314,9 @@ def _compare_tp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", hf_overrides])
 
-    vllm_use_v1 = os.getenv("VLLM_USE_V1", "0") == "1"
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
-    if distributed_backend == "ray" and (vllm_use_v1 or specific_case):
+    if distributed_backend == "ray" and (vllm_major_version == "1"
+                                         or specific_case):
         # For V1, test Ray ADAG for all the tests
         # For V0, test Ray ADAG for a subset of the tests
         pp_env = {
@@ -352,8 +368,8 @@ def _compare_tp(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend_and_major_version",
-     "task", "test_options"),
+    ("model_name", "parallel_setup", "distributed_backend",
+     "vllm_major_version", "task", "test_options"),
     [
         params for model_name, settings in TEXT_GENERATION_MODELS.items()
         for params in settings.iter_params(model_name)
@@ -365,16 +381,17 @@ def test_tp_language_generation(
     monkeypatch,
     model_name: str,
     parallel_setup: ParallelSetup,
-    distributed_backend_and_major_version: Tuple[str, str],
+    distributed_backend: str,
+    vllm_major_version: str,
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    distributed_backend, major_version = distributed_backend_and_major_version
-    monkeypatch.setenv('VLLM_USE_V1', major_version)
+    monkeypatch.setenv('VLLM_USE_V1', vllm_major_version)
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
+                vllm_major_version,
                 task,
                 test_options,
                 num_gpus_available,
@@ -382,8 +399,8 @@ def test_tp_language_generation(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend", "task",
-     "test_options"),
+    ("model_name", "parallel_setup", "distributed_backend",
+     "vllm_major_version", "task", "test_options"),
     [
         params for model_name, settings in EMBEDDING_MODELS.items()
         for params in settings.iter_params(model_name)
@@ -392,16 +409,20 @@ def test_tp_language_generation(
 )
 @fork_new_process_for_each_test
 def test_tp_language_embedding(
+    monkeypatch,
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
+    vllm_major_version: str,
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
 ):
+    monkeypatch.setenv('VLLM_USE_V1', vllm_major_version)
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
+                vllm_major_version,
                 task,
                 test_options,
                 num_gpus_available,
@@ -409,8 +430,8 @@ def test_tp_language_embedding(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend", "task",
-     "test_options"),
+    ("model_name", "parallel_setup", "distributed_backend",
+     "vllm_major_version", "task", "test_options"),
     [
         params for model_name, settings in MULTIMODAL_MODELS.items()
         for params in settings.iter_params(model_name)
@@ -419,16 +440,20 @@ def test_tp_language_embedding(
 )
 @fork_new_process_for_each_test
 def test_tp_multimodal_generation(
+    monkeypatch,
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
+    vllm_major_version: str,
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
 ):
+    monkeypatch.setenv('VLLM_USE_V1', vllm_major_version)
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
+                vllm_major_version,
                 task,
                 test_options,
                 num_gpus_available,
