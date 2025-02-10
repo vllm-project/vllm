@@ -67,13 +67,13 @@ DEFAULT_IM_END_TOKEN_ID = 152065
 
 
 class MolmoImageInputs(TypedDict):
-    images: torch.Tensor
+    images: NestedTensors
     """Shape: `(batch_size, num_crops, num_patch, patch_dim)`"""
 
-    image_input_idx: torch.Tensor
+    image_input_idx: NestedTensors
     """Shape: `(batch_size, num_crops, num_patch)`"""
 
-    image_masks: Optional[torch.Tensor]
+    image_masks: Optional[NestedTensors]
     """Shape: `(batch_size, num_crops, num_patch)`"""
 
     seq_len: torch.Tensor
@@ -1474,13 +1474,14 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             raise ValueError("image_input_idx is required for Molmo model.")
         if seq_len is None:
             raise ValueError("seq_len is required for Molmo model.")
-        if not isinstance(images, torch.Tensor):
+        if not isinstance(images, (torch.Tensor, list)):
             raise ValueError("Incorrect type of images. "
                              f"Got type: {type(images)}")
-        if not isinstance(image_input_idx, torch.Tensor):
+        if not isinstance(image_input_idx, (torch.Tensor, list)):
             raise ValueError("Incorrect type of image_input_idx. "
                              f"Got type: {type(image_input_idx)}")
-        if not (image_masks is None or isinstance(image_masks, torch.Tensor)):
+        if not (image_masks is None or isinstance(image_masks,
+                                                  (torch.Tensor, list))):
             raise ValueError("Incorrect type of image_masks. "
                              f"Got type: {type(image_masks)}")
         if not isinstance(seq_len, torch.Tensor):
