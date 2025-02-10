@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from functools import cached_property, partial
+from functools import partial
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
                     Union)
 
@@ -61,9 +61,9 @@ VIT_LAYERS = [-2, -9]
 NUM_PREFIX_TOKENS = 1
 ADDITIONAL_VOCAB_SIZE = 128
 DEFAULT_IMAGE_PATCH_TOKEN_ID = 152066
-DEFAULT_IM_START_TOKEN_ID = 152067
-DEFAULT_IM_END_TOKEN_ID = 152064
-DEFAULT_IM_COL_TOKEN_ID = 152065
+DEFAULT_IM_COL_TOKEN_ID = 152067
+DEFAULT_IM_START_TOKEN_ID = 152064
+DEFAULT_IM_END_TOKEN_ID = 152065
 
 
 class MolmoImageInputs(TypedDict):
@@ -333,7 +333,7 @@ class VisionTransformer(nn.Module):
 
     def forward(self,
                 x: torch.Tensor,
-                patch_num: int = None) -> List[torch.Tensor]:
+                patch_num: Optional[int] = None) -> List[torch.Tensor]:
         """
         : param x: (batch_size, num_patch, n_pixels)
         """
@@ -890,15 +890,6 @@ def _lowest_multiple(x: int, k: int) -> int:
     return (x // k) * k
 
 
-def get_num_crop_window_patches(
-    crop_patches: int,
-    *,
-    left_margin: int,
-    right_margin: int,
-):
-    return crop_patches - (left_margin + right_margin)
-
-
 def get_num_patches(
     num_tiles: int,
     *,
@@ -910,11 +901,7 @@ def get_num_patches(
     if num_tiles == 1:
         return _lowest_multiple(crop_patches + pooling_size - 1, pooling_size)
 
-    crop_window_patches = get_num_crop_window_patches(
-        crop_patches,
-        left_margin=left_margin,
-        right_margin=right_margin,
-    )
+    crop_window_patches = crop_patches - (left_margin + right_margin)
 
     left_num = _lowest_multiple(
         crop_window_patches + left_margin + pooling_size - 1,
@@ -956,7 +943,7 @@ def get_patches_grid_size(
         pooling_size=pooling_size,
     )
 
-    return ncols, nrows
+    return nrows, ncols
 
 
 def get_candidate_tilings(max_num: int) -> list[tuple[int, int]]:
@@ -1069,7 +1056,7 @@ class MolmoProcessorWrapper:
     def pooling_size(self) -> int:
         return 2
 
-    def get_patches_grid_size(
+    def select_tiling(
         self,
         *,
         image_width: int,
@@ -1079,7 +1066,6 @@ class MolmoProcessorWrapper:
         left_margin, right_margin = self.overlap_margins
         base_image_input_size = self.base_image_input_size
         base_image_input_d = self.image_patch_size
-        pooling_size = self.pooling_size
 
         total_margin_pixels = base_image_input_d * (right_margin + left_margin)
         crop_patches = base_image_input_size[0] // base_image_input_d
@@ -1092,7 +1078,26 @@ class MolmoProcessorWrapper:
             max_num_patches=max_crops,
         )
 
-        ncols, nrows = get_patches_grid_size(
+        return tiling_w, tiling_h
+
+    def get_patches_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        left_margin, right_margin = self.overlap_margins
+        base_image_input_size = self.base_image_input_size
+        base_image_input_d = self.image_patch_size
+        pooling_size = self.pooling_size
+
+        crop_patches = base_image_input_size[0] // base_image_input_d
+        tiling_w, tiling_h = self.select_tiling(
+            image_height=image_height,
+            image_width=image_width,
+        )
+
+        nrows, ncols = get_patches_grid_size(
             tiling_h=tiling_h,
             tiling_w=tiling_w,
             crop_patches=crop_patches,
@@ -1113,28 +1118,51 @@ class MolmoProcessorWrapper:
         outputs = self.processor.process(  # type: ignore
             text, images, **kwargs)
 
-        return BatchFeature(
-            {
-                "input_ids": outputs.pop("input_ids").unsqueeze(0),
-                **outputs
-            },
-            tensor_type=return_tensors,
+        if images is None:
+            images = []
+        if not isinstance(images, list):
+            images = [images]
+
+        input_ids = outputs.pop("input_ids")
+        outputs["input_ids"] = input_ids.unsqueeze(0)
+
+        tilings = [
+            self.select_tiling(
+                image_width=image.size[0],
+                image_height=image.size[1],
+            ) for image in images
+        ]
+        if tilings:
+            outputs["num_patches"] = torch.tensor(tilings).prod(-1) + 1
+
+        outputs["seq_len"] = torch.tensor(len(input_ids))
+
+        image_ids = [
+            DEFAULT_IMAGE_PATCH_TOKEN_ID,
+            DEFAULT_IM_COL_TOKEN_ID,
+            DEFAULT_IM_START_TOKEN_ID,
+            DEFAULT_IM_END_TOKEN_ID,
+        ]
+        is_image_ids, inv_idxs, counts = torch.unique_consecutive(
+            torch.isin(input_ids, torch.tensor(image_ids), assume_unique=True),
+            return_inverse=True,
+            return_counts=True,
         )
+        idxs = inv_idxs.diff(prepend=torch.tensor([-1])).nonzero().squeeze(1)
+        assert len(is_image_ids) == len(idxs) == len(counts)
+
+        image_start_end = list[tuple[int, int]]()
+        for is_image_id, idx, count in zip(is_image_ids, idxs, counts):
+            if is_image_id:
+                assert input_ids[idx] in image_ids
+                image_start_end.append((idx, idx + count))
+
+        outputs["image_start_end"] = torch.tensor(image_start_end)
+
+        return BatchFeature(outputs, tensor_type=return_tensors)
 
 
 class MolmoProcessingInfo(BaseProcessingInfo):
-
-    @cached_property
-    def bos_token_id(self) -> int:
-        # HF processor adds bos_token_id
-        tokenizer = self.get_tokenizer()
-
-        # qwen2 and olmo do not have a BOS,
-        # and instead use EOS as a generic separator token.
-        bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
-        assert isinstance(bos_token_id, int)
-
-        return bos_token_id
 
     def get_hf_processor(self) -> MolmoProcessorWrapper:
         processor = self.ctx.get_hf_processor()
@@ -1239,38 +1267,6 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
 
 class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
-
-        prompt_ids = processed_outputs.input_ids  # shape: (1, seq_len)
-        image_ids = torch.tensor([
-            DEFAULT_IMAGE_PATCH_TOKEN_ID,
-            DEFAULT_IM_START_TOKEN_ID,
-            DEFAULT_IM_END_TOKEN_ID,
-            DEFAULT_IM_COL_TOKEN_ID,
-        ])  # Shape: (4,)
-        is_image_id = (prompt_ids == image_ids[:, None]).any(dim=0)
-
-        num_image_idxs = is_image_id.sum()
-        image_start_idx = torch.tensor(
-            -1) if num_image_idxs == 0 else is_image_id.nonzero()[0][0]
-        image_end_idx = image_start_idx + num_image_idxs
-
-        processed_outputs["seq_len"] = prompt_ids.shape[1]
-        processed_outputs["image_start_end"] = torch.stack(
-            [image_start_idx, image_end_idx])
-
-        return processed_outputs
-
     def _apply_hf_processor_tokens_only(
         self,
         prompt_tokens: list[int],
@@ -1297,13 +1293,16 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        images = hf_inputs.get("images", torch.empty(0))
-        num_images = len(images)
+        num_patches = hf_inputs.get("num_patches", torch.empty(0))
+        num_images = len(num_patches)
 
         return dict(
-            images=MultiModalFieldConfig.batched("image"),
-            image_masks=MultiModalFieldConfig.batched("image"),
-            image_input_idx=MultiModalFieldConfig.batched("image"),
+            images=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
+            image_masks=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_patches),
+            image_input_idx=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_patches),
+            num_patches=MultiModalFieldConfig.batched("image"),
             seq_len=MultiModalFieldConfig.shared("image", num_images),
             image_start_end=MultiModalFieldConfig.shared("image", num_images),
         )
@@ -1316,18 +1315,25 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
     ) -> list[PromptReplacement]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
-        bos_token_id = self.info.bos_token_id
 
         image_token_length_w = processor.image_token_length_w
         image_token_length_h = processor.image_token_length_h
         pooling_size = processor.pooling_size
 
-        user_prefix = "User: "
+        user_str = "User:"
         if processor.always_start_with_space:
-            user_prefix += " "
+            user_str = " " + user_str
 
-        user_prefix_tokens = tokenizer.encode(user_prefix,
-                                              add_special_tokens=False)
+        user_tokens = tokenizer.encode(user_str, add_special_tokens=False)
+
+        img_patch_id = DEFAULT_IMAGE_PATCH_TOKEN_ID
+        img_col_id = DEFAULT_IM_COL_TOKEN_ID
+        img_start_id = DEFAULT_IM_START_TOKEN_ID
+        img_end_id = DEFAULT_IM_END_TOKEN_ID
+
+        extra_row = [img_patch_id] * image_token_length_w + [img_col_id]
+        extra_joint = ([img_start_id] + extra_row * image_token_length_h +
+                       [img_end_id])
 
         def get_replacement_molmo(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -1338,46 +1344,22 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
                 image_height=image_size.height,
             )
 
-            per_row = np.full(
-                (ncols + 1) // pooling_size,
-                DEFAULT_IMAGE_PATCH_TOKEN_ID,
-            )
-            per_row = np.concatenate(
-                [[per_row], DEFAULT_IM_COL_TOKEN_ID],
-                axis=0,
-            )
-            joint = [
-                [DEFAULT_IM_START_TOKEN_ID],
-                np.tile(per_row, [(nrows + 1) // pooling_size]),
-                [DEFAULT_IM_END_TOKEN_ID],
-            ]
+            joint_row = ([img_patch_id] * ((ncols + 1) // pooling_size) +
+                         [img_col_id])
+            joint = ([img_start_id] + joint_row *
+                     ((nrows + 1) // pooling_size) + [img_end_id])
 
-            extra_per_row = np.full(
-                (image_token_length_w, ),
-                DEFAULT_IMAGE_PATCH_TOKEN_ID,
-            )
-            extra_per_row = np.concatenate(
-                [extra_per_row, [DEFAULT_IM_COL_TOKEN_ID]],
-                axis=0,
-            )
-            extra_joint = [
-                [DEFAULT_IM_START_TOKEN_ID],
-                np.tile(extra_per_row, [image_token_length_h]),
-                [DEFAULT_IM_END_TOKEN_ID],
-            ]
-
-            image_tokens = np.concatenate([extra_joint + joint], axis=0)
-            image_tokens = image_tokens.tolist()
+            image_tokens = extra_joint + joint
 
             return PromptReplacementDetails(
-                full=user_prefix_tokens + [bos_token_id] + image_tokens,
+                full=image_tokens + user_tokens,
                 features=image_tokens,
             )
 
         return [
             PromptReplacement(
                 modality="image",
-                target=user_prefix,
+                target=user_str,
                 replacement=get_replacement_molmo,
             )
         ]
@@ -1581,8 +1563,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings, [
-                    DEFAULT_IMAGE_PATCH_TOKEN_ID, DEFAULT_IM_START_TOKEN_ID,
-                    DEFAULT_IM_END_TOKEN_ID, DEFAULT_IM_COL_TOKEN_ID
+                    DEFAULT_IMAGE_PATCH_TOKEN_ID, DEFAULT_IM_COL_TOKEN_ID,
+                    DEFAULT_IM_START_TOKEN_ID, DEFAULT_IM_END_TOKEN_ID
                 ])
         return inputs_embeds
 
