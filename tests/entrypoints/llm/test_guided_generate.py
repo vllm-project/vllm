@@ -8,8 +8,7 @@ import jsonschema
 import pytest
 
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.entrypoints.llm import LLM
-from vllm.outputs import RequestOutput
+from vllm.entrypoints.llm import LLM, ChatCompletionMessageParam, RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -178,7 +177,8 @@ def test_guided_json_for_reasoning(
         llm_for_reasoning.get_tokenizer())
 
     sampling_params = SamplingParams(
-        temperature=1.0,
+        presence_penalty=0.2,
+        temperature=0.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(
             json=sample_definition_json_schema,
@@ -186,9 +186,22 @@ def test_guided_json_for_reasoning(
             trigger_token=reasoning_parser.think_end_token,
         ),
     )
-    outputs = llm_for_reasoning.generate(
-        prompts=[("Solve 8x + 7 = -23. Summarize your steps in JSON format. " +
-                  reasoning_parser.think_start_token)] * 2,
+
+    conversation: list[ChatCompletionMessageParam] = [
+        {
+            "role":
+            "system",
+            "content":
+            ("Your response should fit the following JSON schema: \n" +
+             str(sample_definition_json_schema)),
+        },
+        {
+            "role": "user",
+            "content": "Solve 8x + 7 = -23. "
+        },
+    ]
+    outputs = llm_for_reasoning.chat(
+        messages=[conversation for _ in range(2)],
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -196,12 +209,11 @@ def test_guided_json_for_reasoning(
     assert outputs is not None
 
     for output in outputs:
-        assert output is not None
         assert isinstance(output, RequestOutput)
-        prompt = output.prompt
+        assert output is not None
 
         generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Prompt: {output.prompt!r}, Generated text: {generated_text!r}")
 
         assert generated_text is not None
         assert reasoning_parser.think_end_token in generated_text
