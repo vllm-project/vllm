@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
-from vllm.cmd.types import CLISubcommand
+from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.utils import FlexibleArgumentParser
 
 

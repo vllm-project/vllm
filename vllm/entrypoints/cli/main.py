@@ -5,8 +5,8 @@ import os
 import signal
 import sys
 
-import vllm.cmd.openai
-import vllm.cmd.serve
+import vllm.entrypoints.cli.openai
+import vllm.entrypoints.cli.serve
 import vllm.version
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
@@ -14,8 +14,8 @@ from vllm.utils import FlexibleArgumentParser
 logger = init_logger(__name__)
 
 CMD_MODULES = [
-    vllm.cmd.openai,
-    vllm.cmd.serve,
+    vllm.entrypoints.cli.openai,
+    vllm.entrypoints.cli.serve,
 ]
 
 

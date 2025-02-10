@@ -5,8 +5,8 @@ from typing import List
 
 import uvloop
 
-from vllm.cmd.types import CLISubcommand
 from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
