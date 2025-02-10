@@ -117,7 +117,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/correctness/
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -339,13 +339,13 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
-- label: Transcription API correctness
+- label: OpenAI API correctness
   source_file_dependencies:
   - csrc/
-  - vllm/entrypoints/openai/serving_transcription.py
+  - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
-  commands:
-  - pytest -s entrypoints/openai/test_transcription_api_correctness.py
+  commands: # LMEval+Transcription WER check
+  - pytest -s entrypoints/openai/correctness/
 
 - label: Encoder Decoder tests # 5min
   source_file_dependencies:
