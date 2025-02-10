@@ -64,6 +64,7 @@ DEFAULT_IMAGE_PATCH_TOKEN_ID = 152066
 DEFAULT_IM_COL_TOKEN_ID = 152067
 DEFAULT_IM_START_TOKEN_ID = 152064
 DEFAULT_IM_END_TOKEN_ID = 152065
+POOLING_SIZE = 2
 
 
 class MolmoImageInputs(TypedDict):
@@ -636,8 +637,8 @@ class MolmoVisionBackbone(nn.Module):
         self.vit_layers = VIT_LAYERS
         self.image_num_patch = vision_config.image_num_patch
         self.llm_patches_per_crop = (
-            (self.image_num_patch[0] + 1) // 2,
-            (self.image_num_patch[1] + 1) // 2,
+            (self.image_num_patch[0] + 1) // POOLING_SIZE,
+            (self.image_num_patch[1] + 1) // POOLING_SIZE,
         )
         self.image_vit = VisionTransformer(vision_config,
                                            quant_config=quant_config)
@@ -721,19 +722,20 @@ class MolmoVisionBackbone(nn.Module):
         image_features = image_features.reshape(
             (batch_size, num_image) + self.image_num_patch + (-1, ), )
 
-        if self.image_num_patch[0] % 2 == 1:
+        missing_w = self.image_num_patch[0] % 2
+        if missing_w:
             # Pad so we can still pool 2x2 patches
             image_features = F.pad(
                 image_features,
-                (0, 0, 0, 1, 0, 1, 0, 0, 0, 0),
+                (0, 0, 0, missing_w, 0, missing_w, 0, 0, 0, 0),
             )
 
         # image pooling
         image_features = rearrange(
             image_features,
             'b n (h dh) (w dw) c -> (b n h w) (dh dw) c',
-            dh=2,
-            dw=2,
+            dh=POOLING_SIZE,
+            dw=POOLING_SIZE,
         )
 
         query = image_features.mean(-2, keepdim=True)
@@ -1054,7 +1056,7 @@ class MolmoProcessorWrapper:
 
     @property
     def pooling_size(self) -> int:
-        return 2
+        return POOLING_SIZE
 
     def select_tiling(
         self,
