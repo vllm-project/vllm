@@ -504,8 +504,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     "`VLLM_USE_TRITON_FLASH_ATTN=0`")
 
             from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
-                triton_attention_rocm)
-            self.attn_func = triton_attention_rocm
+                triton_attention)
+            self.attn_func = triton_attention
             logger.debug("Using Triton FA in ROCmBackend")
             if self.sliding_window != (-1, -1):
                 logger.warning("ROCm Triton FA does not currently support "

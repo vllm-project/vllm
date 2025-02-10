@@ -67,7 +67,7 @@ def quantize_input(q, k, v, input_metadata: MetaData, int8_kv=False):
     # model.
     p_scale = p_descale = None
 
-    # We are not multiplying the scales togather to get
+    # We are not multiplying the scales together to get
     # qk_desale / o_descale e.g.
     # qk_desale = q_descale * k_descale
     # o_desale = p_descale * v_descale
@@ -397,7 +397,7 @@ def test_op_fwd_int8(Z,
                      dtype=torch.float16):
     torch.manual_seed(20)
 
-    # Disable grad to save memeory it won't run into OOM on CI machine.
+    # Disable grad to save memory it won't run into OOM on CI machine.
     q, k, v, input_metadata = input_helper(Z,
                                            H,
                                            H,
