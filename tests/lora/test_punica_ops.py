@@ -1,10 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-This script is mainly used to tests various hidden_sizes. We have collected the
-hidden_sizes included in the LoRA models currently supported by vLLM. It tests
-whether the corresponding Triton kernel can run normally when tensor parallelism
-is set to [1, 2, 4, 8, 16, 32, 64].
-"""
 from threading import Lock
 from typing import List
 
