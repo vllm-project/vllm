@@ -359,12 +359,12 @@ export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
 ### Audio
 
 Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
-Here is a simple example using Ultravox-v0.3.
+Here is a simple example using Ultravox-v0.5-1B.
 
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve fixie-ai/ultravox-v0_3
+vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b
 ```
 
 Then, you can use the OpenAI client as follows:

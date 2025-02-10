@@ -24,9 +24,9 @@ question_per_audio_count = {
 # Unless specified, these settings have been tested to work on a single L4.
 
 
-# Ultravox 0.3
+# Ultravox 0.5-1B
 def run_ultravox(question: str, audio_count: int):
-    model_name = "fixie-ai/ultravox-v0_3"
+    model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [{
