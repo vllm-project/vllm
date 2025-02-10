@@ -350,7 +350,7 @@ class ColumnParallelLinear(LinearBase):
         # Materialize GGUF UninitializedParameter
         if is_gguf_weight and isinstance(param, UninitializedParameter):
             final_shape = list(loaded_weight.shape)
-            if output_dim is not None and not is_sharded_weight:
+            if output_dim is not None:
                 tp_size = get_tensor_model_parallel_world_size()
                 assert final_shape[output_dim] % tp_size == 0
                 final_shape[output_dim] = final_shape[output_dim] // tp_size
