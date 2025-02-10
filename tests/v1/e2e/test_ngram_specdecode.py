@@ -7,7 +7,7 @@ from vllm import LLM, SamplingParams
 @pytest.fixture
 def test_prompts():
     return [
-        "Can you repeat the sentence ten times, this is a sentence?",
+        "Can you repeat the sentence ten times, this is a sentence.",
         "This is a basic spec decode test",
     ]
 

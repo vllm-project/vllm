@@ -223,8 +223,7 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
-        num_cached_blocks = self.cached_block_num[
-            request.request_id] // self.block_size
+        num_cached_blocks = self.cached_block_num[request.request_id]
         num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
             request.spec_token_ids)) // self.block_size
         new_full_blocks = req_blocks[

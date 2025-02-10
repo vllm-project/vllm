@@ -528,14 +528,14 @@ class Scheduler:
 
             stopped = False
             new_logprobs = None
-            new_token_ids = []
+            new_token_ids: List[int] = []
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
                     request.append_output_token_ids(output_token_id)
                     new_token_ids.append(output_token_id)
 
-                    stopped = self._check_stop(request, output_token_id)
+                    stopped = self._check_stop(request)
                     # This must be called before we make the EngineCoreOutput.
                     if stopped:
                         self._free_request(request)
@@ -544,7 +544,6 @@ class Scheduler:
                 # Extract sample logprobs if needed.
                 if request.sampling_params.logprobs is not None:
                     assert logprobs is not None
-                    req_index = model_runner_output.req_id_to_index[req_id]
                     # NOTE: once we support N tokens per step (spec decode),
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
@@ -570,13 +569,14 @@ class Scheduler:
             scheduler_stats=self.make_stats(),
         )
 
-    def _check_stop(self, request: Request, last_token_id: int) -> bool:
+    def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
                 or request.num_output_tokens >= request.max_tokens):
             request.status = RequestStatus.FINISHED_LENGTH_CAPPED
             return True
 
         sampling_params = request.sampling_params
+        last_token_id = request.output_token_ids[-1]
         if (not sampling_params.ignore_eos
                 and last_token_id == request.eos_token_id):
             request.status = RequestStatus.FINISHED_STOPPED

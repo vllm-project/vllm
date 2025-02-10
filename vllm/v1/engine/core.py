@@ -72,6 +72,7 @@ class EngineCore:
             assert self.scheduler.speculative_config.ngram_prompt_lookup_min \
                     , "Only ngram spec decode is supported in V1."
             self.proposer = NgramProposer()
+            self.use_spec_decode = True
 
     def _initialize_kv_caches(self,
                               vllm_config: VllmConfig) -> Tuple[int, int]:
@@ -131,7 +132,7 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        if self.scheduler.speculative_config:
+        if self.use_spec_decode:
             self.propose_tokens()
 
         scheduler_output = self.scheduler.schedule()

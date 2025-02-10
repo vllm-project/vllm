@@ -50,7 +50,7 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
-        self._spec_token_ids: List[int] = []
+        self.spec_token_ids: List[int] = []
         self.num_computed_tokens = 0
 
         # Multi-modal related
@@ -98,16 +98,12 @@ class Request:
         token_ids: Union[int, List[int]],
     ) -> None:
         if isinstance(token_ids, int):
-            self._spec_token_ids.append(token_ids)
+            self.spec_token_ids.append(token_ids)
         else:
-            self._spec_token_ids.extend(token_ids)
+            self.spec_token_ids.extend(token_ids)
 
     def clear_spec_tokens(self) -> None:
-        self._spec_token_ids = []
-
-    @property
-    def spec_token_ids(self) -> List[int]:
-        return self._spec_token_ids
+        self.spec_token_ids = []
 
     @property
     def num_tokens(self) -> int:
@@ -115,7 +111,7 @@ class Request:
 
     @property
     def num_tokens_with_spec(self) -> int:
-        return len(self._all_token_ids) + len(self._spec_token_ids)
+        return len(self._all_token_ids) + len(self.spec_token_ids)
 
     @property
     def num_output_tokens(self) -> int:
