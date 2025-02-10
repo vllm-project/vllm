@@ -865,6 +865,10 @@ class QWenVLMultiModalProcessor(BaseMultiModalProcessor[QWenVLProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
+        hf_config = self.info.get_hf_config()
+        if not hasattr(hf_config, "visual"):
+            return []
+
         tokenizer = self.info.get_tokenizer()
         special_tokens: dict[str,
                              int] = tokenizer.special_tokens  # type: ignore

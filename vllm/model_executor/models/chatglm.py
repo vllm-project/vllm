@@ -208,11 +208,13 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        config = self.info.get_hf_config()
+        hf_config = self.info.get_hf_config()
+        if not hasattr(hf_config, "vision_config"):
+            return []
 
-        boi_token_id = config.boi_token_id
-        image_token_id = config.pad_token_id
-        eoi_token_id = config.eoi_token_id
+        boi_token_id = hf_config.boi_token_id
+        image_token_id = hf_config.pad_token_id
+        eoi_token_id = hf_config.eoi_token_id
 
         def get_replacement(item_idx: int):
             num_image_tokens = self.info.get_num_image_tokens()
