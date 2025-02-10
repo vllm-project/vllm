@@ -17,14 +17,14 @@ from ...utils import RemoteOpenAIServer
 
 @pytest.fixture
 def mary_had_lamb():
-    path = AudioAsset('mary_had_lamb').get_asset_path()
+    path = AudioAsset('mary_had_lamb').get_local_path()
     with open(str(path), "rb") as f:
         yield f
 
 
 @pytest.fixture
 def winning_call():
-    path = AudioAsset('winning_call').get_asset_path()
+    path = AudioAsset('winning_call').get_local_path()
     with open(str(path), "rb") as f:
         yield f
 
@@ -84,3 +84,17 @@ async def test_bad_requests(mary_had_lamb):
                                                      file=buffer,
                                                      language="en",
                                                      temperature=0.0)
+
+
+@pytest.mark.asyncio
+async def test_non_asr_model(winning_call):
+    # text to text model
+    model_name = "JackFram/llama-68m"
+    server_args = ["--enforce-eager"]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        # with pytest.raises(openai.BadRequestError):
+        await client.audio.transcriptions.create(model=model_name,
+                                                 file=winning_call,
+                                                 language="hh",
+                                                 temperature=0.0)
