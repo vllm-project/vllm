@@ -16,7 +16,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 
 def evil_forward(self, *args, **kwargs):
-    """Evil forward method that raise an exception after 5 calls."""
+    """Evil forward method that raise an exception after 10 calls."""
     NUMBER_OF_GOOD_PASSES = 10
 
     if not hasattr(self, "num_calls"):
