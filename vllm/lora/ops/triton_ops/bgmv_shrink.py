@@ -12,7 +12,7 @@ import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
 
-from .utils import get_lora_op_configs,set_cuda_device
+from .utils import get_lora_op_configs, set_cuda_device
 
 
 @triton.jit

@@ -14,7 +14,7 @@ import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
 
-from .utils import _get_lora_b_ptr,set_cuda_device
+from .utils import _get_lora_b_ptr, set_cuda_device
 
 
 @triton.jit
