@@ -79,7 +79,7 @@ def maybe_backend_fallback(
                     "Falling back to use outlines instead.")
                 guided_params.backend = "outlines"
 
-        # If the xgrammar module cannot be imported successfully for some reason,
+        # If the xgrammar module cannot be imported successfully,
         # we should still allow users to use guided decoding with a fallback.
         elif not xgr_installed:
             logger.warning("xgrammar module cannot be imported successfully. "
