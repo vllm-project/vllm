@@ -64,6 +64,16 @@ MULTIPLE_LINES_WITH_THINK = {
     "reasoning_content": "This\nThat",
     "content": "This is the rest\nThat",
 }
+SHORTEST_REASONING_NO_STREAMING_WITH_THINK = {
+    "output": "</think>This is the rest",
+    "reasoning_content": "",
+    "content": "This is the rest",
+}
+SHORTEST_REASONING_WITH_THINK = {
+    "output": "</think>This is the rest",
+    "reasoning_content": None,
+    "content": "This is the rest",
+}
 
 TEST_CASES = [
     pytest.param(
@@ -146,7 +156,21 @@ TEST_CASES = [
         MULTIPLE_LINES_WITH_THINK,
         id="multiple_lines_with_think_streaming",
     ),
+    pytest.param(
+        False,
+        SHORTEST_REASONING_NO_STREAMING_WITH_THINK,
+        id="shortest_with_think",
+    ),
+    pytest.param(
+        True,
+        SHORTEST_REASONING_WITH_THINK,
+        id="shortest_with_think_streaming",
+    ),
 ]
+
+# Global tokenizer initialization to avoid repeated loading
+tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
+tokenizer.add_tokens([start_token, end_token])
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
@@ -154,8 +178,6 @@ def test_reasoning(
     streaming: bool,
     param_dict: dict,
 ):
-    tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
-    tokenizer.add_tokens([start_token, end_token])
     output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
     output_tokens: List[str] = [
