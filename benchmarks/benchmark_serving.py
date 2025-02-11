@@ -146,7 +146,9 @@ def sample_burstgpt_requests(
     if num_requests <= len(gpt4_df):
         gpt4_df = gpt4_df.sample(n=num_requests, random_state=random_seed)
     else:
-        gpt4_df = gpt4_df.sample(n=num_requests, random_state=random_seed, replace=True)
+        gpt4_df = gpt4_df.sample(n=num_requests,
+                                 random_state=random_seed,
+                                 replace=True)
     # Convert the dataframe to a list of tuples
     dataset = gpt4_df.values.tolist()
     input_requests = []
