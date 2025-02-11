@@ -2,7 +2,7 @@
 import re
 from copy import deepcopy
 from fractions import Fraction
-from typing import TYPE_CHECKING, Dict, Optional, Union
+from typing import Dict, Optional, Union
 
 import torch
 
@@ -11,11 +11,6 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod)
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
-    from vllm.model_executor.layers.quantization.gptq_marlin import (
-        GPTQMarlinLinearMethod, GPTQMarlinMoEMethod)
 
 
 # Match dynamic rules with module name (prefix) and override quantize
@@ -80,9 +75,7 @@ def get_linear_quant_method(
     layer: torch.nn.Module,
     prefix: str,
     linear_method_cls: type,
-) -> Optional[Union["GPTQLinearMethod", "GPTQMarlinLinearMethod",
-                    "GPTQMarlinMoEMethod", UnquantizedLinearMethod,
-                    UnquantizedEmbeddingMethod]]:
+):
     cloned_config = deepcopy(config)
     parallel_lm_head_quantized = isinstance(
         layer, ParallelLMHead) and cloned_config.lm_head_quantized

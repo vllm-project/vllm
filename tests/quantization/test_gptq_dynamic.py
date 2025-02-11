@@ -3,7 +3,6 @@
 
 Run `pytest tests/quantization/test_gptq_dynamic.py --forked`.
 """
-from typing import Tuple
 
 import pytest
 import torch
@@ -28,10 +27,9 @@ MODEL_QUANT = [
 ]
 
 
-@pytest.mark.parametrize("model_id_and_use_marlin_kernel", MODEL_QUANT)
-def test_gptq_with_dynamic(vllm_runner,
-                           model_id_and_use_marlin_kernel: Tuple[str, bool]):
-    model_id, use_marlin_kernel = model_id_and_use_marlin_kernel
+@pytest.mark.parametrize("model_id, use_marlin_kernel", MODEL_QUANT)
+def test_gptq_with_dynamic(vllm_runner, model_id: str,
+                           use_marlin_kernel: bool):
 
     vllm_model = vllm_runner(model_id, dtype=torch.float16, max_model_len=2048)
 
