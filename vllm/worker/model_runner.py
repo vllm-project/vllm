@@ -701,13 +701,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if not mm_data:
             return
 
-        print("FOOOOOOOO")
-
         if self.runner.mm_registry.has_processor(self.runner.model_config):
             mm_kwargs = mm_data
-            print("just used mm_data")
         else:
-            print("calling mapper")
             mm_kwargs = self.multi_modal_input_mapper(
                 mm_data,
                 seq_group_metadata.mm_processor_kwargs,
@@ -754,7 +750,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         """Add a sequence group to the builder."""
 
-        print("Adding seq group!")
         try:
             seq_ids = seq_group_metadata.seq_data.keys()
             n_seqs = len(seq_ids)
@@ -785,7 +780,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 for per_seq_fn in self.per_seq_compute_fns:
                     per_seq_fn(inter_data, seq_idx, seq_group_metadata)
             for per_seq_group_fn in self.per_seq_group_compute_fns:
-                print(f"calling {per_seq_group_fn}")
                 per_seq_group_fn(inter_data, seq_group_metadata)
         except Exception as e:
             # Raise an exception that tracks the ID of the bad request
@@ -1658,9 +1652,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
-
-        print("\n\n\n preparing model input \n\n\n\n ")
-
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:

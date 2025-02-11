@@ -273,7 +273,6 @@ class MQLLMEngine:
             self._send_outputs(rpc_err)
 
         try:
-            print("\n Running add_request \n")
             self.engine.add_request(
                 request_id=request_id,
                 prompt=request.prompt,
