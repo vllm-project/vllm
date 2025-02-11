@@ -179,11 +179,14 @@ class OutputProcessor:
             # in the EngineCore.
             req_state.is_prefilling = not new_token_ids
 
+            stop_reason = engine_core_output.stop_reason
+
             # 2) Detokenize the token ids into text and check for stop
             #    strings.
-            stop_reason = req_state.detokenizer.update(new_token_ids)
-            if stop_reason:
+            stop_string = req_state.detokenizer.update(new_token_ids)
+            if stop_string and finish_reason != FinishReason.STOP:
                 finish_reason = FinishReason.STOP
+                stop_reason = stop_string
 
             # 3) Compute sample and prompt logprobs for request,
             #    if required.
