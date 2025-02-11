@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -31,7 +33,10 @@ def test_processor_override(
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    tokenizer = cached_get_tokenizer(ctx.model_config.tokenizer)
+    tokenizer = cached_get_tokenizer(
+        ctx.model_config.tokenizer,
+        trust_remote_code=ctx.model_config.trust_remote_code,
+    )
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
         tokenizer=tokenizer,
