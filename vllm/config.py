@@ -1401,6 +1401,9 @@ class ParallelConfig:
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
 
+        if self.distributed_executor_backend is None and self.world_size == 1:
+            self.distributed_executor_backend = "uni"
+
         self._verify_args()
 
     @property
@@ -3054,7 +3057,8 @@ class VllmConfig:
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
     # some opaque config, only used to provide additional information
-    # for the hash computation, mainly used for testing and debugging.
+    # for the hash computation, mainly used for testing, debugging or out of
+    # tree config registration.
     additional_config: SupportsHash = field(default=None,
                                             init=True)  # type: ignore
     instance_id: str = ""
