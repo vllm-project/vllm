@@ -116,13 +116,6 @@ repos:
     language: python
     types: [python]
     exclude: 'vllm/third_party/.*'
-  - id: suggestion
-    name: Suggestion
-    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
-    language: system
-    verbose: true
-    pass_filenames: false
-    exclude: 'vllm/third_party/.*'
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
@@ -133,3 +126,12 @@ repos:
     always_run: true
     pass_filenames: false
     exclude: 'vllm/third_party/.*'
+  # Keep `suggestion` last
+  - id: suggestion
+    name: Suggestion
+    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    language: system
+    verbose: true
+    pass_filenames: false
+    exclude: 'vllm/third_party/.*'
+  # Insert new entries above the `suggestion` entry
