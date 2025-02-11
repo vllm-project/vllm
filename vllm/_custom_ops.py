@@ -11,7 +11,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
-from vllm.utils import round_up
 
 logger = init_logger(__name__)
 
@@ -809,6 +808,7 @@ def scaled_fp4_quant(
     # So, we first pad the scales to multiples of 128 and 4. Then, the scales
     # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
     # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+    round_up = lambda x, y: (x + y - 1) // y * y
     rounded_m = round_up(m, 128)
     scale_n = n // block_size
     rounded_n = round_up(scale_n, 4)
