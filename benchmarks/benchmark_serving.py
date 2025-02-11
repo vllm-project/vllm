@@ -38,6 +38,7 @@ from datetime import datetime
 from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
                                   RequestFuncOutput)
 from datasets import load_dataset
@@ -129,6 +130,35 @@ def sample_sharegpt_requests(
         filtered_dataset.append((prompt, prompt_len, output_len, None))
 
     return filtered_dataset
+
+
+def sample_burstgpt_requests(
+    dataset_path: str,
+    num_requests: int,
+    random_seed: int,
+    tokenizer: PreTrainedTokenizerBase,
+) -> List[Tuple[str, int, int, None]]:
+    df = pd.read_csv(dataset_path)
+    gpt4_df = df[df["Model"] == "GPT-4"]
+    # Remove the failed requests (i.e., response length is 0)
+    gpt4_df = gpt4_df[gpt4_df["Response tokens"] > 0]
+    # Randomly sample num_requests from the dataset
+    if num_requests <= len(gpt4_df):
+        gpt4_df = gpt4_df.sample(n=num_requests, random_state=random_seed)
+    else:
+        gpt4_df = gpt4_df.sample(n=num_requests,
+                                 random_state=random_seed,
+                                 replace=True)
+    # Convert the dataframe to a list of tuples
+    dataset = gpt4_df.values.tolist()
+    input_requests = []
+    for i in range(num_requests):
+        input_len = int(dataset[i][2])
+        output_len = int(dataset[i][3])
+        prompt = tokenizer.decode([(i + j) % tokenizer.vocab_size
+                                   for j in range(input_len)])
+        input_requests.append((prompt, input_len, output_len, None))
+    return input_requests
 
 
 def sample_sonnet_requests(
@@ -830,6 +860,14 @@ def main(args: argparse.Namespace):
             fixed_output_len=args.sharegpt_output_len,
         )
 
+    elif args.dataset_name == "burstgpt":
+        input_requests = sample_burstgpt_requests(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            random_seed=args.seed,
+            tokenizer=tokenizer,
+        )
+
     elif args.dataset_name == "sonnet":
         # Do not format the prompt, pass to message directly
         if args.backend == "openai-chat":
@@ -995,7 +1033,7 @@ if __name__ == "__main__":
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "sonnet", "random", "hf"],
+        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument("--dataset-path",
