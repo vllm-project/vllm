@@ -15,7 +15,7 @@ from vllm.lora.request import LoRARequest
 from ..models.utils import check_outputs_equal
 
 ULTRAVOX_MODEL_NAME = "fixie-ai/ultravox-v0_3"
-LLMA_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
+LLMA_MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
 

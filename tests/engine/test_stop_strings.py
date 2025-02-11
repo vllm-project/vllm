@@ -6,7 +6,7 @@ import pytest
 
 from vllm import CompletionOutput, LLMEngine, SamplingParams
 
-MODEL = "meta-llama/llama-2-7b-hf"
+MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 MAX_TOKENS = 200
 
 IS_ASYNC = False

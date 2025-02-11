@@ -117,7 +117,7 @@ def lora_llm(long_context_infos):
     ]
 
     llm = vllm.LLM(
-        "meta-llama/Llama-2-13b-chat-hf",
+        "meta-llama/Llama-3.2-1B-Instruct",
         enable_lora=True,
         max_num_seqs=16,
         max_loras=2,
@@ -136,7 +136,7 @@ def test_rotary_emb_replaced(dist_init):
     """Verify rotary emb in all the layers are replaced"""
     from vllm.engine.arg_utils import EngineArgs
     from vllm.worker.model_runner import ModelRunner
-    engine_args = EngineArgs("meta-llama/Llama-2-7b-hf",
+    engine_args = EngineArgs("meta-llama/Llama-3.2-1B-Instruct",
                              long_lora_scaling_factors=(4.0, ),
                              enable_lora=True)
     engine_config = engine_args.create_engine_config()

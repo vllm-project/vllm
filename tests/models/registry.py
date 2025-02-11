@@ -139,7 +139,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini"),
-    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Meta-Llama-3-8B"),
+    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct"),
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),

@@ -14,7 +14,7 @@ from ..utils import compare_two_settings
                     reason="fp8 is not supported on this GPU type.")
 def test_cpu_offload_fp8():
     # Test quantization of an unquantized checkpoint
-    compare_two_settings("meta-llama/Meta-Llama-3-8B-Instruct",
+    compare_two_settings("meta-llama/Llama-3.2-1B-Instruct",
                          ["--quantization", "fp8"],
                          ["--quantization", "fp8", "--cpu-offload-gb", "2"],
                          max_wait_seconds=480)

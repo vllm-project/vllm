@@ -182,9 +182,9 @@ def test_rope_customization():
     LONGCHAT_ROPE_SCALING = {"rope_type": "linear", "factor": 8.0}
 
     llama_model_config = ModelConfig(
-        "meta-llama/Meta-Llama-3-8B-Instruct",
+        "meta-llama/Llama-3.2-1B-Instruct",
         task="auto",
-        tokenizer="meta-llama/Meta-Llama-3-8B-Instruct",
+        tokenizer="meta-llama/Llama-3.2-1B-Instruct",
         tokenizer_mode="auto",
         trust_remote_code=False,
         dtype="float16",
@@ -195,9 +195,9 @@ def test_rope_customization():
     assert llama_model_config.max_model_len == 8192
 
     llama_model_config = ModelConfig(
-        "meta-llama/Meta-Llama-3-8B-Instruct",
+        "meta-llama/Llama-3.2-1B-Instruct",
         task="auto",
-        tokenizer="meta-llama/Meta-Llama-3-8B-Instruct",
+        tokenizer="meta-llama/Llama-3.2-1B-Instruct",
         tokenizer_mode="auto",
         trust_remote_code=False,
         dtype="float16",
@@ -250,7 +250,7 @@ def test_rope_customization():
 @pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [
     ("facebook/opt-125m", False),
     ("facebook/bart-base", True),
-    ("meta-llama/Llama-3.2-1B", False),
+    ("meta-llama/Llama-3.2-1B-Instruct", False),
     ("meta-llama/Llama-3.2-11B-Vision", True),
 ])
 def test_is_encoder_decoder(model_id, is_encoder_decoder):
