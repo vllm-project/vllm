@@ -523,15 +523,25 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                     image_height=image_input.shape[-2],
                 )
                 placeholder_start = mm_pos["offset"]
+
                 # Turn placeholder position into encoder output position
-                def placeholder_pos_to_encoder_output_pos(placeholder_pos: int) -> int:
-                    return placeholder_pos % (ncols + 1) + placeholder_pos // (ncols + 1) * ncols
-                start_idx = max(placeholder_pos_to_encoder_output_pos(num_computed_tokens - placeholder_start), 0)
+                def placeholder_pos_to_encoder_output_pos(
+                        placeholder_pos: int) -> int:
+                    return placeholder_pos % (ncols + 1) + placeholder_pos // (
+                        ncols + 1) * ncols
+
+                start_idx = max(
+                    placeholder_pos_to_encoder_output_pos(num_computed_tokens -
+                                                          placeholder_start),
+                    0)
                 end_idx = min(
-                    placeholder_pos_to_encoder_output_pos(num_computed_tokens + num_scheduled_tokens - placeholder_start),
-                    len(encoder_output))
-                assert start_idx <= end_idx, f"{start_idx=} should be no greater than {end_idx=}"
+                    placeholder_pos_to_encoder_output_pos(
+                        num_computed_tokens + num_scheduled_tokens -
+                        placeholder_start), len(encoder_output))
+                assert start_idx <= end_idx, (
+                    f"{start_idx=} should be no greater than {end_idx=}")
                 return encoder_output[start_idx:end_idx]
+
             self.slice_encoder_output = _slice_encoder_output
 
         if (config.projector_hidden_act is None
