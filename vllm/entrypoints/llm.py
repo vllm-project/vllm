@@ -63,6 +63,9 @@ class LLM:
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
         tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
             if available, and "slow" will always use the slow tokenizer.
+        intial_incremental_detokenization_offset: Initial incremental
+            detoakenization offset. Non default value can be used with
+            sentencepiece based tokenizers such as mistral in chat api.
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer. Expect valid prompt_token_ids and None for prompt
             from the input.
@@ -159,6 +162,7 @@ class LLM:
         model: str,
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
+        intial_incremental_detokenization_offset: int = 5,
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
@@ -214,6 +218,8 @@ class LLM:
             task=task,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
+            intial_incremental_detokenization_offset=
+            intial_incremental_detokenization_offset,
             skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
             allowed_local_media_path=allowed_local_media_path,

@@ -49,12 +49,15 @@ class IncrementalDetokenizer:
         cls,
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
+        intial_incremental_detokenization_offset: int,
     ) -> "IncrementalDetokenizer":
 
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,
             prompt_ids=request.prompt_token_ids,
             skip_special_tokens=request.sampling_params.skip_special_tokens,
+            intial_incremental_detokenization_offset=
+            intial_incremental_detokenization_offset,
         )
 
         stops = request.sampling_params.stop

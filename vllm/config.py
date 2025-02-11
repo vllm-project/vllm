@@ -104,6 +104,9 @@ class ModelConfig:
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, "slow" will always use the slow tokenizer, and
             "mistral" will always use the tokenizer from `mistral_common`.
+        intial_incremental_detokenization_offset: Initial incremental
+            detoakenization offset. Non default value can be used with
+            sentencepiece based tokenizers such as mistral in chat api.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
         allowed_local_media_path: Allowing API requests to read local images or
@@ -212,6 +215,7 @@ class ModelConfig:
         task: Union[TaskOption, Literal["draft"]],
         tokenizer: str,
         tokenizer_mode: str,
+        intial_incremental_detokenization_offset: int,
         trust_remote_code: bool,
         dtype: Union[str, torch.dtype],
         seed: int,
@@ -247,6 +251,8 @@ class ModelConfig:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
+        self.intial_incremental_detokenization_offset = \
+            intial_incremental_detokenization_offset
         self.trust_remote_code = trust_remote_code
         self.allowed_local_media_path = allowed_local_media_path
         self.seed = seed
@@ -1792,6 +1798,8 @@ class SpeculativeConfig:
                 task="draft",
                 tokenizer=target_model_config.tokenizer,
                 tokenizer_mode=target_model_config.tokenizer_mode,
+                intial_incremental_detokenization_offset=target_model_config.
+                intial_incremental_detokenization_offset,
                 trust_remote_code=target_model_config.trust_remote_code,
                 allowed_local_media_path=target_model_config.
                 allowed_local_media_path,
@@ -3348,6 +3356,8 @@ class VllmConfig:
             f" tokenizer={self.model_config.tokenizer!r}, "
             f"skip_tokenizer_init={self.model_config.skip_tokenizer_init},"
             f" tokenizer_mode={self.model_config.tokenizer_mode}, "
+            " intial_incremental_detokenization_offset="
+            f"{self.model_config.intial_incremental_detokenization_offset}, "
             f"revision={self.model_config.revision}, "
             f"override_neuron_config={self.model_config.override_neuron_config},"
             f" tokenizer_revision={self.model_config.tokenizer_revision}, "

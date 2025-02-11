@@ -93,6 +93,7 @@ class EngineArgs:
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
+    intial_incremental_detokenization_offset: int = 5
     trust_remote_code: bool = False
     allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
@@ -286,6 +287,13 @@ class EngineArgs:
             'fast tokenizer if available.\n* "slow" will '
             'always use the slow tokenizer. \n* '
             '"mistral" will always use the `mistral_common` tokenizer.')
+        parser.add_argument('--intial-incremental-detokenization-offset',
+                            type=int,
+                            default=5,
+                            help='Initial incremental detoakenization '
+                            'offset. Non default value can be used with '
+                            'sentencepiece based tokenizers '
+                            'such as mistral in chat api.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
@@ -1001,6 +1009,8 @@ class EngineArgs:
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
             tokenizer_mode=self.tokenizer_mode,
+            intial_incremental_detokenization_offset=self.
+            intial_incremental_detokenization_offset,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,

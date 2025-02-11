@@ -64,8 +64,11 @@ class LLMEngine:
                                    mm_registry=mm_registry)
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
-        self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=False)
+        self.output_processor = OutputProcessor(
+            self.tokenizer,
+            log_stats=False,
+            intial_incremental_detokenization_offset=vllm_config.model_config.
+            intial_incremental_detokenization_offset)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(

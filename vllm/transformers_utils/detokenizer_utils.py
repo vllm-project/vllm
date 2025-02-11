@@ -45,15 +45,16 @@ def _convert_tokens_to_string_with_added_encoders(
         return "".join(sub_texts)
 
 
-# 5 is an arbitrary value that should work for all
+# intial_incremental_detokenization_offset = 5
+# is an arbitrary value that should work for all
 # tokenizers (bigger = more conservative).
-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 
 def convert_prompt_ids_to_tokens(
     tokenizer: AnyTokenizer,
     prompt_ids: List[int],
     skip_special_tokens: bool = False,
+    intial_incremental_detokenization_offset: int = 5,
 ) -> Tuple[List[str], int, int]:
     """Converts the prompt ids to tokens and returns the tokens and offsets
     for incremental detokenization.
@@ -64,11 +65,11 @@ def convert_prompt_ids_to_tokens(
     # We do not need to convert the whole prompt to tokens.
     # Offset a little more in case we have special tokens.
     new_tokens = tokenizer.convert_ids_to_tokens(
-        prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2:],
+        prompt_ids[-intial_incremental_detokenization_offset - 2:],
         skip_special_tokens=skip_special_tokens)
     read_offset = len(new_tokens)
-    prefix_offset = max(
-        read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
+    prefix_offset = max(read_offset - intial_incremental_detokenization_offset,
+                        0)
     # This is required to guard against out-of-vocab prompt token ids
     _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     return new_tokens, prefix_offset, read_offset
