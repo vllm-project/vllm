@@ -28,7 +28,7 @@ def save_to_pytorch_benchmark_format(
         "benchmark": {
             "name": "vLLM benchmark",
             "extra_info": {
-                "args": args,
+                "args": str(args),
             },
         },
         "model": {
@@ -45,9 +45,9 @@ def save_to_pytorch_benchmark_format(
     }
 
     if os.environ.get("SAVE_IN_PYTORCH_BENCHMARK_FORMAT", False):
-        output_file = (
-            f"{os.path.splitext(args.output_json)[0]}_pytorch_format.json"
-        )
+        # Don't use json suffix here as we don't want convert-results-json-to-markdown.py
+        # to pick it up
+        output_file = f"{os.path.splitext(args.output_json)[0]}.pytorch"
         with open(output_file, "w") as f:
             json.dump(record, f)
 
