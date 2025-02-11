@@ -192,7 +192,7 @@ set_gencode_flags_for_srcs(
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling cumem allocator extension.")
   # link against cuda driver library
-  list(APPEND CUMEM_LIBS cuda)
+  list(APPEND CUMEM_LIBS CUDA::cuda_driver)
   define_gpu_extension_target(
     cumem_allocator
     DESTINATION vllm
