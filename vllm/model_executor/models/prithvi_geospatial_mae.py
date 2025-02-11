@@ -213,6 +213,10 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
                 for name, weight in weights_to_parse.items():
                     if "pos_embed" in name:
                         continue
+
+                    if "_timm_module." in name:
+                        name = name.replace("_timm_module.", "")
+
                     # this model requires a couple of buffers to be loaded
                     # that are not loadable with the AutoWeightsLoader
                     if name in model_buffers:
@@ -223,12 +227,8 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
                                                 default_weight_loader)
                         weight_loader(buffer, weight)
                         loaded_buffers.append(name)
-                        continue
-
-                    if "_timm_module." in name:
-                        name = name.replace("_timm_module.", "")
-
-                    params_list.append((name, weight))
+                    else:
+                        params_list.append((name, weight))
                 break
 
         # Load the remaining model parameters
