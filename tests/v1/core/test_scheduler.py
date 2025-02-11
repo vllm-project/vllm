@@ -38,7 +38,8 @@ def create_scheduler(
     return Scheduler(scheduler_config,
                      model_config,
                      cache_config,
-                     lora_config=None)
+                     lora_config=None,
+                     log_stats=True)
 
 
 def create_requests(

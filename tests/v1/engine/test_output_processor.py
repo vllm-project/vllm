@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+import time
 from typing import Dict, List, Optional
 
 import pytest
@@ -15,6 +16,7 @@ from vllm.sequence import PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.metrics.stats import IterationStats
 
 
 def _ref_convert_id_to_token(
@@ -603,6 +605,7 @@ def test_iteration_stats(dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=True)
     engine_core = MockEngineCore(dummy_test_vectors.generation_tokens)
+    engine_core_timestamp = time.monotonic()
 
     # Make N requests.
     requests = [
@@ -630,8 +633,9 @@ def test_iteration_stats(dummy_test_vectors):
 
     # First iteration has 2 prefills.
     outputs = engine_core.get_outputs()[:num_active]
-    processed_outputs = output_processor.process_outputs(outputs)
-    iteration_stats = processed_outputs.iteration_stats
+    iteration_stats = IterationStats()
+    output_processor.process_outputs(outputs, engine_core_timestamp,
+                                     iteration_stats)
     total_prompt_tokens = sum([
         len(prompt_tokens)
         for prompt_tokens in dummy_test_vectors.prompt_tokens[:num_active]
@@ -642,8 +646,9 @@ def test_iteration_stats(dummy_test_vectors):
 
     # Just decodes in this step.
     outputs = engine_core.get_outputs()[:num_active]
-    processed_outputs = output_processor.process_outputs(outputs)
-    iteration_stats = processed_outputs.iteration_stats
+    iteration_stats = IterationStats()
+    output_processor.process_outputs(outputs, engine_core_timestamp,
+                                     iteration_stats)
 
     assert iteration_stats.num_prompt_tokens == 0
     assert iteration_stats.num_generation_tokens == num_active
@@ -652,8 +657,9 @@ def test_iteration_stats(dummy_test_vectors):
     output_processor.add_request(inactive_request)
     num_active += 1
     outputs = engine_core.get_outputs()[:num_active]
-    processed_outputs = output_processor.process_outputs(outputs)
-    iteration_stats = processed_outputs.iteration_stats
+    iteration_stats = IterationStats()
+    output_processor.process_outputs(outputs, engine_core_timestamp,
+                                     iteration_stats)
     total_prompt_tokens = len(dummy_test_vectors.prompt_tokens[num_active - 1])
 
     assert iteration_stats.num_prompt_tokens == total_prompt_tokens
@@ -661,8 +667,9 @@ def test_iteration_stats(dummy_test_vectors):
 
     # Just decodes in this step.
     outputs = engine_core.get_outputs()[:num_active]
-    processed_outputs = output_processor.process_outputs(outputs)
-    iteration_stats = processed_outputs.iteration_stats
+    iteration_stats = IterationStats()
+    output_processor.process_outputs(outputs, engine_core_timestamp,
+                                     iteration_stats)
 
     assert iteration_stats.num_prompt_tokens == 0
     assert iteration_stats.num_generation_tokens == num_active

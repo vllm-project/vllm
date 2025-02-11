@@ -182,6 +182,45 @@ class PrometheusStatLogger(StatLoggerBase):
                 ],
                 labelnames=labelnames).labels(*labelvalues)
 
+        request_latency_buckets = [
+            0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+            40.0, 50.0, 60.0
+        ]
+        self.histogram_e2e_time_request = \
+            prometheus_client.Histogram(
+                name="vllm:e2e_request_latency_seconds",
+                documentation="Histogram of e2e request latency in seconds.",
+                buckets=request_latency_buckets,
+                labelnames=labelnames).labels(*labelvalues)
+        self.histogram_queue_time_request = \
+            prometheus_client.Histogram(
+                name="vllm:request_queue_time_seconds",
+                documentation=
+                "Histogram of time spent in WAITING phase for request.",
+                buckets=request_latency_buckets,
+                labelnames=labelnames).labels(*labelvalues)
+        self.histogram_inference_time_request = \
+            prometheus_client.Histogram(
+                name="vllm:request_inference_time_seconds",
+                documentation=
+                "Histogram of time spent in RUNNING phase for request.",
+                buckets=request_latency_buckets,
+                labelnames=labelnames).labels(*labelvalues)
+        self.histogram_prefill_time_request = \
+            prometheus_client.Histogram(
+                name="vllm:request_prefill_time_seconds",
+                documentation=
+                "Histogram of time spent in PREFILL phase for request.",
+                buckets=request_latency_buckets,
+                labelnames=labelnames).labels(*labelvalues)
+        self.histogram_decode_time_request = \
+            prometheus_client.Histogram(
+                name="vllm:request_decode_time_seconds",
+                documentation=
+                "Histogram of time spent in DECODE phase for request.",
+                buckets=request_latency_buckets,
+                labelnames=labelnames).labels(*labelvalues)
+
     def log(self, scheduler_stats: SchedulerStats,
             iteration_stats: IterationStats):
         """Log to prometheus."""
@@ -201,6 +240,12 @@ class PrometheusStatLogger(StatLoggerBase):
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason].inc()
+            self.histogram_e2e_time_request.observe(
+                finished_request.e2e_latency)
+            self.histogram_inference_time_request.observe(
+                finished_request.inference_time)
+            self.histogram_decode_time_request.observe(
+                finished_request.decode_time)
             self.histogram_num_prompt_tokens_request.observe(
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
@@ -210,6 +255,10 @@ class PrometheusStatLogger(StatLoggerBase):
             self.histogram_time_to_first_token.observe(ttft)
         for tpot in iteration_stats.time_per_output_tokens_iter:
             self.histogram_time_per_output_token.observe(tpot)
+        for queue_time in iteration_stats.queue_times_iter:
+            self.histogram_queue_time_request.observe(queue_time)
+        for prefill_time in iteration_stats.prefill_times_iter:
+            self.histogram_prefill_time_request.observe(prefill_time)
 
     @staticmethod
     def _unregister_vllm_metrics():

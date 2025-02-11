@@ -73,6 +73,7 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
+            log_stats=False,  # FIXME: implement
         )
 
     @classmethod

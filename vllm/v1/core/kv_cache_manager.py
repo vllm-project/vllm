@@ -26,6 +26,7 @@ class KVCacheManager:
         sliding_window: Optional[int] = None,
         enable_caching: bool = True,
         num_preallocate_tokens: int = 64,
+        log_stats: bool = False,
     ) -> None:
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
@@ -33,6 +34,8 @@ class KVCacheManager:
         self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
         self.sliding_window = sliding_window
         self.enable_caching = enable_caching
+        # FIXME: make prefix cache stats conditional on log_stats
+        self.log_stats = log_stats
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
         # blocks for each request. For example, when a request reaches the end
         # of its block table, we preallocate N blocks in advance. This way, we
