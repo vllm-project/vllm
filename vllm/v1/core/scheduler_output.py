@@ -91,9 +91,9 @@ class SchedulerOutput:
     # Total number of tokens scheduled for all requests.
     # Equal to sum(num_scheduled_tokens.values())
     total_num_scheduled_tokens: int
-    # req_id -> indices of encoder inputs scheduled for each request
-    # E.g., [0, 1] means that 0-th and 1-th images are scheduled to run on
-    # the vision encoder at the current step.
+    # req_id -> encoder input indices that need processing.
+    # E.g., if a request has [0, 1], it could mean the vision encoder needs
+    # to process that the request's 0-th and 1-th images in the current step.
     scheduled_encoder_inputs: Dict[str, List[int]]
     # Number of common prefix blocks for all requests.
     # This can be used for cascade attention.
