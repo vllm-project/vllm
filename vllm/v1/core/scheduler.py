@@ -456,8 +456,6 @@ class Scheduler:
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
-        use_spec_decode = len(
-            scheduler_output.scheduled_spec_decode_tokens) > 0
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
@@ -468,7 +466,7 @@ class Scheduler:
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-            if not use_spec_decode:
+            if req_id not in scheduler_output.scheduled_spec_decode_tokens:
                 # When the request's num_computed_tokens catches up
                 # its num_tokens, the request generates output tokens.
                 # Otherwise, we ignore the sampler output for the request.
@@ -529,8 +527,8 @@ class Scheduler:
                     request.append_output_token_ids(output_token_id)
                     new_token_ids.append(output_token_id)
 
-                    stopped = self._check_stop(request)
                     # This must be called before we make the EngineCoreOutput.
+                    stopped = self._check_stop(request)
                     if stopped:
                         self._free_request(request)
                         break
