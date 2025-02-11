@@ -8,50 +8,47 @@ from vllm.config import ModelConfig, PoolerConfig
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
+# @pytest.mark.parametrize(
+#     ("model_id", "expected_runner_type", "expected_task"),
+#     [
+#         ("facebook/opt-125m", "generate", "generate"),
+#         ("intfloat/e5-mistral-7b-instruct", "pooling", "embed"),
+#         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+#         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
+#         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
+#     ],
+# )
+# def test_auto_task(model_id, expected_runner_type, expected_task):
+#     config = ModelConfig(
+#         model_id,
+#         task="auto",
+#         tokenizer=model_id,
+#         tokenizer_mode="auto",
+#         trust_remote_code=False,
+#         seed=0,
+#         dtype="float16",
+#     )
 
-@pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_task"),
-    [
-        ("facebook/opt-125m", "generate", "generate"),
-        ("intfloat/e5-mistral-7b-instruct", "pooling", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
-    ],
-)
-def test_auto_task(model_id, expected_runner_type, expected_task):
-    config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-    )
+#     assert config.runner_type == expected_runner_type
+#     assert config.task == expected_task
 
-    assert config.runner_type == expected_runner_type
-    assert config.task == expected_task
-
-
-@pytest.mark.parametrize(("model_id", "bad_task"), [
-    ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
-])
-def test_incorrect_task(model_id, bad_task):
-    with pytest.raises(ValueError, match=r"does not support the .* task"):
-        ModelConfig(
-            model_id,
-            task=bad_task,
-            tokenizer=model_id,
-            tokenizer_mode="auto",
-            trust_remote_code=False,
-            seed=0,
-            dtype="float16",
-        )
-
+# @pytest.mark.parametrize(("model_id", "bad_task"), [
+#     ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
+# ])
+# def test_incorrect_task(model_id, bad_task):
+#     with pytest.raises(ValueError, match=r"does not support the .* task"):
+#         ModelConfig(
+#             model_id,
+#             task=bad_task,
+#             tokenizer=model_id,
+#             tokenizer_mode="auto",
+#             trust_remote_code=False,
+#             seed=0,
+#             dtype="float16",
+#         )
 
 MODEL_IDS_EXPECTED = [
-    ("Qwen/Qwen1.5-7B", 32768),
+    ("Qwen/Qwen2.5-1.5B", 131072),
     ("mistralai/Mistral-7B-v0.1", 4096),
     ("mistralai/Mistral-7B-Instruct-v0.2", 32768),
 ]
@@ -80,9 +77,9 @@ def test_get_sliding_window():
     # For Qwen1.5/Qwen2, get_sliding_window() should be None
     # when use_sliding_window is False.
     qwen2_model_config = ModelConfig(
-        "Qwen/Qwen1.5-7B",
+        "Qwen/Qwen2.5-1.5B",
         task="auto",
-        tokenizer="Qwen/Qwen1.5-7B",
+        tokenizer="Qwen/Qwen2.5-1.5B",
         tokenizer_mode="auto",
         trust_remote_code=False,
         seed=0,

@@ -15,7 +15,7 @@ from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 NUM_CONCURRENT = 500
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"

@@ -15,7 +15,7 @@ MODEL_LEN_LEN = [
 
     # Confirm model with sliding window works.
     # config has "use_sliding_window": false
-    ("Qwen/Qwen1.5-0.5B-Chat", 32768, 32768),
+    ("Qwen/Qwen2.5-1.5B-Instruct", 32768, 32768),
     # config has no sliding window attribute.
     ("TinyLlama/TinyLlama-1.1B-Chat-v1.0", 2048, 2048),
 ]
