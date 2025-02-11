@@ -28,6 +28,8 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 
 logger = init_logger(__name__)
 
+T = TypeVar('T')
+
 
 def check_implementation():
     """
@@ -36,12 +38,11 @@ def check_implementation():
     methods.
     """
 
-    def decorator(cls: Type):
+    def decorator(cls: Type[T]) -> Type[T]:
+
         original_init = cls.__init__
 
-        @wraps(original_init)
-        def wrapped_init(self, *args, **kwargs):
-            original_init(self, *args, **kwargs)
+        def warn_unimplemented_methods(self: object):
             unimplemented_methods = []
             for attr_name in dir(self):
                 # bypass inner method
@@ -56,24 +57,26 @@ def check_implementation():
                     base_method_name = base_method.__func__
                 else:
                     continue
-                class_method = getattr(cls, attr_name, False)
+                class_method_name = getattr(cls, attr_name, False)
                 # bypass method defined in sub class
-                if not class_method:
+                if not class_method_name:
                     continue
-                if class_method == base_method_name:
+                if class_method_name == base_method_name:
                     unimplemented_methods.append(attr_name)
             if unimplemented_methods:
                 method_names = ','.join(unimplemented_methods)
                 msg = (f"Methods {method_names} not implemented in {self}")
                 logger.warning(msg)
 
+        @wraps(original_init)
+        def wrapped_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            warn_unimplemented_methods(self)
+
         cls.__init__ = wrapped_init
         return cls
 
     return decorator
-
-
-T = TypeVar('T')
 
 
 def avoid_check(func: Callable[..., T]) -> Callable[..., T]:
