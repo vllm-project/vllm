@@ -109,8 +109,8 @@ class LogitsProcessor(nn.Module):
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
         logits = lm_head.quant_method.apply(lm_head,
-                                             hidden_states,
-                                             bias=embedding_bias)
+                                            hidden_states,
+                                            bias=embedding_bias)
 
         # Gather logits for TP
         logits = self._gather_logits(logits)
