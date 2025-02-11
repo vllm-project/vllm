@@ -244,7 +244,7 @@ class Worker:
         else:
             self.profiler.stop()
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
+    def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
     def check_health(self) -> None:
