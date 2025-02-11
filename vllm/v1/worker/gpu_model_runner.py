@@ -382,7 +382,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens_list: List[int] = []
         max_num_scheduled_tokens = 0
         all_spec_token_ids: List[int] = []
-        num_spec_tokens: List[int] = []
+        num_spec_tokens_list: List[int] = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -392,7 +392,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
                 req_id, [])
             all_spec_token_ids.extend(spec_token_ids)
-            num_spec_tokens.append(len(spec_token_ids))
+            num_spec_tokens_list.append(len(spec_token_ids))
 
         num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
                                                     dtype=np.int32)
@@ -433,29 +433,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
 
-        if scheduler_output.use_spec_decode and all_spec_token_ids:
+        if all_spec_token_ids:
             # Currently, we assume all speculated tokens are verified.
             # We don't support partial verification.
             # 1. Get spec decode logits indices.
             spec_decode_logits_indices = self.arange_cpu[:
                                                          total_num_scheduled_tokens]
-            # 2. Write spec token ids to input_ids_cpu.
-            all_spec_token_ids = torch.tensor(all_spec_token_ids,
-                                              dtype=torch.int32)
             # Step 1. Calculate the spec token indices within input_ids_cpu.
-            # E.g., num_spec_tokens:                 [3, 0, 2, 0, 1]
-            #       num_scheduled_tokens:            [4, 1, 3, 1, 2]
-            # cu_num_tokens - num_scheduled_tokens:  [0, 4, 5, 8, 9]
-            # cumsums_spec_offsets                   [0, 0, 0, 5, 5, 9]
-            cumsums_spec_offsets = np.repeat(
-                cu_num_tokens - num_scheduled_tokens, num_spec_tokens)
+            # E.g., num_spec_tokens_list:            [3, 0, 2, 0, 1]
+            #       spec_req_indices:                [0, 0, 0, 2, 2, 4]
+            spec_req_indices = np.repeat(self.arange_np[:num_reqs],
+                                         num_spec_tokens_list)
+            # spec_offsets: offsets within each spec token list.
+            # E.g., [1, 2, 3, 1, 2, 1], TODO: avoid the for loop here
+            spec_offsets = np.concatenate(
+                [self.arange_np[1:val + 1] for val in num_spec_tokens_list])
+            # spec_seq_offsets: offsets within each sequence.
+            # E.g., num_computed_tokens_cpu:   [1, 4, 3, 6, 2]
+            #       after repeating:           [1, 1, 1, 3, 3, 2]
+            #       spec_seq_offsets:  [1, 1, 1, 3, 3, 2] + [1, 2, 3, 1, 2, 1]
+            #                                = [2, 3, 4, 4, 5, 3]
+            spec_seq_offsets = np.repeat(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                num_spec_tokens_list) + spec_offsets
+            # cumsums_spec_offsets: [0, 0, 0, 2M, 2M, 4M] + [2, 3, 4, 4, 5, 3]
+            cumsums_spec_offsets = (
+                spec_seq_offsets +
+                spec_req_indices * self.input_batch.token_ids_cpu.shape[1])
+            cumsums_spec_offsets = torch.from_numpy(cumsums_spec_offsets).to(
+                torch.int64)
+            all_spec_token_ids = torch.tensor(all_spec_token_ids,
+                                              device=self.input_ids_cpu.device,
+                                              dtype=self.input_ids_cpu.dtype)
 
             # Step 2. Write spec token ids to input_ids_cpu.
-            torch.index_select(
-                all_spec_token_ids,
-                0,
-                torch.from_numpy(cumsums_spec_offsets),
-                out=self.input_ids_cpu[:total_num_scheduled_tokens])
+            self.input_batch.token_ids_cpu_tensor.flatten().scatter_(
+                0, cumsums_spec_offsets, all_spec_token_ids)
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large

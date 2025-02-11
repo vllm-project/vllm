@@ -22,7 +22,7 @@ class RejectionSampler(nn.Module):
                sampling_metadata: SamplingMetadata) -> SamplerOutput:
         if not sampling_metadata.all_greedy:
             raise NotImplementedError(
-                "Only greedy sampling is supported for now.")
+                "Only greedy sampling is supported by rejection sampler.")
 
         if is_flashinfer_available:
             return RejectionSampler.flashinfer_sample(logits,

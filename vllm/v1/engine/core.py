@@ -66,6 +66,7 @@ class EngineCore:
             vllm_config.model_config)
 
         # TODO: find a better way to check if we are using ngram.
+        self.use_spec_decode = False
         if self.scheduler.speculative_config:
             assert self.scheduler.speculative_config.ngram_prompt_lookup_min \
                     , "Only ngram spec decode is supported in V1."
