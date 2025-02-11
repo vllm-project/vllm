@@ -64,7 +64,7 @@ class PoolingOutput:
     Args:
         data: The extracted hidden states.
     """
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: torch.Tensor
 
     def __repr__(self) -> str:
         return (f"PoolingOutput(data={self.data})")
@@ -377,13 +377,7 @@ class PoolingRequestOutput(Generic[_O]):
         pooled_data = seq_group.pooled_data
         assert pooled_data is not None
 
-        if isinstance(pooled_data, list):
-            data = [
-                pooled_data_item.to(dtype=torch.float32, device="cpu")
-                for pooled_data_item in pooled_data
-            ]
-        else:
-            data = pooled_data.to(dtype=torch.float32, device="cpu")
+        data = pooled_data.to(dtype=torch.float32, device="cpu")
         output = PoolingOutput(data)
         prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()
