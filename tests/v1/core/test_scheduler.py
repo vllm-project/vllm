@@ -195,8 +195,8 @@ def test_schedule_partial_requests():
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
         sampled_token_ids=[0] * len(requests),
-        logprob_token_ids_cpu=None,
-        logprobs_cpu=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
     )
     scheduler.update_from_output(output, model_runner_output)
 
