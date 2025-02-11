@@ -115,6 +115,9 @@ class CpuPlatform(Platform):
         # Environment variables for CPU executor
         #
 
+        # Set default threads num for OpenMP parallel
+        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
