@@ -22,11 +22,9 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include "cudaUtils.h"
-
 #include <cuda_fp8.h>
 
-namespace vcm = vllm::common;
+#include "cuda_utils.h"
 
 // Get type2 from type or vice versa (applied to half and bfloat16)
 template <typename T>
@@ -336,24 +334,16 @@ template void invokeFP4Quantization(int m, int n, __nv_bfloat16 const* input,
 
 inline int getMultiProcessorCount() {
   static int multi_processor_count = []() {
-    int device_id = 0;
-    int count = 0;
-
-    // Get the current CUDA device ID
-    vcm::check_cuda_error(cudaGetDevice(&device_id));
-
-    // Get the number of multiprocessors for the current device
-    vcm::check_cuda_error(cudaDeviceGetAttribute(
-        &count, cudaDevAttrMultiProcessorCount, device_id));
-
-    return count;  // Initialize the static variable
+    int64_t count = get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
+    return static_cast<int>(count);
   }();
 
   return multi_processor_count;  // Return the cached value on subsequent calls
 }
 
-void scaled_fp4_quant_sm100a(torch::Tensor& output, torch::Tensor const& input,
-                             torch::Tensor& output_sf,
+void scaled_fp4_quant_sm100a(torch::Tensor const& output,
+                             torch::Tensor const& input,
+                             torch::Tensor const& output_sf,
                              torch::Tensor const& input_sf) {
   int32_t m = input.size(0);
   int32_t n = input.size(1);

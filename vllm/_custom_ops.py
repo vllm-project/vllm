@@ -11,6 +11,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+from vllm.utils import round_up
 
 logger = init_logger(__name__)
 
@@ -785,7 +786,7 @@ def scaled_fp4_quant(
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
             two values are packed into a uint8 and float8_e4m3 scaling factors
-            in a sizzled layout.
+            in the sizzled layout.
     """
     assert input.ndim >= 1, (
         f'input.ndim needs to be >= 1, but got {input.ndim}.')
@@ -803,11 +804,14 @@ def scaled_fp4_quant(
     # Two fp4 values will be packed into an uint8.
     output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
 
-    # We use the rounded values to store the swizzled values. Then, the scaling
-    # factors in float8_e4m3fn are packed into an int32 for every 4 values.
-    rounded_m = ((m + 128 - 1) // 128) * 128
+    # We use the rounded values to store the swizzled values. Due to the
+    # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
+    # So, we first pad the scales to multiples of 128 and 4. Then, the scales
+    # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
+    # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+    rounded_m = round_up(m, 128)
     scale_n = n // block_size
-    rounded_n = ((scale_n + 4 - 1) // 4) * 4
+    rounded_n = round_up(scale_n, 4)
     output_scale = torch.empty((rounded_m, rounded_n // 4),
                                device=device,
                                dtype=torch.int32)

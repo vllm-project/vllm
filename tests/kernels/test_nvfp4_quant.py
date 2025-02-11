@@ -4,6 +4,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
+from vllm.utils import round_up
 
 if not current_platform.has_device_capability(100):
     pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
@@ -16,7 +18,7 @@ PAD_SHAPES = [(90, 64), (150, 64), (128, 48), (128, 80), (150, 80), (90, 48),
 SEEDS = [42]
 CUDA_DEVICES = ['cuda:0']
 
-FLOAT4_E2M1_MAX = 6.0
+FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 # E2M1 to float
@@ -84,9 +86,9 @@ def ref_nvfp4_quant(x, global_scale):
 
 
 def recover_swizzled_scales(scale, m, n):
-    rounded_m = ((m + 128 - 1) // 128) * 128
+    rounded_m = round_up(m, 128)
     scale_n = n // BLOCK_SIZE
-    rounded_n = ((scale_n + 4 - 1) // 4) * 4
+    rounded_n = round_up(scale_n, 4)
     # Recover the swizzled scaling factor to linear layout
     tmp = torch.reshape(scale, (1, rounded_m // 128, rounded_n // 4, 32, 4, 4))
     tmp = torch.permute(tmp, (0, 1, 4, 3, 2, 5))

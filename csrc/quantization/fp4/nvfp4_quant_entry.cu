@@ -17,8 +17,9 @@
 #include <torch/all.h>
 
 #if defined ENABLE_NVFP4 && ENABLE_NVFP4
-void scaled_fp4_quant_sm100a(torch::Tensor& output, torch::Tensor const& input,
-                             torch::Tensor& output_sf,
+void scaled_fp4_quant_sm100a(torch::Tensor const& output,
+                             torch::Tensor const& input,
+                             torch::Tensor const& output_sf,
                              torch::Tensor const& input_sf);
 #endif
 

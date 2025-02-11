@@ -273,7 +273,7 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   set(TGT_CUDA_ARCHS_ ${TGT_CUDA_ARCHS})
 
   # if x.0a is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
-  # remove x.0a from SRC_CUDA_ARCHS and add 9.0a to _CUDA_ARCHS
+  # remove x.0a from SRC_CUDA_ARCHS and add x.0a to _CUDA_ARCHS
   set(_CUDA_ARCHS)
   if ("9.0a" IN_LIST SRC_CUDA_ARCHS)
     list(REMOVE_ITEM SRC_CUDA_ARCHS "9.0a")
