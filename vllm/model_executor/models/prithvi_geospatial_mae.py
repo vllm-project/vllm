@@ -216,12 +216,17 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
                     # this model requires a couple of buffers to be loaded
                     # that are not loadable with the AutoWeightsLoader
                     if name in model_buffers:
+                        if "_timm_module." in name:
+                            name = name.replace("_timm_module.", "")
                         buffer = model_buffers[name]
                         weight_loader = getattr(buffer, "weight_loader",
                                                 default_weight_loader)
                         weight_loader(buffer, weight)
                         loaded_buffers.append(name)
                         continue
+
+                    if "_timm_module." in name:
+                        name = name.replace("_timm_module.", "")
 
                     params_list.append((name, weight))
                 break
