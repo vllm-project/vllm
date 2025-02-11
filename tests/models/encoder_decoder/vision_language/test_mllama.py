@@ -37,7 +37,7 @@ text_only_prompts = [
 ]
 
 models = [
-    "meta-llama/Llama-3.2-11B-Vision-Instruct",
+    "unsloth/Llama-3.2-11B-Vision-Instruct",
 ]
 
 # Indices for inputs
@@ -517,6 +517,10 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
                                             images=images)
 
 
+class DummyModel:
+    image_token_id = MLLAMA_IMAGE_TOKEN_ID
+
+
 @pytest.mark.core_model
 @pytest.mark.parametrize(
     "input_indices_and_output",
@@ -558,7 +562,7 @@ def test_get_cross_attention_mask(input_indices_and_output) -> None:
         use_cuda_graph=False,
     )
 
-    dummy: dict[str, str] = {}
+    dummy = DummyModel()
 
     cross_attention_mask, kv_range_for_decode = MllamaForConditionalGeneration\
         .get_cross_attention_mask(dummy,
@@ -615,7 +619,7 @@ def test_get_full_text_row_masked_out_mask(input_indices) -> None:
         use_cuda_graph=False,
     )
 
-    dummy: dict[str, str] = {}
+    dummy = DummyModel()
 
     full_text_row_masked_out_mask = MllamaForConditionalGeneration\
         .get_full_text_row_masked_out_mask(dummy,
