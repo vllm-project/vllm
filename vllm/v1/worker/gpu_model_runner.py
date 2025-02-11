@@ -440,7 +440,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # 1. Get spec decode logits indices.
             spec_decode_logits_indices = self.arange_cpu[:
                                                          total_num_scheduled_tokens]
-            # Step 1. Calculate the spec token indices within input_ids_cpu.
+            # 2. Write spec_token_ids to input batch.
+            # Step 1. Get req indices that perform spec decode and repeat
+            #         the req indices by the number of spec tokens. Note
+            #         for requests that don't perform spec decode, the
+            #         number of spec tokens is 0 and the req index is
+            #         repeated 0 times.
             # E.g., num_spec_tokens_list:            [3, 0, 2, 0, 1]
             #       spec_req_indices:                [0, 0, 0, 2, 2, 4]
             spec_req_indices = np.repeat(self.arange_np[:num_reqs],

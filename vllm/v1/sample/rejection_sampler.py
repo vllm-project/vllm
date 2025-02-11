@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pad_sequence
 
 from vllm.logger import init_logger
 from vllm.v1.outputs import SamplerOutput
@@ -84,45 +85,49 @@ class RejectionSampler(nn.Module):
     def greedy_sample_ref(
             logits: torch.Tensor,
             sampling_metadata: SamplingMetadata) -> SamplerOutput:
-        # num_reqs x [num_speculated_tokens]
-        spec_token_ids = sampling_metadata.spec_token_ids
-        # only argmax is supported for now
-        output_token_ids_cpu = logits.argmax(dim=-1).view(-1).tolist()
+        spec_lens = [len(x) for x in sampling_metadata.spec_token_ids]
+        # Add 1 to include the 'bonus' token
+        sample_lens = [x + 1 for x in spec_lens]
 
-        sampled_token_ids = []
-        # Stop at the first mismatch place.
-        # spec_tokens:    [1, 2, 3]
-        # output_tokens:  [1, 2, 4, 5]
-        # sampled_tokens: [1, 2, 4]
-        output_token_start_idx = 0
-        max_spec_len = -1
-        for spec_tokens in spec_token_ids:
-            num_spec_tokens = len(spec_tokens)
-            max_spec_len = max(max_spec_len, num_spec_tokens)
-            i = 0
-            while i < num_spec_tokens:
-                if spec_tokens[i] != output_token_ids_cpu[
-                        output_token_start_idx + i]:
-                    break
-                i += 1
-            # +1 to include the bonus token.
-            i += 1
-            output_tokens = output_token_ids_cpu[
-                output_token_start_idx:output_token_start_idx + i]
-            sampled_token_ids.append(output_tokens)
-            output_token_start_idx += num_spec_tokens + 1
+        output_token_ids = logits.argmax(dim=-1).view(-1)
+        output_token_ids = output_token_ids.split(sample_lens)
+        output_token_ids = pad_sequence(output_token_ids,
+                                        batch_first=True,
+                                        padding_value=INVALID_TOKEN_ID)
 
-        sampled_token_ids = [
-            x + [INVALID_TOKEN_ID] * (max_spec_len + 1 - len(x))
-            for x in sampled_token_ids
+        # Convert spec token IDs to a tensor, split by sample_lens, then pad.
+        spec_token_ids = [
+            torch.tensor(x,
+                         dtype=output_token_ids.dtype,
+                         device=output_token_ids.device)
+            for x in sampling_metadata.spec_token_ids
         ]
-        sampled_token_ids = torch.tensor(sampled_token_ids,
-                                         device=logits.device,
-                                         dtype=torch.int)
+        spec_token_ids = pad_sequence(spec_token_ids,
+                                      batch_first=True,
+                                      padding_value=INVALID_TOKEN_ID)
 
-        assert output_token_start_idx == len(output_token_ids_cpu)
+        # Produce a mask that remains 1 (True) until the first
+        # mismatch (cumprod turns 0 after a mismatch).
+        accept_mask = (output_token_ids[:, :-1] == spec_token_ids).cumprod(
+            dim=1)
+        # Identify valid positions (non-padding)
+        valid_mask = output_token_ids != INVALID_TOKEN_ID
 
-        return SamplerOutput(sampled_token_ids=sampled_token_ids,
+        # Generate mask with bonus token.
+        generate_mask = torch.cat([
+            accept_mask,
+            torch.zeros(accept_mask.size(0), 1, device=accept_mask.device)
+        ],
+                                  dim=1).to(torch.bool) & valid_mask
+        zeros_mask = (generate_mask == 0)
+        first_zero_idx = zeros_mask.float().argmax(dim=1)
+        # Figure out which rows actually contain at least one zero.
+        rows_with_zero = zeros_mask.any(dim=1)
+        # Use indexing to set the first zero in each of those rows to 1.
+        generate_mask[rows_with_zero, first_zero_idx[rows_with_zero]] = 1
+
+        output_token_ids[~generate_mask] = INVALID_TOKEN_ID
+        return SamplerOutput(sampled_token_ids=output_token_ids,
                              logprobs_tensors=None)
 
     @staticmethod
