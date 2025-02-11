@@ -118,8 +118,8 @@ class Scheduler:
         scheduled_encoder_inputs: Dict[str, List[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
 
-        # Spec Decode-related. spec_decode: if any request in the scheduled batch uses speculative decoding.
-        spec_decode = False
+        # Spec Decode-related. spec_decode: if any request in
+        # the scheduled batch uses speculative decoding.
         scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
 
         # First, schedule the RUNNING requests.
@@ -191,9 +191,8 @@ class Scheduler:
 
             # Speculative decode related.
             if request.spec_token_ids:
-                spec_decode = True
-            scheduled_spec_decode_tokens[
-                request.request_id] = request.spec_token_ids
+                scheduled_spec_decode_tokens[
+                    request.request_id] = request.spec_token_ids
 
         # Record the LoRAs in scheduled_running_reqs
         requested_loras: Set[int] = set()
@@ -342,7 +341,6 @@ class Scheduler:
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            use_spec_decode=spec_decode,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             num_common_prefix_blocks=num_common_prefix_blocks,
             # finished_req_ids is an existing state in the scheduler,
@@ -464,6 +462,8 @@ class Scheduler:
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
@@ -474,7 +474,7 @@ class Scheduler:
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-            if not scheduler_output.use_spec_decode:
+            if not use_spec_decode:
                 # When the request's num_computed_tokens catches up
                 # its num_tokens, the request generates output tokens.
                 # Otherwise, we ignore the sampler output for the request.
@@ -717,7 +717,6 @@ class SchedulerOutput:
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
-    use_spec_decode: bool
     scheduled_spec_decode_tokens: Dict[str, List[int]]
     num_common_prefix_blocks: int
 

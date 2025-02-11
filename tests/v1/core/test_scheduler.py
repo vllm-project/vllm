@@ -240,7 +240,6 @@ def test_stop_via_update_from_output():
                                        },
                                        total_num_scheduled_tokens=3,
                                        scheduled_encoder_inputs={},
-                                       use_spec_decode=True,
                                        scheduled_spec_decode_tokens={
                                            requests[0].request_id: [],
                                            requests[1].request_id: [10]
@@ -289,7 +288,6 @@ def test_stop_via_update_from_output():
                                        },
                                        total_num_scheduled_tokens=5,
                                        scheduled_encoder_inputs={},
-                                       use_spec_decode=True,
                                        scheduled_spec_decode_tokens={
                                            requests[0].request_id: [10, 42],
                                            requests[1].request_id: [13]
@@ -336,7 +334,6 @@ def test_stop_via_update_from_output():
                                        },
                                        total_num_scheduled_tokens=4,
                                        scheduled_encoder_inputs={},
-                                       use_spec_decode=True,
                                        scheduled_spec_decode_tokens={
                                            requests[0].request_id: [10, 11],
                                            requests[1].request_id: []
@@ -381,7 +378,6 @@ def test_stop_via_update_from_output():
         num_scheduled_tokens={requests[0].request_id: 3},
         total_num_scheduled_tokens=3,
         scheduled_encoder_inputs={},
-        use_spec_decode=True,
         scheduled_spec_decode_tokens={
             requests[0].request_id: [EOS_TOKEN_ID, 10]
         },

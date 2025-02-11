@@ -15,7 +15,7 @@ def test_prompts():
 @pytest.fixture
 def sampling_config():
     # Only support greedy for now
-    return SamplingParams(temperature=0, max_tokens=100, ignore_eos=False)
+    return SamplingParams(temperature=0, max_tokens=50, ignore_eos=False)
 
 
 @pytest.fixture

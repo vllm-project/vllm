@@ -79,8 +79,7 @@ class KVCacheManager:
             str, List[BlockHashType]] = defaultdict(list)
 
         # {req_id: The number of cached blocks for this given request}
-        # This is used to track the number of cached blocks for each request,
-        # currently only used for speculative decoding.
+        # This is used to track the number of cached blocks for each request.
         self.cached_block_num: Dict[str, int] = defaultdict(int)
 
     @property

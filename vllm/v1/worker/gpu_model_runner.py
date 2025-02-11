@@ -433,7 +433,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
 
-        if all_spec_token_ids:
+        use_spec_decode = len(all_spec_token_ids) > 0
+        if use_spec_decode:
             # Currently, we assume all speculated tokens are verified.
             # We don't support partial verification.
             # 1. Get spec decode logits indices.
@@ -563,7 +564,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             suffix_kv_lens=suffix_kv_lens,
         )
 
-        if scheduler_output.use_spec_decode:
+        if use_spec_decode:
             logits_indices = spec_decode_logits_indices.to(self.device,
                                                            non_blocking=True)
         else:
