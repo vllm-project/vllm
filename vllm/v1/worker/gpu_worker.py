@@ -18,7 +18,6 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import GiB_bytes
-from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -26,7 +25,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler import SchedulerOutput
+    from vllm.v1.core.scheduler_output import SchedulerOutput
 
 
 class Worker:
