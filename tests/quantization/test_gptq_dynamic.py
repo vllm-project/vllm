@@ -3,6 +3,7 @@
 
 Run `pytest tests/quantization/test_gptq_dynamic.py --forked`.
 """
+from typing import Tuple
 
 import pytest
 import torch
@@ -20,16 +21,20 @@ PROMPT = "On the surface of Mars, we found"
 # The second layer is quantized using bits=8, group_size=32
 # All other layers (layer index >= 2) are not quantized
 MODEL_QUANT = [
-    "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue",
-    "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symFalse",
+    ("ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue",
+     True),
+    ("ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symFalse",
+     False),
 ]
 
 
-@pytest.mark.parametrize("model_id", MODEL_QUANT)
-def test_gptq_with_dynamic(vllm_runner, model_id: str):
+@pytest.mark.parametrize("model_id_and_use_marlin_kernel", MODEL_QUANT)
+def test_gptq_with_dynamic(vllm_runner,
+                           model_id_and_use_marlin_kernel: Tuple[str, bool]):
+    model_id, use_marlin_kernel = model_id_and_use_marlin_kernel
+
     vllm_model = vllm_runner(model_id, dtype=torch.float16, max_model_len=2048)
 
-    use_marlin_kernel = "symTrue" in model_id
     linear_method_cls = GPTQMarlinLinearMethod if use_marlin_kernel else (
         GPTQLinearMethod)
 
