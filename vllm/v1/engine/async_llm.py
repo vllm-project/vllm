@@ -242,6 +242,16 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
+    async def _parallel_sampling_task(
+        self,
+        gen: AsyncGenerator[RequestOutput, None],
+        output_processor: ParallelSamplingOutputProcessor,
+        index: int,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        async for out in gen:
+            if req_out := output_processor.process_output(out, index):
+                yield req_out
+
     async def _parallel_sampling_batch(
         self,
         prompt: PromptType,
@@ -279,7 +289,9 @@ class AsyncLLM(EngineClient):
                 # Exhaust the generator
                 pass
 
-        # n child requests
+        # Aggregate generators for n child requests
+        gens = []
+        active = {}
         seed = 42
         for idx in range(n):
             c_sampling_params = parent_state.get_child_sampling_params({
@@ -289,17 +301,37 @@ class AsyncLLM(EngineClient):
                 seed
             })
             seed += 1
-            async for out in self._generate(
-                    prompt,
-                    c_sampling_params,
-                    parent_state.get_child_request_id(idx),
-                    lora_request,
-                    trace_headers,
-                    prompt_adapter_request,
-                    priority,
-            ):
-                if req_out := output_processor.process_output(out, idx):
-                    yield req_out
+            child_gen = self._generate(
+                prompt,
+                c_sampling_params,
+                parent_state.get_child_request_id(idx),
+                lora_request,
+                trace_headers,
+                prompt_adapter_request,
+                priority,
+            )
+            gen = self._parallel_sampling_task(child_gen, output_processor,
+                                               idx)
+            gens.append(gen)
+            active[asyncio.create_task(gen.__anext__())] = idx
+
+        try:
+            while active:
+                done, _ = await asyncio.wait(
+                    active.keys(), return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    idx = active.pop(task)
+                    try:
+                        result = task.result()
+                        yield result
+                        # Schedule the next result
+                        active[asyncio.create_task(
+                            gens[idx].__anext__())] = idx
+                    except StopAsyncIteration:
+                        continue
+        finally:
+            for task in active:
+                task.cancel()
 
     async def generate(
         self,
