@@ -2,6 +2,7 @@
 """A GPU worker class."""
 import gc
 import os
+import time
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -125,7 +126,9 @@ class Worker(LocalOrDistributedWorkerBase):
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
         allocator = CuMemAllocator.get_instance()
+        time_before_sleep = time.perf_counter()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        time_after_sleep = time.perf_counter()
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -134,10 +137,16 @@ class Worker(LocalOrDistributedWorkerBase):
             "Sleep mode freed %.2f GiB memory, "
             "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes)
+        logger.info("It took %.6f seconds to fall asleep.",
+                    time_after_sleep - time_before_sleep)
 
     def wake_up(self) -> None:
         allocator = CuMemAllocator.get_instance()
+        time_before_wakeup = time.perf_counter()
         allocator.wake_up()
+        time_after_wakeup = time.perf_counter()
+        logger.info("It took %.6f seconds to wake up.",
+                    time_after_wakeup - time_before_wakeup)
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
