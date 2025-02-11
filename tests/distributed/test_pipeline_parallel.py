@@ -320,6 +320,7 @@ def _compare_tp(
         # For V1, test Ray ADAG for all the tests
         # For V0, test Ray ADAG for a subset of the tests
         pp_env = {
+            "VLLM_USE_V1": vllm_major_version,
             "VLLM_USE_RAY_COMPILED_DAG": "1",
             "VLLM_USE_RAY_SPMD_WORKER": "1",
             "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
@@ -378,7 +379,6 @@ def _compare_tp(
 )
 @fork_new_process_for_each_test
 def test_tp_language_generation(
-    monkeypatch,
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
@@ -387,7 +387,6 @@ def test_tp_language_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    monkeypatch.setenv('VLLM_USE_V1', vllm_major_version)
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
@@ -409,7 +408,6 @@ def test_tp_language_generation(
 )
 @fork_new_process_for_each_test
 def test_tp_language_embedding(
-    monkeypatch,
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
@@ -418,7 +416,6 @@ def test_tp_language_embedding(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    monkeypatch.setenv('VLLM_USE_V1', vllm_major_version)
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
@@ -440,7 +437,6 @@ def test_tp_language_embedding(
 )
 @fork_new_process_for_each_test
 def test_tp_multimodal_generation(
-    monkeypatch,
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
@@ -449,7 +445,6 @@ def test_tp_multimodal_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    monkeypatch.setenv('VLLM_USE_V1', vllm_major_version)
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
