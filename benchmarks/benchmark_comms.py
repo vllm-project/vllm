@@ -463,7 +463,7 @@ def proc_fn(cfgtpl: Tuple[BMConfig, int, torch.device]):
     assert rank == pstate.get_world_group().rank
 
     print(f"rank: {rank}, device: {device} tpg: {rank // bmcfg.tp_size},",
-          " ppg: {rank // bmcfg.pp_size}",
+          f" ppg: {rank // bmcfg.pp_size}",
           flush=True)
     pstate.get_world_group().barrier()
 
