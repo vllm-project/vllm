@@ -19,3 +19,11 @@ mkdir coco -p
 wget http://images.cocodataset.org/zips/train2017.zip -O coco/train2017.zip
 unzip coco/train2017.zip -d coco/
 ```
+
+# Downloading the BurstGPT dataset
+
+You can download the BurstGPT v1.1 dataset by running:
+
+```bash
+wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv
+```
