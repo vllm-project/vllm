@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_dequantize, scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+from vllm.platforms import current_platform
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -182,6 +183,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
+        # Currently different K headdim and V headdim is only supported for
+        # hopper devices
+        self.pad_v_head = not self.vllm_flash_attn_version >= 3 or \
+            current_platform.get_device_capability()[0] != 9
 
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
@@ -501,11 +506,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
         v_dim = v.shape[-1]
-        pad_v = self.vllm_flash_attn_version < 3
-        if pad_v:
+        if self.pad_v_head:
+            # For MLA the v head dim is smaller than qk head dim so we pad out
+            # v with 0s to match the qk head dim
             v = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                         value=0)
 
@@ -522,7 +526,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             fa_version=self.vllm_flash_attn_version,
         )
 
-        if pad_v:
+        if self.pad_v_head:
             attn_output = attn_output\
                 .view(-1, self.num_heads, q.shape[-1])[..., :v_dim]
 
