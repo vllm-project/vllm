@@ -204,6 +204,11 @@ def test_engine_core_concurrent_batches(monkeypatch):
     Test that the engine can handle multiple concurrent batches.
     """
 
+    def make_request_with_max_tokens(max_tokens: int) -> EngineCoreRequest:
+        request = make_request()
+        request.sampling_params.max_tokens = max_tokens
+        return request
+
     class DummyExecutor(UniProcExecutor):
 
         def initialize(self, kv_cache_config: KVCacheConfig) -> None:
@@ -253,13 +258,9 @@ def test_engine_core_concurrent_batches(monkeypatch):
         assert engine_core.batch_queue is not None
 
         # Add two requests in a row.
-        req = make_request()
-        print(f"Adding request: {req.request_id}")
-        req.sampling_params.max_tokens = 5
+        req = make_request_with_max_tokens(5)
         engine_core.add_request(req)
-        req = make_request()
-        print(f"Adding request: {req.request_id}")
-        req.sampling_params.max_tokens = 5
+        req = make_request_with_max_tokens(5)
         engine_core.add_request(req)
 
         # First saturate the batch queue.
