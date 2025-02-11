@@ -758,7 +758,7 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
 
     opcheck(
         torch.ops._C_cache_ops.gather_cache,
-        (src_cache, dst, block_table, cu_seq_lens, batch_size),
+        (src_cache, dst, block_table, cu_seq_lens, batch_size, None),
         test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
 

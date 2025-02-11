@@ -691,6 +691,17 @@ void gather_cache(
                 "seq_starts must be int32");
   }
 
+  TORCH_CHECK(src_cache.device() == dst.device(),
+              "src_cache and dst must be on the same device");
+  TORCH_CHECK(src_cache.device() == block_table.device(),
+              "src_cache and block_table must be on the same device");
+  TORCH_CHECK(src_cache.device() == cu_seq_lens.device(),
+              "src_cache and cu_seq_lens must be on the same device");
+  if (seq_starts.has_value()) {
+    TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
+                "src_cache and seq_starts must be on the same device");
+  }
+
   int64_t block_table_stride = block_table.stride(0);
   int64_t cache_block_stride = src_cache.stride(0);
   int64_t cache_entry_stride = src_cache.stride(1);

@@ -276,8 +276,8 @@ class TritonMLAMetadata(MLACommonMetadata):
 
     # For chunked prefill
     chunk_prefill_workspace_size: Optional[int] = None
-    chunk_cu_seq_lens: Optional[List[torch.Tensor]] = None
-    chunk_seq_starts: Optional[List[torch.Tensor]] = None
+    chunk_cu_seq_lens: Optional[torch.Tensor] = None
+    chunk_seq_starts: Optional[torch.Tensor] = None
     chunk_iter_toks: Optional[List[int]] = None
     chunk_max_seq_lens: Optional[List[int]] = None
 
@@ -665,15 +665,17 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             self.multimodal_placeholder_maps.items()
         }
 
+        chunk_prefill_workspace_size = \
+            self.runner.model_config.max_model_len * 4
         chunk_cu_seq_lens = None
         chunk_seq_starts = None
         chunk_iter_toks = None
         chunk_max_seq_lens = None
 
+        print("seq_start_loc_tensor", seq_start_loc_tensor.device)
+
         chunked_prefill_enabled = self.input_builder.chunked_prefill_enabled
-        if chunked_prefill_enabled:
-            chunk_prefill_workspace_size = \
-                self.runner.model_config.max_model_len * 4
+        if chunked_prefill_enabled and self.num_prefills > 0:
             page_size = self.runner.block_size
             seq_chunk_size = chunk_prefill_workspace_size // self.num_prefills
             # align seq_chunk_size to page_size by rounding down
@@ -681,29 +683,30 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             num_chunks = (max_prefill_seq_len + seq_chunk_size -
                           1) // seq_chunk_size
 
-            chunk_cu_seq_lens = []
-            chunk_seq_starts = []
-            chunk_iter_toks = []
-            chunk_max_seq_lens = []
+            # if `seq_chunk_size = 256`, `num_chunks = 3`, and
+            #   `num_prefills = 4`, create a tensor that looks like
+            #  [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512]]
+            chunk_seq_starts = \
+                torch.arange(num_chunks, device=device, dtype=torch.int32)\
+                .unsqueeze(1).expand(-1, self.num_prefills)\
+                * seq_chunk_size
+            chunk_ends = torch.min(seq_lens_tensor.unsqueeze(0),\
+                                   chunk_seq_starts + seq_chunk_size)
+            chunk_seq_lens = (chunk_ends - chunk_seq_starts).clamp(min=0)
+            _chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(torch.int32)
+            zero = torch.zeros(num_chunks, dtype=torch.int32, device=device)\
+                .unsqueeze(0)
+            print(self.num_prefills, zero, _chunk_cu_seq_lens)
+            chunk_cu_seq_lens = torch.cat([zero, _chunk_cu_seq_lens], dim=1)
+            chunk_max_seq_lens = chunk_seq_lens.max(dim=1).values.tolist()
+            chunk_iter_toks = chunk_seq_lens.sum(dim=1).tolist()
 
-            for chunk in range(num_chunks):
-                chunk_starts = chunk * seq_chunk_size
-                chunk_starts = torch.tensor([chunk_starts] * self.num_prefills,
-                                            dtype=torch.int32,
-                                            device=device)
-                chunk_ends = seq_lens_tensor.clamp(max=(chunk + 1) *
-                                                   seq_chunk_size)
-                _chunk_cu_seq_lens = (chunk_ends - chunk_starts).clamp(
-                    min=0).cumsum(dim=0).to(torch.int32)
-                chunk_iter_toks.append(_chunk_cu_seq_lens.sum())
-                chunk_max_seq_lens.append(_chunk_cu_seq_lens.max().item())
-
-                zero = torch.zeros(1, dtype=torch.int32, device=device)
-                _chunk_cu_seq_lens = torch.cat([zero, _chunk_cu_seq_lens],
-                                               dim=0)
-
-                chunk_cu_seq_lens.append(_chunk_cu_seq_lens.contiguous())
-                chunk_seq_starts.append(chunk_starts.contiguous())
+            print(chunk_seq_starts)
+            print(chunk_ends)
+            #print(_chunk_cu_seq_lens)
+            print(chunk_cu_seq_lens)
+            print(chunk_max_seq_lens)
+            print(chunk_iter_toks)
 
         return TritonMLAMetadata(
             num_prefills=self.num_prefills,
@@ -726,6 +729,7 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             use_cuda_graph=use_captured_graph,
             num_kv_splits=4,  # TODO(lucas) add heuristic
             head_dim=self.runner.model_config.get_head_size(),
+            # Chunked prefill data
             chunk_prefill_workspace_size=chunk_prefill_workspace_size,
             chunk_cu_seq_lens=chunk_cu_seq_lens,
             chunk_seq_starts=chunk_seq_starts,
@@ -794,17 +798,11 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                 )
 
             output = None
-            for chunk_cu_seq_lens, chunk_seq_starts, toks, max_seq_len in \
-                zip(
-                    attn_metadata.chunk_cu_seq_lens, \
-                        attn_metadata.chunk_seq_starts, \
-                            attn_metadata.chunk_iter_toks, \
-                                attn_metadata.chunk_max_seq_lens):
-
-                print("cu_seq_lens", chunk_cu_seq_lens)
-                print("seq_starts", chunk_seq_starts)
-                print("toks", toks)
-                print("max_seq_len", max_seq_len)
+            for i in range(len(prefill_metadata.chunk_iter_toks)):
+                chunk_cu_seq_lens = prefill_metadata.chunk_cu_seq_lens[i]
+                chunk_seq_starts = prefill_metadata.chunk_seq_starts[i]
+                toks = prefill_metadata.chunk_iter_toks[i]
+                max_seq_len = prefill_metadata.chunk_max_seq_lens[i]
 
                 ops.gather_cache(
                     src_cache=kv_c_and_k_pe_cache,
@@ -859,8 +857,8 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                         output=output,
                         prefix_output=output,
                         prefix_lse=attn_softmax_lse,
-                        new_output=attn_output,
-                        new_lse=attn_softmax_lse,
+                        suffix_output=attn_output,
+                        suffix_lse=attn_softmax_lse,
                     )
 
             output = output\
