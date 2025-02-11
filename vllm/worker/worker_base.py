@@ -4,7 +4,9 @@ import dataclasses
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+from functools import wraps
+from typing import (Any, Callable, Dict, List, Optional, Set, Tuple, Type,
+                    TypeVar, Union)
 
 import cloudpickle
 import torch
@@ -27,6 +29,64 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 logger = init_logger(__name__)
 
 
+def check_implementation():
+    """
+    A decorator that checks if all abstract methods from the base class 
+    are implemented in the subclass and gives warnings for unimplemented 
+    methods.
+    """
+
+    def decorator(cls: Type):
+        original_init = cls.__init__
+
+        @wraps(original_init)
+        def wrapped_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            unimplemented_methods = []
+            for attr_name in dir(self):
+                # bypass inner method
+                if attr_name.startswith('_'):
+                    continue
+                base_method = getattr(self, attr_name)
+                # bypass method already defined
+                if getattr(base_method, '_avoid_check', False):
+                    continue
+                # get the func of callable method
+                if callable(base_method):
+                    base_method_name = base_method.__func__
+                else:
+                    continue
+                class_method = getattr(cls, attr_name, False)
+                # bypass method defined in sub class
+                if not class_method:
+                    continue
+                if class_method == base_method_name:
+                    unimplemented_methods.append(attr_name)
+            if unimplemented_methods:
+                method_names = ','.join(unimplemented_methods)
+                msg = (f"Methods {method_names} not implemented in {self}")
+                logger.warning(msg)
+
+        cls.__init__ = wrapped_init
+        return cls
+
+    return decorator
+
+
+T = TypeVar('T')
+
+
+def avoid_check(func: Callable[..., T]) -> Callable[..., T]:
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> T:
+        return func(*args, **kwargs)
+
+    wrapper._avoid_check = True  # type: ignore
+    return wrapper
+
+
+@check_implementation()
 class WorkerBase(ABC):
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
@@ -60,7 +120,38 @@ class WorkerBase(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        """Initialize the KV cache with the given size in blocks.
+        """
+        raise NotImplementedError
+
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
+
+    def load_model(self) -> None:
+        """Load model onto target device."""
+        raise NotImplementedError
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
+        raise NotImplementedError
+
+    @avoid_check
+    def start_worker_execution_loop(self) -> None:
+        """Execute model loop in parallel worker.
+
+        You can stop the loop by executing a driver worker with an empty output.
+        See `stop_remote_worker_execution_loop` for more details.
+        """
+        with self.current_platform.inference_mode():
+            while True:
+                output = self.execute_model(execute_model_req=None)
+                if output is None:
+                    return None
+
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
@@ -75,58 +166,28 @@ class WorkerBase(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """Initialize the KV cache with the given size in blocks.
-        """
-        raise NotImplementedError
-
-    def start_worker_execution_loop(self) -> None:
-        """Execute model loop in parallel worker.
-
-        You can stop the loop by executing a driver worker with an empty output.
-        See `stop_remote_worker_execution_loop` for more details.
-        """
-        with self.current_platform.inference_mode():
-            while True:
-                output = self.execute_model(execute_model_req=None)
-                if output is None:
-                    return None
-
-    @abstractmethod
-    def get_model(self) -> nn.Module:
-        raise NotImplementedError
-
-    @abstractmethod
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
-        raise NotImplementedError
-
-    @abstractmethod
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
         """
         raise NotImplementedError
 
-    @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def list_loras(self) -> Set[int]:
         raise NotImplementedError
+
+    @property
+    def vocab_size(self) -> int:
+        """Get vocabulary size from model configuration."""
+        return self.model_config.get_vocab_size()
 
 
 class DelegateWorkerBase(WorkerBase):
