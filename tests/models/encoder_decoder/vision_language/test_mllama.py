@@ -37,7 +37,7 @@ text_only_prompts = [
 ]
 
 models = [
-    "unsloth/Llama-3.2-11B-Vision-Instruct",
+    "meta-llama/Llama-3.2-11B-Vision-Instruct",
 ]
 
 # Indices for inputs
