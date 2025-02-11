@@ -1442,6 +1442,9 @@ class ParallelConfig:
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
 
+        if self.distributed_executor_backend is None and self.world_size == 1:
+            self.distributed_executor_backend = "uni"
+
         self._verify_args()
 
     @property

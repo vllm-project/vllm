@@ -3,8 +3,9 @@
 import enum
 import json
 import os
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any, Dict, Literal, Optional, Type, Union
 
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download, list_repo_files,
@@ -100,15 +101,33 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
 
     # NB: file_exists will only check for the existence of the config file on
     # hf_hub. This will fail in offline mode.
-    try:
-        return file_exists(model,
-                           config_name,
-                           revision=revision,
-                           token=HF_TOKEN)
-    except huggingface_hub.errors.OfflineModeIsEnabled:
-        # Don't raise in offline mode, all we know is that we don't have this
-        # file cached.
-        return False
+
+    # Call HF to check if the file exists
+    # 2 retries and exponential backoff
+    max_retries = 2
+    retry_delay = 2
+    for attempt in range(max_retries):
+        try:
+            return file_exists(model,
+                               config_name,
+                               revision=revision,
+                               token=HF_TOKEN)
+        except huggingface_hub.errors.OfflineModeIsEnabled:
+            # Don't raise in offline mode,
+            # all we know is that we don't have this
+            # file cached.
+            return False
+        except Exception as e:
+            logger.error(
+                "Error checking file existence: %s, retrying %d of %d", e,
+                attempt + 1, max_retries)
+            if attempt == max_retries - 1:
+                logger.error("Error checking file existence: %s", e)
+                raise
+            time.sleep(retry_delay)
+            retry_delay *= 2
+            continue
+    return False
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -193,10 +212,26 @@ def get_config(
             # raise an offline mode error to indicate to the user that they
             # don't have files cached and may need to go online.
             # This is conveniently triggered by calling file_exists().
-            file_exists(model,
-                        HF_CONFIG_NAME,
-                        revision=revision,
-                        token=HF_TOKEN)
+
+            # Call HF to check if the file exists
+            # 2 retries and exponential backoff
+            max_retries = 2
+            retry_delay = 2
+            for attempt in range(max_retries):
+                try:
+                    file_exists(model,
+                                HF_CONFIG_NAME,
+                                revision=revision,
+                                token=HF_TOKEN)
+                except Exception as e:
+                    logger.error(
+                        "Error checking file existence: %s, retrying %d of %d",
+                        e, attempt + 1, max_retries)
+                    if attempt == max_retries:
+                        logger.error("Error checking file existence: %s", e)
+                        raise e
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
 
             raise ValueError(f"No supported config format found in {model}")
 
@@ -554,7 +589,8 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
             for key, value in elem.items():
                 key = config_mapping.get(key, key)
                 config_dict[key] = recurse_elems(value)
-            return PretrainedConfig(**config_dict)
+
+            return config_dict
         else:
             return elem
 
@@ -566,12 +602,30 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict["max_position_embeddings"] = config_dict.get(
         "max_position_embeddings", 128_000)
 
+    if config_dict.get("quantization") is not None:
+        quantization = config_dict.get("quantization", {})
+        if quantization.get("qformat_weight") == "fp8_e4m3":
+            # This maps to the FP8 static per-tensor quantization scheme
+            quantization_config = {
+                "quant_method": "fp8",
+                "activation_scheme": "static"
+            }
+        else:
+            raise ValueError(
+                f"Found unknown quantization='{quantization}' in config")
+
+        config_dict["quantization_config"] = quantization_config
+
+    config_type: Literal["text",
+                         "multimodal"] = "multimodal" if config_dict.get(
+                             "vision_encoder") is not None else "text"
+
     if config_dict.get("moe") is not None:
         config_dict["architectures"] = ["MixtralForCausalLM"]
     else:
         config_dict["architectures"] = ["MistralForCausalLM"]
 
-    if config_dict.get("vision_encoder") is not None:
+    if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
 
         config_dict = {
@@ -583,8 +637,16 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     config_dict.update(kwargs)
 
-    config = recurse_elems(config_dict)
-    return config
+    config_dict = recurse_elems(config_dict)
+
+    # transform to HF config format
+    if config_type == "multimodal":
+        config_dict["text_config"] = PretrainedConfig(
+            **config_dict["text_config"])
+        config_dict["vision_config"] = PretrainedConfig(
+            **config_dict["vision_config"])
+
+    return PretrainedConfig(**config_dict)
 
 
 def get_hf_image_processor_config(
