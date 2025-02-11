@@ -64,7 +64,7 @@ class PoolingOutput:
     Args:
         data: The extracted hidden states.
     """
-    data: torch.Tensor | List[torch.Tensor]
+    data: Union[torch.Tensor, List[torch.Tensor]]
 
     def __repr__(self) -> str:
         return (f"PoolingOutput(data={self.data})")
