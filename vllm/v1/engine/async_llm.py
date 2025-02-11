@@ -252,7 +252,7 @@ class AsyncLLM(EngineClient):
             if req_out := output_processor.process_output(out, index):
                 yield req_out
 
-    async def _parallel_sampling_batch(
+    async def _generate_parallel_sampling(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -265,6 +265,12 @@ class AsyncLLM(EngineClient):
         parent_state = ParentRequestState(request_id, sampling_params)
         output_processor = ParallelSamplingOutputProcessor(parent_state)
         n = parent_state.n
+
+        # Adapted from sglang:
+        # https://github.com/sgl-project/sglang/blob/
+        # 4fe92bfca5517f3cf5ca967fc5fcfdb7cf335f30/
+        # python/sglang/srt/managers/
+        # tokenizer_manager.py#L456-L532
 
         if self.enable_prefix_caching:
             # If engine uses APC, generate a “warmup request” with
@@ -352,7 +358,7 @@ class AsyncLLM(EngineClient):
                                             prompt_adapter_request, priority):
                 yield out
         else:
-            async for out in self._parallel_sampling_batch(
+            async for out in self._generate_parallel_sampling(
                     prompt, sampling_params, request_id, lora_request,
                     trace_headers, prompt_adapter_request, priority):
                 yield out
