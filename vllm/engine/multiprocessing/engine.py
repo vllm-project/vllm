@@ -217,6 +217,7 @@ class MQLLMEngine:
                                is_engine_errored=False,
                                exception=e.__cause__)
             self._send_outputs(rpc_err)
+            return []
         except BaseException as e:
             self._set_errored(e)
             rpc_err = RPCError(request_id=None,
