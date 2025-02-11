@@ -1,10 +1,13 @@
 # Base UBI image for s390x architecture
 ARG BASE_UBI_IMAGE_TAG=9.5-1736404155
+ARG PYTHON_VERSION=3.12
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
 
 # Install basic dependencies
+ARG PYTHON_VERSION
+ENV PYTHON_VERSION=${PYTHON_VERSION}
 RUN microdnf -y update && microdnf install -y \
-    python-pip python-wheel \
+    python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel \
     && microdnf clean all
 
 WORKDIR /workspace
@@ -21,24 +24,28 @@ RUN microdnf install -y \
 
 # Python Installation
 FROM base as python-install
+ARG PYTHON_VERSION
 
-RUN microdnf install -y python-devel && microdnf clean all
-
-# Set up Python virtual environment
-RUN python -m venv /opt/venv/vllm
-ENV PATH="/opt/venv/vllm/bin:$PATH"
+ENV VIRTUAL_ENV=/opt/venv/vllm
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+RUN microdnf install -y \
+    python${PYTHON_VERSION}-devel  && \
+    python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && pip install --no-cache -U pip wheel uv && microdnf clean all
 
 # Upgrade pip and install base tools
-RUN python -m pip install --no-cache -U pip wheel uv cmake setuptools
+RUN python -m pip install -U pip wheel uv cmake setuptools
 
 # Install Rust
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     . "$HOME/.cargo/env"
 
+FROM python-install as pyarrow
+
 # Build Apache Arrow
-workdir /tmp
+WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/apache/arrow.git && \
     cd arrow/cpp && \
     mkdir release && cd release && \
@@ -76,12 +83,10 @@ RUN curl -LO https://github.com/numactl/numactl/archive/refs/tags/v2.0.16.tar.gz
     make && \
     make install
 
-# Clean up build files
-RUN rm -rf /tmp/numactl-2.0.16 /tmp/v2.0.16.tar.gz
-
 # Set include path
 ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 
+FROM pyarrow as python-dependecies
 # Copy vLLM source
 COPY . /workspace/vllm
 WORKDIR /workspace/vllm
@@ -93,8 +98,8 @@ RUN --mount=type=bind,source=.git,target=.git \
 
 # Install dependencies, including PyTorch and Apache Arrow
 RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/ccache \
-    pip install --no-cache-dir -v \
+    --mount=type=cache,target=/root/.cache/uv \
+    pip install -v \
         'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
          /tmp/arrow/python/dist/*.whl  \
         --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
@@ -106,34 +111,28 @@ RUN rm -rf /tmp/arrow
 # Install torchvision
 ARG TORCH_VISION_VERSION=v0.20.1
 WORKDIR /tmp
-RUN git clone https://github.com/pytorch/vision.git && \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/uv \
+    git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
     python setup.py bdist_wheel && \
-    pip install --no-cache-dir dist/*.whl
-
-#Clean up build files for vision
-RUN rm -rf /tmp/vision
+    uv pip install dist/*.whl
 
 # Final build stage
-FROM python-install as vllm-cpu
-
-# Ensure we are using the virtual environment
-ENV PATH="/opt/venv/vllm/bin:$PATH"
+FROM python-dependecies as vllm-cpu
+ARG PYTHON_VERSION
 
 # Set correct library path for torch and numactl
-ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python3.9/site-packages/torch/lib:/usr/local/lib:$LD_LIBRARY_PATH"
-
-# Upgrade setuptools for compatibility
-RUN python -m pip install --upgrade setuptools
+ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:$LD_LIBRARY_PATH"
 
 WORKDIR /workspace/vllm
 
 # Build and install vllm
 RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/uv \
     VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
-    pip install dist/*.whl && \
+    uv pip install dist/*.whl && \
     rm -rf dist
 
 # setup non-root user for vllm
@@ -149,4 +148,4 @@ USER 2000
 WORKDIR /home/vllm
 
 # Set the default entrypoint
-ENTRYPOINT ["/opt/venv/vllm/bin/python", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["/opt/vllm/bin/python", "-m", "vllm.entrypoints.openai.api_server"]
