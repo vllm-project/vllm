@@ -1257,9 +1257,24 @@ class GGUFModelLoader(BaseModelLoader):
         """
         config = model_config.hf_config
         model_type = config.model_type
+        gguf_to_hf_name_map = {}
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
+        if model_type == "deepseek_v3":
+            model_type = "deepseek2"
+            # GGUF layer map assumes that we will have a merged expert weights
+            # so we need to map them manually
+            for idx in range(config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.exp_probs_b.bias"] = \
+                        f"model.layers.{idx}.mlp.gate.e_score_correction_bias"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.$EXP_ID$.down_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.$EXP_ID$.gate_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.$EXP_ID$.up_proj.weight"
+
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
             if value == model_type:
@@ -1273,7 +1288,6 @@ class GGUFModelLoader(BaseModelLoader):
             dummy_model = AutoModelForCausalLM.from_config(config)
         state_dict = dummy_model.state_dict()
 
-        gguf_to_hf_name_map = {}
         for hf_name in state_dict:
             name, suffix = hf_name.rsplit(".", 1)
             gguf_name = name_map.get_name(name)
