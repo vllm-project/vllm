@@ -217,9 +217,6 @@ class MQLLMEngine:
                                is_engine_errored=False,
                                exception=e.__cause__)
             self._send_outputs(rpc_err)
-            # We must abort the request immediately so that the engine does not
-            # try to continue to process it in the next step
-            self.engine.abort_request(e.request_id)
         except BaseException as e:
             self._set_errored(e)
             rpc_err = RPCError(request_id=None,
