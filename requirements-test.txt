@@ -627,7 +627,7 @@ transformers==4.48.2
     #   transformers-stream-generator
 transformers-stream-generator==0.0.5
     # via -r requirements-test.in
-triton==3.1.0
+triton==3.2.0
     # via torch
 tritonclient==2.51.0
     # via
