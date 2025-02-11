@@ -13,6 +13,7 @@ from PIL.Image import Image
 from transformers import (AutoConfig, AutoTokenizer, BatchEncoding,
                           GenerationConfig)
 
+from vllm.multimodal.processing import iter_token_matches
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import patch_padding_side
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -522,72 +523,6 @@ def minicpmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
-def _generate_greedy_logprobs_limit(
-    self,
-    prompts: List[str],
-    max_tokens: int,
-    num_logprobs: int,
-    images: Optional[PromptImageInput] = None,
-    audios: Optional[PromptAudioInput] = None,
-    videos: Optional[PromptVideoInput] = None,
-    **kwargs: Any,
-) -> List[TokensTextLogprobs]:
-    all_inputs = self.get_inputs(prompts,
-                                 images=images,
-                                 videos=videos,
-                                 audios=audios)
-
-    # Process in batches for inference.
-    if len(all_inputs):
-        input_ids_lst = []
-        images_lst = []
-        images_input_idx_lst = []
-        imges_masks_lst = []
-        for inputs in all_inputs:
-            input_ids_lst.append(inputs["input_ids"])
-            images_lst.append(inputs["images"])
-            images_input_idx_lst.append(inputs["image_input_idx"])
-            imges_masks_lst.append(inputs["image_masks"])
-        batch_inputs = {}
-        batch_inputs['input_ids'] = torch.cat(input_ids_lst, dim=0)
-        batch_inputs['images'] = torch.cat(images_lst, dim=0)
-        batch_inputs['image_input_idx'] = torch.cat(images_input_idx_lst,
-                                                    dim=0)
-        batch_inputs['image_masks'] = torch.cat(imges_masks_lst, dim=0)
-
-        outputs = self.model.generate_from_batch(
-            batch=self.wrap_device(batch_inputs,
-                                   device=self.model.device.type),
-            generation_config=GenerationConfig(
-                max_new_tokens=max_tokens,
-                stop_strings="<|endoftext|>",
-                do_sample=False,
-            ),
-            tokenizer=self.tokenizer,
-            output_hidden_states=True,
-            return_dict_in_generate=True,
-        )
-
-    all_logprobs: List[List[Dict[int, float]]] = []
-    all_output_ids: List[List[int]] = []
-    all_output_strs: List[str] = []
-
-    for index in range(len(all_inputs)):
-        (
-            seq_logprobs_lst,
-            output_len,
-        ) = self._hidden_states_to_logprobs(outputs.hidden_states,
-                                            num_logprobs)
-        all_logprobs.append(seq_logprobs_lst)
-        seq_ids = outputs.sequences[index]
-        output_ids = seq_ids[-output_len:]
-        all_output_ids.append(output_ids.tolist())
-        all_output_strs.append(self.tokenizer.decode(output_ids))
-    outputs = zip(all_output_ids, all_output_strs, all_logprobs)
-    return [(output_ids, output_str, output_logprobs)
-            for output_ids, output_str, output_logprobs in outputs]
-
-
 ####### Molmo-specific HuggingFace runner patchers
 def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Molmo."""
@@ -597,6 +532,71 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return hf_processor.process(*args, **kwargs)
 
     hf_model.processor = _processor
+
+    def _generate_greedy_logprobs_limit(
+        self,
+        prompts: List[str],
+        max_tokens: int,
+        num_logprobs: int,
+        images: Optional[PromptImageInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        **kwargs: Any,
+    ) -> List[TokensTextLogprobs]:
+        all_inputs = self.get_inputs(prompts,
+                                     images=images,
+                                     videos=videos,
+                                     audios=audios)
+
+        all_outputs = []
+        for inputs in all_inputs:
+            outputs = self.model.generate_from_batch(
+                batch=self.wrap_device(inputs, device=self.model.device.type),
+                generation_config=GenerationConfig(
+                    max_new_tokens=max_tokens,
+                    stop_strings="<|endoftext|>",
+                    do_sample=False,
+                ),
+                tokenizer=self.tokenizer,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+            )
+            all_outputs.append(outputs)
+
+        all_logprobs: List[List[Dict[int, float]]] = []
+        all_output_ids: List[List[int]] = []
+        all_output_strs: List[str] = []
+
+        for output in all_outputs:
+            (
+                seq_logprobs_lst,
+                output_len,
+            ) = self._hidden_states_to_logprobs(outputs.hidden_states,
+                                                num_logprobs)
+            all_logprobs.append(seq_logprobs_lst)
+            seq_ids = output.sequences[0]
+            output_ids = seq_ids[-output_len:]
+
+            # Ignore the prefix up to "Assistant:" (inclusive)
+            assistant_id = self.tokenizer.encode("Assistant:")
+            output_ids = output_ids.tolist()
+            assistant_match = next(
+                iter_token_matches(output_ids, assistant_id),
+                None,
+            )
+            if assistant_match is not None:
+                (
+                    seq_logprobs_lst,
+                    output_len,
+                ) = self._hidden_states_to_logprobs(
+                    outputs.hidden_states[assistant_match.end_idx:],
+                    num_logprobs,
+                )
+
+            all_output_ids.append(output_ids)
+            all_output_strs.append(self.tokenizer.decode(output_ids))
+
+        return list(zip(all_output_ids, all_output_strs, all_logprobs))
 
     setattr(  # noqa: B010
         hf_model,
