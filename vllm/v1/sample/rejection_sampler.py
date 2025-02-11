@@ -57,7 +57,7 @@ class RejectionSampler(nn.Module):
             draft_token_ids[i, :num_spec_tokens] = torch.tensor(
                 spec_token_ids[i], device="cpu", dtype=torch.long)
             end_loc = start_loc + num_spec_tokens + 1
-            # Assume greedy sampling here
+            # Assume greedy sampling.
             target_token_ids[i, :num_spec_tokens + 1] = torch.argmax(
                 logits[start_loc:end_loc], dim=-1)
             start_loc = end_loc
@@ -86,7 +86,7 @@ class RejectionSampler(nn.Module):
             logits: torch.Tensor,
             sampling_metadata: SamplingMetadata) -> SamplerOutput:
         spec_lens = [len(x) for x in sampling_metadata.spec_token_ids]
-        # Add 1 to include the 'bonus' token
+        # Add 1 to include the 'bonus' token.
         sample_lens = [x + 1 for x in spec_lens]
 
         output_token_ids = logits.argmax(dim=-1).view(-1)
@@ -110,9 +110,8 @@ class RejectionSampler(nn.Module):
         # mismatch (cumprod turns 0 after a mismatch).
         accept_mask = (output_token_ids[:, :-1] == spec_token_ids).cumprod(
             dim=1)
-        # Identify valid positions (non-padding)
+        # Identify valid positions (non-padding).
         valid_mask = output_token_ids != INVALID_TOKEN_ID
-
         # Generate mask with bonus token.
         generate_mask = torch.cat([
             accept_mask,
@@ -141,7 +140,7 @@ class RejectionSampler(nn.Module):
                                   dtype=torch.float,
                                   device=out_device)
 
-        # Ignore INVALID_TOKEN_ID
+        # Ignore INVALID_TOKEN_ID.
         valid_mask = (token_ids != INVALID_TOKEN_ID)
         valid_indices = token_ids.clone()
         valid_indices[~valid_mask] = 0
