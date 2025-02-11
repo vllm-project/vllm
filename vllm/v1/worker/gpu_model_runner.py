@@ -36,7 +36,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler import SchedulerOutput
+    from vllm.v1.core.scheduler_output import SchedulerOutput
 
 logger = init_logger(__name__)
 
