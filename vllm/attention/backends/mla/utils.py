@@ -517,7 +517,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             max_seqlen_k=max_prefill_seq_len,
             softmax_scale=self.scale,
             causal=True,
-            fa_version=self.vllm_flash_attn_version,
         )
         attn_output = attn_output\
             .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
