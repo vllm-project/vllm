@@ -9,6 +9,7 @@ import prometheus_client
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
@@ -37,6 +38,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_prompt_tokens: List[int] = []
         self.num_generation_tokens: List[int] = []
 
+        # Prefix cache metrics. TODO: Make the interval configurable.
+        self.prefix_caching_metrics = PrefixCachingMetrics()
+
     def _local_interval_elapsed(self, now: float) -> bool:
         # Log every _LOCAL_LOGGING_INTERVAL_SEC.
         elapsed_time = now - self.last_log_time
@@ -58,6 +62,8 @@ class LoggingStatLogger(StatLoggerBase):
 
         self._track_iteration_stats(iteration_stats)
 
+        self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
+
         now = time.monotonic()
         if not self._local_interval_elapsed(now):
             return
@@ -72,13 +78,15 @@ class LoggingStatLogger(StatLoggerBase):
         logger.info(
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
-            "Running: %d reqs, Waiting: %d reqs "
-            "GPU KV cache usage: %.1f%%.",
+            "Running: %d reqs, Waiting: %d reqs, "
+            "GPU KV cache usage: %.1f%%, "
+            "Prefix cache hit rate: %.1f%%",
             prompt_throughput,
             generation_throughput,
             scheduler_stats.num_running_reqs,
             scheduler_stats.num_waiting_reqs,
             scheduler_stats.gpu_cache_usage * 100,
+            self.prefix_caching_metrics.hit_rate * 100,
         )
 
 
@@ -105,6 +113,18 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_gpu_cache_usage = prometheus_client.Gauge(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_gpu_prefix_cache_queries = prometheus_client.Counter(
+            name="vllm:gpu_prefix_cache_queries",
+            documentation=
+            "GPU prefix cache queries, in terms of number of queried blocks.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_gpu_prefix_cache_hits = prometheus_client.Counter(
+            name="vllm:gpu_prefix_cache_hits",
+            documentation=
+            "GPU prefix cache hits, in terms of number of cached blocks.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_prompt_tokens = prometheus_client.Counter(
@@ -169,6 +189,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
         self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+
+        self.counter_gpu_prefix_cache_queries.inc(
+            scheduler_stats.prefix_cache_stats.queries)
+        self.counter_gpu_prefix_cache_hits.inc(
+            scheduler_stats.prefix_cache_stats.hits)
 
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(

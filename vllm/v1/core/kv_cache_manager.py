@@ -10,6 +10,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
+from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
@@ -78,10 +79,27 @@ class KVCacheManager:
         self.req_to_block_hashes: DefaultDict[
             str, List[BlockHashType]] = defaultdict(list)
 
+        self.prefix_cache_stats = PrefixCacheStats()
+
     @property
     def usage(self) -> float:
+        """Get the KV cache usage.
+
+        Returns:
+            The KV cache usage (between 0.0 and 1.0).
+        """
         return 1.0 - (self.free_block_queue.num_free_blocks /
                       self.num_gpu_blocks)
+
+    def make_prefix_cache_stats(self) -> PrefixCacheStats:
+        """Get (and reset) the prefix cache stats.
+
+        Returns:
+            The current prefix caching stats.
+        """
+        stats = self.prefix_cache_stats
+        self.prefix_cache_stats = PrefixCacheStats()
+        return stats
 
     def get_computed_blocks(
             self, request: Request) -> Tuple[List[KVCacheBlock], int]:
@@ -117,6 +135,10 @@ class KVCacheManager:
                 computed_blocks.append(cached_block)
             else:
                 break
+
+        self.prefix_cache_stats.requests += 1
+        self.prefix_cache_stats.queries += len(block_hashes)
+        self.prefix_cache_stats.hits += len(computed_blocks)
 
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
@@ -279,6 +301,8 @@ class KVCacheManager:
         # Remove all hashes from all blocks.
         for block in self.block_pool:
             block.reset_hash()
+
+        self.prefix_cache_stats.reset = True
 
         logger.info("Successfully reset prefix cache")
         return True
