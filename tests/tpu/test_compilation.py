@@ -67,15 +67,18 @@ compiled_fn = sorted(
 with open(compiled_fn[0]) as f:
     content = f.read()
     assert "kv_caches" not in content
+    print(f'xw32 after 1st compilation {content=}')
 
 # the second compilation is the prefill phase,
 # it should have kv cache and the flash_attention op
 with open(compiled_fn[1]) as f:
     content = f.read()
     assert "kv_caches" in content and "torch.ops.xla.flash_attention" in content
+    print(f'xw32 after 2nd compilation {content=}')
 
 # the third compilation is the decode phase,
 # it should have kv cache and the paged_attention op
 with open(compiled_fn[2]) as f:
     content = f.read()
     assert "kv_caches" in content and "torch.ops.xla.paged_attention" in content
+    print(f'xw32 after 3rd compilation {content=}')

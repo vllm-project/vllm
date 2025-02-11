@@ -341,7 +341,7 @@ class TPUModelRunner(ModelRunnerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        logger.info("xw32 TPUModelRunner.execute_model.")
+        logger.info(f"xw32 TPUModelRunner.execute_model. {scheduler_output=}")
 
         # Update cached state
         self.update_states(scheduler_output)
@@ -450,10 +450,10 @@ class TPUModelRunner(ModelRunnerBase):
         model = ModelWrapperV1(model)
         # xw32 turns off dynamo
         self.model = model
-        #self.model = torch.compile(model,
-        #                           backend="openxla",
-        #                           fullgraph=True,
-        #                           dynamic=False)
+        # self.model = torch.compile(model,
+        #                            backend="openxla",
+        #                            fullgraph=True,
+        #                            dynamic=False)
 
     def dummy_run(
         self,
@@ -491,7 +491,7 @@ class TPUModelRunner(ModelRunnerBase):
                     effective_query_lens=None,
                 )
 
-            else:
+            else:  # PREFIX_PREFILL
                 context_lens = torch.ones((num_tokens, ),
                                           dtype=torch.int32,
                                           device=self.device)
@@ -627,7 +627,7 @@ class TPUModelRunner(ModelRunnerBase):
             kv_cache_config: Configuration for the KV cache, including the KV 
             cache size of each layer
         """
-        logger.info("xw32 TPUModelRunner.initialize_kv_cache.")
+        logger.info(f"xw32 TPUModelRunner.initialize_kv_cache. {kv_cache_config=}")
         if len(kv_cache_config.groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
@@ -688,6 +688,10 @@ class ModelWrapperV1(nn.Module):
         """
         # Skip this in memory profiling at initialization.
         # logger.info("xw32 ModelWrapperV1.forward.")
+        print(f'xw32 ModelWrapperV1.forward {token_ids=}')
+        print(f'xw32 ModelWrapperV1.forward {position_ids=}')
+        print(f'xw32 ModelWrapperV1.forward {attn_metadata=}')
+        print(f'xw32 ModelWrapperV1.forward {len(kv_caches)=}, {kv_caches[0][0].shape=}')
         if attn_metadata is not None:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
