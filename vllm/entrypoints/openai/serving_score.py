@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import time
-from typing import (Any, AsyncGenerator, Dict, List, Mapping, Optional, Union,
-                    cast)
+from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional, Union
 
 import torch
 from fastapi import Request
@@ -55,68 +54,60 @@ class OpenAIServingScores(OpenAIServing):
         prompt_adapter_request: Optional[Union[PromptAdapterRequest,
                                                None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> List[Optional[PoolingRequestOutput]]:
+    ) -> List[PoolingRequestOutput]:
 
-        try:
-            input_texts = text_1 + text_2
+        input_texts = text_1 + text_2
 
-            engine_prompts: List[TokensPrompt] = []
-            tokenize_async = make_async(tokenizer.__call__,
-                                        executor=self._tokenizer_executor)
+        engine_prompts: List[TokensPrompt] = []
+        tokenize_async = make_async(tokenizer.__call__,
+                                    executor=self._tokenizer_executor)
 
-            tokenized_prompts = [
-                tokenize_async(t, **tokenization_kwargs) for t in input_texts
-            ]
+        tokenization_kwargs = tokenization_kwargs or {}
+        tokenized_prompts = [
+            tokenize_async(t, **tokenization_kwargs) for t in input_texts
+        ]
 
-            for t, i in zip(await asyncio.gather(*tokenized_prompts),
-                            input_texts):
+        for tok_result, input_text in zip(
+                await asyncio.gather(*tokenized_prompts), input_texts):
 
-                text_token_prompt = \
-                    self._validate_input(request, t["input_ids"], i)
+            text_token_prompt = \
+                self._validate_input(
+                    request,
+                    tok_result["input_ids"],
+                    input_text)
 
-                engine_prompts.append(
-                    TokensPrompt(
-                        prompt_token_ids=text_token_prompt["prompt_token_ids"])
-                )
-
-        except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            engine_prompts.append(
+                TokensPrompt(
+                    prompt_token_ids=text_token_prompt["prompt_token_ids"]))
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
+        pooling_params = request.to_pooling_params()
 
-        try:
-            pooling_params = request.to_pooling_params()
+        for i, engine_prompt in enumerate(engine_prompts):
 
-            for i, engine_prompt in enumerate(engine_prompts):
+            request_id_item = f"{request_id}-{i}"
 
-                request_id_item = f"{request_id}-{i}"
+            self._log_inputs(request_id_item,
+                             input_texts[i],
+                             params=pooling_params,
+                             lora_request=lora_request,
+                             prompt_adapter_request=prompt_adapter_request)
 
-                self._log_inputs(request_id_item,
-                                 input_texts[i],
-                                 params=pooling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
-
-                generators.append(
-                    self.engine_client.encode(
-                        engine_prompt,
-                        pooling_params,
-                        request_id_item,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                    ))
-
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            generators.append(
+                self.engine_client.encode(
+                    engine_prompt,
+                    pooling_params,
+                    request_id_item,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=request.priority,
+                ))
 
         result_generator = merge_async_iterators(*generators)
 
         # Non-streaming response
-        final_res_batch: List[Optional[PoolingRequestOutput]] = []
+        final_res_batch: List[PoolingRequestOutput] = []
 
         embeddings: List[Optional[PoolingRequestOutput]] =\
               [None] * len(engine_prompts)
@@ -135,6 +126,8 @@ class OpenAIServingScores(OpenAIServing):
         scorer = torch.nn.CosineSimilarity(0)
 
         for emb_1, emb_2 in zip(emb_text_1, emb_text_2):
+            assert emb_1 is not None
+            assert emb_2 is not None
             pair_score = scorer(emb_1.outputs.data, emb_2.outputs.data)
 
             padding = []
@@ -165,7 +158,7 @@ class OpenAIServingScores(OpenAIServing):
         prompt_adapter_request: Optional[Union[PromptAdapterRequest,
                                                None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> List[Optional[PoolingRequestOutput]]:
+    ) -> List[PoolingRequestOutput]:
 
         request_prompts: List[str] = []
         engine_prompts: List[TokensPrompt] = []
@@ -175,37 +168,33 @@ class OpenAIServingScores(OpenAIServing):
 
         input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
 
-        try:
-            if isinstance(tokenizer, MistralTokenizer):
-                raise ValueError(
-                    "MistralTokenizer not supported for cross-encoding")
+        if isinstance(tokenizer, MistralTokenizer):
+            raise ValueError(
+                "MistralTokenizer not supported for cross-encoding")
 
-            tokenize_async = make_async(tokenizer.__call__,
-                                        executor=self._tokenizer_executor)
+        tokenize_async = make_async(tokenizer.__call__,
+                                    executor=self._tokenizer_executor)
 
-            tokenized_prompts = [
-                tokenize_async(text=t1, text_pair=t2, **tokenization_kwargs)
-                for t1, t2 in input_pairs
-            ]
+        tokenization_kwargs = tokenization_kwargs or {}
+        tokenized_prompts = [
+            tokenize_async(text=t1, text_pair=t2, **tokenization_kwargs)
+            for t1, t2 in input_pairs
+        ]
 
-            for prompt_inputs, (t1, t2) in zip(
-                    await asyncio.gather(*tokenized_prompts), input_pairs):
+        for prompt_inputs, (t1, t2) in zip(
+                await asyncio.gather(*tokenized_prompts), input_pairs):
 
-                request_prompt = f"{t1}{tokenizer.sep_token}{t2}"
+            request_prompt = f"{t1}{tokenizer.sep_token}{t2}"
 
-                input_ids = prompt_inputs["input_ids"]
-                text_token_prompt = \
-                    self._validate_input(request, input_ids, request_prompt)
-                engine_prompt = TokensPrompt(
-                    prompt_token_ids=text_token_prompt["prompt_token_ids"],
-                    token_type_ids=prompt_inputs.get("token_type_ids"))
+            input_ids = prompt_inputs["input_ids"]
+            text_token_prompt = \
+                self._validate_input(request, input_ids, request_prompt)
+            engine_prompt = TokensPrompt(
+                prompt_token_ids=text_token_prompt["prompt_token_ids"],
+                token_type_ids=prompt_inputs.get("token_type_ids"))
 
-                request_prompts.append(request_prompt)
-                engine_prompts.append(engine_prompt)
-
-        except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            request_prompts.append(request_prompt)
+            engine_prompts.append(engine_prompt)
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
@@ -241,7 +230,7 @@ class OpenAIServingScores(OpenAIServing):
         async for i, res in result_generator:
             final_res_batch[i] = res
 
-        return final_res_batch
+        return [out for out in final_res_batch if out is not None]
 
     async def create_score(
         self,
@@ -327,13 +316,8 @@ class OpenAIServingScores(OpenAIServing):
                     prompt_adapter_request=prompt_adapter_request,
                     trace_headers=trace_headers)
 
-            assert all(final_res is not None for final_res in final_res_batch)
-
-            final_res_batch_checked = cast(List[PoolingRequestOutput],
-                                           final_res_batch)
-
             response = self.request_output_to_score_response(
-                final_res_batch_checked,
+                final_res_batch,
                 request_id,
                 created_time,
                 model_name,
