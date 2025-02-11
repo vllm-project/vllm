@@ -15,7 +15,6 @@ import ipaddress
 import multiprocessing
 import os
 import re
-import resource
 import signal
 import socket
 import subprocess
@@ -2070,6 +2069,11 @@ def memory_profiling(
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
 def set_ulimit(target_soft_limit=65535):
+    if sys.platform.startswith('win'):
+        logger.info("Windows detected, skipping ulimit adjustment.")
+        return
+
+    import resource
     resource_type = resource.RLIMIT_NOFILE
     current_soft, current_hard = resource.getrlimit(resource_type)
 
