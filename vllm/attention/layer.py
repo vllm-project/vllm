@@ -104,13 +104,15 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype,
-                                        block_size,
-                                        is_attention_free,
-                                        blocksparse_params is not None,
-                                        use_mla=use_mla)
+        attn_backend = get_attn_backend(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            is_attention_free,
+            blocksparse_params is not None,
+            use_mla=use_mla,
+            has_extra_impl_args=len(extra_impl_args) > 0)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,

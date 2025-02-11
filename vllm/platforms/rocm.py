@@ -77,8 +77,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1,
-                             use_mla) -> str:
+                             kv_cache_dtype, block_size, use_v1, use_mla,
+                             **kwargs) -> str:
         if use_mla:
             logger.info("Using Triton MLA backend.")
             return "vllm.attention.backends.triton_mla.TritonMLABackend"

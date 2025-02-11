@@ -152,11 +152,19 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1,
-                             use_mla) -> str:
+                             kv_cache_dtype, block_size, use_v1, use_mla,
+                             **kwargs) -> str:
         if use_v1:
-            logger.info("Using Flash Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+            has_extra_impl_args = kwargs.get('has_extra_impl_args', False)
+            if has_extra_impl_args:
+                logger.info("Using Triton MLA backend on V1 engine.")
+                attn_backend = ("vllm.attention.backends."
+                                "triton_mla.TritonMLABackend")
+            else:
+                logger.info("Using Flash Attention backend on V1 engine.")
+                attn_backend = ("vllm.v1.attention.backends."
+                                "flash_attn.FlashAttentionBackend")
+            return attn_backend
         if use_mla:
             logger.info("Using Triton MLA backend.")
             return "vllm.attention.backends.triton_mla.TritonMLABackend"

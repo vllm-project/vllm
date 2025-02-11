@@ -86,6 +86,7 @@ def get_attn_backend(
     is_attention_free: bool,
     is_blocksparse: bool = False,
     use_mla: bool = False,
+    has_extra_impl_args: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     # Accessing envs.* behind an @lru_cache decorator can cause the wrong
@@ -101,6 +102,7 @@ def get_attn_backend(
         is_blocksparse=is_blocksparse,
         use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
+        has_extra_impl_args=has_extra_impl_args,
     )
 
 
@@ -114,6 +116,7 @@ def _cached_get_attn_backend(
     is_blocksparse: bool = False,
     use_v1: bool = False,
     use_mla: bool = False,
+    has_extra_impl_args: bool = False,
 ) -> Type[AttentionBackend]:
     if is_blocksparse:
         logger.info("Using BlocksparseFlashAttention backend.")
@@ -145,9 +148,10 @@ def _cached_get_attn_backend(
             selected_backend = backend_name_to_enum(backend_by_env_var)
 
     # get device-specific attn_backend
+    backends_kwargs = {'has_extra_impl_args': has_extra_impl_args}
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
-        use_mla)
+        use_mla, **backends_kwargs)
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}")
