@@ -334,10 +334,10 @@ class NvmlCudaPlatform(CudaPlatformBase):
             if (len(set(device_names)) > 1
                     and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"):
                 logger.warning(
-                    "Detected different devices in the system: \n%s\nPlease"
+                    "Detected different devices in the system: %s. Please"
                     " make sure to set `CUDA_DEVICE_ORDER=PCI_BUS_ID` to "
                     "avoid unexpected behavior.",
-                    "\n".join(device_names),
+                    ", ".join(device_names),
                 )
 
 

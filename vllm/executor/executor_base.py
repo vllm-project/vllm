@@ -8,11 +8,11 @@ from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
 import torch.nn as nn
 from typing_extensions import TypeVar
 
+import vllm.platforms
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import make_async
@@ -108,8 +108,8 @@ class ExecutorBase(ABC):
         """
         # NOTE: This is logged in the executor because there can be >1 workers.
         logger.info("# %s blocks: %d, # CPU blocks: %d",
-                    current_platform.dispatch_key, num_gpu_blocks,
-                    num_cpu_blocks)
+                    vllm.platforms.current_platform.dispatch_key,
+                    num_gpu_blocks, num_cpu_blocks)
         max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
                            self.model_config.max_model_len)
         logger.info("Maximum concurrency for %s tokens per request: %.2fx",
