@@ -1628,7 +1628,7 @@ class LLMEngine:
             self.scheduler_config.max_num_seqs,
             self.scheduler_config.max_num_batched_tokens)
         total_tokens_in_current_batch_requests: List[int] = []
-        total_tokens_in_queue_requests: List[int] = []
+        total_tokens_in_queue: int = 0
         request_with_evicted_tokens_requests: List[bool] = []
         total_evicted_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
@@ -1651,6 +1651,19 @@ class LLMEngine:
         max_lora_stat = "0"
         if self.lora_config:
             max_lora_stat = str(self.lora_config.max_loras)
+
+        # Calculate total tokens in queue
+        total_tokens_in_queue = 0
+        for scheduler in self.scheduler:
+            waiting_queue = scheduler.waiting
+            for waiting_seq_group in waiting_queue:
+                # Add prompt tokens
+                prompt_length = len(waiting_seq_group.prompt_token_ids)
+                total_tokens_in_queue += prompt_length
+                # Add expected generation tokens
+                if waiting_seq_group.sampling_params:
+                    total_tokens_in_queue += (
+                        waiting_seq_group.sampling_params.max_tokens)
 
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
@@ -1723,18 +1736,6 @@ class LLMEngine:
                         1 if seq_group.state.current_step == 0 else
                         seq_group.state.current_step)
 
-                # Calculate total tokens in queue
-                total_tokens_in_queue = 0
-                for scheduler in self.scheduler:
-                    for waiting_seq_group in scheduler.waiting:
-                        # Add prompt tokens
-                        prompt_length = len(waiting_seq_group.prompt_token_ids)
-                        total_tokens_in_queue += prompt_length
-                        # Add expected generation tokens
-                        if waiting_seq_group.sampling_params:
-                            total_tokens_in_queue +=\
-                                waiting_seq_group.sampling_params.max_tokens
-
                 # Because of chunked prefill, we can have a single sequence
                 # group that does multiple prompt_runs. To prevent logging
                 # the same metadata more than once per request, we standardize
@@ -1792,8 +1793,6 @@ class LLMEngine:
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
                     ])
-                    total_tokens_in_queue_requests.append(
-                        total_tokens_in_queue)
                     # Track if this request had any token evictions
                     if self.device_config.device_type == "cuda":
                         had_evicted_tokens = any(
@@ -1873,7 +1872,7 @@ class LLMEngine:
             max_token_capacity_per_batch=max_token_capacity_per_batch,
             total_tokens_in_current_batch_requests=
             total_tokens_in_current_batch_requests,
-            total_tokens_in_queue_requests=total_tokens_in_queue_requests,
+            total_tokens_in_queue=total_tokens_in_queue,
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
             waiting_lora_adapters=list(waiting_lora_adapters.keys()),

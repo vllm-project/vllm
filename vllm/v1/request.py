@@ -128,7 +128,7 @@ class Request:
         Args:
             num_tokens: Number of tokens that were evicted from KV cache.
         """
-        return self.metrics.num_evicted_tokens += num_tokens
+        self.metrics.num_evicted_tokens += num_tokens
 
 
 class RequestStatus(enum.IntEnum):

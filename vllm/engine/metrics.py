@@ -259,8 +259,8 @@ class Metrics:
             "Total number of tokens being processed in the current batch",
             labelnames=labelnames,
             multiprocess_mode="sum")
-        self.gauge_total_tokens_in_queue_request = self._gauge_cls(
-            name="vllm:total_tokens_in_queue_requests",
+        self.gauge_total_tokens_in_queue = self._gauge_cls(
+            name="vllm:total_tokens_in_queue",
             documentation="Total number of tokens in queue (prefill + decode).",
             labelnames=labelnames,
             multiprocess_mode="sum")
@@ -642,8 +642,8 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_gauge(
             self.metrics.gauge_total_tokens_in_current_batch_request,
             sum(stats.total_tokens_in_current_batch_requests))
-        self._log_gauge(self.metrics.gauge_total_tokens_in_queue_request,
-                        sum(stats.total_tokens_in_queue_requests))
+        self._log_gauge(self.metrics.gauge_total_tokens_in_queue,
+                        stats.total_tokens_in_queue)
         num_requests_with_evictions = len(
             [x for x in stats.request_with_evicted_tokens_requests
              if x]) if stats.request_with_evicted_tokens_requests else 0

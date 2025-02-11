@@ -110,7 +110,7 @@ EXPECTED_VALUES = {
         ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
         ("_count", _NUM_REQUESTS)
     ],
-    "vllm:total_tokens_in_queue_requests": [
+    "vllm:total_tokens_in_queue": [
         ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
         ("_count", _NUM_REQUESTS)
     ],
@@ -205,8 +205,8 @@ EXPECTED_METRICS = [
     "vllm:generation_tokens_total",
     "vllm:total_tokens_in_current_batch_sum",
     "vllm:total_tokens_in_current_batch_count",
-    "vllm:total_tokens_in_queue_requests_sum",
-    "vllm:total_tokens_in_queue_requests_count",
+    "vllm:total_tokens_in_queue_sum",
+    "vllm:total_tokens_in_queue_count",
     "vllm:max_token_capacity_per_batch_sum",
     "vllm:max_token_capacity_per_batch_count",
     "vllm:requests_with_evicted_tokens_total",
