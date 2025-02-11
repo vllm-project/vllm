@@ -19,6 +19,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges,
                                    repeat_and_pad_placeholder_tokens)
@@ -468,10 +469,10 @@ class CLIPVisionTransformer(nn.Module):
         return encoder_outputs
 
 
-class CLIPVisionModel(nn.Module):
-
+class CLIPVisionModel(nn.Module, SupportsQuant):
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(
         self,
@@ -483,6 +484,7 @@ class CLIPVisionModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        SupportsQuant.__init__(self, quant_config)
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,

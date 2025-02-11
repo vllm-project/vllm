@@ -13,6 +13,7 @@ from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
+    from vllm.config import QuantizationConfig
     from vllm.multimodal.inputs import NestedTensors  # noqa: F401
     from vllm.sequence import IntermediateTensors
 
@@ -441,3 +442,16 @@ def supports_cross_encoding(
     model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
+
+
+class SupportsQuant:
+    """The interface required for all models that support quantization."""
+
+    packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
+    quant_config: Optional[QuantizationConfig] = None
+
+    def __init__(self, quant_config: "QuantizationConfig"):
+        super().__init__()
+        self.quant_config = quant_config
+        self.quant_config.packed_modules_mapping.update(
+            self.packed_modules_mapping)
