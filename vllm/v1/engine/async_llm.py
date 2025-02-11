@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
+from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 import numpy as np
 
@@ -245,13 +245,34 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
-    async def _parallel_sampling_task(
+    async def _parallel_sampling_child_gen(
         self,
-        gen: AsyncGenerator[RequestOutput, None],
+        child_gen: AsyncGenerator[RequestOutput, None],
         output_processor: ParallelSamplingOutputProcessor,
         index: int,
     ) -> AsyncGenerator[RequestOutput, None]:
-        async for out in gen:
+        """A single parallel sampling child request
+        output generator.
+
+        Each parallel sampling request triggers at
+        least two child requests. This generator
+        yields zero or more request outputs to
+        return to the caller, as they become
+        available.
+
+        Args:
+          child_gen: generator for child request
+                     outputs.
+          output_processor: transform child request
+                            outputs into parent
+                            request outputs
+          index: index within the `n` child requests
+
+        Returns:
+          Yields zero or more request outputs to return
+          to the caller.
+        """
+        async for out in child_gen:
             if req_out := output_processor.process_output(out, index):
                 yield req_out
 
@@ -265,6 +286,8 @@ class AsyncLLM(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
+        """Generation completes for parallel sampling requests."""
+
         parent_state = ParentRequestState(request_id, sampling_params)
         output_processor = ParallelSamplingOutputProcessor(parent_state)
         n = parent_state.n
@@ -278,14 +301,7 @@ class AsyncLLM(EngineClient):
         if self.enable_prefix_caching:
             # If engine uses APC, generate a “warmup request” with
             # max_tokens=1 which populates the APC
-            w_sampling_params = parent_state.get_child_sampling_params({
-                "max_tokens":
-                1,
-                "n":
-                1,
-                "output_kind":
-                RequestOutputKind.FINAL_ONLY
-            })
+            w_sampling_params = parent_state.get_warmup_sampling_params()
             async for _ in self._generate(
                     prompt,
                     w_sampling_params,
@@ -299,16 +315,11 @@ class AsyncLLM(EngineClient):
                 pass
 
         # Aggregate generators for n child requests
-        gens = []
-        active = {}
+        gens: List[AsyncGenerator[RequestOutput, None]] = []
+        active: Dict[asyncio.Task, int] = {}
         seed = sampling_params.seed
         for idx in range(n):
-            c_sampling_params = parent_state.get_child_sampling_params({
-                "n":
-                1,
-                "seed":
-                seed
-            })
+            c_sampling_params = parent_state.get_child_sampling_params(seed)
             if seed is not None:
                 seed += 1
             child_gen = self._generate(
@@ -320,10 +331,10 @@ class AsyncLLM(EngineClient):
                 prompt_adapter_request,
                 priority,
             )
-            gen = self._parallel_sampling_task(child_gen, output_processor,
-                                               idx)
+            gen = self._parallel_sampling_child_gen(child_gen,
+                                                    output_processor, idx)
             gens.append(gen)
-            active[asyncio.create_task(gen.__anext__())] = idx
+            active[asyncio.create_task(gen.__anext__())] = idx  # type: ignore
 
         try:
             while active:
@@ -336,7 +347,7 @@ class AsyncLLM(EngineClient):
                         yield result
                         # Schedule the next result
                         active[asyncio.create_task(
-                            gens[idx].__anext__())] = idx
+                            gens[idx].__anext__())] = idx  # type: ignore
                     except StopAsyncIteration:
                         continue
         finally:
