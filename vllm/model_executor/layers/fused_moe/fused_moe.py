@@ -1365,8 +1365,6 @@ def fused_moe(
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
-    # Check constraints.
-    assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None

@@ -424,13 +424,14 @@ class EngineArgs:
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
         parser.add_argument(
-            '--expertimental-expert-parallel-size',
-            # '-ep',
+            '--expert-parallel-size',
+            '-ep',
             type=int,
             default=EngineArgs.expert_parallel_size,
             help='Force certain number of expert parallelism for MoE layers. '
-            'When not specified, the number of expert parallelism will be '
-            'the same as tensor parallelism size. '
+            'Only works when the environmental variable VLLM_TEST_ENABLE_EP '
+            'is set to 1. When this argument is not specified, the number of '
+            'expert parallelism will be the same as tensor parallelism size. '
             'However, when specified, the number of expert parallelism in MoE '
             'layers will be the same as the specified number, and tensor '
             'parallelism specified by the --tensor-parallel-size argument will '
@@ -438,7 +439,7 @@ class EngineArgs:
             'and non-MoE layers without experts will use tensor parallelism of '
             'tensor_parallel_size * expert_parallel_size. For example, if '
             'tensor_parallel_size is 2 and expert_parallel_size is 4, then '
-            'there will be 4 expert parallel ranks with 2 tensor parallel '
+            'there will be four expert parallel ranks with two tensor parallel '
             'devices each. Or, if expert_parallel_size is set to 1, MoE layers '
             'will be run with tensor parallelism only.')
         parser.add_argument(
