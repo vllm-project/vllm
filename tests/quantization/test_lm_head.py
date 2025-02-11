@@ -18,7 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 PROMPT = "On the surface of Mars, we found"
 
 MODELS_QUANT = [
-    ("ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bits-dynamic-cfg-with-lm_head",
+    ("ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head",
      True),
     ("ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-10-25-2024", False),
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", False),

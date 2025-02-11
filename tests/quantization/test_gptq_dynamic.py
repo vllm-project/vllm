@@ -17,7 +17,7 @@ PROMPT = "On the surface of Mars, we found"
 # The second layer is quantized using bits=8, group_size=32
 # All other layers (layer index >= 2) are not quantized
 MODEL_QUANT = [
-    "ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bits-dynamic-cfg-with-lm_head"
+    "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head"
 ]
 
 
