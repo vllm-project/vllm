@@ -279,6 +279,7 @@ class AsyncLLM(EngineClient):
                 # Exhaust the generator
                 pass
 
+        # n child requests
         seed = 42
         for idx in range(n):
             c_sampling_params = parent_state.get_child_sampling_params({
