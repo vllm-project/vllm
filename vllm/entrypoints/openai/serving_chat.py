@@ -35,6 +35,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
+from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = init_logger(__name__)
 
@@ -243,16 +244,28 @@ class OpenAIServingChat(OpenAIServing):
                         params=sampling_params,
                     )
                 else:
-                    generator = self.engine_client.generate(
-                        engine_prompt,
-                        sampling_params,
-                        request_id,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        prompt_adapter_request=prompt_adapter_request,
-                        kv_transfer_params=kv_transfer_params,
-                        priority=request.priority,
-                    )
+                    # Note(shangming): v1 does not support KV transfer yet.
+                    if isinstance(self.engine_client, AsyncLLM):
+                        generator = self.engine_client.generate(
+                            engine_prompt,
+                            sampling_params,
+                            request_id,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            prompt_adapter_request=prompt_adapter_request,
+                            priority=request.priority,
+                        )
+                    else:
+                        generator = self.engine_client.generate(
+                            engine_prompt,
+                            sampling_params,
+                            request_id,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            prompt_adapter_request=prompt_adapter_request,
+                            kv_transfer_params=kv_transfer_params,
+                            priority=request.priority,
+                        )
 
                 generators.append(generator)
         except ValueError as e:
