@@ -179,14 +179,15 @@ message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 #
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
-  # Setting up debug flags for pleasant debug experience.
+  # Overriding the default -O set up by cmake, adding ggdb3 for the most verbose devug info
   #
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG "${CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG} -O0 -ggdb3")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb3")
 
 
   #
-  # Suppress the noisy warning
+  # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
+  # a lot of warnings that always mask real issues. Suppressing until this is properly addressed.
   #
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
