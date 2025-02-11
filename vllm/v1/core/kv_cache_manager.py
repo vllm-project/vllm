@@ -10,6 +10,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
+from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
@@ -72,10 +73,33 @@ class KVCacheManager:
         self.req_to_blocks: DefaultDict[str,
                                         List[KVCacheBlock]] = defaultdict(list)
 
+        # Mapping from request ID to kv block hashes.
+        # This is to avoid recomputing the block hashes for each call of
+        # `get_computed_blocks` or `allocate_slots`.
+        self.req_to_block_hashes: DefaultDict[
+            str, List[BlockHashType]] = defaultdict(list)
+
+        self.prefix_cache_stats = PrefixCacheStats()
+
     @property
     def usage(self) -> float:
+        """Get the KV cache usage.
+
+        Returns:
+            The KV cache usage (between 0.0 and 1.0).
+        """
         return 1.0 - (self.free_block_queue.num_free_blocks /
                       self.num_gpu_blocks)
+
+    def make_prefix_cache_stats(self) -> PrefixCacheStats:
+        """Get (and reset) the prefix cache stats.
+
+        Returns:
+            The current prefix caching stats.
+        """
+        stats = self.prefix_cache_stats
+        self.prefix_cache_stats = PrefixCacheStats()
+        return stats
 
     def get_computed_blocks(
             self, request: Request) -> Tuple[List[KVCacheBlock], int]:
@@ -97,11 +121,11 @@ class KVCacheManager:
         computed_blocks = []
 
         # The block hashes for the request may already be computed
-        # if the request was preempted and resumed.
-        if not request.kv_block_hashes:
-            request.set_kv_block_hashes(
-                hash_request_tokens(self.block_size, request))
-        block_hashes = request.kv_block_hashes
+        # if the scheduler has tried to schedule the request before.
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        if not block_hashes:
+            block_hashes = hash_request_tokens(self.block_size, request)
+            self.req_to_block_hashes[request.request_id] = block_hashes
 
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -111,6 +135,10 @@ class KVCacheManager:
                 computed_blocks.append(cached_block)
             else:
                 break
+
+        self.prefix_cache_stats.requests += 1
+        self.prefix_cache_stats.queries += len(block_hashes)
+        self.prefix_cache_stats.hits += len(computed_blocks)
 
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
@@ -199,8 +227,6 @@ class KVCacheManager:
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
                 # [..., max_num_blocks_per_req].
-                # TODO(woosuk): Check and reject requests if
-                # num_prompt_tokens + max_tokens > max_model_len.
                 self.max_num_blocks_per_req - len(req_blocks),
             )
             assert num_new_blocks > 0
@@ -276,6 +302,8 @@ class KVCacheManager:
         for block in self.block_pool:
             block.reset_hash()
 
+        self.prefix_cache_stats.reset = True
+
         logger.info("Successfully reset prefix cache")
         return True
 
@@ -299,9 +327,7 @@ class KVCacheManager:
 
         While all scheduled requests must be in the RUNNING state, the inverse
         is not necessarily true. There may be RUNNING requests that are not
-        scheduled in the current step. As of 1/1/2025, the scheduler does not
-        allow this case, but it is possible in the future, as we allow more
-        flexible scheduling.
+        scheduled in the current step.
 
         This can result in an edge case where the number of common prefix blocks
         is 0, even though all scheduled requests share a common prefix. This
@@ -437,7 +463,8 @@ class KVCacheManager:
             full_blocks: The list of blocks to update hash metadata.
             prev_block: The previous block in the chain.
         """
-        num_cached_block_hashes = len(request.kv_block_hashes)
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        num_cached_block_hashes = len(block_hashes)
 
         # Update the new blocks with the block hashes through the chain.
         prev_block_hash_value = None
@@ -470,7 +497,7 @@ class KVCacheManager:
                 # this request (either the prompt tokens or the previously
                 # generated tokens with preemption). In this case we simply
                 # reuse the block hash.
-                block_hash = request.kv_block_hashes[blk_idx]
+                block_hash = block_hashes[blk_idx]
             else:
                 # Otherwise compute the block hash and cache it in the request
                 # in case it will be preempted in the future.
@@ -492,9 +519,17 @@ class KVCacheManager:
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(prev_block_hash_value,
                                                block_tokens, extra_keys)
-                request.append_kv_block_hashes(block_hash)
+                block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
             prev_block_hash_value = block_hash.hash_value
+
+    def free_block_hashes(self, request: Request) -> None:
+        """Discard the block hashes for the request.
+
+        NOTE: Unlike `free`, this method should be called only when the request
+        is finished, not when it is preempted.
+        """
+        self.req_to_block_hashes.pop(request.request_id, None)

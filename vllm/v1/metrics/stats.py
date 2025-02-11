@@ -1,12 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
     from vllm.v1.engine import EngineCoreOutput, FinishReason
+
+
+@dataclass
+class PrefixCacheStats:
+    """Stores prefix cache hit statistics."""
+    # Whether reset_prefix_cache was invoked.
+    reset: bool = False
+    # The number of requests in this update.
+    requests: int = 0
+    # The number of queries in these requests. Note that "queries" here
+    # means the number of blocks that were queried from the cache.
+    queries: int = 0
+    # The number of hits in these requests.
+    hits: int = 0
 
 
 @dataclass
@@ -17,7 +31,9 @@ class SchedulerStats:
     num_waiting_reqs: int = 0
 
     gpu_cache_usage: float = 0.0
-    # gpu_prefix_cache_hit_rate: float = 0.0
+
+    prefix_cache_stats: PrefixCacheStats = field(
+        default_factory=PrefixCacheStats)
 
 
 @dataclass
@@ -60,14 +76,17 @@ class IterationStats:
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
-            # This relies on the invariant that EngineCore does
-            # not stream outputs for partially completed prefills
-            # (scheduler.update_from_output makes EngineCoreOutput
-            # iff num_computed_tokens == num_tokens).
-            assert (num_new_generation_tokens > 0)
-            self.num_prompt_tokens += prompt_len
-
-            self.time_to_first_tokens_iter.append(last_token_latency)
+            # TODO(andy): we used to assert that num_new_generation_tokens
+            # > 0 with an invariant that EngineCore does not stream outputs
+            # for partially completed prefills (scheduler.update_from_output
+            # makes EngineCoreOutput iff num_computed_tokens == num_tokens).
+            # When prompt logprobs are enabled, we currently stream out the
+            # partially completed prompt.
+            # This will be reverted in a follow up PR and we should re-enable
+            # this assertion / invariant.
+            if num_new_generation_tokens > 0:
+                self.num_prompt_tokens += prompt_len
+                self.time_to_first_tokens_iter.append(last_token_latency)
         else:
             self.time_per_output_tokens_iter.append(last_token_latency)
 
