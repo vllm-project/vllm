@@ -376,10 +376,7 @@ main() {
   pip install tabulate pandas
   python3 $QUICK_BENCHMARK_ROOT/scripts/convert-results-json-to-markdown.py
 
-  # Set to 0 to run the benchmark script locally without uploading to Buildkite
-  if [[ "${UPLOAD_TO_BUILDKITE:-1}" == "1" ]]; then
-    upload_to_buildkite
-  fi
+  upload_to_buildkite
 }
 
 main "$@"
