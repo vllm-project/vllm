@@ -13,15 +13,17 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
-from vllm.model_executor.layers.quantization.awq import is_layer_skipped_awq
+from vllm.model_executor.layers.quantization.awq import (AWQLinearMethod,
+                                                         is_layer_skipped_awq)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
-    marlin_make_empty_g_idx, marlin_make_workspace, marlin_moe_permute_scales,
-    marlin_permute_scales, moe_awq_to_marlin_zero_points,
-    verify_marlin_supported, verify_marlin_supports_shape)
+    check_marlin_supports_layer, marlin_make_empty_g_idx,
+    marlin_make_workspace, marlin_moe_permute_scales, marlin_permute_scales,
+    moe_awq_to_marlin_zero_points, verify_marlin_supported,
+    verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
@@ -124,6 +126,12 @@ class AWQMarlinConfig(QuantizationConfig):
             (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
                 return UnquantizedLinearMethod()
+            # Check if the layer is supported by AWQMarlin.
+            if not check_marlin_supports_layer(layer, self.group_size):
+                logger.warning_once(
+                    f"Layer '{prefix}' is not supported by AWQMarlin. "
+                    "Falling back to unoptimized AWQ kernels.")
+                return AWQLinearMethod(self)
             return AWQMarlinLinearMethod(self)
         elif isinstance(layer, FusedMoE):
             return AWQMoEMethod(self)
