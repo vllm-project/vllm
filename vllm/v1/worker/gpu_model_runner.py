@@ -905,7 +905,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
-        request_seq_lens: List[Tuple[int, CachedRequestState, int, int]] = []
+        request_seq_lens: List[Tuple[int, CachedRequestState, int]] = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
             req_state = self.requests[req_id]
@@ -914,11 +914,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if seq_len >= req_state.num_tokens:
                 # We don't rewind the generator state for requests now
                 # because spec decode only supports greedy decoding for now.
-                gen_len = (sampled_token_ids[i]
-                           != INVALID_TOKEN_ID).sum().item()
-                self.input_batch.num_tokens[i] += gen_len
-                req_state.output_token_ids.extend([0] * gen_len)
-                request_seq_lens.append((i, req_state, seq_len, gen_len))
+                request_seq_lens.append((i, req_state, seq_len))
             else:
                 # Ignore the sampled token from the partial request.
                 # Rewind the generator state as if the token was not sampled.
@@ -933,9 +929,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
 
+        logprobs_tensors = sampler_output.logprobs_tensors
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
-        logprobs_tensors = sampler_output.logprobs_tensors
         logprobs_lists = logprobs_tensors.tolists() \
             if logprobs_tensors is not None else None
 
@@ -945,19 +941,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             scheduler_output,
         )
 
-        # Update with the actual token ids
-        sampled_token_ids = sampled_token_ids.tolist()
-        for i, req_state, seq_len, gen_len in request_seq_lens:
-            del sampled_token_ids[i][gen_len:]
-            for j, token_id in enumerate(sampled_token_ids[i]):
-                self.input_batch.token_ids_cpu[i, seq_len - gen_len + j +
-                                               1] = token_id
-                req_state.output_token_ids[-gen_len + j] = token_id
+        # Update batch with the valid generated tokens.
+        valid_mask = sampled_token_ids != INVALID_TOKEN_ID
+        gen_lens = valid_mask.sum(dim=1).tolist()
+        valid_sampled_token_ids = [
+            seq.tolist()
+            for seq in sampled_token_ids[valid_mask].split(gen_lens)
+        ]
+        self.input_batch.num_tokens[:num_reqs] += gen_lens
+        for i, req_state, seq_len in request_seq_lens:
+            target_slice = slice(seq_len - gen_lens[i] + 1, seq_len + 1)
+            self.input_batch.token_ids_cpu[
+                i, target_slice] = valid_sampled_token_ids[i]
+            req_state.output_token_ids.extend(valid_sampled_token_ids[i])
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=sampled_token_ids,
+            sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
