@@ -397,10 +397,8 @@ measurements for a given model. The quantization configuration is used during in
 
 # Troubleshooting
 
-If you encounter device out-of-memory issues or want to attempt inference with higher batch sizes, try tweaking HPU Graphs as follows:
-
-- Tweak `gpu_memory_utilization` knob. This will decrease the allocation of KV cache, leaving some headroom for capturing graphs with larger batch size. By default, `gpu_memory_utilization` is set to 0.9.
-  It attempts to allocate ~90% of HBM left for KV cache after short profiling run. Note that this reduces the number of KV cache blocks you have available, and therefore reduces the effective maximum
-  number of tokens handled at a given time.
-- If this method is not efficient, you can disable `HPUGraph` completely. With HPU Graphs disabled, you are trading latency and throughput at lower batches for potentially higher throughput on higher batches.
-  You can do that by adding `--enforce-eager` flag to the server (for online inference), or by passing `enforce_eager=True` argument to LLM constructor (for offline inference).
+The following steps address Out of Memory related errors:
+- Increase gpu_memory_utilization - This addresses insufficient overall memory. The vLLM pre-allocates HPU cache by using gpu_memory_utilization% of device memory. By default, gpu_memory_utilization is set to 0.9. By increasing this utilization, you can provide more KV cache space.
+- Decrease max_num_seqs or max_num_batched_tokens - This may reduce the number of concurrent requests in a batch, thereby requiring less KV cache space when overall usable memory is limited.
+- Increase tensor_parallel_size - This approach shards model weights, so each GPU has more memory available for KV cache.
+- For maximizing memory available for KV cache, you can disable `HPUGraph` completely. With HPU Graphs disabled, you are trading latency and throughput at lower batches for potentially higher throughput on higher batches. You can do that by adding `--enforce-eager` flag to the server (for online inference), or by passing `enforce_eager=True` argument to LLM constructor (for offline inference).
