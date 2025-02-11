@@ -164,7 +164,10 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     # hf_hub. This will fail in offline mode.
 
     # Call HF to check if the file exists
-    return file_exists(model, config_name, revision=revision, token=HF_TOKEN)
+    return file_exists(str(model),
+                       config_name,
+                       revision=revision,
+                       token=HF_TOKEN)
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
