@@ -115,6 +115,7 @@ model_example_map = {
     "minicpmo": run_minicpmo,
     "qwen2_audio": run_qwen2_audio,
     "ultravox": run_ultravox,
+    "whisper": run_whisper,
 }
 
 
