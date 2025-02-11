@@ -38,11 +38,14 @@ class EngineCore:
         self,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
+        log_stats: bool,
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
+
+        self.log_stats = log_stats
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -59,6 +62,7 @@ class EngineCore:
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
+            log_stats=self.log_stats,
         )
 
         self.mm_input_mapper_server = MMInputMapperServer(
@@ -148,11 +152,9 @@ class EngineCoreProc(EngineCore):
         ready_pipe: Connection,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        log_stats: bool = False,
+        log_stats: bool,
     ):
-        super().__init__(vllm_config, executor_class)
-
-        self.log_stats = log_stats
+        super().__init__(vllm_config, executor_class, log_stats)
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
