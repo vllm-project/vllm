@@ -20,7 +20,7 @@ INVALID_TOKEN_ID = -1
 class RejectionSampler(nn.Module):
 
     def forward(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> SamplerOutput:
+                sampling_metadata: SamplingMetadata) -> SamplerOutput:
         if not sampling_metadata.all_greedy:
             raise NotImplementedError(
                 "Only greedy sampling is supported by rejection sampler.")
