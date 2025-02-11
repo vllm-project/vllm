@@ -415,15 +415,15 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
+def test_lru_cache_worker_adapter_manager(llama_3p2_1b_model_extra_embeddings,
                                           sql_lora_files, device):
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
-        4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
+        4, 2, llama_3p2_1b_model_extra_embeddings.unpadded_vocab_size -
         lora_config.lora_extra_vocab_size, lora_config, device,
         EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
     worker_adapter_manager.create_lora_manager(
-        llama_2_7b_model_extra_embeddings)
+        llama_3p2_1b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
     worker_adapter_manager.set_active_adapters([
@@ -494,16 +494,16 @@ def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
+def test_worker_adapter_manager(llama_3p2_1b_model_extra_embeddings,
                                 sql_lora_files, device):
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
     worker_adapter_manager = WorkerLoRAManager(
-        4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
+        4, 2, llama_3p2_1b_model_extra_embeddings.unpadded_vocab_size -
         lora_config.lora_extra_vocab_size, lora_config, device,
         EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
     worker_adapter_manager.create_lora_manager(
-        llama_2_7b_model_extra_embeddings)
+        llama_3p2_1b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
     worker_adapter_manager.set_active_adapters([

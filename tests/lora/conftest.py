@@ -286,7 +286,7 @@ def long_context_infos(long_context_lora_files_16k_1,
 
 
 @pytest.fixture
-def llama_2_7b_engine_extra_embeddings():
+def llama_3p2_1b_engine_extra_embeddings():
     cleanup_dist_env_and_memory(shutdown_ray=True)
     get_model_old = get_model
 
@@ -304,8 +304,8 @@ def llama_2_7b_engine_extra_embeddings():
 
 
 @pytest.fixture
-def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
-    yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
+def llama_3p2_1b_model_extra_embeddings(llama_3p2_1b_engine_extra_embeddings):
+    yield (llama_3p2_1b_engine_extra_embeddings.model_executor.driver_worker.
            model_runner.model)
 
 

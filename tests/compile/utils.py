@@ -18,7 +18,7 @@ TEST_MODELS = [
         "dtype": torch.float16,
         "quantization": "fp8"
     }),
-    ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples", {
+    ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {
         "quantization": "compressed-tensors"
     }),
     ("meta-llama/Llama-3.2-1B-Instruct", {}),
