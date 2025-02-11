@@ -68,24 +68,20 @@ POOLING_SIZE = 2
 
 
 class MolmoImageInputs(TypedDict):
-    images: NestedTensors
+    images: Union[torch.Tensor, List[torch.Tensor]]
     """Shape: `(batch_size, num_crops, num_patch, patch_dim)`"""
 
-    image_input_idx: NestedTensors
+    image_masks: Optional[Union[torch.Tensor, List[torch.Tensor]]]
     """Shape: `(batch_size, num_crops, num_patch)`"""
 
-    image_masks: Optional[NestedTensors]
+    feat_is_patch: Union[torch.Tensor, List[torch.Tensor]]
     """Shape: `(batch_size, num_crops, num_patch)`"""
 
-    seq_len: torch.Tensor
-    """Shape: `(batch_size, )`"""
+    num_crops: torch.Tensor
+    """Shape: `(batch_size, num_images)`"""
 
-    image_start_end: torch.Tensor
-    """
-    Starting and ending index of placeholder tokens.
-
-    Shape: `(batch_size, 2)`
-    """
+    num_embeds: torch.Tensor
+    """Shape: `(batch_size, num_images)`"""
 
 
 @dataclass
@@ -464,7 +460,7 @@ class MolmoAttention(nn.Module):
         return output
 
 
-class LanuageModelMLP(nn.Module):
+class LanguageModelMLP(nn.Module):
     """Molmo's LLM mlp."""
 
     def __init__(self,
@@ -558,7 +554,7 @@ class MolmoDecoderLayer(nn.Module):
                                         prefix=f"{prefix}.self_attn")
 
         # MLP block.
-        self.mlp = LanuageModelMLP(config, quant_config=quant_config)
+        self.mlp = LanguageModelMLP(config, quant_config=quant_config)
 
         # LayerNorm
         assert config.layer_norm_type == "rms"
@@ -1128,40 +1124,47 @@ class MolmoProcessorWrapper:
         input_ids = outputs.pop("input_ids")
         outputs["input_ids"] = input_ids.unsqueeze(0)
 
-        tilings = [
-            self.select_tiling(
-                image_width=image.size[0],
-                image_height=image.size[1],
-            ) for image in images
-        ]
-        if tilings:
-            outputs["num_patches"] = torch.tensor(tilings).prod(-1) + 1
+        image_input_idx = outputs.pop("image_input_idx", None)
+        if image_input_idx is not None:
+            input_is_patch = input_ids == DEFAULT_IMAGE_PATCH_TOKEN_ID
+            image_input_idx_flat: torch.Tensor = image_input_idx.view(-1)
+            image_valid_flat = image_input_idx_flat >= 0
+            feat_is_patch_flat = image_valid_flat.clone()
+            feat_is_patch_flat[image_valid_flat] = (
+                input_is_patch[image_input_idx_flat[image_valid_flat]])
+            outputs["feat_is_patch"] = feat_is_patch_flat.view(
+                *image_input_idx.shape)
 
-        outputs["seq_len"] = torch.tensor(len(input_ids))
+            tilings = [
+                self.select_tiling(
+                    image_width=image.size[0],
+                    image_height=image.size[1],
+                ) for image in images
+            ]
+            # For each image: tiling_h * tiling_w + extra
+            outputs["num_crops"] = torch.tensor(tilings).prod(-1) + 1
 
-        image_ids = [
-            DEFAULT_IMAGE_PATCH_TOKEN_ID,
-            DEFAULT_IM_COL_TOKEN_ID,
-            DEFAULT_IM_START_TOKEN_ID,
-            DEFAULT_IM_END_TOKEN_ID,
-        ]
-        is_image_ids, inv_idxs, counts = torch.unique_consecutive(
-            torch.isin(input_ids, torch.tensor(image_ids), assume_unique=True),
-            return_inverse=True,
-            return_counts=True,
-        )
-        idxs = inv_idxs.diff(prepend=torch.tensor([-1])).nonzero().squeeze(1)
-        assert len(is_image_ids) == len(idxs) == len(counts)
+            input_is_embed = torch.isin(
+                input_ids,
+                torch.tensor([
+                    DEFAULT_IMAGE_PATCH_TOKEN_ID,
+                    DEFAULT_IM_COL_TOKEN_ID,
+                    DEFAULT_IM_START_TOKEN_ID,
+                    DEFAULT_IM_END_TOKEN_ID,
+                ]),
+            )
+            is_embed_per_seg, count_per_seg = torch.unique_consecutive(
+                input_is_embed,
+                return_counts=True,
+            )
+            num_embeds_lst = list[int]()
+            for is_embed, count in zip(is_embed_per_seg, count_per_seg):
+                if is_embed:
+                    num_embeds_lst.append(count)
 
-        image_start_end_lst = list[tuple[int, int]]()
-        for is_image_id, idx, count in zip(is_image_ids, idxs, counts):
-            if is_image_id:
-                assert input_ids[idx] in image_ids
-                image_start_end_lst.append((idx, idx + count))
-
-        image_start_end = torch.tensor(image_start_end_lst)
-        assert len(image_start_end) <= 1, "Multi-image input not supported yet"
-        outputs["image_start_end"] = image_start_end.squeeze(0)
+            num_embeds = torch.tensor(num_embeds_lst)
+            assert num_embeds.sum() == input_is_embed.sum()
+            outputs["num_embeds"] = num_embeds
 
         return BatchFeature(outputs, tensor_type=return_tensors)
 
@@ -1297,18 +1300,16 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        num_patches = hf_inputs.get("num_patches", torch.empty(0))
-        num_images = len(num_patches)
+        num_crops = hf_inputs.get("num_crops", torch.empty(0))
 
         return dict(
-            images=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
+            images=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
             image_masks=MultiModalFieldConfig.flat_from_sizes(
-                "image", num_patches),
-            image_input_idx=MultiModalFieldConfig.flat_from_sizes(
-                "image", num_patches),
-            num_patches=MultiModalFieldConfig.batched("image"),
-            seq_len=MultiModalFieldConfig.shared("image", num_images),
-            image_start_end=MultiModalFieldConfig.shared("image", num_images),
+                "image", num_crops),
+            feat_is_patch=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_crops),
+            num_crops=MultiModalFieldConfig.batched("image"),
+            num_embeds=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_replacements(
@@ -1465,99 +1466,103 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         **kwargs: object,
     ) -> Optional[MolmoImageInputs]:
         images = kwargs.pop("images", None)
-        image_masks = kwargs.pop("image_masks", None)
-        image_start_end = kwargs.pop("image_start_end", None)
         if images is None:
             return None
 
-        image_input_idx = kwargs.pop("image_input_idx", None)
-        seq_len = kwargs.pop("seq_len", None)
-        if image_input_idx is None:
-            raise ValueError("image_input_idx is required for Molmo model.")
-        if seq_len is None:
-            raise ValueError("seq_len is required for Molmo model.")
         if not isinstance(images, (torch.Tensor, list)):
             raise ValueError("Incorrect type of images. "
                              f"Got type: {type(images)}")
-        if not isinstance(image_input_idx, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of image_input_idx. "
-                             f"Got type: {type(image_input_idx)}")
+
+        image_masks = kwargs.pop("image_masks", None)
         if not (image_masks is None or isinstance(image_masks,
                                                   (torch.Tensor, list))):
             raise ValueError("Incorrect type of image_masks. "
                              f"Got type: {type(image_masks)}")
-        if not isinstance(seq_len, torch.Tensor):
-            raise ValueError("Incorrect type of seq_len. "
-                             f"Got type: {type(seq_len)}")
-        if not isinstance(image_start_end, torch.Tensor):
-            raise ValueError("Incorrect type of image_start_end. "
-                             f"Got type: {type(image_start_end)}")
+
+        feat_is_patch = kwargs.pop("feat_is_patch", None)
+        if not isinstance(feat_is_patch, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of feat_is_patch. "
+                             f"Got type: {type(feat_is_patch)}")
+
+        num_crops = kwargs.pop("num_crops", None)
+        if not isinstance(num_crops, torch.Tensor):
+            raise ValueError("Incorrect type of num_crops. "
+                             f"Got type: {type(num_crops)}")
+
+        num_embeds = kwargs.pop("num_embeds", None)
+        if not isinstance(num_embeds, torch.Tensor):
+            raise ValueError("Incorrect type of num_embeds. "
+                             f"Got type: {type(num_embeds)}")
 
         return MolmoImageInputs(
             images=images,
-            image_input_idx=image_input_idx,
             image_masks=image_masks,
-            seq_len=seq_len,
-            image_start_end=image_start_end,
+            feat_is_patch=feat_is_patch,
+            num_crops=num_crops,
+            num_embeds=num_embeds,
         )
 
     def _process_image_input(
         self,
         image_input: MolmoImageInputs,
-    ) -> torch.Tensor:
-
-        image_features = self.vision_backbone(
-            images=image_input["images"],
-            image_masks=image_input["image_masks"],
-        )
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        if isinstance(image_input["images"], list):
+            # TODO: Enable vision backbone to handle flattened batches
+            image_features = [
+                self.vision_backbone(
+                    images=images.unsqueeze(0),
+                    image_masks=image_masks.unsqueeze(0),
+                ).squeeze(0) for images, image_masks in zip(
+                    image_input["images"],
+                    image_input["image_masks"],
+                )
+            ]
+        else:
+            image_features = self.vision_backbone(
+                images=image_input["images"],
+                image_masks=image_input["image_masks"],
+            )
 
         return image_features
+
+    def _get_batch_mm_embeds(
+            self,
+            features: torch.Tensor,  # Shape: (num_crop, num_patch, embed_dim)
+            is_patch: torch.Tensor,  # Shape: (num_crop, num_patch)
+            num_crops_per_image: torch.Tensor,  # Shape: (num_images,)
+            num_embeds_per_image: torch.Tensor,  # Shape: (num_images,)
+    ) -> list[torch.Tensor]:
+        # The patch features are padded to match the embedding dimension
+        # as defined in the multimodal processor
+        feats_per_image = features.split(num_crops_per_image)
+        is_patch_per_image = is_patch.split(num_crops_per_image)
+
+        return [
+            F.pad(
+                (patch := feats[is_patch]),
+                (0, 0, 0, int(num_embeds) - len(patch)),
+            ) for feats, is_patch, num_embeds in zip(
+                feats_per_image,
+                is_patch_per_image,
+                num_embeds_per_image,
+            )
+        ]
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
+
         image_features = self._process_image_input(image_input)
-        image_input_idx = image_input["image_input_idx"]
-        seq_len = image_input["seq_len"]
-        batch_size, num_image, num_patch = image_features.shape[:3]
-        assert image_input_idx.shape == (batch_size, num_image, num_patch)
 
-        # insert the image feature into the embedding.
-        image_features = image_features.view(batch_size, num_image * num_patch,
-                                             -1)
-        image_input_idx = image_input_idx.view(batch_size,
-                                               num_image * num_patch)
-
-        valid = image_input_idx >= 0
-        image_features = image_features * valid[:, :, None].to(
-            image_features.dtype)
-        image_features = image_features.view(
-            batch_size * num_image * num_patch, -1).contiguous()
-
-        image_input_idx = image_input_idx * valid.to(image_input_idx.dtype)
-        offset = torch.cat([seq_len.new_zeros(1),
-                            seq_len.cumsum(dim=0)[:-1]],
-                           dim=0)[:, None]
-        image_input_idx = image_input_idx + offset.to(image_input_idx.dtype)
-        image_input_idx = image_input_idx.flatten()[:, None]
-        mat = image_input_idx == torch.arange(
-            seq_len.sum().item(), device=image_features.device)[None, :]
-        mat = mat.to(image_features.dtype)
-
-        # Note: In this original implementation from AI2, the final
-        # vision_embeddings will be always be the same length
-        # of input embeddings.
-        vision_embeddings = torch.einsum('nd,nm->md', image_features, mat)
-
-        # Split by the sizes of the input sequences. For each full embedding,
-        # extract the actual vision embeddings to be merged.
-        vision_embeddings = list(vision_embeddings.split(seq_len.tolist()))
-        for i in range(len(vision_embeddings)):
-            start, end = image_input['image_start_end'][i]
-            vision_embeddings[i] = vision_embeddings[i][start:end]
-
-        return vision_embeddings
+        return [
+            self._get_batch_mm_embeds(*args) for args in zip(
+                image_features,
+                image_input["feat_is_patch"],
+                image_input["num_crops"],
+                image_input["num_embeds"],
+            )
+        ]
 
     def get_input_embeddings(
         self,
