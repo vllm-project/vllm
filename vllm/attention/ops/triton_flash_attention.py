@@ -1175,10 +1175,10 @@ class _attention(torch.autograd.Function):
         return o, encoded_softmax
 
 
-triton_attention = _attention.apply
+triton_attention_rocm = _attention.apply
 
 
-def triton_attention_rocm(
+def triton_attention(
     q,
     k,
     v,
@@ -1198,4 +1198,4 @@ def triton_attention_rocm(
     attn_metadata.causal = causal
     attn_metadata.bias = bias
     attn_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
-    return triton_attention(q, k, v, o, attn_metadata)
+    return triton_attention_rocm(q, k, v, o, attn_metadata)
