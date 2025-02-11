@@ -286,8 +286,6 @@ class MQLLMEngine:
                 logger.info("Added request %s.", request.request_id)
 
         except Exception as e:
-            print("\n Caught add_request failure\n")
-
             # We do not set self._errored = True here, since the error
             # is due to an issue adding this request to the engine,
             # rather than an issue with the engine itself.
