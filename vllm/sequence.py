@@ -639,6 +639,8 @@ class SequenceGroup:
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
+        kv_transfer_params: The KVCache transfer parameters to use for
+            disaggregated prefilling and KVCache sharing.
         priority: User-defined priority of the request.
     """
 
@@ -946,6 +948,8 @@ class SequenceGroupMetadata(
                            unless you are working with an encoder/decoder
                            model.
         prompt_adapter_request: Prompt Adapter request.
+        kv_transfer_params: The KVCache transfer parameters to use for
+            disaggregated prefilling and KVCache sharing.
     """
 
     request_id: str

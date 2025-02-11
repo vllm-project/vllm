@@ -5,7 +5,7 @@ from vllm import KVTransferParams
 
 
 def test_all_none():
-    """None should be allowed"""
+    # None should be allowed
     KVTransferParams(prefix_prompt_ids=None,
                      kvcache_load_keys=None,
                      kvcache_store_keys=None)
@@ -13,21 +13,27 @@ def test_all_none():
                      kvcache_load_keys=[None],
                      kvcache_store_keys=[None])
 
+    # Note(shangming): KVCache transfer may have different granularity,
+    # such as block-level, so the length of kvcache_load_keys and
+    # kvcache_store_keys has no strong correspondence with the length of
+    # prefix_prompt_ids.
+
     # prefill node cases
+    KVTransferParams(prefix_prompt_ids=[1, 2, 3],
+                     kvcache_load_keys=None,
+                     kvcache_store_keys=["key1", "key2", "key3"])
+
+    KVTransferParams(prefix_prompt_ids=[None, [1, 2, 3]],
+                     kvcache_load_keys=[None, None],
+                     kvcache_store_keys=[None, ["key1"]])
+
+    # decode node cases
     KVTransferParams(prefix_prompt_ids=[1, 2, 3],
                      kvcache_load_keys=["key1", "key2", "key3"],
                      kvcache_store_keys=None)
     KVTransferParams(prefix_prompt_ids=[None, [1, 2, 3]],
-                     kvcache_load_keys=[None, ["key1", "key2", "key3"]],
+                     kvcache_load_keys=[None, ["key1"]],
                      kvcache_store_keys=[None, None])
-
-    # decode node cases
-    KVTransferParams(prefix_prompt_ids=[1, 2, 3],
-                     kvcache_load_keys=None,
-                     kvcache_store_keys=["key1", "key2", "key3"])
-    KVTransferParams(prefix_prompt_ids=[None, [1, 2, 3]],
-                     kvcache_load_keys=[None, None],
-                     kvcache_store_keys=[None, ["key1", "key2", "key3"]])
 
     # prefix cache sharing cases
     KVTransferParams(prefix_prompt_ids=[[1, 2, 3], [1, 2]],

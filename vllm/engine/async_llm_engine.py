@@ -961,6 +961,8 @@ class AsyncLLMEngine(EngineClient):
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
+            kv_transfer_params: The KVCache transfer parameters to use
+                for generation, if any.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
 

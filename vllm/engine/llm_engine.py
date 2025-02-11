@@ -701,6 +701,7 @@ class LLMEngine:
             lora_request: The LoRA request to add.
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: The prompt adapter request to add.
+            kv_transfer_params: The KVCache transfer parameters to add.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
 
