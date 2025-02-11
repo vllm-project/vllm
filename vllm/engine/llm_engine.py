@@ -60,6 +60,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -1389,8 +1390,6 @@ class LLMEngine:
                 execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
 
-            # todo: import loop
-            from vllm.worker.model_runner import InputProcessingError
             try:
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)

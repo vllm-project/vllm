@@ -26,7 +26,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
-from vllm.worker.model_runner import InputProcessingError
+from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
 

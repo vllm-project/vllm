@@ -53,8 +53,8 @@ from vllm.utils import (DeviceMemoryProfiler, GiB_bytes, PyObjectCache,
                         is_pin_memory_available, supports_dynamo,
                         weak_ref_tensor)
 from vllm.worker.model_runner_base import (
-    ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
-    _add_attn_metadata_broadcastable_dict,
+    InputProcessingError, ModelRunnerBase, ModelRunnerInputBase,
+    ModelRunnerInputBuilderBase, _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
@@ -73,24 +73,6 @@ TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 # For now, bump up cache limits for recompilations during CUDA graph warmups.
 torch._dynamo.config.cache_size_limit = 128
 torch._dynamo.config.accumulated_cache_size_limit = 128
-
-
-class InputProcessingError(Exception):
-    """This exception is raised when an error occurs preparing the inputs for
-    a single sequence group.
-    This allows the engine to gracefully handle errors with a single sequence
-    group without having to fail the entire batch.
-    """
-
-    def __init__(self, request_id, message):
-        """request_id is the id of the offending sequence group"""
-        self.request_id = request_id
-        self.message = message
-        super().__init__(self.message)
-
-    def __str__(self):
-        return "Failed to prepare inputs for sequence group with request id: " \
-                f"{self.request_id}, Error: {self.message}"
 
 
 @dataclass(frozen=True)
