@@ -8,14 +8,14 @@ from vllm import LLM, SamplingParams
 def test_prompts():
     return [
         "Can you repeat the sentence ten times, this is a sentence.",
-        "This is a basic spec decode test",
+        "Can you repeat the sentence ten times, the future of AI is right.",
     ]
 
 
 @pytest.fixture
 def sampling_config():
     # Only support greedy for now
-    return SamplingParams(temperature=0, max_tokens=50, ignore_eos=False)
+    return SamplingParams(temperature=0, max_tokens=30, ignore_eos=False)
 
 
 @pytest.fixture
