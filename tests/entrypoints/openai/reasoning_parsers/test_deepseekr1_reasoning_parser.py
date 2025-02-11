@@ -15,32 +15,62 @@ start_token = "<think>"
 end_token = "</think>"
 
 SIMPLE_REASONING = {
-    "output": "<think>This is a reasoning section</think>This is the rest",
+    "output": "This is a reasoning section</think>This is the rest",
     "reasoning_content": "This is a reasoning section",
     "content": "This is the rest",
 }
 COMPLETE_REASONING = {
-    "output": "<think>This is a reasoning section</think>",
+    "output": "This is a reasoning section</think>",
     "reasoning_content": "This is a reasoning section",
     "content": None,
 }
 NO_REASONING = {
-    "output": "This is a reasoning section",
+    "output": "This is content",
     "reasoning_content": None,
-    "content": "This is a reasoning section",
+    "content": "This is content",
+}
+NO_REASONING_STREAMING = {
+    "output": "This is a reasoning section",
+    "reasoning_content": "This is a reasoning section",
+    "content": None,
 }
 MULTIPLE_LINES = {
-    "output": "<think>This\nThat</think>This is the rest\nThat",
+    "output": "This\nThat</think>This is the rest\nThat",
     "reasoning_content": "This\nThat",
     "content": "This is the rest\nThat",
 }
 SHORTEST_REASONING_NO_STREAMING = {
-    "output": "<think></think>This is the rest",
+    "output": "</think>This is the rest",
     "reasoning_content": "",
     "content": "This is the rest",
 }
 SHORTEST_REASONING = {
-    "output": "<think></think>This is the rest",
+    "output": "</think>This is the rest",
+    "reasoning_content": None,
+    "content": "This is the rest",
+}
+REASONING_WITH_THINK = {
+    "output": "<think>This is a reasoning section</think>This is the rest",
+    "reasoning_content": "This is a reasoning section",
+    "content": "This is the rest",
+}
+COMPLETE_REASONING_WITH_THINK = {
+    "output": "<think>This is a reasoning section</think>",
+    "reasoning_content": "This is a reasoning section",
+    "content": None,
+}
+MULTIPLE_LINES_WITH_THINK = {
+    "output": "<think>This\nThat</think>This is the rest\nThat",
+    "reasoning_content": "This\nThat",
+    "content": "This is the rest\nThat",
+}
+SHORTEST_REASONING_NO_STREAMING_WITH_THINK = {
+    "output": "</think>This is the rest",
+    "reasoning_content": "",
+    "content": "This is the rest",
+}
+SHORTEST_REASONING_WITH_THINK = {
+    "output": "</think>This is the rest",
     "reasoning_content": None,
     "content": "This is the rest",
 }
@@ -49,37 +79,37 @@ TEST_CASES = [
     pytest.param(
         False,
         SIMPLE_REASONING,
-        id="simple_streaming",
+        id="simple_reasoning",
     ),
     pytest.param(
         True,
         SIMPLE_REASONING,
-        id="simple_streaming",
+        id="simple_reasoning_streaming",
     ),
     pytest.param(
         False,
         COMPLETE_REASONING,
-        id="complete_streaming",
+        id="complete_reasoning",
     ),
     pytest.param(
         True,
         COMPLETE_REASONING,
-        id="complete_streaming",
+        id="complete_reasoning_streaming",
     ),
     pytest.param(
         False,
         NO_REASONING,
-        id="no_streaming",
+        id="no_reasoning_token",
     ),
     pytest.param(
         True,
-        NO_REASONING,
-        id="no_streaming",
+        NO_REASONING_STREAMING,
+        id="no_reasoning_token_streaming",
     ),
     pytest.param(
         False,
         MULTIPLE_LINES,
-        id="multiple_lines_streaming",
+        id="multiple_lines",
     ),
     pytest.param(
         True,
@@ -89,14 +119,58 @@ TEST_CASES = [
     pytest.param(
         True,
         SHORTEST_REASONING,
-        id="shortest_streaming",
+        id="shortest",
     ),
     pytest.param(
         False,
         SHORTEST_REASONING_NO_STREAMING,
         id="shortest_streaming",
     ),
+    pytest.param(
+        False,
+        REASONING_WITH_THINK,
+        id="reasoning_with_think",
+    ),
+    pytest.param(
+        True,
+        REASONING_WITH_THINK,
+        id="reasoning_with_think_streaming",
+    ),
+    pytest.param(
+        False,
+        COMPLETE_REASONING_WITH_THINK,
+        id="complete_reasoning_with_think",
+    ),
+    pytest.param(
+        True,
+        COMPLETE_REASONING_WITH_THINK,
+        id="complete_reasoning_with_think_streaming",
+    ),
+    pytest.param(
+        False,
+        MULTIPLE_LINES_WITH_THINK,
+        id="multiple_lines_with_think",
+    ),
+    pytest.param(
+        True,
+        MULTIPLE_LINES_WITH_THINK,
+        id="multiple_lines_with_think_streaming",
+    ),
+    pytest.param(
+        False,
+        SHORTEST_REASONING_NO_STREAMING_WITH_THINK,
+        id="shortest_with_think",
+    ),
+    pytest.param(
+        True,
+        SHORTEST_REASONING_WITH_THINK,
+        id="shortest_with_think_streaming",
+    ),
 ]
+
+# Global tokenizer initialization to avoid repeated loading
+tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
+tokenizer.add_tokens([start_token, end_token])
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
@@ -104,8 +178,6 @@ def test_reasoning(
     streaming: bool,
     param_dict: dict,
 ):
-    tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
-    tokenizer.add_tokens([start_token, end_token])
     output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
     output_tokens: List[str] = [
