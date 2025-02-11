@@ -69,11 +69,11 @@ def check_implementation():
                 logger.warning(msg)
 
         @wraps(original_init)
-        def wrapped_init(self, *args, **kwargs):
+        def wrapped_init(self, *args, **kwargs) -> None:
             original_init(self, *args, **kwargs)
             warn_unimplemented_methods(self)
 
-        cls.__init__ = wrapped_init
+        type.__setattr__(cls, '__init__', wrapped_init)
         return cls
 
     return decorator
