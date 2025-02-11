@@ -14,7 +14,7 @@ TEST_MODELS = [
         "dtype": torch.float16,
         "quantization": "compressed-tensors"
     }),
-    ("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", {
+    ("neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic", {
         "dtype": torch.float16,
         "quantization": "fp8"
     }),
