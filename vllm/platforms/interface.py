@@ -13,8 +13,10 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.utils import FlexibleArgumentParser
 else:
     VllmConfig = None
+    FlexibleArgumentParser = None
 
 logger = init_logger(__name__)
 
@@ -222,6 +224,22 @@ class Platform:
             random.seed(seed)
             np.random.seed(seed)
             torch.manual_seed(seed)
+
+    @classmethod
+    def pre_register_and_update(cls,
+                                parser: Optional[FlexibleArgumentParser] = None
+                                ) -> None:
+        """
+        Do some pre-registeration or update action for the current platform.
+
+        This function is called before global VllmConfig is initialized or cli
+        arguments are parsed. It's used for out-of-tree platforms to register or
+        update the configuration.
+
+        For example, the out-of-tree quantization config can be imported and
+        registered here dynamically.
+        """
+        pass
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
