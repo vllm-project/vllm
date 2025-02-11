@@ -345,6 +345,15 @@ main() {
   check_gpus
   check_hf_token
 
+  # Set to v1 to run v1 benchmark
+  VLLM_VERSION=$1
+  if [[ "${VLLM_VERSION:-v0}" == "v1" ]]; then
+    export VLLM_USE_V1=1
+  fi
+
+  # Set to 0 to run the benchmark script locally without uploading to Buildkite
+  UPLOAD_TO_BUILDKITE=$2
+
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
   (which jq) || (apt-get update && apt-get -y install jq)
@@ -371,7 +380,9 @@ main() {
   pip install tabulate pandas
   python3 $QUICK_BENCHMARK_ROOT/scripts/convert-results-json-to-markdown.py
 
-  upload_to_buildkite
+  if [[ "${UPLOAD_TO_BUILDKITE:-1}" == "1" ]]; then
+    upload_to_buildkite
+  fi
 }
 
 main "$@"
