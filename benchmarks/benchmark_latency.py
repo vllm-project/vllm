@@ -44,7 +44,7 @@ def save_to_pytorch_benchmark_format(
         },
     }
 
-    if os.environ.get("SAVE_IN_PYTORCH_BENCHMARK_FORMAT", False):
+    if os.environ.get("SAVE_TO_PYTORCH_BENCHMARK_FORMAT", False):
         # Don't use json suffix here as we don't want convert-results-json-to-markdown.py
         # to pick it up
         output_file = f"{os.path.splitext(args.output_json)[0]}.pytorch"
