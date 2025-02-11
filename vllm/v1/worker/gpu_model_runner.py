@@ -726,16 +726,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # in the decoder's KV cache.
                     continue
 
-                start_idx = max(num_computed_tokens - start_pos, 0)
-                end_idx = min(
-                    num_computed_tokens - start_pos + num_scheduled_tokens,
-                    num_encoder_tokens)
-                assert start_idx < end_idx
                 assert req_id in self.encoder_cache
                 assert i in self.encoder_cache[req_id]
                 encoder_output = self.encoder_cache[req_id][i]
-                assert end_idx <= encoder_output.shape[0], f"{end_idx=} {encoder_output.shape=}"
-                encoder_outputs.append(encoder_output[start_idx:end_idx])
+                if hasattr(self.model, "slice_encoder_output"):
+                    # Per-model custom logic to slice the encoder output. Some
+                    # models (e.g. Pixtral) have dynamic number of special
+                    # tokens (e.g. image_break) in the middle of placeholder
+                    # positions. This allows the model to calculate
+                    # encoder_output slices taking into account the special
+                    # tokens.
+                    encoder_outputs.append(self.model.slice_encoder_output(
+                        mm_input=req_state.mm_inputs[i],
+                        encoder_output=encoder_output,
+                        mm_pos=pos_info,
+                        num_computed_tokens=num_computed_tokens,
+                        num_scheduled_tokens=num_scheduled_tokens))
+                else:
+                    start_idx = max(num_computed_tokens - start_pos, 0)
+                    end_idx = min(
+                        num_computed_tokens - start_pos + num_scheduled_tokens,
+                        num_encoder_tokens)
+                    assert start_idx < end_idx
+                    # assert end_idx <= encoder_output.shape[0], f"{end_idx=} {encoder_output.shape=}"
+                    encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
     def get_model(self) -> nn.Module:

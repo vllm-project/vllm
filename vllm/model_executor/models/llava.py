@@ -27,7 +27,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, MultiModalKwargs,
-                                    NestedTensors)
+                                    NestedTensors, PlaceholderRange)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -507,6 +507,33 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if (config.text_config.architectures is None
                 and config.text_config.model_type == "mistral"):
             config.text_config.architectures = ["MistralForCausalLM"]
+
+            def _slice_encoder_output(
+                mm_input: MultiModalKwargs,
+                encoder_output: torch.Tensor,
+                mm_pos: PlaceholderRange,
+                num_computed_tokens: int,
+                num_scheduled_tokens: int,
+            ) -> torch.Tensor:
+                assert "pixel_values" in mm_input
+                image_input = mm_input["pixel_values"]
+                ncols, nrows = get_pixtral_hf_image_feature_grid_size(
+                    self.config.vision_config,
+                    image_width=image_input.shape[-1],
+                    image_height=image_input.shape[-2],
+                )
+                placeholder_start = mm_pos["offset"]
+                # Turn placeholder position into encoder output position
+                def placeholder_pos_to_encoder_output_pos(placeholder_pos: int) -> int:
+                    return placeholder_pos % (ncols + 1) + placeholder_pos // (ncols + 1) * ncols
+                start_idx = max(placeholder_pos_to_encoder_output_pos(num_computed_tokens - placeholder_start), 0)
+                end_idx = min(
+                    placeholder_pos_to_encoder_output_pos(num_computed_tokens + num_scheduled_tokens - placeholder_start),
+                    len(encoder_output))
+                assert start_idx <= end_idx, f"{start_idx=} should be no greater than {end_idx=}"
+                return encoder_output[start_idx:end_idx]
+            self.slice_encoder_output = _slice_encoder_output
+
         if (config.projector_hidden_act is None
                 and config.vision_config.hidden_act == "gelu"):
             config.projector_hidden_act = "gelu"
