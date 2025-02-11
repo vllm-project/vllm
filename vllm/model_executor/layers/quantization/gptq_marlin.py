@@ -208,7 +208,7 @@ class GPTQMarlinConfig(QuantizationConfig):
             layer, ParallelLMHead) and self.lm_head_quantized
         if isinstance(layer, LinearBase) or parallel_lm_head_quantized:
             # False = skip module, None = no override, else = Positive match
-            if self.get_dynamic_override(
+            if self.get_dynamic_override(  # noqa: E712
                     layer_name=prefix) == False:  # noqa: E712
                 if parallel_lm_head_quantized:
                     return UnquantizedEmbeddingMethod()
