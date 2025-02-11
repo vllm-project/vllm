@@ -57,12 +57,10 @@ class OpenAIServingScores(OpenAIServing):
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> List[Optional[PoolingRequestOutput]]:
 
-        engine_prompts = []
-
         try:
             input_texts = text_1 + text_2
 
-            engine_prompts = []
+            engine_prompts: List[TokensPrompt] = []
             tokenize_async = make_async(tokenizer.__call__,
                                         executor=self._tokenizer_executor)
 
@@ -126,8 +124,11 @@ class OpenAIServingScores(OpenAIServing):
         async for i, res in result_generator:
             embeddings[i] = res
 
+        assert all(embed is not None for embed in embeddings)
+
         emb_text_1 = embeddings[:len(text_1)]
         emb_text_2 = embeddings[len(text_1):]
+
         if len(emb_text_1) == 1:
             emb_text_1 = emb_text_1 * len(emb_text_2)
 
@@ -166,8 +167,8 @@ class OpenAIServingScores(OpenAIServing):
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> List[Optional[PoolingRequestOutput]]:
 
-        request_prompts = []
-        engine_prompts = []
+        request_prompts: List[str] = []
+        engine_prompts: List[TokensPrompt] = []
 
         if len(text_1) == 1:
             text_1 = text_1 * len(text_2)
