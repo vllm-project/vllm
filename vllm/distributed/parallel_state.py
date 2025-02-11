@@ -196,10 +196,8 @@ class GroupCoordinator:
         assert self.device_group is not None
 
         from vllm.platforms import current_platform
-        if current_platform.is_cuda_alike():
-            self.device = torch.device(f"cuda:{local_rank}")
-        else:
-            self.device = torch.device("cpu")
+        self.device = torch.device(
+            f"{current_platform.device_type}:{self.local_rank}")
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
