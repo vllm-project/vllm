@@ -324,7 +324,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
     "common_llm_kwargs",
     [{
         # A "real" model (not tiny).
-        "model_name": "meta-llama/Llama-3.2-1B-Instruct",
+        "model_name": "meta-llama/Llama-2-7b-chat-hf",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
@@ -379,7 +379,7 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
     "common_llm_kwargs",
     [{
         # A "real" model (not tiny).
-        "model_name": "meta-llama/Llama-3.2-1B-Instruct",
+        "model_name": "meta-llama/Llama-2-7b-chat-hf",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
