@@ -28,7 +28,7 @@ def save_to_pytorch_benchmark_format(
         "benchmark": {
             "name": "vLLM benchmark",
             "extra_info": {
-                "args": str(args),
+                "args": vars(args),
             },
         },
         "model": {
