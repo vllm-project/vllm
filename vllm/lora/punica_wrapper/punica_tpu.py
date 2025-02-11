@@ -33,7 +33,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     ):
         #No LoRA request, so return directly
         if self.no_lora:
-            return
+            return y
         return sgmv_shrink(
             x,
             w_t_all,
@@ -50,7 +50,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         scale: float,
     ):
         if self.no_lora:
-            return
+            return y
         return bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
     def _expand_prefill(
@@ -62,7 +62,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     ):
         #No LoRA request, so return directly
         if self.no_lora:
-            return
+            return y
         return sgmv_expand(
             x,
             w_t_all,
@@ -79,7 +79,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         add_inputs: bool,
     ):
         if self.no_lora:
-            return
+            return y
         return bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
 
     def _expand_slice_prefill(
@@ -93,7 +93,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     ) -> torch.Tensor:
         #No LoRA request, so return directly
         if self.no_lora:
-            return
+            return y
         return sgmv_expand_slice(
             x,
             w_t_all,
@@ -114,7 +114,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         add_inputs: bool,
     ) -> torch.Tensor:
         if self.no_lora:
-            return
+            return y
         return bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices,
                                  y_offset, y_slice_size, add_inputs)
 
