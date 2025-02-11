@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
+import time
 from typing import List, Optional, Union
 
 import msgspec
@@ -60,6 +61,30 @@ class EngineCoreRequest(
     lora_request: Optional[LoRARequest]
 
 
+class EngineCoreEventType(enum.IntEnum):
+    """The type of engine core request event."""
+    QUEUED = 1
+    SCHEDULED = 2
+
+
+class EngineCoreEvent(msgspec.Struct):
+    """A timestamped engine core event associated with a request.
+
+    The timestamp is a monotonic timestamps and is used for by the engine
+    frontend to calculate intervals between engine core events. These
+    timestamps should not be compared with timestamps from other processes.
+    """
+    type: EngineCoreEventType
+    timestamp: float
+
+    @classmethod
+    def new_event(cls,
+                  event_type: EngineCoreEventType,
+                  timestamp: Optional[float] = None) -> "EngineCoreEvent":
+        timestamp = time.monotonic() if timestamp is None else timestamp
+        return cls(event_type, timestamp)
+
+
 class EngineCoreOutput(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -74,6 +99,7 @@ class EngineCoreOutput(
 
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
+    events: Optional[List[EngineCoreEvent]] = None
 
     @property
     def finished(self) -> bool:
@@ -91,7 +117,12 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
-    scheduler_stats: SchedulerStats
+    scheduler_stats: Optional[SchedulerStats]
+    timestamp: float = 0.0
+
+    def __post_init__(self):
+        if self.timestamp == 0.0:
+            self.timestamp = time.monotonic()
 
 
 class EngineCoreRequestType(enum.Enum):
