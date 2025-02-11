@@ -295,7 +295,7 @@ class ColumnParallelLinear(LinearBase):
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
-        # If QKV or MergedColumn, use output size of each partitfion.
+        # If QKV or MergedColumn, use output size of each partition.
         if hasattr(self, "output_sizes"):
             self.output_partition_sizes = [
                 divide(output_size, self.tp_size)
