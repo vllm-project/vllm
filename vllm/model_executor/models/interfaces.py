@@ -448,7 +448,7 @@ class SupportsQuant:
     """The interface required for all models that support quantization."""
 
     packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
-    quant_config: Optional[QuantizationConfig] = None
+    quant_config: Optional["QuantizationConfig"] = None
 
     def __init__(self, quant_config: "QuantizationConfig"):
         super().__init__()
