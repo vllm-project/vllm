@@ -1254,8 +1254,11 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         # For MLA the v head dim is smaller than qk head dim so we pad out
         # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
+        v_dim = v.shape[-1]
+        pad_v = self.vllm_flash_attn_version < 3
+        if pad_v:
+            v = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
+                                        value=0)
 
         if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN and not has_context:
             output = self.triton_fa_func(
@@ -1278,7 +1281,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             output = self.flash_attn_varlen_func(
                 q=q,
                 k=k,
-                v=v_padded,
+                v=v,
                 cu_seqlens_q=prefill_metadata.query_start_loc,
                 cu_seqlens_k=prefill_metadata.query_start_loc,
                 max_seqlen_q=prefill_metadata.max_prefill_seq_len,
@@ -1291,7 +1294,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             output = self.flash_attn_varlen_func(
                 q=q,
                 k=k,
-                v=v_padded,
+                v=v,
                 cu_seqlens_q=prefill_metadata.query_start_loc,
                 cu_seqlens_k=prefill_metadata.query_start_loc,
                 max_seqlen_q=prefill_metadata.max_prefill_seq_len,
@@ -1317,10 +1320,11 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             )
 
         # slice by `:v.shape[-1]` in order to remove v headdim padding
-        output = output\
-            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                .reshape(-1, self.num_heads * v.shape[-1])
+        if pad_v:
+            attn_output = attn_output\
+                .view(-1, self.num_heads, q.shape[-1])[..., :v_dim]
 
+        attn_output = attn_output.reshape(-1, self.num_heads * v_dim)
         return self.o_proj(output)[0]
 
     @abstractmethod
