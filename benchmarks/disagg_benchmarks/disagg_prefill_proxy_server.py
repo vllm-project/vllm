@@ -28,6 +28,19 @@ async def forward_request(url, data):
                     yield content
 
 
+@app.route('/v1/models', methods=['GET'])
+async def forward_model_request():
+    async with aiohttp.ClientSession() as session:
+        headers = {
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+        }
+        async with session.get('http://localhost:8100/v1/models',
+                               headers=headers) as response:
+            if response.status == 200:
+                # Read the response from the upstream service
+                return await response.json()
+
+
 @app.route('/v1/completions', methods=['POST'])
 async def handle_request():
     try:
