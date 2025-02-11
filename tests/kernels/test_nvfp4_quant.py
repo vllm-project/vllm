@@ -5,7 +5,6 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import round_up
 
 if not current_platform.has_device_capability(100):
     pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
@@ -86,6 +85,7 @@ def ref_nvfp4_quant(x, global_scale):
 
 
 def recover_swizzled_scales(scale, m, n):
+    round_up = lambda x, y: (x + y - 1) // y * y
     rounded_m = round_up(m, 128)
     scale_n = n // BLOCK_SIZE
     rounded_n = round_up(scale_n, 4)
