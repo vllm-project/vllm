@@ -292,7 +292,7 @@ class AsyncLLM(EngineClient):
         # Aggregate generators for n child requests
         gens = []
         active = {}
-        seed = 42
+        seed = sampling_params.seed
         for idx in range(n):
             c_sampling_params = parent_state.get_child_sampling_params({
                 "n":
@@ -300,7 +300,8 @@ class AsyncLLM(EngineClient):
                 "seed":
                 seed
             })
-            seed += 1
+            if seed is not None:
+                seed += 1
             child_gen = self._generate(
                 prompt,
                 c_sampling_params,
