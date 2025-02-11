@@ -8,6 +8,7 @@ from gguf import GGMLQuantizationType as WeightType
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -257,6 +258,7 @@ class GGUFMoEMethod(GGUFLinearMethod):
                 # "shard_qweight_type": {},
                 "ignore_warning": True
             })
+
         set_weight_attrs(w2_qweight_type, extra_weight_attrs)
         layer.register_parameter("w2_qweight_type", w2_qweight_type)
 
@@ -285,21 +287,27 @@ class GGUFMoEMethod(GGUFLinearMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-        for w, idx in zip(topk_weights, topk_ids):
-            final_hidden_states = None
-            expert_up = layer.w13_weight[idx]
+        final_hidden_states = torch.empty_like(x)
+        act = SiluAndMul()
+        for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
+            inp = x[tok].reshape((1, ) + x.shape[1:])
+            current_hidden_state = None
+            for ww, ii in zip(w, idx):
+                expert_up = layer.w13_qweight[ii]
 
-            out = _fuse_mul_mat(x, expert_up, layer.w13_weight_type)
-            d = out.shape[-1] // 2
-            out = torch.ops._C.silu_and_mul(out[..., :d], out[..., d:])
+                out = _fuse_mul_mat(inp, expert_up,
+                                    layer.w13_qweight_type.weight_type)
+                out = act(out)
 
-            expert_down = layer.w2_weight[idx]
-            current_state = _fuse_mul_mat(out, expert_down,
-                                          layer.w2_weight_type)
-            if final_hidden_states is None:
-                final_hidden_states = current_state
-            else:
-                final_hidden_states.add_(current_state)
+                expert_down = layer.w2_qweight[ii]
+                current_state = _fuse_mul_mat(
+                    out, expert_down,
+                    layer.w2_qweight_type.weight_type).mul_(ww)
+                if current_hidden_state is None:
+                    current_hidden_state = current_state
+                else:
+                    current_hidden_state.add_(current_state)
+            final_hidden_states[tok] = current_hidden_state
         return final_hidden_states
 
 
