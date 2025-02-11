@@ -1,22 +1,45 @@
-# Dockerfile for vLLM on s390x architecture with dependencies, PyTorch, torchvision, and Apache Arrow
-FROM ubuntu:22.04
-USER root
+# Base UBI image for s390x architecture
+ARG BASE_UBI_IMAGE_TAG=9.5-1736404155
+FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
 
-RUN apt-get update -y && apt-get install -y \
-    git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev protobuf-compiler \
-    build-essential ffmpeg libsm6 libxext6 libgl1 python3 python3-pip cmake ninja-build \
-    cargo libjpeg-dev libpng-dev zlib1g-dev libavcodec-dev libavformat-dev libswscale-dev \
-    libtiff-dev libwebp-dev llvm-dev libclang-dev clang libssl-dev g++ \
-    python3-distutils python3-setuptools libbz2-dev liblz4-dev libzstd-dev \
-    libsnappy-dev rapidjson-dev libboost-dev liborc-dev pkg-config libopenblas-dev
+# Install basic dependencies
+RUN microdnf -y update && microdnf install -y \
+    python-pip python-wheel \
+    && microdnf clean all
 
-RUN python3 -m pip install --upgrade pip setuptools
+WORKDIR /workspace
 
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# Install development utilities
+RUN microdnf install -y \
+    which procps findutils tar vim git gcc g++ make patch make cython cargo zlib-devel \
+    libjpeg-turbo-devel libtiff-devel libpng-devel libwebp-devel freetype-devel harfbuzz-devel \
+    openssl-devel openblas openblas-devel wget autoconf automake libtool && \
+    microdnf clean all
+
+# Python Installation
+FROM base as python-install
+
+RUN microdnf install -y python-devel && microdnf clean all
+
+# Set up Python virtual environment
+RUN python -m venv /opt/venv/vllm
+ENV PATH="/opt/venv/vllm/bin:$PATH"
+
+# Upgrade pip and install base tools
+RUN python -m pip install --no-cache -U pip wheel uv cmake setuptools
+
+# Install Rust
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     . "$HOME/.cargo/env"
 
-WORKDIR /tmp/arrow
-RUN git clone https://github.com/apache/arrow.git && \
+# Build Apache Arrow
+workdir /tmp
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/ccache \
+    git clone https://github.com/apache/arrow.git && \
     cd arrow/cpp && \
     mkdir release && cd release && \
     cmake -DCMAKE_BUILD_TYPE=Release \
@@ -30,46 +53,100 @@ RUN git clone https://github.com/apache/arrow.git && \
           -DARROW_WITH_SNAPPY=ON \
           -DARROW_JSON=ON \
           -DARROW_CSV=ON \
+          -DARROW_DATASET=ON \
           -DPROTOBUF_PROTOC_EXECUTABLE=/usr/bin/protoc \
           -DARROW_DEPENDENCY_SOURCE=BUNDLED \
-          -DARROW_DATASET=libarrow_dataset.so \
           .. && \
-    make -j$(nproc) && make install
+    make -j$(nproc) && \
+    make install && \
+    cd ../../python && \
+    export PYARROW_PARALLEL=4 && \
+    export ARROW_BUILD_TYPE=release && \
+    python -m pip install -r requirements-build.txt && \
+    python setup.py build_ext --build-type=$ARROW_BUILD_TYPE --bundle-arrow-cpp bdist_wheel
 
-ENV CMAKE_PREFIX_PATH=/usr/local/lib/cmake:$CMAKE_PREFIX_PATH
-ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
+# Install numactl (needed for numa.h dependency)
+WORKDIR /tmp
+RUN curl -LO https://github.com/numactl/numactl/archive/refs/tags/v2.0.16.tar.gz && \
+    tar -xvzf v2.0.16.tar.gz && \
+    cd numactl-2.0.16 && \
+    ./autogen.sh && \
+    ./configure && \
+    make && \
+    make install
+
+# Clean up build files
+RUN rm -rf /tmp/numactl-2.0.16 /tmp/v2.0.16.tar.gz
+
+# Set include path
+ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
+
+# Copy vLLM source
 COPY . /workspace/vllm
 WORKDIR /workspace/vllm
 
+# Check git repository integrity if enabled
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
-RUN mkdir -p /root/.cache/pip && chmod -R 777 /root/.cache/pip
-
+# Install dependencies, including PyTorch and Apache Arrow
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     pip install --no-cache-dir -v \
         'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
+         /tmp/arrow/python/dist/*.whl  \
         --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
         -r requirements-cpu.txt
 
+#Clean up build files for arrow
+RUN rm -rf /tmp/arrow
+
+# Install torchvision
 ARG TORCH_VISION_VERSION=v0.20.1
+WORKDIR /tmp
 RUN git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
-    python3 setup.py bdist_wheel && \
-    pip install --no-cache-dir dist/*.whl && \
-    rm -rf dist
+    python setup.py bdist_wheel && \
+    pip install --no-cache-dir dist/*.whl
 
-RUN python3 -m pip install --upgrade setuptools
+#Clean up build files for vision
+RUN rm -rf /tmp/vision
 
+# Final build stage
+FROM python-install as vllm-cpu
+
+# Ensure we are using the virtual environment
+ENV PATH="/opt/venv/vllm/bin:$PATH"
+
+# Set correct library path for torch and numactl
+ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python3.9/site-packages/torch/lib:/usr/local/lib:$LD_LIBRARY_PATH"
+
+# Upgrade setuptools for compatibility
+RUN python -m pip install --upgrade setuptools
+
+WORKDIR /workspace/vllm
+
+# Build and install vllm
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py build_ext --inplace && \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
-    pip install --no-cache-dir dist/*.whl && \
+    VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
+    pip install dist/*.whl && \
     rm -rf dist
 
-ENTRYPOINT ["/usr/bin/python3", "-m", "vllm.entrypoints.openai.api_server"]
+# setup non-root user for vllm
+RUN umask 002 && \
+    useradd --uid 2000 --gid 0 vllm && \
+    mkdir -p /home/vllm && \
+    chmod g+rwx /home/vllm /usr/src /workspace
+
+COPY LICENSE /licenses/vllm.md
+COPY examples/*.jinja /app/data/template/
+
+USER 2000
+WORKDIR /home/vllm
+
+# Set the default entrypoint
+ENTRYPOINT ["/opt/venv/vllm/bin/python", "-m", "vllm.entrypoints.openai.api_server"]
