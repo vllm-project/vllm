@@ -143,6 +143,7 @@ class TransformersModel(nn.Module):
         self.model: PreTrainedModel = AutoModel.from_config(
             self.config,
             attn_implementation="vllm",
+            torch_dtype=vllm_config.model_config.dtype,
             trust_remote_code=vllm_config.model_config.trust_remote_code,
         )
         prefix = self.model.base_model_prefix
