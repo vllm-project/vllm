@@ -10,6 +10,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
+from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
@@ -25,6 +26,7 @@ class KVCacheManager:
         sliding_window: Optional[int] = None,
         enable_caching: bool = True,
         num_preallocate_tokens: int = 64,
+        log_stats: bool = False,
     ) -> None:
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
@@ -32,6 +34,8 @@ class KVCacheManager:
         self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
         self.sliding_window = sliding_window
         self.enable_caching = enable_caching
+        # FIXME: make prefix cache stats conditional on log_stats
+        self.log_stats = log_stats
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
         # blocks for each request. For example, when a request reaches the end
         # of its block table, we preallocate N blocks in advance. This way, we
@@ -72,10 +76,33 @@ class KVCacheManager:
         self.req_to_blocks: DefaultDict[str,
                                         List[KVCacheBlock]] = defaultdict(list)
 
+        # Mapping from request ID to kv block hashes.
+        # This is to avoid recomputing the block hashes for each call of
+        # `get_computed_blocks` or `allocate_slots`.
+        self.req_to_block_hashes: DefaultDict[
+            str, List[BlockHashType]] = defaultdict(list)
+
+        self.prefix_cache_stats = PrefixCacheStats()
+
     @property
     def usage(self) -> float:
+        """Get the KV cache usage.
+
+        Returns:
+            The KV cache usage (between 0.0 and 1.0).
+        """
         return 1.0 - (self.free_block_queue.num_free_blocks /
                       self.num_gpu_blocks)
+
+    def make_prefix_cache_stats(self) -> PrefixCacheStats:
+        """Get (and reset) the prefix cache stats.
+
+        Returns:
+            The current prefix caching stats.
+        """
+        stats = self.prefix_cache_stats
+        self.prefix_cache_stats = PrefixCacheStats()
+        return stats
 
     def get_computed_blocks(
             self, request: Request) -> Tuple[List[KVCacheBlock], int]:
@@ -97,11 +124,11 @@ class KVCacheManager:
         computed_blocks = []
 
         # The block hashes for the request may already be computed
-        # if the request was preempted and resumed.
-        if not request.kv_block_hashes:
-            request.set_kv_block_hashes(
-                hash_request_tokens(self.block_size, request))
-        block_hashes = request.kv_block_hashes
+        # if the scheduler has tried to schedule the request before.
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        if not block_hashes:
+            block_hashes = hash_request_tokens(self.block_size, request)
+            self.req_to_block_hashes[request.request_id] = block_hashes
 
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -111,6 +138,10 @@ class KVCacheManager:
                 computed_blocks.append(cached_block)
             else:
                 break
+
+        self.prefix_cache_stats.requests += 1
+        self.prefix_cache_stats.queries += len(block_hashes)
+        self.prefix_cache_stats.hits += len(computed_blocks)
 
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
@@ -199,8 +230,6 @@ class KVCacheManager:
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
                 # [..., max_num_blocks_per_req].
-                # TODO(woosuk): Check and reject requests if
-                # num_prompt_tokens + max_tokens > max_model_len.
                 self.max_num_blocks_per_req - len(req_blocks),
             )
             assert num_new_blocks > 0
@@ -252,29 +281,6 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
-    def uncache_blocks(self, request: Request) -> int:
-        """Uncache the blocks that are no longer full based on the
-        num_computed_tokens in the given request. This happens when
-        the blocks were full and cached due to speculative tokens, but the
-        speculative tokens are not accepted.
-
-        Args:
-            request: The request.
-
-        Returns:
-            The number of uncached blocks.
-        """
-        blocks = self.req_to_blocks[request.request_id]
-        num_computed_tokens = request.num_computed_tokens
-        num_full_blocks = num_computed_tokens // self.block_size
-        num_uncached_blocks = 0
-        for block in blocks[num_full_blocks:]:
-            # If the block is not cached, the following blocks are not cached.
-            if not self._maybe_evict_cached_block(block):
-                break
-            num_uncached_blocks += 1
-        return num_uncached_blocks
-
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalid prefix caching after the weights are updated,
@@ -299,6 +305,8 @@ class KVCacheManager:
         for block in self.block_pool:
             block.reset_hash()
 
+        self.prefix_cache_stats.reset = True
+
         logger.info("Successfully reset prefix cache")
         return True
 
@@ -322,9 +330,7 @@ class KVCacheManager:
 
         While all scheduled requests must be in the RUNNING state, the inverse
         is not necessarily true. There may be RUNNING requests that are not
-        scheduled in the current step. As of 1/1/2025, the scheduler does not
-        allow this case, but it is possible in the future, as we allow more
-        flexible scheduling.
+        scheduled in the current step.
 
         This can result in an edge case where the number of common prefix blocks
         is 0, even though all scheduled requests share a common prefix. This
@@ -460,7 +466,8 @@ class KVCacheManager:
             full_blocks: The list of blocks to update hash metadata.
             prev_block: The previous block in the chain.
         """
-        num_cached_block_hashes = len(request.kv_block_hashes)
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        num_cached_block_hashes = len(block_hashes)
 
         # Update the new blocks with the block hashes through the chain.
         prev_block_hash_value = None
@@ -470,8 +477,22 @@ class KVCacheManager:
             assert prev_block.block_hash is not None
             prev_block_hash_value = prev_block.block_hash.hash_value
 
-        for i, blk in enumerate(full_blocks):
-            blk_idx = blk_start_idx + i
+        # Find the first uncached block. This case should only happen when
+        # speculative decoding is used.
+        offset = 0
+        for blk in full_blocks:
+            if blk.block_hash is None:
+                break
+            else:
+                prev_block_hash_value = blk.block_hash.hash_value
+                offset += 1
+        else:
+            # All blocks are cached.
+            return
+
+        for i, blk in enumerate(full_blocks[offset:]):
+            blk_idx = blk_start_idx + offset + i
+            assert blk.block_hash is None
 
             if blk_idx < num_cached_block_hashes:
                 # The block hash may already be computed in
@@ -479,7 +500,7 @@ class KVCacheManager:
                 # this request (either the prompt tokens or the previously
                 # generated tokens with preemption). In this case we simply
                 # reuse the block hash.
-                block_hash = request.kv_block_hashes[blk_idx]
+                block_hash = block_hashes[blk_idx]
             else:
                 # Otherwise compute the block hash and cache it in the request
                 # in case it will be preempted in the future.
@@ -501,9 +522,17 @@ class KVCacheManager:
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(prev_block_hash_value,
                                                block_tokens, extra_keys)
-                request.append_kv_block_hashes(block_hash)
+                block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
             prev_block_hash_value = block_hash.hash_value
+
+    def free_block_hashes(self, request: Request) -> None:
+        """Discard the block hashes for the request.
+
+        NOTE: Unlike `free`, this method should be called only when the request
+        is finished, not when it is preempted.
+        """
+        self.req_to_block_hashes.pop(request.request_id, None)

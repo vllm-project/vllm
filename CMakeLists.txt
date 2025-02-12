@@ -226,7 +226,7 @@ set_gencode_flags_for_srcs(
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling cumem allocator extension.")
   # link against cuda driver library
-  list(APPEND CUMEM_LIBS cuda)
+  list(APPEND CUMEM_LIBS CUDA::cuda_driver)
   define_gpu_extension_target(
     cumem_allocator
     DESTINATION vllm
@@ -641,7 +641,7 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG d4e09037abf588af1ec47d0e966b237ee376876c
+          GIT_TAG 720c94869cf2e0ff5a706e9c7f1dce0939686ade
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

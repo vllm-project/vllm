@@ -110,7 +110,7 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-        "fbgemm_fp8", "gguf", "quark"
+        "fbgemm_fp8", "gguf", "quark", "ptpc_fp8"
     ]
 
     @classmethod
@@ -235,4 +235,5 @@ class RocmPlatform(Platform):
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
-        return torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+        return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(
+            device)[0]

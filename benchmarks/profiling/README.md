@@ -55,5 +55,3 @@ python3 rocmProfileData/tools/rpd2tracing.py trace.rpd trace.json
 ```
 
 Once the trace is converted, open the `.json` file in [Chrome](chrome://tracing/) or [Perfetto](https://ui.perfetto.dev/) for visualization.
-
-

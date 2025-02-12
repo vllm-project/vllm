@@ -15,7 +15,6 @@ import ipaddress
 import multiprocessing
 import os
 import re
-import resource
 import signal
 import socket
 import subprocess
@@ -712,6 +711,10 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
+
+
 def _generate_random_fp8(
     tensor: torch.Tensor,
     low: float,
@@ -941,6 +944,12 @@ def async_tensor_h2d(
 def get_dtype_size(dtype: torch.dtype) -> int:
     """Get the size of the data type in bytes."""
     return torch.tensor([], dtype=dtype).element_size()
+
+
+def align_to_256bytes(extent: int, dtype: torch.dtype) -> int:
+    dtype_size = get_dtype_size(dtype)
+    eles_per_256bytes = 256 // dtype_size
+    return round_up(extent, eles_per_256bytes)
 
 
 # `collections` helpers
@@ -2231,6 +2240,11 @@ def memory_profiling(
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
 def set_ulimit(target_soft_limit=65535):
+    if sys.platform.startswith('win'):
+        logger.info("Windows detected, skipping ulimit adjustment.")
+        return
+
+    import resource
     resource_type = resource.RLIMIT_NOFILE
     current_soft, current_hard = resource.getrlimit(resource_type)
 
@@ -2400,34 +2414,13 @@ def import_pynvml():
         This causes errors when both of them are installed.
         Starting from version 12.0, it migrates to a new module
         named `pynvml_utils` to avoid the conflict.
-    
-    TL;DR: if users have pynvml<12.0 installed, it will cause problems.
-    Otherwise, `import pynvml` will import the correct module.
-    We take the safest approach here, to manually import the correct
-    `pynvml.py` module from the `nvidia-ml-py` package.
+    It is so confusing that many packages in the community use the
+    unofficial one by mistake, and we have to handle this case.
+    For example, `nvcr.io/nvidia/pytorch:24.12-py3` uses the unofficial
+    one, and it will cause errors, see the issue
+    https://github.com/vllm-project/vllm/issues/12847 for example.
+    After all the troubles, we decide to copy the official `pynvml`
+    module to our codebase, and use it directly.
     """
-    if TYPE_CHECKING:
-        import pynvml
-        return pynvml
-    if "pynvml" in sys.modules:
-        import pynvml
-        if pynvml.__file__.endswith("__init__.py"):
-            # this is pynvml < 12.0
-            raise RuntimeError(
-                "You are using a deprecated `pynvml` package. "
-                "Please uninstall `pynvml` or upgrade to at least"
-                " version 12.0. See https://pypi.org/project/pynvml "
-                "for more information.")
-        return sys.modules["pynvml"]
-    import importlib.util
-    import os
-    import site
-    for site_dir in site.getsitepackages():
-        pynvml_path = os.path.join(site_dir, "pynvml.py")
-        if os.path.exists(pynvml_path):
-            spec = importlib.util.spec_from_file_location(
-                "pynvml", pynvml_path)
-            pynvml = importlib.util.module_from_spec(spec)
-            sys.modules["pynvml"] = pynvml
-            spec.loader.exec_module(pynvml)
-            return pynvml
+    import vllm.third_party.pynvml as pynvml
+    return pynvml
