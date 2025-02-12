@@ -218,6 +218,8 @@ __global__ void sgl_moe_align_block_size_kernel(
     }
   }
 
+  __syncthreads();
+
   const size_t tokens_per_thread = CEILDIV(numel, blockDim.x);
   const size_t start_idx = threadIdx.x * tokens_per_thread;
 
