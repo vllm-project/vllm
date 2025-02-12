@@ -140,6 +140,17 @@ class RayDistributedExecutor(DistributedExecutorBase):
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
+        def retain_envs(var_name):
+            retain_var_list = ['GLOO_SOCKET_IFNAME']
+            return ('HPU' in var_name or 'RAY' in var_name or 'VLLM' in var_name or var_name in retain_var_list)
+
+        if (self.parallel_config.tensor_parallel_size == 1
+                and self.parallel_config.pipeline_parallel_size == 1):
+            # For single GPU case, we use a ray worker with constrained memory.
+            num_gpus = self.cache_config.gpu_memory_utilization
+        else:
+            # Otherwise, the ray workers are allocated with a full GPU.
+            num_gpus = 1
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
@@ -198,11 +209,14 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
                                            rpc_rank=rank)
             else:
+                runtime_env_vars = {k:v for k, v in os.environ.items() if retain_envs(k)}
+                logger.info(f"setting ray env with {runtime_env_vars}")
                 worker = ray.remote(
                     num_cpus=0,
                     num_gpus=0,
                     resources={current_platform.ray_device_key: num_gpus},
                     scheduling_strategy=scheduling_strategy,
+                    runtime_env={"env_vars": runtime_env_vars},
                     **ray_remote_kwargs,
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
                                            rpc_rank=rank)
