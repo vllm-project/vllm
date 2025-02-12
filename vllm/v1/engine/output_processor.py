@@ -55,6 +55,7 @@ class RequestState:
         request: EngineCoreRequest,
         queue: Optional[asyncio.Queue[RequestOutput]],
         log_stats: bool,
+        intial_incremental_detokenization_offset: int,
     ) -> "RequestState":
         return cls(
             request_id=request.request_id,
@@ -68,6 +69,8 @@ class RequestState:
             detokenizer=IncrementalDetokenizer.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
+                intial_incremental_detokenization_offset=
+                intial_incremental_detokenization_offset,
             ),
             arrival_time=request.arrival_time,
             queue=queue,
@@ -82,9 +85,12 @@ class OutputProcessor:
         self,
         tokenizer: BaseTokenizerGroup,
         log_stats: bool,
+        intial_incremental_detokenization_offset: int,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
+        self.intial_incremental_detokenization_offset = \
+            intial_incremental_detokenization_offset
         self.request_states: Dict[str, RequestState] = {}
 
     def is_request_active(self, request_id: str) -> bool:
@@ -115,6 +121,8 @@ class OutputProcessor:
         self.request_states[request_id] = RequestState.from_new_request(
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
+            intial_incremental_detokenization_offset=self.
+            intial_incremental_detokenization_offset,
             queue=queue,
             log_stats=self.log_stats)
 

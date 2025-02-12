@@ -7,6 +7,7 @@ import partial_json_parser
 import pytest
 from partial_json_parser.core.options import Allow
 
+from vllm.config import _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET
 from vllm.entrypoints.openai.protocol import (DeltaMessage, FunctionCall,
                                               ToolCall)
 from vllm.entrypoints.openai.tool_parsers import JambaToolParser
@@ -63,7 +64,8 @@ def stream_delta_message_generator(
              read_offset=read_offset,
              skip_special_tokens=False,
              spaces_between_special_tokens=True,
-         )
+             intial_incremental_detokenization_offset=
+             _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET)
 
         current_text = previous_text + delta_text
 

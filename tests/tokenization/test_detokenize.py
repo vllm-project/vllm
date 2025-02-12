@@ -5,6 +5,7 @@ from typing import Any, Dict, Generator, List, Optional
 import pytest
 from transformers import AutoTokenizer
 
+from vllm.config import _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET
 from vllm.inputs import token_inputs
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 from vllm.transformers_utils.detokenizer import (Detokenizer,
@@ -50,7 +51,9 @@ def _run_incremental_decode(tokenizer, all_input_ids,
             prev_tokens,
             offset,
             token_offset,
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens,
+            intial_incremental_detokenization_offset=
+            _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET)
         decoded_text += text
         if prev_tokens is None:
             prev_tokens = new_tokens
@@ -158,7 +161,9 @@ def detokenizer(tokenizer_name: str) -> Detokenizer:
         **init_kwargs,
     )
 
-    return Detokenizer(tokenizer_group)
+    return Detokenizer(tokenizer_group,
+                       intial_incremental_detokenization_offset=
+                       _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET)
 
 
 @pytest.fixture(name="complete_sequence_token_ids")
