@@ -800,7 +800,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             preprocessed_size = ImageSize(width=image_width,
                                           height=image_height)
 
-        grid_t = max(num_frames // temporal_patch_size, 1)
+        # NOTE: Frames are padded to be divisible by `temporal_patch_size`
+        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
+        padded_num_frames = num_frames + num_frames % temporal_patch_size
+
+        grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
         grid_w = preprocessed_size.width // patch_size
 
