@@ -2,11 +2,25 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
-    from vllm.v1.engine import EngineCoreOutputs, FinishReason
+    from vllm.v1.engine import EngineCoreEvent, FinishReason
+
+
+@dataclass
+class PrefixCacheStats:
+    """Stores prefix cache hit statistics."""
+    # Whether reset_prefix_cache was invoked.
+    reset: bool = False
+    # The number of requests in this update.
+    requests: int = 0
+    # The number of queries in these requests. Note that "queries" here
+    # means the number of blocks that were queried from the cache.
+    queries: int = 0
+    # The number of hits in these requests.
+    hits: int = 0
 
 
 @dataclass
@@ -67,11 +81,10 @@ class IterationStats:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
 
-    def update_from_output(self,
-                           num_new_generation_tokens: int,
+    def update_from_output(self, num_new_generation_tokens: int,
+                           engine_events: Optional[List["EngineCoreEvent"]],
                            engine_core_timestamp: float, is_prefilling: bool,
                            prompt_len: int, req_stats: RequestStateStats):
-        num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling and num_new_generation_tokens > 0:
@@ -91,8 +104,8 @@ class IterationStats:
         req_stats.num_generation_tokens += num_new_generation_tokens
 
         # Process request-level engine core events
-        if output.events is not None:
-            self.update_from_events(output.events, is_prefilling, req_stats)
+        if engine_events is not None:
+            self.update_from_events(engine_events, is_prefilling, req_stats)
 
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:

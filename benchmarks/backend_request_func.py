@@ -277,7 +277,6 @@ async def async_request_openai_completions(
                     first_chunk_received = False
 
                     #print(response)
-
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         #print(f"CB = {chunk_bytes}")

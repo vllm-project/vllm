@@ -187,11 +187,12 @@ class LogprobsProcessor:
                 logprob_token_ids, logprobs, ranks, decoded_tokens)
         }
 
-    def update_from_output(self,
-                           new_logprobs: List[Optional[LogprobsLists]],
-                           new_prompt_logprobs_tensors: List[Optional[LogprobsTensors]],
-                           ) -> None:
-        if len(new_logprobs) > 0:
-            self._update_sample_logprobs(output.new_logprobs)
-        if len(new_prompt_logprobs_tensors) > 0:
-            self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
+    def update_from_output(
+        self,
+        new_logprobs: Optional[LogprobsLists],
+        new_prompt_logprobs_tensors: Optional[LogprobsTensors],
+    ) -> None:
+        if new_logprobs is not None:
+            self._update_sample_logprobs(new_logprobs)
+        if new_prompt_logprobs_tensors is not None:
+            self._update_prompt_logprobs(new_prompt_logprobs_tensors)
