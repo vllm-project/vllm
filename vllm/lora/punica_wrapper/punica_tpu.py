@@ -22,7 +22,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                  device: Union[torch.device, str], **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
-
+    @torch.compile(backend="openxla")
     def shrink(
         self,
         y: torch.Tensor,
@@ -34,6 +34,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             return y
         return bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
+    @torch.compile(backend="openxla")
     def expand(
         self,
         y: torch.Tensor,
@@ -45,7 +46,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             return y
         return bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
 
-
+    @torch.compile(backend="openxla")
     def expand_slice(
         self,
         y: torch.Tensor,
@@ -60,6 +61,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         return bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices,
                                  y_offset, y_slice_size, add_inputs)
 
+    @torch.compile(backend="openxla")
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
                    x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
                    scale: float, **kwargs) -> Optional[torch.Tensor]:
@@ -97,6 +99,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             new_y.append(y_s)
         return tuple(new_y)
 
+    @torch.compile(backend="openxla")
     def add_expand(self,
                    y: torch.Tensor,
                    x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
@@ -143,6 +146,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             offset_left += output_slices[slice_idx]
         return y.view_as(y_org)
 
+    @torch.compile(backend="openxla")
     def add_lora_embedding(self,
                            y: torch.Tensor,
                            x: torch.Tensor,
@@ -165,6 +169,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         # Embedding layer only needs the expand op
         return self.expand(y, x, lora_b_stacked, add_inputs)
 
+    @torch.compile(backend="openxla")
     def add_lora_linear(self,
                         y: torch.Tensor,
                         x: torch.Tensor,
@@ -223,7 +228,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                                output_slices,
                                add_inputs=True,
                                **kwargs)
-
+    
+    @torch.compile(backend="openxla")
     def add_lora_logits(self,
                         y: torch.Tensor,
                         x: torch.Tensor,
