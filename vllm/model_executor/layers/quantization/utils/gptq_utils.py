@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import re
 from copy import deepcopy
-from fractions import Fraction
 from typing import Dict, Optional, Union
 
 import torch
@@ -29,12 +28,12 @@ def override_config(config: QuantizationConfig, prefix: str):
     if isinstance(desc_act, bool):
         config.desc_act = desc_act
 
+    config.pack_factor = 32 // config.weight_bits  # packed into int32
     if config.get_name() == "gptq_marlin":
         is_sym = get_dynamic_override(config, prefix, "sym", config.is_sym)
         if isinstance(is_sym, bool):
             config.is_sym = is_sym
 
-        config.pack_factor = 32 // config.weight_bits  # packed into int32
         if (config.weight_bits, config.is_sym) not in config.TYPE_MAP:
             raise ValueError("Unsupported quantization config: "
                              f"bits={config.weight_bits}, sym={config.is_sym}")
@@ -42,7 +41,6 @@ def override_config(config: QuantizationConfig, prefix: str):
         config.quant_type = config.TYPE_MAP[(config.weight_bits,
                                              config.is_sym)]
     elif config.get_name() == "gptq":
-        config.pack_factor = Fraction(32, config.weight_bits)
         if config.weight_bits not in [2, 3, 4, 8]:
             raise ValueError(
                 "Currently, only 2/3/4/8-bit weight quantization is "
