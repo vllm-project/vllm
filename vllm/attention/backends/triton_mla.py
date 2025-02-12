@@ -273,7 +273,7 @@ class TritonMLAMetadata(MLACommonMetadata):
     prefill_seq_len_total: Optional[int] = None
 
     # For chunked prefill
-    chunk_prefill_workspace_size: Optional[int] = None
+    chunked_prefill_workspace_size: Optional[int] = None
     chunk_cu_seq_lens: Optional[torch.Tensor] = None
     chunk_seq_starts: Optional[torch.Tensor] = None
     chunk_iter_toks: Optional[List[int]] = None
@@ -342,7 +342,7 @@ class TritonMLAMetadata(MLACommonMetadata):
             prefill_seq_len_total=seq_lens_tensor.sum().item(),
 
             # Chunk prefill meta-data
-            chunk_prefill_workspace_size=self.chunk_prefill_workspace_size,
+            chunked_prefill_workspace_size=self.chunked_prefill_workspace_size,
             chunk_cu_seq_lens=self.chunk_cu_seq_lens,
             chunk_seq_starts=self.chunk_seq_starts,
             chunk_iter_toks=self.chunk_iter_toks,
@@ -671,8 +671,7 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             self.multimodal_placeholder_maps.items()
         }
 
-        chunk_prefill_workspace_size = \
-            self.runner.model_config.max_model_len * 4
+        chunked_prefill_workspace_size = max(16 * self.num_prefills, 128)
         chunk_cu_seq_lens = None
         chunk_seq_starts = None
         chunk_iter_toks = None
@@ -681,29 +680,35 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
         print("seq_start_loc_tensor", seq_start_loc_tensor.device)
 
         chunked_prefill_enabled = self.input_builder.chunked_prefill_enabled
-        if chunked_prefill_enabled and self.num_prefills > 0:
+        if chunked_prefill_enabled and self.num_prefills > 0 \
+            and context_lens_tensor is not None:
             page_size = self.runner.block_size
-            seq_chunk_size = chunk_prefill_workspace_size // self.num_prefills
+            seq_chunk_size = chunked_prefill_workspace_size // self.num_prefills
+            print("seq_chunk_size", seq_chunk_size)
             # align seq_chunk_size to page_size by rounding down
             seq_chunk_size = seq_chunk_size - (seq_chunk_size % page_size)
-            num_chunks = (max_prefill_seq_len + seq_chunk_size -
+            assert seq_chunk_size > 0
+            num_chunks = (context_lens_tensor.max() + seq_chunk_size -
                           1) // seq_chunk_size
 
             # if `seq_chunk_size = 256`, `num_chunks = 3`, and
             #   `num_prefills = 4`, create a tensor that looks like
             #  [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512]]
+            # Note: we only chunk the current context so we can separate the
+            #       causal masked and un-masked portions of the computation
             chunk_seq_starts = \
                 torch.arange(num_chunks, device=device, dtype=torch.int32)\
                 .unsqueeze(1).expand(-1, self.num_prefills)\
                 * seq_chunk_size
-            chunk_ends = torch.min(seq_lens_tensor[:self.num_prefills]\
+            chunk_ends = torch.min(context_lens_tensor[:self.num_prefills]\
                 .unsqueeze(0), chunk_seq_starts + seq_chunk_size)
             chunk_seq_lens = (chunk_ends - chunk_seq_starts).clamp(min=0)
             _chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(torch.int32)
             zero = torch.zeros(num_chunks, dtype=torch.int32, device=device)\
-                .unsqueeze(0)
+                .unsqueeze(-1)
+            print("zero", zero.shape)
             print("self.num_prefills", self.num_prefills, "_chunk_cu_seq_lens",
-                  _chunk_cu_seq_lens)
+                  _chunk_cu_seq_lens.shape)
             chunk_cu_seq_lens = torch.cat([zero, _chunk_cu_seq_lens], dim=1)
             chunk_max_seq_lens = chunk_seq_lens.max(dim=1).values.tolist()
             chunk_iter_toks = chunk_seq_lens.sum(dim=1).tolist()
@@ -737,7 +742,7 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             num_kv_splits=4,  # TODO(lucas) add heuristic
             head_dim=self.runner.model_config.get_head_size(),
             # Chunked prefill data
-            chunk_prefill_workspace_size=chunk_prefill_workspace_size,
+            chunked_prefill_workspace_size=chunked_prefill_workspace_size,
             chunk_cu_seq_lens=chunk_cu_seq_lens,
             chunk_seq_starts=chunk_seq_starts,
             chunk_iter_toks=chunk_iter_toks,
@@ -781,6 +786,129 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                                       "are not implemented for "
                                       "TritonMLAImpl")
 
+    def _compute_prefill_context_attention(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: TritonMLAMetadata,
+    ):
+        prefill_metadata = attn_metadata.prefill_metadata
+        if not hasattr(self, "workspace"):
+            self.workspace = torch.empty(
+                (attn_metadata.chunked_prefill_workspace_size,
+                 self.kv_lora_rank + self.qk_rope_head_dim),
+                dtype=q.dtype,
+                device=q.device,
+            )
+
+        output = None
+        iters = len(prefill_metadata.chunk_iter_toks)
+        for i in range(iters):
+            chunk_cu_seq_lens = prefill_metadata.chunk_cu_seq_lens[i]
+            chunk_seq_starts = prefill_metadata.chunk_seq_starts[i]
+            toks = prefill_metadata.chunk_iter_toks[i]
+            max_seq_len = prefill_metadata.chunk_max_seq_lens[i]
+
+            if attn_metadata.first_layer:
+                print("running gather")
+                print(prefill_metadata.block_tables)
+                print("chunk_cu_seq_lens", chunk_cu_seq_lens)
+                print("chunk_seq_starts", chunk_seq_starts)
+
+            ops.gather_cache(
+                src_cache=kv_c_and_k_pe_cache,
+                dst=self.workspace,
+                block_table=prefill_metadata.block_tables,
+                cu_seq_lens=chunk_cu_seq_lens,
+                batch_size=prefill_metadata.num_prefills,
+                seq_starts=chunk_seq_starts,
+            )
+
+            k_c_normed = self.workspace[:toks]\
+                [..., :self.kv_lora_rank].unsqueeze(1)
+            k_pe = self.workspace[:toks]\
+                [..., self.kv_lora_rank:].unsqueeze(1)
+            # print("====================================")
+            # print(prefill_metadata.block_tables)
+            # print("====================================")
+            kv_nope = self.kv_b_proj(k_c_normed)[0].view( \
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, v = kv_nope\
+                .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
+                          dim=-1)
+
+            # For MLA the v head dim is smaller than qk head dim so we pad
+            # out v with 0s to match the qk head dim
+            v_padded = torch.nn.functional.pad(v,
+                                               [0, q.shape[-1] - v.shape[-1]],
+                                               value=0)
+
+            if attn_metadata.first_layer:
+                print("prefill_metadata.query_start_loc",
+                      prefill_metadata.query_start_loc)
+
+            attn_output, attn_softmax_lse = flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=chunk_cu_seq_lens,
+                max_seqlen_q=prefill_metadata.max_query_len,
+                max_seqlen_k=max_seq_len,
+                softmax_scale=self.scale,
+                causal=False,  # Context is unmasked
+                return_softmax_lse=True,
+                fa_version=self.vllm_flash_attn_version,
+            )
+
+            if attn_metadata.first_layer:
+                print("q", q.shape)
+                print("k", k.shape)
+                print("v", v_padded.shape)
+                print("prefill_metadata.query_start_loc",
+                      prefill_metadata.query_start_loc)
+                print("chunk_cu_seq_lens", chunk_cu_seq_lens)
+                print(attn_output.shape)
+
+            if output is None:
+                output = attn_output
+                output_lse = attn_softmax_lse
+                if attn_metadata.first_layer:
+                    print("============  first output =============")
+                    print("output", output.shape, output[0])
+                    print("output_lse", output_lse.shape, output_lse[0])
+                    print("========================================")
+
+            else:
+                if attn_metadata.first_layer:
+                    print("merging", output.shape, attn_output.shape)
+
+                output_tmp = torch.ones_like(output)
+                output_lse_tmp = torch.ones_like(output_lse)
+                merge_attn_states(
+                    output=output_tmp,
+                    output_lse=output_lse_tmp,
+                    prefix_output=output,
+                    prefix_lse=output_lse,
+                    suffix_output=attn_output,
+                    suffix_lse=attn_softmax_lse,
+                )
+
+                if attn_metadata.first_layer:
+                    print("attn_softmax_lse", attn_softmax_lse.shape,
+                          attn_softmax_lse[0])
+                    print("output_lse_tmp", output_lse_tmp.shape,
+                          output_lse_tmp[0])
+                    print("output_tmp", output_tmp.shape, output_tmp[0])
+                    print("output", output.shape, output[0])
+                    print("att_output", attn_output.shape, attn_output[0])
+                output = output_tmp
+                output_lse = output_lse_tmp
+
+        return output, output_lse
+
     def _forward_prefill(
         self,
         q: torch.Tensor,
@@ -793,100 +921,57 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
 
         prefill_metadata = attn_metadata.prefill_metadata
 
-        if prefill_metadata.context_lens_tensor is not None \
-            and prefill_metadata.context_lens_tensor.max() > 0 \
-            and kv_c_and_k_pe_cache.numel() > 0:
+        has_context = prefill_metadata.context_lens_tensor is not None \
+            and prefill_metadata.context_lens_tensor.max() > 0
 
-            if not hasattr(self, "workspace"):
-                self.workspace = torch.empty(
-                    (attn_metadata.chunk_prefill_workspace_size,
-                     self.kv_lora_rank + self.qk_rope_head_dim),
-                    dtype=q.dtype,
-                    device=q.device,
-                )
+        if has_context:
+            context_output, context_lse = \
+                self._compute_prefill_context_attention(
+                q, kv_c_and_k_pe_cache, attn_metadata)
 
-            output = None
-            iters = len(prefill_metadata.chunk_iter_toks)
-            for i in range(iters):
-                chunk_cu_seq_lens = prefill_metadata.chunk_cu_seq_lens[i]
-                chunk_seq_starts = prefill_metadata.chunk_seq_starts[i]
-                toks = prefill_metadata.chunk_iter_toks[i]
-                max_seq_len = prefill_metadata.chunk_max_seq_lens[i]
+            kv_nope = self.kv_b_proj(kv_c)[0].view(\
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, v = kv_nope\
+                .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-                if attn_metadata.first_layer:
-                    print("running gather")
-                    print(prefill_metadata.block_tables)
-                    print("chunk_cu_seq_lens", chunk_cu_seq_lens)
-                    print("chunk_seq_starts", chunk_seq_starts)
+            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
+                          dim=-1)
 
-                ops.gather_cache(
-                    src_cache=kv_c_and_k_pe_cache,
-                    dst=self.workspace,
-                    block_table=prefill_metadata.block_tables,
-                    cu_seq_lens=chunk_cu_seq_lens,
-                    batch_size=prefill_metadata.num_prefills,
-                    seq_starts=chunk_seq_starts,
-                )
+            # For MLA the v head dim is smaller than qk head dim so we pad out
+            # v with 0s to match the qk head dim
+            v_padded = torch.nn.functional.pad(v,
+                                               [0, q.shape[-1] - v.shape[-1]],
+                                               value=0)
 
-                k_c_normed = self.workspace[:toks]\
-                    [..., :self.kv_lora_rank].unsqueeze(1)
-                k_pe = self.workspace[:toks]\
-                    [..., self.kv_lora_rank:].unsqueeze(1)
-                # print("====================================")
-                # print(prefill_metadata.block_tables)
-                # print("====================================")
-                kv_nope = self.kv_b_proj(k_c_normed)[0].view( \
-                    -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-                k_nope, v = kv_nope\
-                    .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            extend_output, extend_lse = flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=attn_metadata.query_start_loc,
+                cu_seqlens_k=attn_metadata.query_start_loc,
+                max_seqlen_q=attn_metadata.max_prefill_seq_len,
+                max_seqlen_k=attn_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=True,
+                fa_version=self.vllm_flash_attn_version,
+            )
 
-                k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
-                              dim=-1)
-
-                # For MLA the v head dim is smaller than qk head dim so we pad
-                # out v with 0s to match the qk head dim
-                v_padded = torch.nn.functional.pad(
-                    v, [0, q.shape[-1] - v.shape[-1]], value=0)
-
-                if attn_metadata.first_layer:
-                    print("prefill_metadata.query_start_loc",
-                          prefill_metadata.query_start_loc)
-
-                attn_output, attn_softmax_lse = flash_attn_varlen_func(
-                    q=q,
-                    k=k,
-                    v=v_padded,
-                    cu_seqlens_q=prefill_metadata.query_start_loc,
-                    cu_seqlens_k=chunk_cu_seq_lens,
-                    max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=max_seq_len,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    return_softmax_lse=True,
-                    fa_version=self.vllm_flash_attn_version,
-                )
-
-                if attn_metadata.first_layer:
-                    print(q.shape)
-                    print(k.shape)
-                    print(v_padded.shape)
-
-                if output is None:
-                    output = attn_output
-                else:
-                    merge_attn_states(
-                        output=output,
-                        prefix_output=output,
-                        prefix_lse=attn_softmax_lse,
-                        suffix_output=attn_output,
-                        suffix_lse=attn_softmax_lse,
-                    )
-
-                attn_metadata.first_layer = False
+            output = torch.empty_like(context_output)
+            merge_attn_states(
+                output=output,
+                prefix_output=context_output,
+                prefix_lse=context_lse,
+                suffix_output=extend_output,
+                suffix_lse=extend_lse,
+            )
 
             output = output\
                 .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
                     .reshape(-1, self.num_heads * v.shape[-1])
+
+            attn_metadata.first_layer = False
+
             return self.o_proj(output)[0]
         else:
             return self._forward_prefill_flash(
