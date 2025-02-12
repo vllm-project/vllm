@@ -120,16 +120,16 @@ TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
-    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(tp_base=8),  # noqa: E501
+    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(tp_base=8),
     "baichuan-inc/Baichuan-7B": PPTestSettings.fast(),
-    "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),  # noqa: E501
+    "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "THUDM/chatglm3-6b": PPTestSettings.fast(),
-    "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(tp_base=2),  # noqa: E501
+    "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(tp_base=2),
     "databricks/dbrx-instruct": PPTestSettings.fast(tp_base=8),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(),  # noqa: E501
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(),
     "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct": PPTestSettings.fast(),
     "tiiuae/falcon-7b": PPTestSettings.fast(),
     "google/gemma-2b": PPTestSettings.fast(),
@@ -161,7 +161,7 @@ TEXT_GENERATION_MODELS = {
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(),
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "microsoft/phi-2": PPTestSettings.fast(),
-    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),  # noqa: E501
+    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(multi_node_only=True, load_format="dummy"),  # noqa: E501
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-7B-Instruct": PPTestSettings.fast(),
@@ -181,7 +181,7 @@ EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
     "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
     "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(),
-    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(tp_base=4),  # noqa: E501
+    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(tp_base=4),
 }
 
 MULTIMODAL_MODELS = {
@@ -197,12 +197,12 @@ MULTIMODAL_MODELS = {
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
     "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
-    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(),  # noqa: E501
-    "mistralai/Pixtral-12B-2409": PPTestSettings.fast(tp_base=2),  # noqa: E501
+    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(),
+    "mistralai/Pixtral-12B-2409": PPTestSettings.fast(tp_base=2),
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
-    "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),  # noqa: E501
+    "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),
     # [Encoder-decoder]
     # TODO: Implement PP
     # "meta-llama/Llama-3.2-11B-Vision-Instruct": PPTestSettings.fast(),
