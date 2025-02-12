@@ -2,7 +2,7 @@
 
 import enum
 import time
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
@@ -129,14 +129,16 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     request_ids: List[str]
-    new_token_id_offsets: List[int]
+    new_token_id_offsets: List[
+        int]  # consider making Optional since most of the time all will be 1
     new_token_ids: List[int]
-    # TODO: need offsets for logprobs?
-    new_logprobs: List[Optional[LogprobsLists]]
-    new_prompt_logprobs_tensors: List[Optional[LogprobsTensors]]
-    finish_reason: Dict[str, FinishReason]  # Union[List, Dict]?
-    events: List[Optional[List[EngineCoreEvent]]]
-    scheduler_stats: SchedulerStats
+
+    new_logprobs: Dict[str, LogprobsLists]
+    new_prompt_logprobs_tensors: Dict[str, LogprobsTensors]
+
+    finish_reason: Dict[str, Tuple[FinishReason, Union[int, str, None]]]
+    events: Dict[str, List[EngineCoreEvent]]
+    scheduler_stats: Optional[SchedulerStats]
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None
