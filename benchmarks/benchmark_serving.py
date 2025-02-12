@@ -794,7 +794,7 @@ def parse_goodput(slo_pairs):
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                                      results: Dict[str, Any],
                                      file_name: str) -> None:
-    metrics = ["ttft", "tpot", "itl", "e2el"]
+    metrics = ["ttfts", "itls"]
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={k: results[k]
