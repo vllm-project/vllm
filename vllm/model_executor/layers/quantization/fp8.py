@@ -1,6 +1,7 @@
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -29,6 +30,7 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.model_executor.layers.quantization.utils.fp8_utils import dequant_block_fp8_weight_naive
 
 if current_platform.is_hpu():
     from vllm_hpu_extension.ops import scaled_fp8_quant
@@ -743,6 +745,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             block_shape=self.quant_config.weight_block_size,
         )
 
+    def dequant_weight(self, weight, weight_scale, block_size):
+        weight_scale_m, weight_scale_n = weight_scale.shape
+        weight_scale = weight_scale.view(weight_scale_m, 1, weight_scale_n, 1)
+        weight = weight.view(weight_scale_m, block_size, weight_scale_n, block_size)
+        dequant_weight = weight.to(torch.bfloat16) * weight_scale.to(torch.bfloat16)
+        dequant_weight = dequant_weight.view(weight_scale_m*block_size, weight_scale_n*block_size)
+        return dequant_weight
+
     def forward_hpu(
         self,
         layer: torch.nn.Module,
@@ -764,9 +774,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # # assert topk_group is None, 'topk_group is not supported on HPU'
         # if layer is not None:
         #     return layer.hpu_fused_moe(x, router_logits, top_k)
-        assert len(x.shape) == 2
-        import habana_frameworks.torch as htorch
-        htorch.core.mark_step()
+#        assert len(x.shape) == 2
+#        import habana_frameworks.torch as htorch
+#        htorch.core.mark_step()
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -781,11 +791,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         final_hidden_states = torch.zeros_like(x)
         num_experts = layer.w13_weight.shape[0]
         n_expert_slice = layer.w13_weight.shape[0] // self.moe_n_slice
-        assert n_expert_slice * self.moe_n_slice == num_experts
-
-        # w13_list = layer.hpu_fused_moe.MoeOp.w13_list
-        # w2_list = layer.hpu_fused_moe.MoeOp.w2_list
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import dequant_block_fp8_weight_naive
+#        assert n_expert_slice * self.moe_n_slice == num_experts
 
         orig_M_w13 = layer.orig_M_w13.data
         orig_N_w13 = layer.orig_N_w13.data
@@ -793,43 +799,60 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         orig_N_w2 = layer.orig_N_w2.data
         ep_shift = ep_rank * num_experts
 
-        for i in range(self.moe_n_slice):
-            min_expert = i * n_expert_slice
-            max_expert = (i + 1) * n_expert_slice
+        bt, hidden_dim = x.shape
 
-            w13_weight_tmp = layer.w13_weight[min_expert:max_expert, ...]
-            w2_weight_tmp = layer.w2_weight[min_expert:max_expert, ...]
-            w13_scale_tmp = layer.w13_weight_scale_inv[min_expert:max_expert, ...]
-            w2_scale_tmp = layer.w2_weight_scale_inv[min_expert:max_expert, ...]
+        final_hidden_states = torch.zeros((bt, hidden_dim), dtype=x.dtype, device=x.device)
+        total_num_experts = router_logits.size(1)
 
-            w13_weight = dequant_block_fp8_weight_naive(weight=w13_weight_tmp,
-                                                    weight_scale=w13_scale_tmp,
+        padded_weights = torch.zeros((bt, total_num_experts), dtype=x.dtype, device=x.device)
+        padded_weights.scatter_(-1, topk_ids, topk_weights)
+        padded_weights = padded_weights.transpose(0, 1)
+
+        moe_intermediate_size = layer.w13_weight.size(1) // 2
+        moe_block_size = layer.w13_weight_scale_inv.size(1) // 2
+
+        for idx in range(num_experts):
+            w13_weight_tmp = layer.w13_weight[idx, ...]
+            w2_weight_tmp = layer.w2_weight[idx, ...]
+            w13_scale_tmp = layer.w13_weight_scale_inv[idx, ...]
+            w2_scale_tmp = layer.w2_weight_scale_inv[idx, ...]
+
+            '''
+            w1_weight = dequant_block_fp8_weight_naive(weight=w13_weight_tmp[:moe_intermediate_size, ...],
+                                                    weight_scale=w13_scale_tmp[:moe_block_size, ...],
                                                     block_size=self.quant_config.weight_block_size,
                                                     dtype=x.dtype,
                                                     original_M=orig_M_w13,
                                                     original_N=orig_N_w13)
+            gate_states = torch.matmul(x, w1_weight.transpose(0, 1))
+
+            w3_weight = dequant_block_fp8_weight_naive(weight=w13_weight_tmp[moe_intermediate_size:, ...],
+                                                    weight_scale=w13_scale_tmp[moe_block_size:, ...],
+                                                    block_size=self.quant_config.weight_block_size,
+                                                    dtype=x.dtype,
+                                                    original_M=orig_M_w13,
+                                                    original_N=orig_N_w13)
+            up_states = torch.matmul(x, w3_weight.transpose(0, 1))
+            up_gate_states = F.silu(gate_states) * up_states
+            
             w2_weight = dequant_block_fp8_weight_naive(weight=w2_weight_tmp,
                                                     weight_scale=w2_scale_tmp,
                                                     block_size=self.quant_config.weight_block_size,
                                                     dtype=x.dtype,
                                                     original_M=orig_M_w2,
                                                     original_N=orig_N_w2)
-            torch.hpu.synchronize()
+            '''
+            w13_weight = self.dequant_weight(w13_weight_tmp, w13_scale_tmp, self.quant_config.weight_block_size[0])
+            up_gate_states = torch.matmul(x, w13_weight.transpose(0, 1))
+            d = up_gate_states.shape[-1] // 2
+            tmp_states = F.silu(up_gate_states[..., :d]) * up_gate_states[..., d:]
 
-            w13_list_slice = [w13_weight[j] for j in range(n_expert_slice)]
-            w2_list_slice = [w2_weight[j] for j in range(n_expert_slice)]
+            w2_weight = self.dequant_weight(w2_weight_tmp, w2_scale_tmp, self.quant_config.weight_block_size[0])
+            current_hidden_states = torch.matmul(tmp_states, w2_weight.transpose(0, 1))
 
-            final_hidden_states += torch.ops.hpu.mixture_of_experts(
-                                         hidden_states=x,
-                                         expert_routing_table=(topk_ids.to(torch.int64) - min_expert - ep_shift),
-                                         router_weights=topk_weights.to(x.dtype),
-                                         w12=w13_list_slice,
-                                         w3=w2_list_slice,
-                                         permuted_weights=True,
-                                         activation="silu",
-                                         experts_min=0,
-                                         experts_max=(n_expert_slice - 1))
-            torch.hpu.synchronize()
+            padded_weight = padded_weights[idx + ep_shift].unsqueeze(1)
+            final_hidden_states += current_hidden_states * padded_weight
+
         return final_hidden_states.view(-1, x.shape[1])
 
 
