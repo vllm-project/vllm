@@ -14,7 +14,9 @@ from transformers import PreTrainedTokenizerFast
 try:
     import xgrammar as xgr
     from xgrammar.base import _core as xgr_core
+    xgr_installed = True
 except ImportError:
+    xgr_installed = False
     pass
 
 from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
