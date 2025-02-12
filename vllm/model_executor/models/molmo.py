@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from functools import partial
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union)
+                    Union, cast)
 
 import numpy as np
 import torch
@@ -50,6 +50,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacementDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
+from vllm.utils import JSONTree, json_map_leaves
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
@@ -75,12 +76,28 @@ class MolmoImageInputs(TypedDict):
     """Shape: `(batch_size, num_crops, num_patch)`"""
 
     feat_is_patch: Union[torch.Tensor, List[torch.Tensor]]
-    """Shape: `(batch_size, num_crops, num_patch)`"""
+    """
+    A boolean mask indicating which image features correspond
+    to patch tokens.
+
+    Shape: `(batch_size, num_crops, num_patch)`
+    """
+
+    embed_is_patch: Union[torch.Tensor, List[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+    
+    Shape: `(batch_size, num_embeds)`
+
+    Note:
+        The original code only considers patch tokens as feature
+        tokens, but our processor considers all image-related tokens
+        as feature tokens because the feature tokens need to be
+        consecutive in `input_ids`.
+    """
 
     num_crops: torch.Tensor
-    """Shape: `(batch_size, num_images)`"""
-
-    num_embeds: torch.Tensor
     """Shape: `(batch_size, num_images)`"""
 
 
@@ -1121,7 +1138,7 @@ class MolmoProcessorWrapper:
         if not isinstance(images, list):
             images = [images]
 
-        input_ids = outputs.pop("input_ids")
+        input_ids: torch.Tensor = outputs.pop("input_ids")
         outputs["input_ids"] = input_ids.unsqueeze(0)
 
         image_input_idx = outputs.pop("image_input_idx", None)
@@ -1132,17 +1149,7 @@ class MolmoProcessorWrapper:
             feat_is_patch_flat = image_valid_flat.clone()
             feat_is_patch_flat[image_valid_flat] = (
                 input_is_patch[image_input_idx_flat[image_valid_flat]])
-            outputs["feat_is_patch"] = feat_is_patch_flat.view(
-                *image_input_idx.shape)
-
-            tilings = [
-                self.select_tiling(
-                    image_width=image.size[0],
-                    image_height=image.size[1],
-                ) for image in images
-            ]
-            # For each image: tiling_h * tiling_w + extra
-            outputs["num_crops"] = torch.tensor(tilings).prod(-1) + 1
+            feat_is_patch = feat_is_patch_flat.view(*image_input_idx.shape)
 
             input_is_embed = torch.isin(
                 input_ids,
@@ -1153,18 +1160,23 @@ class MolmoProcessorWrapper:
                     DEFAULT_IM_END_TOKEN_ID,
                 ]),
             )
-            is_embed_per_seg, count_per_seg = torch.unique_consecutive(
-                input_is_embed,
-                return_counts=True,
-            )
-            num_embeds_lst = list[int]()
-            for is_embed, count in zip(is_embed_per_seg, count_per_seg):
-                if is_embed:
-                    num_embeds_lst.append(count)
+            embed_ids = input_ids[input_is_embed]
+            embed_is_patch = embed_ids == DEFAULT_IMAGE_PATCH_TOKEN_ID
+            assert embed_is_patch.sum() == feat_is_patch.sum()
 
-            num_embeds = torch.tensor(num_embeds_lst)
-            assert num_embeds.sum() == input_is_embed.sum()
-            outputs["num_embeds"] = num_embeds
+            tilings = [
+                self.select_tiling(
+                    image_width=image.size[0],
+                    image_height=image.size[1],
+                ) for image in images
+            ]
+            # For each image: tiling_h * tiling_w + extra
+            num_crops = torch.tensor(tilings).prod(-1) + 1
+            assert num_crops.sum() == len(feat_is_patch)
+
+            outputs["feat_is_patch"] = feat_is_patch
+            outputs["embed_is_patch"] = embed_is_patch
+            outputs["num_crops"] = num_crops
 
         return BatchFeature(outputs, tensor_type=return_tensors)
 
@@ -1301,6 +1313,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_crops = hf_inputs.get("num_crops", torch.empty(0))
+        num_images = len(num_crops)
 
         return dict(
             images=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
@@ -1308,8 +1321,8 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
                 "image", num_crops),
             feat_is_patch=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_crops),
+            embed_is_patch=MultiModalFieldConfig.shared("image", num_images),
             num_crops=MultiModalFieldConfig.batched("image"),
-            num_embeds=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_replacements(
@@ -1461,6 +1474,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
+        self._fill_value = -10000
+
     def _parse_and_validate_image_input(
         self,
         **kwargs: object,
@@ -1484,22 +1499,22 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             raise ValueError("Incorrect type of feat_is_patch. "
                              f"Got type: {type(feat_is_patch)}")
 
+        embed_is_patch = kwargs.pop("embed_is_patch", None)
+        if not isinstance(embed_is_patch, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of embed_is_patch. "
+                             f"Got type: {type(embed_is_patch)}")
+
         num_crops = kwargs.pop("num_crops", None)
         if not isinstance(num_crops, torch.Tensor):
             raise ValueError("Incorrect type of num_crops. "
                              f"Got type: {type(num_crops)}")
 
-        num_embeds = kwargs.pop("num_embeds", None)
-        if not isinstance(num_embeds, torch.Tensor):
-            raise ValueError("Incorrect type of num_embeds. "
-                             f"Got type: {type(num_embeds)}")
-
         return MolmoImageInputs(
             images=images,
             image_masks=image_masks,
             feat_is_patch=feat_is_patch,
+            embed_is_patch=embed_is_patch,
             num_crops=num_crops,
-            num_embeds=num_embeds,
         )
 
     def _process_image_input(
@@ -1525,28 +1540,28 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
 
         return image_features
 
-    def _get_batch_mm_embeds(
+    def _get_mm_embeds(
             self,
-            features: torch.Tensor,  # Shape: (num_crop, num_patch, embed_dim)
-            is_patch: torch.Tensor,  # Shape: (num_crop, num_patch)
+            features: torch.Tensor,  # Shape: (num_crop, num_patch, d)
+            feat_is_patch: torch.Tensor,  # Shape: (num_crop, num_patch)
             num_crops_per_image: torch.Tensor,  # Shape: (num_images,)
-            num_embeds_per_image: torch.Tensor,  # Shape: (num_images,)
+            embed_is_patch: torch.Tensor,  # Shape: (num_embeds,)
     ) -> list[torch.Tensor]:
-        # The patch features are padded to match the embedding dimension
-        # as defined in the multimodal processor
+        # The patch features are scattered into a tensor that
+        # matches the embedding dimension as defined in the multimodal processor
         feats_per_image = features.split(num_crops_per_image)
-        is_patch_per_image = is_patch.split(num_crops_per_image)
+        f_is_patch_per_image = feat_is_patch.split(num_crops_per_image)
 
-        return [
-            F.pad(
-                (patch := feats[is_patch]),
-                (0, 0, 0, int(num_embeds) - len(patch)),
-            ) for feats, is_patch, num_embeds in zip(
-                feats_per_image,
-                is_patch_per_image,
-                num_embeds_per_image,
-            )
-        ]
+        _, _, embed_dim = features.shape
+        (num_embeds, ) = embed_is_patch.shape
+
+        embeds_in_batch = list[torch.Tensor]()
+        for feats, f_is_patch in zip(feats_per_image, f_is_patch_per_image):
+            embeds = feats.new_full((num_embeds, embed_dim), self._fill_value)
+            embeds[embed_is_patch] = feats[f_is_patch]
+            embeds_in_batch.append(embeds)
+
+        return embeds_in_batch
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -1556,11 +1571,11 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         image_features = self._process_image_input(image_input)
 
         return [
-            self._get_batch_mm_embeds(*args) for args in zip(
+            self._get_mm_embeds(*args) for args in zip(
                 image_features,
                 image_input["feat_is_patch"],
                 image_input["num_crops"],
-                image_input["num_embeds"],
+                image_input["embed_is_patch"],
             )
         ]
 
@@ -1571,11 +1586,18 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
+            # Extract the patch tokens scattered in _get_mm_embeds
+            patch_embeddings = json_map_leaves(
+                lambda x: x[x != self._fill_value].view(-1, *x.shape[1:]),
+                cast(JSONTree[torch.Tensor], multimodal_embeddings),
+            )
+
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings, [
-                    DEFAULT_IMAGE_PATCH_TOKEN_ID, DEFAULT_IM_COL_TOKEN_ID,
-                    DEFAULT_IM_START_TOKEN_ID, DEFAULT_IM_END_TOKEN_ID
-                ])
+                input_ids,
+                inputs_embeds,
+                cast(NestedTensors, patch_embeddings),
+                DEFAULT_IMAGE_PATCH_TOKEN_ID,
+            )
         return inputs_embeds
 
     def forward(
