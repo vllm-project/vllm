@@ -2224,7 +2224,6 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     return func(*args, **kwargs)
 
 
-
 def import_pynvml():
     """
     Historical comments:
@@ -2254,6 +2253,7 @@ def import_pynvml():
     """
     import vllm.third_party.pynvml as pynvml
     return pynvml
+
 
 def warn_for_unimplemented_methods():
     """
