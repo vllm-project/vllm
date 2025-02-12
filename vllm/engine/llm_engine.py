@@ -408,7 +408,7 @@ class LLMEngine:
 
         # Flag to set when an input fails to process and the engine should run
         # the next step without re-scheduling.
-        self._skip_sheduling_next_step = False
+        self._skip_scheduling_next_step = False
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -1334,9 +1334,11 @@ class LLMEngine:
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
+        # The scheduler is also skipped if a single request caused the last
+        # engine step to fail, and the previous schedule needs to be rerun.
         if not self._has_remaining_steps(
                 seq_group_metadata_list
-        ) and not self._skip_sheduling_next_step:
+        ) and not self._skip_scheduling_next_step:
             # Schedule iteration
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
@@ -1393,7 +1395,7 @@ class LLMEngine:
             try:
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
-                self._skip_sheduling_next_step = False
+                self._skip_scheduling_next_step = False
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
                 # abort it. If there are remaining requests in the batch that
@@ -1505,7 +1507,7 @@ class LLMEngine:
         # If there are still other sequence groups left in the schedule, cache
         # them and flag the engine to reuse the schedule.
         if len(seq_group_metadata_list) > 0:
-            self._skip_sheduling_next_step = True
+            self._skip_scheduling_next_step = True
             # Reuse multi-step caching logic
             self._cache_scheduler_outputs_for_multi_step(
                 virtual_engine=virtual_engine,
