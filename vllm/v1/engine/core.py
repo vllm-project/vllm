@@ -84,13 +84,9 @@ class EngineCore:
             kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                                   available_gpu_memory)
             kv_cache_configs.append(kv_cache_config)
-            if num_gpu_blocks is None:
-                num_gpu_blocks = kv_cache_config.num_blocks
-            elif num_gpu_blocks != kv_cache_config.num_blocks:
-                raise NotImplementedError(
-                    "num_gpu_blocks need to be the same across workers: "
-                    f"{num_gpu_blocks} != {kv_cache_config.num_blocks}")
-        assert num_gpu_blocks is not None
+        assert len(set(config.num_blocks for config in kv_cache_configs)) == 1, 
+            f"num_gpu_blocks need to be the same across workers: {num_gpu_blocks} != {kv_cache_config.num_blocks}"
+        num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution
