@@ -231,6 +231,10 @@ class CudaPlatformBase(Platform):
         return "vllm.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.base_communicator.CommunicatorBase"  # noqa: E501"
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 

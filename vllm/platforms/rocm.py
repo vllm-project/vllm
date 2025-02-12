@@ -100,6 +100,10 @@ class RocmPlatform(Platform):
         return DeviceCapability(major=major, minor=minor)
 
     @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.base_communicator.CommunicatorBase"  # noqa: E501"
+
+    @classmethod
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
         return torch.cuda.get_device_name(device_id)
