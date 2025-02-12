@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import gc
 import time
 from typing import TYPE_CHECKING, Dict, List
@@ -8,11 +9,12 @@ import torch
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import xpu_graph_capture
 from vllm.inputs import INPUT_REGISTRY
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
-                        cdiv, is_pin_memory_available)
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.ipex_attn import IPEXAttentionBackend, IPEXAttentionMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
+                        is_pin_memory_available)
+from vllm.v1.attention.backends.ipex_attn import (IPEXAttentionBackend,
+                                                  IPEXAttentionMetadata)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import bind_kv_cache
@@ -77,6 +79,8 @@ class XPUModelRunner(GPUModelRunner):
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
+        # FIXME: support mrope
+        self.uses_mrope = False
 
         # NOTE: Initialized input mapper is only used for processing dummy
         # multimodal data into multimodal kwargs for GPU memory profiling.
@@ -246,7 +250,7 @@ class XPUModelRunner(GPUModelRunner):
         max_seq_len = seq_lens.max()
         self.seq_start_loc_np[0] = 0
         np.cumsum(seq_lens, out=self.seq_start_loc_np[1:num_reqs + 1])
-        
+
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
@@ -316,8 +320,7 @@ class XPUModelRunner(GPUModelRunner):
             for _ in range(self.num_attn_layers)
         ]
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens,
-                                        dummy_kv_caches)
+        hidden_states = self._dummy_run(self.max_num_tokens, dummy_kv_caches)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         torch.xpu.synchronize()
