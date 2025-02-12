@@ -2,19 +2,6 @@
 
 import torch
 
-
-def sgmv_expand(inputs: torch.Tensor,
-                lora_b_weights: torch.Tensor,
-                output_tensor: torch.Tensor,
-                lora_indices_tensor: torch.Tensor,
-                add_inputs: bool = False):
-    exploded_indices = torch.repeat_interleave(lora_indices_tensor,
-                                               inputs.size(0))
-
-    return bgmv_expand(inputs, lora_b_weights, output_tensor, exploded_indices,
-                       add_inputs)
-
-
 def bgmv_expand(inputs: torch.Tensor,
                 lora_b_weights: torch.Tensor,
                 output_tensor: torch.Tensor,
@@ -45,21 +32,6 @@ def bgmv_expand(inputs: torch.Tensor,
     else:
         return outputs[:limit, :]
 
-
-def sgmv_shrink(
-    inputs: torch.Tensor,
-    lora_a_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    scaling: float,
-):
-    exploded_indices = torch.repeat_interleave(lora_indices_tensor,
-                                               inputs.size(0))
-
-    return bgmv_shrink(inputs, lora_a_weights, output_tensor, exploded_indices,
-                       scaling)
-
-
 def bgmv_shrink(inputs: torch.Tensor,
                 lora_b_weights: torch.Tensor,
                 output_tensor: torch.Tensor,
@@ -77,22 +49,6 @@ def bgmv_shrink(inputs: torch.Tensor,
         (batch_size, input_size, 1))).reshape((batch_size, output_size))
 
     return scaling * outputs
-
-
-def sgmv_expand_slice(inputs: torch.Tensor,
-                      lora_b_weights: torch.Tensor,
-                      output_tensor: torch.Tensor,
-                      lora_indices_tensor: torch.Tensor,
-                      slice_offset: int,
-                      slice_size: int,
-                      add_inputs: bool = False):
-    exploded_indices = torch.repeat_interleave(lora_indices_tensor,
-                                               inputs.size(0))
-
-    return bgmv_expand_slice(inputs, lora_b_weights, output_tensor,
-                             exploded_indices, slice_offset, slice_size,
-                             add_inputs)
-
 
 def bgmv_expand_slice(inputs: torch.Tensor,
                       lora_b_weights: torch.Tensor,

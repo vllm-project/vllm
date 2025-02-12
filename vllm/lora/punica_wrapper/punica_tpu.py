@@ -4,8 +4,7 @@ from typing import Callable, Optional, Tuple, Union
 
 import torch
 
-from vllm.lora.ops.xla_ops import (bgmv_expand, bgmv_expand_slice, bgmv_shrink,
-                                   sgmv_expand, sgmv_expand_slice, sgmv_shrink)
+from vllm.lora.ops.xla_ops import (bgmv_expand, bgmv_expand_slice, bgmv_shrink)
 
 from .punica_base import PunicaWrapperBase
 
@@ -24,25 +23,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
 
-    def _shrink_prefill(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        scale: float,
-    ):
-        #No LoRA request, so return directly
-        if self.no_lora:
-            return y
-        return sgmv_shrink(
-            x,
-            w_t_all,
-            y,
-            *self.prefill_metadata,
-            scale,
-        )
-
-    def _shrink_decode(
+    def shrink(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -53,25 +34,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             return y
         return bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
-    def _expand_prefill(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        add_inputs: bool,
-    ):
-        #No LoRA request, so return directly
-        if self.no_lora:
-            return y
-        return sgmv_expand(
-            x,
-            w_t_all,
-            y,
-            *self.prefill_metadata,
-            add_inputs,
-        )
-
-    def _expand_decode(
+    def expand(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -82,29 +45,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             return y
         return bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
 
-    def _expand_slice_prefill(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        y_offset: int,
-        y_slice_size: int,
-        add_inputs: bool,
-    ) -> torch.Tensor:
-        #No LoRA request, so return directly
-        if self.no_lora:
-            return y
-        return sgmv_expand_slice(
-            x,
-            w_t_all,
-            y,
-            *self.prefill_metadata,
-            y_offset,
-            y_slice_size,
-            add_inputs,
-        )
 
-    def _expand_slice_decode(
+    def expand_slice(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -141,9 +83,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         x = x.view(-1, x.shape[-1])
 
-        # shrink_fun: Callable = (self._shrink_prefill
-        #                         if self.is_prefill else self._shrink_decode)
-
         new_y = []
         # TODO fuse these kernels
         for slice_idx in range(len(lora_a_stacked)):
@@ -153,7 +92,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y_org = y_s
             y_s = y_s.view(-1, y_s.shape[-1])
 
-            y_s = self._shrink_decode(y_s, x, lora_s, scale)
+            y_s = self.shrink(y_s, x, lora_s, scale)
             y_s = y_s.view_as(y_org)
             new_y.append(y_s)
         return tuple(new_y)
@@ -186,10 +125,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             output_slices (Tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
         """
-        # expand_slice_fun: Callable = (self._expand_slice_prefill
-        #                               if self.is_prefill else
-        #                               self._expand_slice_decode)
-
         y_org = y
         y = y.view(-1, y.shape[-1])
         offset_left = 0
@@ -197,7 +132,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y = self._apply_bias(self.token_lora_indices, y, output_slices,
                                  lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
-            y = self._expand_slice_decode(
+            y = self.expand_slice(
                 y,
                 x[slice_idx],
                 lora_b_stacked[slice_idx],
@@ -228,9 +163,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         """
 
         # Embedding layer only needs the expand op
-        # expand_fun: Callable = (self._expand_prefill
-        #                         if self.is_prefill else self._expand_decode)
-        return self._expand_decode(y, x, lora_b_stacked, add_inputs)
+        return self.expand(y, x, lora_b_stacked, add_inputs)
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -341,15 +274,3 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     
     def set_no_lora(self, no_lora: bool):
         self.no_lora = no_lora
-    
-    @property
-    def prefill_metadata(
-        self
-    ) -> Tuple[torch.Tensor, int, int]:
-        """
-        This property provides a convenient way to access the necessary 
-        metadata for prefill-related  kernel computations.
-            1. lora_indices_per_batch: Tensor of lora indices, and an index of 
-                -1 means no lora should be applied.
-        """
-        return (self._lora_indices_per_batch[:self.batch_size],)
