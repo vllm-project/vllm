@@ -22,6 +22,7 @@ soundfile # required for audio tests
 timm # required for internvl test
 torch==2.6.0
 torchaudio==2.6.0
+torchvision==0.21.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.0 # required for pixtral test
