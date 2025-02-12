@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
+
 import enum
 import functools
-from typing import TYPE_CHECKING, List, Optional, Union, Dict, Any, Tuple
+from concurrent.futures import Future
+from concurrent.futures._base import TimeoutError
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
@@ -11,11 +14,12 @@ from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
-    from concurrent.futures import Future
+    import torch
 
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
+    from vllm.v1.guided_decoding import Grammar
 
 
 class GuidedDecodingOptions(enum.Enum):
@@ -78,6 +82,10 @@ class Request:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
+
+        # Grammar fields, including the grammar object and the bitmask
+        self._grammar: Future[Grammar] | Grammar | None = None
+        self._bitmask = None
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -163,10 +171,40 @@ class Request:
         else:
             raise ValueError("No valid guided decoding parameter found")
 
+    @property
+    def grammar(self) -> Optional[Grammar | Future[Grammar]]:
+        return self._grammar
+
+    @grammar.setter
+    def grammar(self, grammar: Grammar | Future[Grammar]) -> None:
+        self._grammar = grammar
+
+    def allocate_bitmask(self, batch_size: int, vocab_size: int) -> None:
+        if isinstance(self._grammar, Future):
+            try:
+                self.grammar = self.grammar.result(timeout=0.05)
+                self.status = RequestStatus.WAITING
+            except TimeoutError:
+                pass
+        if self.grammar:
+            self._bitmask = self.grammar.allocate_bitmask(
+                batch_size, vocab_size)
+
+    @functools.cached_property
+    def bitmask(self) -> Optional[torch.Tensor]:
+        return self._bitmask
+
+    @property
+    def is_grammar_ready(self) -> bool:
+        if isinstance(self._grammar, Future):
+            return self._grammar.done()
+        return self._grammar is not None
+
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
     WAITING = 0
+    WAITING_FOR_FSM = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED (2) will be considered
@@ -175,6 +213,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
+    FINISHED_GRAMMAR_ERROR = enum.auto()
 
     @staticmethod
     def is_finished(status: "RequestStatus") -> bool:

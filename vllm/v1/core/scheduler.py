@@ -2,9 +2,6 @@
 
 import time
 from collections import deque
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
-
-from collections import deque
 from concurrent import futures
 from dataclasses import dataclass
 from re import A
@@ -20,6 +17,7 @@ from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreOutput, EngineCoreOutputs)
+from vllm.v1.guided_decoding import Grammar
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -359,8 +357,6 @@ class Scheduler:
         new_block_ids: List[int],
         num_computed_tokens: int,
         *,
-        grammar: Optional[Grammar] = None,
-        grammar_bitmask: Optional[Any] = None,
         resumed_from_preemption: bool,
     ) -> "CachedRequestData":
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
@@ -370,8 +366,6 @@ class Scheduler:
             req_data.resumed_from_preemption = resumed_from_preemption
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
-            req_data.grammar = grammar
-            req_data.grammar_bitmask = grammar_bitmask
         else:
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,

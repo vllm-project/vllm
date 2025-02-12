@@ -8,6 +8,7 @@ from multiprocessing.connection import Connection
 from typing import Any, List, Tuple, Type
 
 import psutil
+import torch
 import zmq
 import zmq.asyncio
 
@@ -15,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
@@ -22,9 +24,8 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import GuidedDecodingOptions, Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -76,20 +77,14 @@ class EngineCore:
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
         tokenizer_group.ping()
-        # setup guided decoding, right now uses xgrammar
-        self.guided_decoding_manager = GuidedDecodingManager(
-            vllm_config=vllm_config, tokenizer_group=tokenizer_group)
+        self.tokenizer_group = tokenizer_group
+        self.use_guided_decoding = False
 
-        # while self.grammar:
-        #     request = self.grammar.popleft()
-        #     try:
-        #         # When request first added via add_request, then it will be a future call
-        #         # check timeout and add it directly to previous queue
-        #         request.grammar = request.grammar.result(timeout=0.05)
-        #         request.status = RequestStatus.WAITING
-        #         newly_grammar_reqs.append(request)
-        #     except futures._base.TimeoutError:
-        #         scheduled_grammar_reqs.append(request)
+        # Initialize guided decoding manager
+        from vllm.v1.guided_decoding import GuidedDecodingManager
+        self.guided_decoding_manager = GuidedDecodingManager(
+            tokenizer_group=self.tokenizer_group,
+            model_config=vllm_config.model_config)
 
     def _initialize_kv_caches(self,
                               vllm_config: VllmConfig) -> Tuple[int, int]:
@@ -130,15 +125,17 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
+        if req.use_guided_decoding:
+            self.use_guided_decoding = True
+            # Start grammar compilation asynchronously
+            self.guided_decoding_manager.should_cache(req)
+        else:
+            self.use_guided_decoding = False
 
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
         """Abort requests from the scheduler."""
-
-        # TODO: The scheduler doesn't really need to know the
-        # specific finish reason, TBD whether we propagate that
-        # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
@@ -149,13 +146,47 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
+        # Calculate bitmasks for all active requests
+        if self.use_guided_decoding:
+            self.calculate_grammar_bitmasks()
+
         scheduler_output = self.scheduler.schedule()
+
+        # Attach bitmasks to scheduler output for broadcasting to workers
+        if self.use_guided_decoding:
+            scheduler_output.guided_decoding_bitmasks = {
+                req.request_id: req.bitmask
+                for req in self.scheduler.running
+                if req.use_guided_decoding and req.is_grammar_ready
+            }
+
         output = self.model_executor.execute_model(scheduler_output)
-        # update FSM async here
-        # two broadcast (bitmask + calculate) <-- manager
-        # copy CPU -> CPU IPC (concat multiple bitmask?)
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
+
+        if self.use_guided_decoding:
+            # Advance FSM for each request using guided decoding
+            for req in self.scheduler.running:
+                if not req.use_guided_decoding or not req.is_grammar_ready:
+                    continue
+
+                # Get the generated tokens for this request
+                if req.request_id in output.outputs:
+                    generated_tokens = output.outputs[req.request_id].token_ids
+                    # Advance FSM for each generated token
+                    for token in generated_tokens:
+                        if not req.grammar.accept_token(token):
+                            # Token was rejected by grammar - mark request as finished with error
+                            self.scheduler.finish_requests(
+                                [req.request_id],
+                                RequestStatus.FINISHED_GRAMMAR_ERROR)
+                            break
+
+                    # Update bitmask for next token prediction if request is still running
+                    if req.request_id not in self.scheduler.finished_requests:
+                        req.grammar.fill_bitmask(req.bitmask, 0)
+
         return engine_core_outputs
 
     def shutdown(self):
@@ -166,6 +197,21 @@ class EngineCore:
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
+
+    def calculate_grammar_bitmasks(self):
+        for req in self.scheduler.running:
+            # ignore requests that doesn't use guided decoding
+            # or ignore requests that grammar is not ready
+            if not req.use_guided_decoding or not req.is_grammar_ready:
+                continue
+
+            # Check if grammar is ready in cache
+            grammar = self.guided_decoding_manager.get(req)
+            if grammar is not None:
+                req.grammar = grammar
+                req.allocate_bitmask(1,
+                                     self.guided_decoding_manager.vocab_size)
+                continue
 
 
 class EngineCoreProc(EngineCore):

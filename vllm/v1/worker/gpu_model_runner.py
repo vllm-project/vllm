@@ -27,6 +27,7 @@ from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.guided_decoding import Grammar
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -850,10 +851,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
-        # We will need to apply the logits inplace from here
-        # so the scheduler_output should contains both the grammar
-        # of the running request to advance as well as the specific bitmask
-        # broadcasted from the scheduler.schedule()
+        # Apply guided decoding bitmasks if present
+        if hasattr(scheduler_output, 'guided_decoding_bitmasks'):
+            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                if req_id in scheduler_output.guided_decoding_bitmasks:
+                    # TODO: We need to ensure that the bitmask
+                    bitmask = scheduler_output.guided_decoding_bitmasks[req_id]
+                    if bitmask is not None:
+                        # Apply bitmask to logits
+                        bitmask = bitmask.to(self.device, non_blocking=True)
+                        Grammar.apply_bitmask(logits, bitmask)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(batch_changed)

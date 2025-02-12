@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
@@ -12,7 +12,6 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.v1.core.guided_decoding import Grammar
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable
 
@@ -37,7 +36,6 @@ class CachedRequestState:
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
-    grammar: Optional[Grammar] = None
 
     lora_request: Optional[LoRARequest] = None
 
@@ -250,7 +248,8 @@ class InputBatch:
         if sampling_params.prompt_logprobs is not None:
             self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
 
-        if request.grammar is not None: self.grammar_reqs.add(req_id)
+        if request.grammar is not None:
+            self.grammar_reqs.add(req_id)
 
         # Add request lora ID
         if request.lora_request:
@@ -366,7 +365,6 @@ class InputBatch:
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
                 last_req_index]
 
-            # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
     def make_sampling_metadata(
