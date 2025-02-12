@@ -250,7 +250,8 @@ class GraniteMoeDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.block_sparse_moe")
-        self.shared_mlp = None if config.shared_intermediate_size == 0 \
+        self.shared_mlp = None if \
+            getattr(config, 'shared_intermediate_size', 0) == 0 \
             else GraniteMoeSharedMLP(
                 config,
                 quant_config=quant_config,
@@ -286,6 +287,7 @@ class GraniteMoeDecoderLayer(nn.Module):
             moe_hidden_states = hidden_states.clone()
             moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
             hidden_states = moe_hidden_states + self.shared_mlp(hidden_states)
+            del moe_hidden_states
         hidden_states = residual + hidden_states * self.residual_multiplier
 
         return hidden_states
