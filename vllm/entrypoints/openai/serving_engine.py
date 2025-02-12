@@ -400,8 +400,7 @@ class OpenAIServing:
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
         request_prompt: Union[str, List[int]]
-        is_mistral_tokenizer = isinstance(tokenizer, MistralTokenizer)
-        if is_mistral_tokenizer:
+        if isinstance(tokenizer, MistralTokenizer):
             request_prompt = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
