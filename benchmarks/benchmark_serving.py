@@ -800,7 +800,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
     ignored_metrics = ["ttfts", "itls", "generated_texts"]
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
-        metrics={k: results[k]
+        metrics={k: [results[k]]
                  for k in metrics},
         extra_info={
             k: results[k]
