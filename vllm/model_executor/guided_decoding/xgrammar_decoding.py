@@ -14,7 +14,9 @@ from transformers import PreTrainedTokenizerFast
 try:
     import xgrammar as xgr
     from xgrammar.base import _core as xgr_core
+    xgr_installed = True
 except ImportError:
+    xgr_installed = False
     pass
 
 from vllm.envs import VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE

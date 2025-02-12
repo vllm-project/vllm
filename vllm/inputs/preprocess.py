@@ -254,8 +254,14 @@ class InputPreprocessor:
         Apply the model's multi-modal processor to a multi-modal prompt,
         returning the corresponding token IDs and metadata.
         """
-        tokenizer_group = self.get_tokenizer_group()
-        tokenizer = tokenizer_group.get_lora_tokenizer(lora_request)
+        # At the moment on model (PrithviGeoSpatialMAE) requires to be
+        # initialized without a tokenizer while using also multi-modal
+        # input.
+        if not self.tokenizer:
+            tokenizer = None
+        else:
+            tokenizer_group = self.get_tokenizer_group()
+            tokenizer = tokenizer_group.get_lora_tokenizer(lora_request)
 
         mm_processor = self.mm_registry.create_processor(
             self.model_config, tokenizer)
@@ -273,9 +279,15 @@ class InputPreprocessor:
         lora_request: Optional[LoRARequest],
     ) -> MultiModalInputs:
         """Async version of :meth:`_process_multimodal`."""
-        tokenizer_group = self.get_tokenizer_group()
-        tokenizer = await tokenizer_group.get_lora_tokenizer_async(lora_request
-                                                                   )
+        # At the moment on model (PrithviGeoSpatialMAE) requires to be
+        # initialized without a tokenizer while using also multi-modal
+        # input.
+        if not self.tokenizer:
+            tokenizer = None
+        else:
+            tokenizer_group = self.get_tokenizer_group()
+            tokenizer = await tokenizer_group.get_lora_tokenizer_async(
+                lora_request)
 
         mm_processor = self.mm_registry.create_processor(
             self.model_config, tokenizer)
