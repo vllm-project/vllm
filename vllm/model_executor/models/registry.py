@@ -37,6 +37,7 @@ _TEXT_GENERATION_MODELS = {
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
     # baichuan-13b, lower case 'c' in the class name
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
+    "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
@@ -45,7 +46,7 @@ _TEXT_GENERATION_MODELS = {
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
-    "DeepseekV3ForCausalLM": ("deepseek_v3", "DeepseekV3ForCausalLM"),
+    "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
@@ -136,6 +137,10 @@ _EMBEDDING_MODELS = {
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     # [Auto-converted (see adapters.py)]
     "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForCausalLM"),
+    # Technically PrithviGeoSpatialMAE is a model that works on images, both in
+    # input and output. I am adding it here because it piggy-backs on embedding
+    # models for the time being.
+    "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
 }
 
 _CROSS_ENCODER_MODELS = {
@@ -172,6 +177,7 @@ _MULTIMODAL_MODELS = {
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "Qwen2_5_VLForConditionalGeneration": ("qwen2_5_vl", "Qwen2_5_VLForConditionalGeneration"),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     # [Encoder-decoder]
@@ -198,6 +204,14 @@ _VLLM_MODELS = {
     **_SPECULATIVE_DECODING_MODELS,
     **_FALLBACK_MODEL,
 }
+
+# This variable is used as the args for subprocess.run(). We
+# can modify  this variable to alter the args if needed. e.g.
+# when we use par format to pack things together, sys.executable
+# might not be the target we want to run.
+_SUBPROCESS_COMMAND = [
+    sys.executable, "-m", "vllm.model_executor.models.registry"
+]
 
 
 @dataclass(frozen=True)
@@ -496,10 +510,9 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
 
         # cannot use `sys.executable __file__` here because the script
         # contains relative imports
-        returned = subprocess.run(
-            [sys.executable, "-m", "vllm.model_executor.models.registry"],
-            input=input_bytes,
-            capture_output=True)
+        returned = subprocess.run(_SUBPROCESS_COMMAND,
+                                  input=input_bytes,
+                                  capture_output=True)
 
         # check if the subprocess is successful
         try:

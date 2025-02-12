@@ -278,6 +278,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @lru_cache(maxsize=8)
     @with_nvml_context
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        return pynvml.nvmlDeviceGetUUID(handle)
+
+    @classmethod
+    @lru_cache(maxsize=8)
+    @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
@@ -326,10 +334,10 @@ class NvmlCudaPlatform(CudaPlatformBase):
             if (len(set(device_names)) > 1
                     and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"):
                 logger.warning(
-                    "Detected different devices in the system: \n%s\nPlease"
+                    "Detected different devices in the system: %s. Please"
                     " make sure to set `CUDA_DEVICE_ORDER=PCI_BUS_ID` to "
                     "avoid unexpected behavior.",
-                    "\n".join(device_names),
+                    ", ".join(device_names),
                 )
 
 

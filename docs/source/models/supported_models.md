@@ -429,7 +429,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `TeleChat2ForCausalLM`
   * TeleChat2
-  * `TeleAI/TeleChat2-3B`, `TeleAI/TeleChat2-7B`, `TeleAI/TeleChat2-35B`, etc.
+  * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
   * ✅︎
   * ✅︎
 - * `XverseForCausalLM`
@@ -719,7 +719,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `THUDM/glm-4v-9b` etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `H2OVLChatModel`
   * H2OVL
   * T + I<sup>E+</sup>
@@ -846,11 +846,18 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5_VLForConditionalGeneration`
+  * Qwen2.5-VL
+  * T + I<sup>E+</sup> + V<sup>E+</sup>
+  * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
-  * `fixie-ai/ultravox-v0_3`
-  *
+  * `fixie-ai/ultravox-v0_5-llama-3_2-1b`
+  * ✅︎
   * ✅︎
   * ✅︎
 :::
@@ -876,8 +883,11 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 :::
 
 :::{note}
-The chat template for Pixtral-HF is incorrect (see [discussion](https://huggingface.co/mistral-community/pixtral-12b/discussions/22)).
-A corrected version is available at <gh-file:examples/template_pixtral_hf.jinja>.
+`mistral-community/pixtral-12b` does not support V1 yet.
+:::
+
+:::{note}
+To use Qwen2.5-VL series models, you have to install Huggingface `transformers` library from source via `pip install git+https://github.com/huggingface/transformers`.
 :::
 
 ### Pooling Models

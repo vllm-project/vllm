@@ -342,6 +342,15 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         **kwargs: object,
     ):
         hf_processor = self.ctx.get_hf_processor()
+
+        # NumPy arrays are considered as Iterable but not Sequence in
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
+        image_processor = hf_processor.image_processor  # type: ignore
+        for attr in ("mean", "std"):
+            val = getattr(image_processor, attr)
+            if isinstance(val, np.ndarray):
+                setattr(image_processor, attr, val.tolist())
+
         return hf_processor
 
     def get_image_processor(self):

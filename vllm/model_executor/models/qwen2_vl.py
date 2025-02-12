@@ -650,8 +650,8 @@ class Qwen2VisionTransformer(nn.Module):
         return loaded_params
 
 
-class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
-                                            dict[str, torch.Tensor]]):
+class Qwen2VLEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
+                                              dict[str, torch.Tensor]]):
 
     def __init__(self, data: dict, modality: str) -> None:
         super().__init__(data, modality)
@@ -683,26 +683,26 @@ class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
         return self.data
 
 
-class Qwen2ImageEmbeddingItems(Qwen2EmbeddingItems):
+class Qwen2VLImageEmbeddingItems(Qwen2VLEmbeddingItems):
 
     def __init__(self, data: dict) -> None:
         super().__init__(data, "image")
 
 
-class Qwen2VideoEmbeddingItems(Qwen2EmbeddingItems):
+class Qwen2VLVideoEmbeddingItems(Qwen2VLEmbeddingItems):
 
     def __init__(self, data: dict) -> None:
         super().__init__(data, "video")
 
 
-class Qwen2MultiModalDataParser(MultiModalDataParser):
+class Qwen2VLMultiModalDataParser(MultiModalDataParser):
 
     def _parse_image_data(
         self,
         data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2EmbeddingItems(data, modality="image")
+            return Qwen2VLEmbeddingItems(data, modality="image")
 
         return super()._parse_image_data(data)
 
@@ -711,7 +711,7 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
         data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2EmbeddingItems(data, modality="video")
+            return Qwen2VLEmbeddingItems(data, modality="video")
 
         return super()._parse_video_data(data)
 
@@ -800,7 +800,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             preprocessed_size = ImageSize(width=image_width,
                                           height=image_height)
 
-        grid_t = max(num_frames // temporal_patch_size, 1)
+        # NOTE: Frames are padded to be divisible by `temporal_patch_size`
+        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
+        padded_num_frames = num_frames + num_frames % temporal_patch_size
+
+        grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
         grid_w = preprocessed_size.width // patch_size
 
@@ -885,14 +889,10 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
-        num_frames = min(max(max_total_frames // max(max_videos, 1), 1),
-                         _MAX_FRAMES_PER_VIDEO)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
 
-        # Temporary workaround for https://github.com/huggingface/transformers/issues/35412
-        if num_frames > 1 and num_frames % 2 == 1:
-            num_frames += 1
-
-        return num_frames
+        return max(max_frames_per_video, 1)
 
     def get_max_video_tokens(self, seq_len: int) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
@@ -948,7 +948,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
                                  ):
 
     def _get_data_parser(self) -> MultiModalDataParser:
-        return Qwen2MultiModalDataParser()
+        return Qwen2VLMultiModalDataParser()
 
     def _get_prompt_replacements(
         self,

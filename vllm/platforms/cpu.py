@@ -35,7 +35,7 @@ class CpuPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if selected_backend != _Backend.TORCH_SDPA:
+        if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         logger.info("Using Torch SDPA backend.")
         return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
@@ -114,6 +114,9 @@ class CpuPlatform(Platform):
         #
         # Environment variables for CPU executor
         #
+
+        # Set default threads num for OpenMP parallel
+        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
