@@ -800,7 +800,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             preprocessed_size = ImageSize(width=image_width,
                                           height=image_height)
 
-        # NOTE: Frames are padded to the next even number
+        # NOTE: Frames are padded to be divisible by `temporal_patch_size`
         # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
         padded_num_frames = num_frames + num_frames % temporal_patch_size
 
