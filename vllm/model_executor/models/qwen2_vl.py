@@ -831,10 +831,12 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         num_frames: int,
         image_processor: Optional[Qwen2VLImageProcessor],
     ) -> int:
+        # NOTE: Frames are padded to the next even number
+        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
-            num_frames=num_frames,
+            num_frames=num_frames + num_frames % 2,
             image_processor=image_processor,
         )
         return num_video_tokens
