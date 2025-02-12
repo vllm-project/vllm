@@ -33,6 +33,7 @@ from vllm.platforms import current_platform
 from vllm.model_executor.layers.quantization.utils.fp8_utils import dequant_block_fp8_weight_naive
 
 if current_platform.is_hpu():
+    import habana_frameworks.torch as htorch
     from vllm_hpu_extension.ops import scaled_fp8_quant
     ops.scaled_fp8_quant = scaled_fp8_quant
 
@@ -746,11 +747,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
     def dequant_weight(self, weight, weight_scale, block_size):
-        weight_scale_m, weight_scale_n = weight_scale.shape
-        weight_scale = weight_scale.view(weight_scale_m, 1, weight_scale_n, 1)
-        weight = weight.view(weight_scale_m, block_size, weight_scale_n, block_size)
-        dequant_weight = weight.to(torch.bfloat16) * weight_scale.to(torch.bfloat16)
-        dequant_weight = dequant_weight.view(weight_scale_m*block_size, weight_scale_n*block_size)
+        weight_shape_len = len(weight.shape)
+        if weight_shape_len == 2:
+            weight_scale_m, weight_scale_n = weight_scale.shape
+            weight_scale = weight_scale.view(weight_scale_m, 1, weight_scale_n, 1)
+            weight = weight.view(weight_scale_m, block_size, weight_scale_n, block_size)
+            dequant_weight = weight.to(torch.bfloat16) * weight_scale.to(torch.bfloat16)
+            dequant_weight = dequant_weight.view(weight_scale_m*block_size, weight_scale_n*block_size)
+        elif weight_shape_len == 3:
+            num_expert, weight_scale_m, weight_scale_n = weight_scale.shape
+            weight_scale = weight_scale.view(num_expert, weight_scale_m, 1, weight_scale_n, 1)
+            weight = weight.view(num_expert, weight_scale_m, block_size, weight_scale_n, block_size)
+            dequant_weight = weight.to(torch.bfloat16) * weight_scale.to(torch.bfloat16)
+            dequant_weight = dequant_weight.view(num_expert, weight_scale_m*block_size, weight_scale_n*block_size)
+        else:
+            raise ValueError("Only support original weight shape is either 2 or 3")
+
         return dequant_weight
 
     def forward_hpu(
@@ -777,6 +789,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 #        assert len(x.shape) == 2
 #        import habana_frameworks.torch as htorch
 #        htorch.core.mark_step()
+
+        batch_size, seq_len, hidden_dim = x.shape
+        bt = batch_size * seq_len
+        x = x.view(-1, hidden_dim)
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -791,7 +808,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         final_hidden_states = torch.zeros_like(x)
         num_experts = layer.w13_weight.shape[0]
         n_expert_slice = layer.w13_weight.shape[0] // self.moe_n_slice
-#        assert n_expert_slice * self.moe_n_slice == num_experts
+        assert n_expert_slice * self.moe_n_slice == num_experts
 
         orig_M_w13 = layer.orig_M_w13.data
         orig_N_w13 = layer.orig_N_w13.data
@@ -799,59 +816,56 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         orig_N_w2 = layer.orig_N_w2.data
         ep_shift = ep_rank * num_experts
 
-        bt, hidden_dim = x.shape
+        if seq_len > 1:
+            for i in range(self.moe_n_slice):
+                min_expert = i * n_expert_slice
+                max_expert = (i + 1) * n_expert_slice
 
-        final_hidden_states = torch.zeros((bt, hidden_dim), dtype=x.dtype, device=x.device)
-        total_num_experts = router_logits.size(1)
+                w13_weight_tmp = layer.w13_weight[min_expert:max_expert, ...]
+                w2_weight_tmp = layer.w2_weight[min_expert:max_expert, ...]
+                w13_scale_tmp = layer.w13_weight_scale_inv[min_expert:max_expert, ...]
+                w2_scale_tmp = layer.w2_weight_scale_inv[min_expert:max_expert, ...]
 
-        padded_weights = torch.zeros((bt, total_num_experts), dtype=x.dtype, device=x.device)
-        padded_weights.scatter_(-1, topk_ids, topk_weights)
-        padded_weights = padded_weights.transpose(0, 1)
+                w13_weight = self.dequant_weight(w13_weight_tmp, w13_scale_tmp, self.quant_config.weight_block_size[0])
+                w2_weight = self.dequant_weight(w2_weight_tmp, w2_scale_tmp, self.quant_config.weight_block_size[0])
+                w13_list_slice = [w13_weight[j] for j in range(n_expert_slice)]
+                w2_list_slice = [w2_weight[j] for j in range(n_expert_slice)]
 
-        moe_intermediate_size = layer.w13_weight.size(1) // 2
-        moe_block_size = layer.w13_weight_scale_inv.size(1) // 2
-
-        for idx in range(num_experts):
-            w13_weight_tmp = layer.w13_weight[idx, ...]
-            w2_weight_tmp = layer.w2_weight[idx, ...]
-            w13_scale_tmp = layer.w13_weight_scale_inv[idx, ...]
-            w2_scale_tmp = layer.w2_weight_scale_inv[idx, ...]
-
-            '''
-            w1_weight = dequant_block_fp8_weight_naive(weight=w13_weight_tmp[:moe_intermediate_size, ...],
-                                                    weight_scale=w13_scale_tmp[:moe_block_size, ...],
-                                                    block_size=self.quant_config.weight_block_size,
-                                                    dtype=x.dtype,
-                                                    original_M=orig_M_w13,
-                                                    original_N=orig_N_w13)
-            gate_states = torch.matmul(x, w1_weight.transpose(0, 1))
-
-            w3_weight = dequant_block_fp8_weight_naive(weight=w13_weight_tmp[moe_intermediate_size:, ...],
-                                                    weight_scale=w13_scale_tmp[moe_block_size:, ...],
-                                                    block_size=self.quant_config.weight_block_size,
-                                                    dtype=x.dtype,
-                                                    original_M=orig_M_w13,
-                                                    original_N=orig_N_w13)
-            up_states = torch.matmul(x, w3_weight.transpose(0, 1))
-            up_gate_states = F.silu(gate_states) * up_states
+                final_hidden_states += torch.ops.hpu.mixture_of_experts(
+                                             hidden_states=x,
+                                             expert_routing_table=(topk_ids.to(torch.int64) - min_expert - ep_shift),
+                                             router_weights=topk_weights.to(x.dtype),
+                                             w12=w13_list_slice,
+                                             w3=w2_list_slice,
+                                             permuted_weights=True,
+                                             activation="silu",
+                                             experts_min=0,
+                                             experts_max=(n_expert_slice - 1))
+                htorch.core.mark_step()
+                # torch.hpu.synchronize()
+        else:
+            final_hidden_states = torch.zeros((bt, hidden_dim), dtype=x.dtype, device=x.device)
+            total_num_experts = router_logits.size(1)
             
-            w2_weight = dequant_block_fp8_weight_naive(weight=w2_weight_tmp,
-                                                    weight_scale=w2_scale_tmp,
-                                                    block_size=self.quant_config.weight_block_size,
-                                                    dtype=x.dtype,
-                                                    original_M=orig_M_w2,
-                                                    original_N=orig_N_w2)
-            '''
-            w13_weight = self.dequant_weight(w13_weight_tmp, w13_scale_tmp, self.quant_config.weight_block_size[0])
-            up_gate_states = torch.matmul(x, w13_weight.transpose(0, 1))
-            d = up_gate_states.shape[-1] // 2
-            tmp_states = F.silu(up_gate_states[..., :d]) * up_gate_states[..., d:]
+            padded_weights = torch.zeros((bt, total_num_experts), dtype=x.dtype, device=x.device)
+            padded_weights.scatter_(-1, topk_ids, topk_weights)
+            padded_weights = padded_weights.transpose(0, 1)
 
-            w2_weight = self.dequant_weight(w2_weight_tmp, w2_scale_tmp, self.quant_config.weight_block_size[0])
-            current_hidden_states = torch.matmul(tmp_states, w2_weight.transpose(0, 1))
+            for idx in range(num_experts):
+                w13_weight_tmp = layer.w13_weight[idx, ...]
+                w2_weight_tmp = layer.w2_weight[idx, ...]
+                w13_scale_tmp = layer.w13_weight_scale_inv[idx, ...]
+                w2_scale_tmp = layer.w2_weight_scale_inv[idx, ...]
 
-            padded_weight = padded_weights[idx + ep_shift].unsqueeze(1)
-            final_hidden_states += current_hidden_states * padded_weight
+                w13_weight = self.dequant_weight(w13_weight_tmp, w13_scale_tmp, self.quant_config.weight_block_size[0])
+                up_gate_states = torch.matmul(x, w13_weight.transpose(0, 1))
+                d = up_gate_states.shape[-1] // 2
+                tmp_states = F.silu(up_gate_states[..., :d]) * up_gate_states[..., d:]
+
+                w2_weight = self.dequant_weight(w2_weight_tmp, w2_scale_tmp, self.quant_config.weight_block_size[0])
+                current_hidden_states = torch.matmul(tmp_states, w2_weight.transpose(0, 1))
+                padded_weight = padded_weights[idx + ep_shift].unsqueeze(1)
+                final_hidden_states += current_hidden_states * padded_weight
 
         return final_hidden_states.view(-1, x.shape[1])
 
