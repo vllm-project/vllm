@@ -152,7 +152,7 @@ class EngineCore:
                 new_logprobs={},
                 new_prompt_logprobs_tensors={},
                 finish_reason={},
-                events={},
+                events=None,
                 scheduler_stats=self.scheduler.make_stats())
 
         scheduler_output = self.scheduler.schedule()
@@ -383,6 +383,5 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 outputs = self.output_queue.get()
-                print(outputs)
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)

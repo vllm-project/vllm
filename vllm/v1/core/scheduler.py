@@ -16,7 +16,7 @@ from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreOutputs)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import FinishReason, Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -489,7 +489,7 @@ class Scheduler:
             new_logprobs={},
             new_prompt_logprobs_tensors={},
             finish_reason={},
-            events={},
+            events=None,
             scheduler_stats=SchedulerStats(),
         )
 
@@ -497,6 +497,7 @@ class Scheduler:
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
         offset = 0
+        count = 0
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
@@ -582,13 +583,9 @@ class Scheduler:
                 new_ids = request.output_token_ids[-num_new_tokens:]
                 output.new_token_ids += new_ids
 
-                # TODO: This is not right, consider moving out of loop? turn into Dict
+                # Move out of loop?
                 if new_logprobs is not None:
                     output.new_logprobs[req_id] = new_logprobs
-
-                if prompt_logprobs_tensors is not None:
-                    output.new_prompt_logprobs_tensors[
-                        req_id] = prompt_logprobs_tensors
 
                 finish_reason = request.get_finished_reason()
                 if finish_reason is not None:
@@ -596,8 +593,11 @@ class Scheduler:
 
                 events = request.take_events()
                 if events is not None:
-                    output.events[req_id] = events
+                    if output.events is None:
+                        output.events = [None] * count
+                    output.events.append(events)
                 offset = offset + len(new_ids)
+                count = count + 1
 
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
@@ -609,6 +609,7 @@ class Scheduler:
             output.new_token_id_offsets.append(num_new_tokens)
 
         self.running = new_running
+        output.new_prompt_logprobs_tensors = prompt_logprobs_dict
         output.scheduler_stats = self.make_stats()
         return output
 
