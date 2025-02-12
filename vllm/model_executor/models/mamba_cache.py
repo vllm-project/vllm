@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from typing import Dict, List
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.utils import PAD_SLOT_ID
 
 
@@ -40,8 +41,7 @@ class MambaCacheManager:
         self.mamba_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
         self.free_cache_indices = list(range(max_batch_size))
 
-    def current_run_tensors(self, input_ids: torch.Tensor,
-                            attn_metadata: AttentionMetadata, **kwargs):
+    def current_run_tensors(self, **kwargs) -> MambaCacheParams:
         """
         Return the tensors for the current run's conv and ssm state.
         """
@@ -64,7 +64,8 @@ class MambaCacheManager:
             (mamba_cache_tensors,
              state_indices_tensor) = kwargs["seqlen_agnostic_capture_inputs"]
 
-        return (mamba_cache_tensors, state_indices_tensor)
+        return MambaCacheParams(mamba_cache_tensors[0], mamba_cache_tensors[1],
+                                state_indices_tensor)
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         """

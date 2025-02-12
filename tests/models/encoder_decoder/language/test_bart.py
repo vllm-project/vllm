@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM for BART models using greedy sampling.
 
 Run `pytest tests/models/encoder_decoder/language/test_bart.py`.

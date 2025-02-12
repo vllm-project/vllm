@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
@@ -8,6 +9,7 @@ from pathlib import PosixPath
 from typing import Type
 
 import pytest
+from packaging.version import Version
 from transformers import AutoModelForVision2Seq
 from transformers import __version__ as TRANSFORMERS_VERSION
 
@@ -119,6 +121,8 @@ VLM_TEST_SETTINGS = {
                else ("half", "float")),
         marks=[pytest.mark.core_model],
     ),
+    # TODO(ywang96): Move Qwen2-VL out of core models in favor of Qwen2.5-VL
+    # once we upgraded to transformers>=4.49.0.
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],
         test_type=(
@@ -135,6 +139,26 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+    ),
+    "qwen2_5_vl": VLMTestInfo(
+        models=["Qwen/Qwen2.5-VL-3B-Instruct"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[pytest.mark.skipif(
+                TRANSFORMERS_VERSION < "4.49.0",
+                reason="HF model requires transformers>=4.49.0",
+            ), pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
@@ -153,13 +177,7 @@ VLM_TEST_SETTINGS = {
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
-        marks=[
-            pytest.mark.skipif(
-                TRANSFORMERS_VERSION < "4.48.0",
-                reason="HF model requires transformers>=4.48.0",
-            ),
-            large_gpu_mark(min_gb=64),
-        ],
+        marks=[large_gpu_mark(min_gb=64)],
     ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
@@ -205,8 +223,8 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
         marks=[
             pytest.mark.skipif(
-                TRANSFORMERS_VERSION >= "4.48.0",
-                reason="HF model is not compatible with transformers>=4.48.0",
+                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
+                reason="HF model is not compatible with transformers>=4.48",
             )
         ],
     ),
@@ -249,17 +267,18 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         dtype="bfloat16",
         use_tokenizer_eos=True,
+        num_logprobs=10,
         patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
     ),
     "idefics3": VLMTestInfo(
-        models=["HuggingFaceM4/Idefics3-8B-Llama3"],
+        models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<image>",
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
-        marks=[large_gpu_mark(min_gb=48)],
+        hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
     ),
     "intern_vl": VLMTestInfo(
         models=[
@@ -281,7 +300,6 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
-        marks=[large_gpu_mark(min_gb=32)],
     ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
@@ -338,6 +356,12 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
         patch_hf_runner=model_utils.mantis_patch_hf_runner,
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
+                reason="HF model is not compatible with transformers>=4.48",
+            )
+        ],
     ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],

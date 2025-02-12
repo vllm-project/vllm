@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """This docstring details important information on the testing methodology.
 
 Most of the tests rely on "greedy equality", where we expect the output of

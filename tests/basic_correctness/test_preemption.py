@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
 VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 has to be set before running this test.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import resolve_obj_by_qualname

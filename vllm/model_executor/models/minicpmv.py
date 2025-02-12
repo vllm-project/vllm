@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -24,7 +26,6 @@ import math
 import re
 from collections import Counter
 from functools import cached_property, partial
-from itertools import accumulate
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
                     Optional, Set, Tuple, TypedDict, Union)
 
@@ -341,6 +342,15 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         **kwargs: object,
     ):
         hf_processor = self.ctx.get_hf_processor()
+
+        # NumPy arrays are considered as Iterable but not Sequence in
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
+        image_processor = hf_processor.image_processor  # type: ignore
+        for attr in ("mean", "std"):
+            val = getattr(image_processor, attr)
+            if isinstance(val, np.ndarray):
+                setattr(image_processor, attr, val.tolist())
+
         return hf_processor
 
     def get_image_processor(self):
@@ -363,7 +373,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         else:
             return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         mm_max_tokens = {"image": self.get_max_image_tokens()}
         if self.get_model_version() == (2, 6):
             mm_max_tokens["video"] = self.get_max_video_tokens(seq_len)
@@ -759,30 +773,25 @@ class MiniCPMVMultiModalProcessor(
         hf_inputs,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        image_num_slices = hf_inputs.get("image_num_slices", torch.empty(0))
+        video_num_slices = hf_inputs.get("video_num_slices", torch.empty(0))
 
-        def get_slices(num_slices: List[int]) -> List[int]:
-            slice_indices = [0] + list(accumulate(num_slices))
-            slices = [(slice_indices[i], slice_indices[i + 1])
-                      for i in range(len(num_slices))]
-            return [slice(*slice_item) for slice_item in slices]
-
-        image_slices = get_slices(
-            hf_inputs.get("image_num_slices", torch.empty(0)))
-        video_slices = get_slices(
-            hf_inputs.get("video_num_slices", torch.empty(0)))
-
-        return dict(
-            pixel_values=MultiModalFieldConfig.flat("image", image_slices),
-            image_sizes=MultiModalFieldConfig.batched("image"),
-            tgt_sizes=MultiModalFieldConfig.flat("image", image_slices),
-            image_num_slices=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.flat("image", image_slices),
-            video_pixel_values=MultiModalFieldConfig.flat(
-                "video", video_slices),
-            video_image_sizes=MultiModalFieldConfig.batched("video"),
-            video_tgt_sizes=MultiModalFieldConfig.flat("video", video_slices),
-            video_embeds=MultiModalFieldConfig.flat("video", video_slices),
-            video_num_slices=MultiModalFieldConfig.batched("video"))
+        return dict(pixel_values=MultiModalFieldConfig.flat_from_sizes(
+            "image", image_num_slices),
+                    image_sizes=MultiModalFieldConfig.batched("image"),
+                    tgt_sizes=MultiModalFieldConfig.flat_from_sizes(
+                        "image", image_num_slices),
+                    image_num_slices=MultiModalFieldConfig.batched("image"),
+                    image_embeds=MultiModalFieldConfig.flat_from_sizes(
+                        "image", image_num_slices),
+                    video_pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                        "video", video_num_slices),
+                    video_image_sizes=MultiModalFieldConfig.batched("video"),
+                    video_tgt_sizes=MultiModalFieldConfig.flat_from_sizes(
+                        "video", video_num_slices),
+                    video_embeds=MultiModalFieldConfig.flat_from_sizes(
+                        "video", video_num_slices),
+                    video_num_slices=MultiModalFieldConfig.batched("video"))
 
     def apply(
         self,
@@ -1473,6 +1482,7 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
     """
     # Ensure that the LoRA support check passes when the class is not
     # initialized, but set all these attributes to empty.
+    # These will be updated when an instance class is selected
     packed_modules_mapping = {}
     supported_lora_modules = []
     embedding_modules = {}
@@ -1489,8 +1499,15 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
             version = str(config.version).split(".")
             version = tuple([int(x) for x in version])
         # Dispatch class based on version
-        instance_class = _SUPPORT_VERSION.get(version)
-        if instance_class is None:
+        instance_cls = _SUPPORT_VERSION.get(version)
+        if instance_cls is None:
             raise ValueError(
                 "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
-        return instance_class(vllm_config=vllm_config, prefix=prefix)
+
+        # quant_config references base class members,
+        # so update values before init is called
+        cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
+        cls.supported_lora_modules += instance_cls.supported_lora_modules
+        cls.embedding_modules.update(instance_cls.embedding_modules)
+        cls.embedding_padding_modules += instance_cls.embedding_padding_modules
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)
