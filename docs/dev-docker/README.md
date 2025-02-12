@@ -20,6 +20,9 @@ Pull the most recent validated docker image with `docker pull rocm/vllm-dev:main
 
 ## What is New
 
+20250207_aiter:
+- More performant AITER
+- Bug fixes
 20250205_aiter:
 - [AITER](https://github.com/ROCm/aiter) support
 - Performance improvement for custom paged attention
@@ -479,9 +482,8 @@ To reproduce the release docker:
 ```bash
     git clone https://github.com/ROCm/vllm.git
     cd vllm
-    git checkout 9dc3394c9ee4da250be28d7bd08babf098d51081
+    git checkout c24ea633f928d77582bc85aff922d07f3bca9d78
     docker build -f Dockerfile.rocm -t <your_tag> --build-arg BUILD_HIPBLASLT=1 --build-arg USE_CYTHON=1 .
-    export VLLM_USE_AITER=0
 ```
 
 ### AITER
