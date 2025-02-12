@@ -9,7 +9,8 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
+                                                        FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -188,7 +189,7 @@ class GGUFLinearMethod(LinearMethodBase):
         return out
 
 
-class GGUFMoEMethod(GGUFLinearMethod):
+class GGUFMoEMethod(FusedMoEMethodBase):
     """MoE method for GGUF.
 
     Args:
