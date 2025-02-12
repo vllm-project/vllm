@@ -58,8 +58,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.model.hidden_size * 2,
-                                 config.model.hidden_size,
+        self.eh_proj = nn.Linear(config.hidden_size * 2,
+                                 config.hidden_size,
                                  bias=False)
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
         self.block = DeepseekV3DecoderLayer(config, prefix, model_config,
@@ -73,11 +73,13 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
+        spec_step_index: int = 0,
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         assert inputs_embeds is not None
-        inputs_embeds[positions == 0] = 0  # masking inputs at position=0
+        inputs_embeds[positions <= spec_step_index] = 0
+        # masking inputs at position<=k, token from k+1
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
@@ -123,24 +125,25 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
-        step_idx: int = 0,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        return self.layers[str(self.mtp_start_layer_idx + step_idx)](
+        return self.layers[str(self.mtp_start_layer_idx + spec_step_idx)](
             input_ids,
             positions,
-            kv_caches[step_idx],
+            kv_caches[spec_step_idx],
             attn_metadata,
             previous_hidden_states,
             inputs_embeds,
+            spec_step_idx,
         )
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        step_idx: int = 0,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        mtp_layer = self.layers[str(self.mtp_start_layer_idx + step_idx)]
+        mtp_layer = self.layers[str(self.mtp_start_layer_idx + spec_step_idx)]
         logits = self.logits_processor(mtp_layer.shared_head.head,
                                        hidden_states, sampling_metadata)
         return logits
@@ -150,9 +153,7 @@ class DeepSeekMTP(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
-        self.config = config
-        self.model_config = config.model
+        self.config = vllm_config.model_config.hf_config
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config,
                                                  prefix=maybe_prefix(
                                                      prefix, "model"))
@@ -168,21 +169,21 @@ class DeepSeekMTP(nn.Module):
         previous_hidden_states: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        step_idx: int = 0,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, previous_hidden_states,
-                                   inputs_embeds, step_idx)
+                                   inputs_embeds, spec_step_idx)
         return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        step_idx: int = 0,
+        spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
         return self.model.compute_logits(hidden_states, sampling_metadata,
-                                         step_idx)
+                                         spec_step_idx)
 
     def sample(
         self,

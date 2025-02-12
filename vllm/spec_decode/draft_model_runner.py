@@ -175,6 +175,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs,
     ) -> Optional[List[SamplerOutput]]:
         """Executes num_steps forward passes with advacement of input tensors 
         on the GPU. Look at supports_gpu_multi_step(..) for pre-conditions.
@@ -271,7 +272,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
-            kwargs = {"previous_hidden_states": hidden_states} \
+            model_execute_kwargs = {"previous_hidden_states": hidden_states} \
                 if previous_hidden_states is not None else {}
 
             compute_logits_kwargs = {}
@@ -279,8 +280,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             if hasattr(self.model.config, "num_nextn_predict_layers"):
                 # for DeepSeek MTP only to use the corresponding layer for
                 # each step
-                kwargs["step_idx"] = step
-                compute_logits_kwargs["step_idx"] = step
+                spec_step_idx = kwargs.get("spec_step_idx", 0)
+                model_execute_kwargs["spec_step_idx"] = spec_step_idx
+                compute_logits_kwargs["spec_step_idx"] = spec_step_idx
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config):
                 hidden_states = model_executable(
@@ -291,7 +293,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
-                    **kwargs,
+                    **model_execute_kwargs,
                 )
 
             # Compute the logits.

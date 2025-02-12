@@ -27,12 +27,10 @@ from .conftest import run_equality_correctness_test
 # main model
 MAIN_MODEL = "luccafong/deepseek_mtp_main_random"
 
-# speculative model
-SPEC_MODEL = "luccafong/deepseek_mtp_draft_random"
 
 # max. number of speculative tokens: this corresponds to
-# num_heads in the config.json of the speculator model.
-MAX_SPEC_TOKENS = 3
+# num_nextn_predict_layers in the config.json of the speculator model.
+MAX_SPEC_TOKENS = 1
 
 # precision
 PRECISION = "bfloat16"
@@ -57,7 +55,6 @@ PRECISION = "bfloat16"
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
         "num_speculative_tokens": MAX_SPEC_TOKENS,
     },
 ])
@@ -97,12 +94,10 @@ def test_mtp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
         "num_speculative_tokens": MAX_SPEC_TOKENS,
         "disable_logprobs_during_spec_decoding": False,
     },
     {
-        "speculative_model": SPEC_MODEL,
         "num_speculative_tokens": MAX_SPEC_TOKENS,
         "disable_logprobs_during_spec_decoding": True,
     },
@@ -152,7 +147,6 @@ def test_mtp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
         "num_speculative_tokens": MAX_SPEC_TOKENS,
     },
 ])
@@ -196,7 +190,6 @@ def test_mtp_e2e_greedy_correctness_cuda_graph(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
         "num_speculative_tokens": MAX_SPEC_TOKENS,
     },
 ])
@@ -239,7 +232,6 @@ def test_mtp_e2e_greedy_correctness_with_preemption(
     "test_llm_kwargs",
     [
         {
-            "speculative_model": SPEC_MODEL,
             "num_speculative_tokens": k,
         }
         # Try a range of num. speculative tokens
@@ -282,7 +274,6 @@ def test_mtp_different_k(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs",
                          [{
-                             "speculative_model": SPEC_MODEL,
                              "num_speculative_tokens": MAX_SPEC_TOKENS,
                              "speculative_disable_by_batch_size": 4
                          }])
