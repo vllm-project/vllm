@@ -214,6 +214,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
+    # The model on Huggingface is currently being updated,
+    # hence I temporarily mark it as not available online
+    "PrithviGeoSpatialMAE": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",  # noqa: E501
+                                            is_available_online=False),
 }
 
 _CROSS_ENCODER_EXAMPLE_MODELS = {
