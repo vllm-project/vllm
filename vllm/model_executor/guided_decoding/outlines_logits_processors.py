@@ -17,6 +17,7 @@ import copy
 import json
 import math
 from collections import defaultdict
+from collections.abc import Hashable, Iterable
 from functools import lru_cache
 from typing import Any, Callable, DefaultDict, Dict, List, Union
 
@@ -36,12 +37,28 @@ from transformers import PreTrainedTokenizerBase
 def _cached(fn):
     cache: Dict[Any, Any] = {}
 
+    def hash_args(obj):
+        match obj:
+            case Iterable():
+                # NOTE(kzawora): be careful not to hash genexpr directly
+                # (e.g hash(hash_args(item) for item in obj))
+                # hashing different generator expressions can yield the
+                # same hash (and vice versa)
+                # see https://stackoverflow.com/q/38174211
+                # this is why we hash the tuple, not genexpr here
+                return hash(tuple(hash_args(item) for item in obj))
+            case Hashable():
+                return hash(obj)
+            case _:
+                return hash(id(obj))
+
     def cached_fn(*args):
-        if args in cache:
-            result = cache[args]
+        cache_key = hash_args(args)
+        if cache_key in cache:
+            result = cache[cache_key]
         else:
             result = fn(*args)
-            cache[args] = result
+            cache[cache_key] = result
         return result
 
     return cached_fn
@@ -60,7 +77,13 @@ class BaseLogitsProcessor:
     @lru_cache(maxsize=128)
     def _create_mask_tensor(allowed_tokens, vocab_size, device):
         mask = torch.full((vocab_size, ), -math.inf, device=device)
-        mask[list(allowed_tokens)] = 0
+        # The tokenizer may support more token ids than the model can generate,
+        # eg. Llama 3.2 Vision models have an `<|image|>` token with id 128256
+        # but scores.shape == torch.Size([128256])
+        allowed_tokens = torch.tensor(allowed_tokens, device=device)
+        allowed_tokens = allowed_tokens.masked_select(
+            allowed_tokens < vocab_size)
+        mask.index_fill_(0, allowed_tokens, 0)
         return mask
 
     def _get_mask_tensor(self, state_id, vocab_size, device):

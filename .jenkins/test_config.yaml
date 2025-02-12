@@ -91,3 +91,8 @@ stages:
       - name: test_gptq
         flavor: g2
         command: VLLM_SKIP_WARMUP=true pytest -v tests/quantization/test_gptq.py::test_gptq
+  - name: tests_guided_decode
+    steps:
+    - name: test_lazy_outlines
+      flavor: g2
+      command: pip install -e tests/vllm_test_utils && pytest -v tests/entrypoints/llm/test_lazy_outlines.py
