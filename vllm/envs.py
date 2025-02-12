@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
+    VLLM_CUDART_SO_PATH: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -580,6 +581,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # can generate endless space for guided decoding.
     "VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE", "0"))),
+
+    # In some system, find_loaded_library() may not work. So we allow users to
+    # specify the path through environment variable VLLM_CUDART_SO_PATH.
+    "VLLM_CUDART_SO_PATH":
+    lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
 }
 
 # end-env-vars-definition
