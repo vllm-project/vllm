@@ -18,7 +18,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v3 import (DeepseekV3DecoderLayer,
+from .deepseek_v2 import (DeepseekV2DecoderLayer,
                           get_spec_layer_idx_from_weight_name)
 from .utils import maybe_prefix
 
@@ -62,7 +62,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
                                  config.hidden_size,
                                  bias=False)
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
-        self.block = DeepseekV3DecoderLayer(config, prefix, model_config,
+        self.block = DeepseekV2DecoderLayer(config, prefix, model_config,
                                             cache_config, quant_config)
 
     def forward(
@@ -78,19 +78,20 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         assert inputs_embeds is not None
-        inputs_embeds[positions <= spec_step_index] = 0
-        # masking inputs at position<=k, token from k+1
+        # masking inputs at position 0, as not needed by MTP
+        inputs_embeds[positions == 0] = 0
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
         hidden_states = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
-        hidden_states, _ = self.block(positions=positions,
-                                      hidden_states=hidden_states,
-                                      kv_cache=kv_cache,
-                                      attn_metadata=attn_metadata,
-                                      residual=None)
+        hidden_states, residual = self.block(positions=positions,
+                                             hidden_states=hidden_states,
+                                             kv_cache=kv_cache,
+                                             attn_metadata=attn_metadata,
+                                             residual=None)
+        hidden_states = residual + hidden_states
         return self.shared_head(hidden_states)
 
 

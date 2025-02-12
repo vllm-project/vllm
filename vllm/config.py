@@ -1693,14 +1693,11 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
-    def hf_config_override(
-        hf_config: PretrainedConfig
-    ) -> PretrainedConfig:
+    def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         if hf_config.model_type == "deepseek_v3":
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
-            n_predict = getattr(
-                    hf_config, "num_nextn_predict_layers", None)
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update({
                 "n_predict": n_predict,
                 "architectures": ["DeepSeekMTPModel"]
@@ -1795,8 +1792,9 @@ class SpeculativeConfig:
                     # use the draft model from the same model:
                     speculative_model = target_model_config.model
                 else:
-                    raise ValueError("num_speculative_tokens was provided without "
-                                 "speculative_model.")
+                    raise ValueError(
+                        "num_speculative_tokens was provided without "
+                        "speculative_model.")
             else:
                 return None
 
@@ -1978,7 +1976,8 @@ class SpeculativeConfig:
         # If speculative_draft_tensor_parallel_size is unset then set it
         # appropriately else verify that it is set correctly.
         if speculative_draft_tensor_parallel_size is None:
-            if draft_hf_config.model_type in ("mlp_speculator", "deepseek_mtp"):
+            if draft_hf_config.model_type in ("mlp_speculator",
+                                              "deepseek_mtp"):
                 speculative_draft_tensor_parallel_size = 1
                 if target_parallel_config.tensor_parallel_size > 1:
                     logger.warning(

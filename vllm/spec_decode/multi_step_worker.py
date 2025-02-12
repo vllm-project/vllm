@@ -2,7 +2,7 @@
 
 import copy
 import weakref
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple
 
 import torch
 

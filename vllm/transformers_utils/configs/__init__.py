@@ -3,8 +3,6 @@
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.configs.cohere2 import Cohere2Config
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
-from vllm.transformers_utils.configs.deepseek_mtp import DeepSeekMTPConfig
-from vllm.transformers_utils.configs.deepseek_v3 import DeepseekV3Config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.exaone import ExaoneConfig
@@ -47,6 +45,4 @@ __all__ = [
     "SolarConfig",
     "Telechat2Config",
     "UltravoxConfig",
-    "DeepSeekMTPConfig",
-    "DeepseekV3Config",
 ]

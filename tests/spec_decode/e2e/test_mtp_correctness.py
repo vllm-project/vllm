@@ -27,7 +27,6 @@ from .conftest import run_equality_correctness_test
 # main model
 MAIN_MODEL = "luccafong/deepseek_mtp_main_random"
 
-
 # max. number of speculative tokens: this corresponds to
 # num_nextn_predict_layers in the config.json of the speculator model.
 MAX_SPEC_TOKENS = 1
