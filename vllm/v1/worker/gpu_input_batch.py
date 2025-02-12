@@ -3,7 +3,7 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -508,6 +508,22 @@ class InputBatch:
             self.lora_id_to_lora_request.values())
 
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+
+    def _construct_logit_bias(
+        self, logit_bias: Union[Dict[int, float],
+                                Dict[str, float]]) -> Dict[int, float]:
+        try:
+            # Convert token_id to integer
+            # Clamp the bias between -100 and 100 per OpenAI API spec
+            clamped_logit_bias: Dict[int, float] = {
+                int(token_id): min(100.0, max(-100.0, bias))
+                for token_id, bias in logit_bias.items()
+            }
+        except ValueError as exc:
+            raise ValueError(
+                "Found token_id in logit_bias that is not "
+                "an integer or string representing an integer") from exc
+        return clamped_logit_bias
 
     @property
     def num_reqs(self) -> int:
