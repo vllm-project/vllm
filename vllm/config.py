@@ -102,8 +102,9 @@ class ModelConfig:
             it; otherwise, you must specify explicitly which task to use.
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
-            available, "slow" will always use the slow tokenizer, and
-            "mistral" will always use the tokenizer from `mistral_common`.
+            available, "slow" will always use the slow tokenizer,
+            "mistral" will always use the tokenizer from `mistral_common`, and
+            "custom" will use --tokenizer to select the preregistered tokenizer.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
         allowed_local_media_path: Allowing API requests to read local images or
@@ -467,10 +468,10 @@ class ModelConfig:
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
-        if tokenizer_mode not in ["auto", "slow", "mistral"]:
+        if tokenizer_mode not in ["auto", "slow", "mistral", "custom"]:
             raise ValueError(
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
-                "either 'auto', 'slow' or 'mistral'.")
+                "either 'auto', 'slow', 'mistral' or 'custom'.")
         self.tokenizer_mode = tokenizer_mode
 
     def _get_preferred_task(
@@ -1400,6 +1401,9 @@ class ParallelConfig:
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
+
+        if self.distributed_executor_backend is None and self.world_size == 1:
+            self.distributed_executor_backend = "uni"
 
         self._verify_args()
 
@@ -3054,7 +3058,8 @@ class VllmConfig:
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
     # some opaque config, only used to provide additional information
-    # for the hash computation, mainly used for testing and debugging.
+    # for the hash computation, mainly used for testing, debugging or out of
+    # tree config registration.
     additional_config: SupportsHash = field(default=None,
                                             init=True)  # type: ignore
     instance_id: str = ""
@@ -3072,15 +3077,6 @@ class VllmConfig:
         the final hidden states.
         """
         factors: List[Any] = []
-        # summarize system state
-        from torch._inductor.codecache import CacheBase
-        system_factors = CacheBase.get_system()
-        factors.append(system_factors)
-
-        # summarize pytorch state
-        from torch._inductor.codecache import torch_key
-        torch_factors = torch_key()
-        factors.append(torch_factors)
 
         # summarize vllm config
         vllm_factors: List[Any] = []
