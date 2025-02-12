@@ -197,8 +197,7 @@ class GroupCoordinator:
 
         from vllm.platforms import current_platform
         self.device = torch.device(
-            f"{current_platform.device_type}:{local_rank}"
-        )
+            f"{current_platform.device_type}:{local_rank}")
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
