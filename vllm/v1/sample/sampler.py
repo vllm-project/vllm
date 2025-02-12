@@ -30,7 +30,7 @@ class Sampler(nn.Module):
             if sampling_metadata.max_num_logprobs:
                 raise NotImplementedError(
                     "Rejection sampling does not support logprobs.")
-            return self.rejection_sampler.sample(
+            return self.rejection_sampler(
                 logits,
                 sampling_metadata,
             )

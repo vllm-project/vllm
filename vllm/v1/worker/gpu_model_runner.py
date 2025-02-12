@@ -437,10 +437,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if use_spec_decode:
             # Currently, we assume all speculated tokens are verified.
             # We don't support partial verification.
-            # 1. Get spec decode logits indices.
-            spec_decode_logits_indices = self.arange_cpu[:
-                                                         total_num_scheduled_tokens]
-            # 2. Write spec_token_ids to input batch.
+            
+            # 1. Write spec_token_ids to input batch.
             # Step 1. Get req indices that perform spec decode and repeat
             #         the req indices by the number of spec tokens. Note
             #         for requests that don't perform spec decode, the
@@ -475,6 +473,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Step 2. Write spec token ids to input_ids_cpu.
             self.input_batch.token_ids_cpu_tensor.flatten().scatter_(
                 0, cumsums_spec_offsets, all_spec_token_ids)
+            
+            
+            # 2. Get spec decode logits indices.
+            # E.g.,   num_scheduled_tokens: [4, 100, 3,   100, 2]
+            #         cu_num_tokens:        [4, 104, 107, 207, 209]
+            #         num_spec_tokens_list: [3, 0,   2,   0,   1] 
+            #         num_sampled_tokens:   [4, 1,   3,   1,   2]
+            #         spec_decode_logits_indices:
+            #                               [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
+            num_spec_tokens_np = np.array(num_spec_tokens_list, dtype=np.int32)
+            num_sampled_tokens = num_spec_tokens_np + 1
+            # logits_start_loc: [0, 103, 104, 206, 207]
+            logits_start_loc = cu_num_tokens - num_sampled_tokens
+            # [0, 103, 104, 206, 207] -> [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
+            logits_start_loc = np.repeat(logits_start_loc, num_sampled_tokens)
+            # The following three lines:
+            # [4, 1,   3,   1,   2] -> [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+            # Step 1. [4, 1, 3, 1, 2] -> [4, 5, 8, 9, 11]
+            cu_num_sampled_tokens = np.cumsum(num_sampled_tokens)
+            # Step 2. [4, 5, 8, 9, 11] -> [0, 4, 5, 8, 9] -> [0, 0, 0, 0, 4, 5, 5, 5, 8, 9, 9]
+            cumsums_sampled_offsets = np.repeat(cu_num_sampled_tokens - num_sampled_tokens,
+                                        num_sampled_tokens)
+            # Step 3. [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] -  [0, 0, 0, 0, 4, 5, 5, 5, 8, 9, 9]
+            #      -> [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+            total_num_sampled_tokens = num_sampled_tokens.sum()
+            sampled_arange = self.arange_np[:total_num_sampled_tokens] - cumsums_sampled_offsets
+        
+            # [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207] ->
+            # [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
+            spec_decode_logits_indices = logits_start_loc + sampled_arange
+            
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
@@ -570,7 +599,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if use_spec_decode:
-            logits_indices = spec_decode_logits_indices.to(self.device,
+            logits_indices = torch.from_numpy(spec_decode_logits_indices).to(self.device,
                                                            non_blocking=True)
         else:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
