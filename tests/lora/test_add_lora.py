@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 import pytest
 
@@ -26,7 +26,7 @@ def v1(run_with_both_engines_lora):
 
 
 async def add_lora_callable(llm: EngineClient,
-                            lora_requests=List[LoRARequest]):
+                            lora_requests: List[LoRARequest]):
     for lr in lora_requests:
         await llm.add_lora(lr)
 
@@ -34,7 +34,7 @@ async def add_lora_callable(llm: EngineClient,
 async def requests_processing_time(
     lora_requests=List[LoRARequest],
     warmup_function: Optional[Callable[[EngineClient, List[LoRARequest]],
-                                       None]] = None
+                                       Any]] = None
 ) -> float:
     """
     Utility function to measure LoRA requests processing time. The primary
@@ -75,11 +75,12 @@ async def requests_processing_time(
         start = time.perf_counter()
 
         for idx, lora_request in enumerate(lora_requests):
-            generator = llm.generate(prompt=TextPrompt(prompt=f"hello {idx}",
-                                                       multi_modal_data=None),
-                                     sampling_params=sampling_params,
-                                     lora_request=lora_request,
-                                     request_id=f"test{idx}")
+            generator = llm.generate(
+                prompt=TextPrompt(prompt=f"hello {idx}",
+                                  multi_modal_data=None),  # type: ignore 
+                sampling_params=sampling_params,
+                lora_request=lora_request,
+                request_id=f"test{idx}")
             generators.append(generator)
 
         all_gens = merge_async_iterators(*generators)
