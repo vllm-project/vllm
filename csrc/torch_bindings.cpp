@@ -387,6 +387,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool silu_activation,"
       "int pad_slot_id) -> ()");
   ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
+
+  // fp4 gemm
+  ops.def(
+      "cutlass_scaled_fp4_mm(Tensor! out, Tensor! a,"
+      "                 Tensor! b, Tensor! block_scale_a,"
+      "                 Tensor! block_scale_b, Tensor! gscale,"
+      "                 Tensor! workspace, int workspace_bytes) -> ()");
+  ops.impl("cutlass_scaled_fp4_mm", torch::kCUDA, &cutlass_scaled_fp4_mm);
+
+  // fp4 quantization
+  ops.def(
+      "scaled_fp4_quant(Tensor! output, Tensor! input,"
+      "                 Tensor! block_scale_out, Tensor! input_global_scale"
+      "                 ) -> ()");
+  ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant);
+
 #endif
 
   // Quantized GEMM for GPTQ.

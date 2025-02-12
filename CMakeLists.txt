@@ -377,8 +377,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
+  # FP4 Archs and flags
+  cuda_archs_loose_intersection(FP4_ARCHS "10.0;10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND FP4_ARCHS)
+    set(SRCS 
+      "csrc/quantization/fp4/fp4_gemm_template.cu"
+      "csrc/quantization/fp4/quantization.cu"
+    )
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${FP4_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    message(STATUS "Building FP4 for archs: ${FP4_ARCHS}")
+  else()
+      message(STATUS "Not building FP4 as no compatible archs were found.")
+  endif()
 
-  #
   # Machete kernels
 
   # The machete kernels only work on hopper and require CUDA 12.0 or later.
