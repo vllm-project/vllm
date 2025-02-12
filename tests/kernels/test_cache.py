@@ -696,10 +696,10 @@ def test_swap_blocks_mla(
 
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
-@pytest.mark.parametrize("block_size", [2])
+@pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("num_blocks", [1024])
-@pytest.mark.parametrize("max_seq_len", [4])
-@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("max_seq_len", [512])
+@pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("kv_cache_dtype",
                          ["auto"])  # You can also test "fp8" if needed.
@@ -724,6 +724,7 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
                               device=device)
     cu_seq_lens[0] = 0
     cu_seq_lens[1:] = seq_len_tensor.cumsum(dim=0).to(dtype=torch.int32)
+    print("seq_len_tensor", seq_len_tensor)
 
     tot_blocks_tensor = (seq_len_tensor + block_size - 1) // block_size
     block_table = torch.empty((batch_size, num_blocks),

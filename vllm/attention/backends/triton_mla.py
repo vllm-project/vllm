@@ -23,9 +23,7 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadataBuilder,
                                               AttentionState, AttentionType)
 from vllm.attention.backends.mla.utils import MLACommonImpl, MLACommonMetadata
-from vllm.attention.backends.utils import (PAD_SLOT_ID,
-                                           VLLM_FLASH_ATTN_VERSION,
-                                           compute_slot_mapping,
+from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
@@ -281,6 +279,8 @@ class TritonMLAMetadata(MLACommonMetadata):
     chunk_iter_toks: Optional[List[int]] = None
     chunk_max_seq_lens: Optional[List[int]] = None
 
+    first_layer: bool = True
+
     def __post_init__(self):
         supported_head_sizes = TritonMLABackend.get_supported_head_sizes()
         if self.head_dim is not None and self.head_dim \
@@ -520,6 +520,9 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
 
+        print("scheduling", inter_data.is_prompt, inter_data,
+              inter_data.seq_lens, inter_data.context_lens)
+
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block, input_positions) in zip(
                  inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
@@ -609,10 +612,13 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             inter_data.prefix_cache_hit
             for inter_data in self.input_builder.inter_data_list
         ])
+
+        print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled,
                                 prefix_cache_hit)
+        print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
@@ -690,23 +696,24 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
                 torch.arange(num_chunks, device=device, dtype=torch.int32)\
                 .unsqueeze(1).expand(-1, self.num_prefills)\
                 * seq_chunk_size
-            chunk_ends = torch.min(seq_lens_tensor.unsqueeze(0),\
-                                   chunk_seq_starts + seq_chunk_size)
+            chunk_ends = torch.min(seq_lens_tensor[:self.num_prefills]\
+                .unsqueeze(0), chunk_seq_starts + seq_chunk_size)
             chunk_seq_lens = (chunk_ends - chunk_seq_starts).clamp(min=0)
             _chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(torch.int32)
             zero = torch.zeros(num_chunks, dtype=torch.int32, device=device)\
                 .unsqueeze(0)
-            print(self.num_prefills, zero, _chunk_cu_seq_lens)
+            print("self.num_prefills", self.num_prefills, "_chunk_cu_seq_lens",
+                  _chunk_cu_seq_lens)
             chunk_cu_seq_lens = torch.cat([zero, _chunk_cu_seq_lens], dim=1)
             chunk_max_seq_lens = chunk_seq_lens.max(dim=1).values.tolist()
             chunk_iter_toks = chunk_seq_lens.sum(dim=1).tolist()
 
-            print(chunk_seq_starts)
-            print(chunk_ends)
+            print("chunk_seq_starts", chunk_seq_starts)
+            print("chunk_ends", chunk_ends)
             #print(_chunk_cu_seq_lens)
-            print(chunk_cu_seq_lens)
-            print(chunk_max_seq_lens)
-            print(chunk_iter_toks)
+            print("chunk_cu_seq_lens", chunk_cu_seq_lens)
+            print("chunk_max_seq_lens", chunk_max_seq_lens)
+            print("chunk_iter_toks", chunk_iter_toks)
 
         return TritonMLAMetadata(
             num_prefills=self.num_prefills,
@@ -787,6 +794,7 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
         prefill_metadata = attn_metadata.prefill_metadata
 
         if prefill_metadata.context_lens_tensor is not None \
+            and prefill_metadata.context_lens_tensor.max() > 0 \
             and kv_c_and_k_pe_cache.numel() > 0:
 
             if not hasattr(self, "workspace"):
@@ -798,29 +806,37 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                 )
 
             output = None
-            for i in range(len(prefill_metadata.chunk_iter_toks)):
+            iters = len(prefill_metadata.chunk_iter_toks)
+            for i in range(iters):
                 chunk_cu_seq_lens = prefill_metadata.chunk_cu_seq_lens[i]
                 chunk_seq_starts = prefill_metadata.chunk_seq_starts[i]
                 toks = prefill_metadata.chunk_iter_toks[i]
                 max_seq_len = prefill_metadata.chunk_max_seq_lens[i]
+
+                if attn_metadata.first_layer:
+                    print("running gather")
+                    print(prefill_metadata.block_tables)
+                    print("chunk_cu_seq_lens", chunk_cu_seq_lens)
+                    print("chunk_seq_starts", chunk_seq_starts)
 
                 ops.gather_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=self.workspace,
                     block_table=prefill_metadata.block_tables,
                     cu_seq_lens=chunk_cu_seq_lens,
-                    batch_size=attn_metadata.num_prefills,
+                    batch_size=prefill_metadata.num_prefills,
                     seq_starts=chunk_seq_starts,
                 )
 
-                k_c_normed = self.workspace[:toks][
-                    ..., :self.kv_lora_rank].unsqueeze(1)
-                k_pe = self.workspace[:toks][...,
-                                             self.kv_lora_rank:].unsqueeze(1)
-
-                kv_nope = self.kv_b_proj(k_c_normed)[0]\
-                    .view(-1, self.num_heads, \
-                        self.qk_nope_head_dim + self.v_head_dim)
+                k_c_normed = self.workspace[:toks]\
+                    [..., :self.kv_lora_rank].unsqueeze(1)
+                k_pe = self.workspace[:toks]\
+                    [..., self.kv_lora_rank:].unsqueeze(1)
+                # print("====================================")
+                # print(prefill_metadata.block_tables)
+                # print("====================================")
+                kv_nope = self.kv_b_proj(k_c_normed)[0].view( \
+                    -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
                 k_nope, v = kv_nope\
                     .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
@@ -832,9 +848,9 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                 v_padded = torch.nn.functional.pad(
                     v, [0, q.shape[-1] - v.shape[-1]], value=0)
 
-                print("q", q.shape)
-                print("k", k.shape)
-                print("v", v_padded.shape)
+                if attn_metadata.first_layer:
+                    print("prefill_metadata.query_start_loc",
+                          prefill_metadata.query_start_loc)
 
                 attn_output, attn_softmax_lse = flash_attn_varlen_func(
                     q=q,
@@ -847,8 +863,13 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                     softmax_scale=self.scale,
                     causal=True,
                     return_softmax_lse=True,
-                    fa_version=VLLM_FLASH_ATTN_VERSION,
+                    fa_version=self.vllm_flash_attn_version,
                 )
+
+                if attn_metadata.first_layer:
+                    print(q.shape)
+                    print(k.shape)
+                    print(v_padded.shape)
 
                 if output is None:
                     output = attn_output
@@ -860,6 +881,8 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                         suffix_output=attn_output,
                         suffix_lse=attn_softmax_lse,
                     )
+
+                attn_metadata.first_layer = False
 
             output = output\
                 .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
@@ -881,6 +904,8 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError("FP8 Triton MLA not yet supported")
+
+        # print("running decode")
 
         decode_meta = attn_metadata.decode_metadata
         assert decode_meta is not None

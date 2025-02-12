@@ -445,9 +445,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         # Restore head dim (for rotary embedding)
         k_pe = k_pe.unsqueeze(1)
         assert hasattr(attn_metadata, "input_positions")
-        rope_fn = self.rotary_emb
 
         num_prefill_tokens: int = attn_metadata.num_prefill_tokens
+
+        # print("has_decode:", has_decode, " has_prefill: ", has_prefill)
 
         if has_decode:
             decode_q = hidden_states_or_q_c[num_prefill_tokens:]
@@ -455,20 +456,22 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             decode_q_pe = torch.matmul(decode_q, self.W_QR)\
                 .view(-1, self.num_heads, self.qk_rope_head_dim)
             decode_q_pe, k_pe[num_prefill_tokens:] = \
-                rope_fn(attn_metadata.input_positions[num_prefill_tokens:],
-                        decode_q_pe, k_pe[num_prefill_tokens:])
+                self.rotary_emb(
+                    attn_metadata.input_positions[num_prefill_tokens:],
+                    decode_q_pe, k_pe[num_prefill_tokens:])
+
         if has_prefill:
-            prefill_q = hidden_states_or_q_c[:num_prefill_tokens]
-            prefill_k_pe = k_pe[:num_prefill_tokens]
-            prefill_q = self.q_proj(prefill_q)[0]\
+            prefill_q = \
+                self.q_proj(hidden_states_or_q_c[:num_prefill_tokens])[0]\
                 .view(-1, self.num_heads, self.qk_head_dim)
 
             # TODO(lucas): there must be a nicer way to write this line
-            prefill_q[..., self.qk_nope_head_dim:], prefill_k_pe = \
-                rope_fn(
+            prefill_q[..., self.qk_nope_head_dim:], \
+                k_pe[:num_prefill_tokens] = \
+                self.rotary_emb(
                     attn_metadata.input_positions[:num_prefill_tokens],
                     prefill_q[..., self.qk_nope_head_dim:],
-                    prefill_k_pe)
+                    k_pe[:num_prefill_tokens])
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
@@ -489,7 +492,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         if has_prefill:
             output[:num_prefill_tokens] = self._forward_prefill(
                 prefill_q, k_c_normed[:num_prefill_tokens].contiguous(),
-                prefill_k_pe.contiguous(), kv_cache, attn_metadata)
+                k_pe[:num_prefill_tokens].contiguous(), kv_cache,
+                attn_metadata)
 
         if has_decode:
             output[num_prefill_tokens:] = self._forward_decode(
