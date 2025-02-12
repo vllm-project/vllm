@@ -17,10 +17,10 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import (avoid_warn_for_unimplementation,
-                        enable_trace_function_call_for_thread,
+from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
-                        update_environment_variables)
+                        update_environment_variables,
+                        warn_for_unimplemented_methods)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
@@ -28,6 +28,7 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 logger = init_logger(__name__)
 
 
+@warn_for_unimplemented_methods()
 class WorkerBase:
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
@@ -79,7 +80,6 @@ class WorkerBase:
     ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
-    @avoid_warn_for_unimplementation
     def start_worker_execution_loop(self) -> None:
         """Execute model loop in parallel worker.
 

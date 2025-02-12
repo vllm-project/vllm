@@ -2301,14 +2301,3 @@ def warn_for_unimplemented_methods():
         return cls
 
     return decorator
-
-
-def avoid_warn_for_unimplementation(
-        func: Callable[..., T]) -> Callable[..., T]:
-
-    @wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> T:
-        return func(*args, **kwargs)
-
-    wrapper._avoid_check = True  # type: ignore
-    return wrapper
