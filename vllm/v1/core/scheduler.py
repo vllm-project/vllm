@@ -576,14 +576,12 @@ class Scheduler:
 
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or prompt_logprobs_tensors is not None:
-                # Add EngineCoreOutput for this Request.
-                # Add EngineCoreOutputs for this Request.
+                # Update EngineCoreOutputs for this Request.
                 output.request_ids.append(req_id)
                 output.new_token_id_offsets.append(offset)
                 new_ids = request.output_token_ids[-num_new_tokens:]
                 output.new_token_ids += new_ids
 
-                # Move out of loop?
                 if new_logprobs is not None:
                     output.new_logprobs[req_id] = new_logprobs
 
@@ -603,7 +601,7 @@ class Scheduler:
             if not stopped:
                 new_running.append(request)
 
-        # Add sentinel
+        # Add sentinel to make output processing simpler.
         num_new_tokens = len(output.new_token_ids)
         if num_new_tokens > 0:
             output.new_token_id_offsets.append(num_new_tokens)

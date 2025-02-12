@@ -129,8 +129,10 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     request_ids: List[str]
-    # consider making Optional since most of the time all will be 1
-    new_token_id_offsets: List[int]
+
+    # TODO: consider making Optional since most of the time all will be 1
+   new_token_id_offsets: List[int]
+
     new_token_ids: List[int]
 
     new_logprobs: Dict[str, LogprobsLists]
