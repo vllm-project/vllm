@@ -204,29 +204,23 @@ class GGUFMoEMethod(GGUFLinearMethod):
         #gate up proj
         w13_qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
-            w13_qweight,
-            {
+            w13_qweight, {
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
                 "is_gguf_weight": True,
                 "data_container": [],
-                # "shard_id": [],
-                # "shard_id_map": {},
             })
         set_weight_attrs(w13_qweight, extra_weight_attrs)
         layer.register_parameter("w13_qweight", w13_qweight)
 
         w13_qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
                                      requires_grad=False)
-        set_weight_attrs(
-            w13_qweight_type,
-            {
-                "is_gguf_weight_type": True,
-                "weight_type": 0,
-                # "shard_qweight_type": {},
-                "ignore_warning": True
-            })
+        set_weight_attrs(w13_qweight_type, {
+            "is_gguf_weight_type": True,
+            "weight_type": 0,
+            "ignore_warning": True
+        })
         set_weight_attrs(w13_qweight_type, extra_weight_attrs)
         layer.register_parameter("w13_qweight_type", w13_qweight_type)
 
@@ -235,32 +229,27 @@ class GGUFMoEMethod(GGUFLinearMethod):
         #gate down proj
         w2_qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
-            w2_qweight,
-            {
+            w2_qweight, {
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
                 "is_gguf_weight": True,
                 "data_container": [],
-                # "shard_id": [],
-                # "shard_id_map": {},
             })
         set_weight_attrs(w2_qweight, extra_weight_attrs)
         layer.register_parameter("w2_qweight", w2_qweight)
 
         w2_qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
                                     requires_grad=False)
-        set_weight_attrs(
-            w2_qweight_type,
-            {
-                "is_gguf_weight_type": True,
-                "weight_type": 0,
-                # "shard_qweight_type": {},
-                "ignore_warning": True
-            })
+        set_weight_attrs(w2_qweight_type, {
+            "is_gguf_weight_type": True,
+            "weight_type": 0,
+            "ignore_warning": True
+        })
 
         set_weight_attrs(w2_qweight_type, extra_weight_attrs)
         layer.register_parameter("w2_qweight_type", w2_qweight_type)
+        self.act = SiluAndMul()
 
     def apply(
         self,
@@ -288,7 +277,6 @@ class GGUFMoEMethod(GGUFLinearMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
         final_hidden_states = torch.empty_like(x)
-        act = SiluAndMul()
         for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
             inp = x[tok].reshape((1, ) + x.shape[1:])
             current_hidden_state = None
@@ -297,7 +285,7 @@ class GGUFMoEMethod(GGUFLinearMethod):
 
                 out = _fuse_mul_mat(inp, expert_up,
                                     layer.w13_qweight_type.weight_type)
-                out = act(out)
+                out = self.act(out)
 
                 expert_down = layer.w2_qweight[ii]
                 current_state = _fuse_mul_mat(
