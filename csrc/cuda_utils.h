@@ -1,6 +1,6 @@
 #pragma once
 
-#include<stdio.h>
+#include <stdio.h>
 
 #if defined(__CUDACC__) || defined(_NVHPC_CUDA)
   #define HOST_DEVICE_INLINE __forceinline__ __host__ __device__
