@@ -210,6 +210,7 @@ class ModelConfig:
     def __init__(
         self,
         model: str,
+        hf_config_path: Optional[str],
         task: Union[TaskOption, Literal["draft"]],
         tokenizer: str,
         tokenizer_mode: str,
@@ -246,6 +247,10 @@ class ModelConfig:
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
+        if hf_config_path:
+            self.hf_config_path = hf_config_path
+        else:
+            self.hf_config_path = self.model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
@@ -300,8 +305,8 @@ class ModelConfig:
         if self.enable_sleep_mode and not current_platform.is_cuda():
             raise ValueError("Sleep mode is only supported on CUDA devices.")
 
-        hf_config = get_config(self.model, trust_remote_code, revision,
-                               code_revision, config_format)
+        hf_config = get_config(self.hf_config_path, trust_remote_code,
+                               revision, code_revision, config_format)
 
         if hf_overrides_kw:
             logger.info("Overriding HF config with %s", hf_overrides_kw)
@@ -908,7 +913,8 @@ class ModelConfig:
     def try_get_generation_config(self) -> Dict[str, Any]:
         if self.generation_config is None or self.generation_config == "auto":
             config = try_get_generation_config(
-                self.model,
+                self.model
+                if self.hf_config_path is None else self.hf_config_path,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
             )
