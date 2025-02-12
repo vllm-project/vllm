@@ -97,5 +97,5 @@ async def test_non_asr_model(winning_call):
                                                        file=winning_call,
                                                        language="en",
                                                        temperature=0.0)
-        assert res.code == 400 and res.text == ""
+        assert res.code == 400 and not res.text
         assert res.message == "The model does not support Transcriptions API"
