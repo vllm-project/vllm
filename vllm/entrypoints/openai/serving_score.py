@@ -121,7 +121,7 @@ class OpenAIServingScores(OpenAIServing):
 
                 tokenize_async = make_async(tokenizer.__call__,
                                             executor=self._tokenizer_executor)
-                prompt_inputs = await tokenize_async(text=q,
+                prompt_inputs = await tokenize_async(q,
                                                      text_pair=t,
                                                      **tokenization_kwargs)
 
