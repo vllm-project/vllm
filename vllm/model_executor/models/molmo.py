@@ -53,7 +53,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import JSONTree, json_map_leaves
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -1537,16 +1538,21 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         image_input: MolmoImageInputs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         if isinstance(image_input["images"], list):
-            # TODO: Enable vision backbone to handle flattened batches
-            image_features = [
-                self.vision_backbone(
-                    images=images.unsqueeze(0),
-                    image_masks=image_masks.unsqueeze(0),
-                ).squeeze(0) for images, image_masks in zip(
-                    image_input["images"],
-                    image_input["image_masks"],
-                )
-            ]
+            # Call the vision backbone on the whole batch at once
+            images_flat = flatten_bn(image_input["images"], concat=True)
+            image_masks_flat = (None if (image_masks :=
+                                         image_input["image_masks"]) is None
+                                else flatten_bn(image_masks, concat=True))
+
+            image_features_flat = self.vision_backbone(
+                images=images_flat.unsqueeze(0),
+                image_masks=(None if image_masks_flat is None else
+                             image_masks_flat.unsqueeze(0)),
+            ).squeeze(0)
+
+            # Reconstruct the batch dimension
+            image_features = image_features_flat.split(
+                image_input["num_crops"].sum(-1).tolist())
         else:
             image_features = self.vision_backbone(
                 images=image_input["images"],
@@ -1559,11 +1565,12 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             self,
             features: torch.Tensor,  # Shape: (num_crop, num_patch, d)
             feat_is_patch: torch.Tensor,  # Shape: (num_crop, num_patch)
-            num_crops_per_image: torch.Tensor,  # Shape: (num_images,)
+            num_crops: torch.Tensor,  # Shape: (num_images,)
             embed_is_patch: torch.Tensor,  # Shape: (num_embeds,)
     ) -> list[torch.Tensor]:
         # The patch features are scattered into a tensor that
         # matches the embedding dimension as defined in the multimodal processor
+        num_crops_per_image = num_crops.tolist()
         feats_per_image = features.split(num_crops_per_image)
         f_is_patch_per_image = feat_is_patch.split(num_crops_per_image)
 
