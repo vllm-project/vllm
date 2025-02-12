@@ -859,8 +859,7 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if ("WhisperForConditionalGeneration"
-          in model_config.hf_config.architectures) else None
+    ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
 
 
