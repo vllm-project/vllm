@@ -361,7 +361,7 @@ class PartialPrefillMetadata:
                     >= self.scheduler_config.max_long_partial_prefills
                     and self.scheduler_config.max_num_partial_prefills > 1)
 
-    def increment_partial_prefills(self, seq_group: SequenceGroup) -> None:
+    def maybe_increment_partial_prefills(self, seq_group: SequenceGroup) -> None:
         # When a new prefill is scheduled, we need to know if it is a
         # long request
         if (seq_group.first_seq.get_num_new_tokens()
