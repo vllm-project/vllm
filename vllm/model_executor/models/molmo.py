@@ -62,10 +62,10 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 VIT_LAYERS = [-2, -9]
 NUM_PREFIX_TOKENS = 1
 ADDITIONAL_VOCAB_SIZE = 128
-DEFAULT_IMAGE_PATCH_TOKEN_ID = 152066
-DEFAULT_IM_COL_TOKEN_ID = 152067
-DEFAULT_IM_START_TOKEN_ID = 152064
-DEFAULT_IM_END_TOKEN_ID = 152065
+DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"
+DEFAULT_IM_COL_TOKEN = "<im_col>"
+DEFAULT_IM_START_TOKEN = "<im_start>"
+DEFAULT_IM_END_TOKEN = "<im_end>"
 POOLING_SIZE = 2
 
 
@@ -1004,6 +1004,10 @@ class MolmoProcessorWrapper:
         self.processor = processor
 
     @property
+    def vocab(self) -> dict[str, int]:
+        return self.processor.tokenizer.vocab
+
+    @property
     def max_crops(self) -> int:
         image_processor = self.processor.image_processor  # type: ignore
 
@@ -1069,19 +1073,19 @@ class MolmoProcessorWrapper:
 
     @property
     def image_patch_id(self) -> int:
-        return DEFAULT_IMAGE_PATCH_TOKEN_ID
+        return self.vocab.get(DEFAULT_IMAGE_PATCH_TOKEN)
 
     @property
     def im_col_id(self) -> int:
-        return DEFAULT_IM_COL_TOKEN_ID
+        return self.vocab.get(DEFAULT_IM_COL_TOKEN)
 
     @property
     def im_start_id(self) -> int:
-        return DEFAULT_IM_START_TOKEN_ID
+        return self.vocab.get(DEFAULT_IM_START_TOKEN)
 
     @property
     def im_end_id(self) -> int:
-        return DEFAULT_IM_END_TOKEN_ID
+        return self.vocab.get(DEFAULT_IM_END_TOKEN)
 
     @property
     def pooling_size(self) -> int:
@@ -1193,6 +1197,7 @@ class MolmoProcessorWrapper:
             outputs["feat_is_patch"] = feat_is_patch
             outputs["embed_is_patch"] = embed_is_patch
             outputs["num_crops"] = num_crops
+            outputs["img_patch_id"] = self.image_patch_id
 
         return BatchFeature(outputs, tensor_type=return_tensors)
 
@@ -1339,6 +1344,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
                 "image", num_crops),
             embed_is_patch=MultiModalFieldConfig.shared("image", num_images),
             num_crops=MultiModalFieldConfig.batched("image"),
+            img_patch_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
     def _get_prompt_replacements(
@@ -1473,6 +1479,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                                                    quant_config)
         self.model = MolmoModel(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
+        self.img_patch_id = None
 
         if self.config.weight_tying:
             self.lm_head = self.model.transformer.wte
@@ -1524,6 +1531,12 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         if not isinstance(num_crops, torch.Tensor):
             raise ValueError("Incorrect type of num_crops. "
                              f"Got type: {type(num_crops)}")
+
+        img_patch_id = kwargs.pop("img_patch_id", None)
+        if not isinstance(img_patch_id, torch.Tensor):
+            raise ValueError("Incorrect type of num_crops. "
+                             f"Got type: {type(num_crops)}")
+        self.img_patch_id = img_patch_id.flatten().unique().item()
 
         return MolmoImageInputs(
             images=images,
@@ -1618,7 +1631,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                 input_ids,
                 inputs_embeds,
                 cast(NestedTensors, patch_embeddings),
-                DEFAULT_IMAGE_PATCH_TOKEN_ID,
+                self.img_patch_id,
             )
         return inputs_embeds
 
