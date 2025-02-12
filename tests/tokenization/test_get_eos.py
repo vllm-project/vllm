@@ -17,7 +17,7 @@ def test_get_llama3_eos_token():
     generation_config = try_get_generation_config(model_name,
                                                   trust_remote_code=False)
     assert generation_config is not None
-    assert generation_config.eos_token_id == [128001, 128009]
+    assert generation_config.eos_token_id == [128001, 128008, 128009]
 
 
 def test_get_blip2_eos_token():
