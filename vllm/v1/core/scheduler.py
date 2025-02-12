@@ -2,11 +2,7 @@
 
 import time
 from collections import deque
-from concurrent import futures
-from dataclasses import dataclass
-from re import A
-from typing import (TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Literal,
-                    Optional, Set, Tuple, Union)
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -17,7 +13,6 @@ from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreOutput, EngineCoreOutputs)
-from vllm.v1.guided_decoding import Grammar
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -109,6 +104,7 @@ class Scheduler:
         scheduled_resumed_reqs: List[Request] = []
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
+        guided_decoding_request_ids: Set[str] = set()
 
         req_to_new_block_ids: Dict[str, List[int]] = {}
         num_scheduled_tokens: Dict[str, int] = {}
@@ -123,11 +119,6 @@ class Scheduler:
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-
-            # Skip requests waiting for FSM
-            if request.status == RequestStatus.WAITING_FOR_FSM:
-                req_index += 1
-                continue
 
             num_new_tokens = request.num_tokens - request.num_computed_tokens
             num_new_tokens = min(num_new_tokens, token_budget)
@@ -206,6 +197,9 @@ class Scheduler:
                     break
 
                 request = self.waiting[0]
+
+                if request.use_guided_decoding:
+                    guided_decoding_request_ids.add(request.request_id)
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -346,7 +340,7 @@ class Scheduler:
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-        )
+            guided_decoding_request_ids=guided_decoding_request_ids)
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -449,8 +443,6 @@ class Scheduler:
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
     ) -> EngineCoreOutputs:
-        # concern: batchsize >>>1000
-        # compilation << update
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
@@ -495,6 +487,18 @@ class Scheduler:
             stopped = False
             new_logprobs = None
             new_token_ids = None
+
+            # Handle guided decoding FSM advancement if applicable
+            if request.use_guided_decoding and request.is_grammar_ready:
+                req_index = model_runner_output.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    token_id = sampled_token_ids[req_index]
+                    # grammar should already be ready here.
+                    can_accept_token = request.grammar.accept_token(token_id)
+                    if not can_accept_token:
+                        request.status = RequestStatus.FINISHED_GRAMMAR_ERROR
+                        self._free_request(request)
+                        continue
 
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
@@ -562,8 +566,8 @@ class Scheduler:
         return False
 
     def add_request(self, request: Request) -> None:
-        self.requests[request.request_id] = request
         self.waiting.append(request)
+        self.requests[request.request_id] = request
         self.request_queued(request)
 
     def finish_requests(

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Datastructures defining an input batch
-from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
@@ -12,10 +11,13 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.v1.guided_decoding import Grammar
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.multimodal.inputs import PlaceholderRange
 
 
@@ -38,6 +40,8 @@ class CachedRequestState:
     mrope_position_delta: Optional[int] = None
 
     lora_request: Optional[LoRARequest] = None
+    grammar: Optional[Grammar] = None
+    bitmask: Optional[torch.Tensor] = None
 
     @property
     def num_tokens(self) -> int:
@@ -171,7 +175,7 @@ class InputBatch:
         self.lora_id_to_request_ids: Dict[int, Set[str]] = {}
         self.lora_id_to_lora_request: Dict[int, LoRARequest] = {}
 
-        self.grammar_reqs: Set[str] = set()
+        self.grammar_reqs: Dict[str, torch.Tensor] = {}
 
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
@@ -249,7 +253,7 @@ class InputBatch:
             self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
 
         if request.grammar is not None:
-            self.grammar_reqs.add(req_id)
+            self.grammar_reqs[req_id] = request.bitmask
 
         # Add request lora ID
         if request.lora_request:
@@ -279,7 +283,7 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
-        self.grammar_reqs.discard(req_id)
+        self.grammar_reqs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
 
         # LoRA
@@ -365,6 +369,7 @@ class InputBatch:
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
                 last_req_index]
 
+            # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
     def make_sampling_metadata(

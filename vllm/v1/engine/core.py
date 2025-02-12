@@ -16,7 +16,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
@@ -24,6 +23,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.request import GuidedDecodingOptions, Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.version import __version__ as VLLM_VERSION
@@ -71,20 +71,10 @@ class EngineCore:
             vllm_config.model_config)
 
         # initialize the tokenizer on the scheduler (this is used for constrained decoding)
-        tokenizer_group = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config)
-        tokenizer_group.ping()
-        self.tokenizer_group = tokenizer_group
+        # and guided decoding manager
         self.use_guided_decoding = False
-
-        # Initialize guided decoding manager
-        from vllm.v1.guided_decoding import GuidedDecodingManager
         self.guided_decoding_manager = GuidedDecodingManager(
-            tokenizer_group=self.tokenizer_group,
-            model_config=vllm_config.model_config)
+            vllm_config=vllm_config)
 
     def _initialize_kv_caches(self,
                               vllm_config: VllmConfig) -> Tuple[int, int]:
@@ -152,41 +142,10 @@ class EngineCore:
 
         scheduler_output = self.scheduler.schedule()
 
-        # Attach bitmasks to scheduler output for broadcasting to workers
-        if self.use_guided_decoding:
-            scheduler_output.guided_decoding_bitmasks = {
-                req.request_id: req.bitmask
-                for req in self.scheduler.running
-                if req.use_guided_decoding and req.is_grammar_ready
-            }
-
         output = self.model_executor.execute_model(scheduler_output)
 
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
-
-        if self.use_guided_decoding:
-            # Advance FSM for each request using guided decoding
-            for req in self.scheduler.running:
-                if not req.use_guided_decoding or not req.is_grammar_ready:
-                    continue
-
-                # Get the generated tokens for this request
-                if req.request_id in output.outputs:
-                    generated_tokens = output.outputs[req.request_id].token_ids
-                    # Advance FSM for each generated token
-                    for token in generated_tokens:
-                        if not req.grammar.accept_token(token):
-                            # Token was rejected by grammar - mark request as finished with error
-                            self.scheduler.finish_requests(
-                                [req.request_id],
-                                RequestStatus.FINISHED_GRAMMAR_ERROR)
-                            break
-
-                    # Update bitmask for next token prediction if request is still running
-                    if req.request_id not in self.scheduler.finished_requests:
-                        req.grammar.fill_bitmask(req.bitmask, 0)
-
         return engine_core_outputs
 
     def shutdown(self):

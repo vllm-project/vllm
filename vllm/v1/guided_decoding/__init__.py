@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Optional
 import torch
 import xgrammar as xgr
 
+from vllm.config import VllmConfig
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
@@ -19,16 +21,15 @@ if TYPE_CHECKING:
 
 
 class Grammar:
-    finished: bool = False
-
-    # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string for jump-forward decoding
 
     def __init__(self, matcher: xgr.GrammarMatcher, vocab_size: int,
                  ctx: xgr.CompiledGrammar) -> None:
+        # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string for jump-forward decoding
         # TODO: support max_rollback_tokens
         self.matcher = matcher
         self.vocab_size = vocab_size
         self.ctx = ctx
+        self.prefilled = False
 
     def accept_token(self, token: int) -> bool:
         # NOTE: accept_token will determines whether we accept this token
@@ -67,11 +68,15 @@ class GrammarCache:
 
 class GuidedDecodingManager:
 
-    def __init__(self, tokenizer_group: BaseTokenizerGroup,
-                 model_config: ModelConfig):
-        self.tokenizer_group = tokenizer_group
-        self.model_config = model_config
-        self.vocab_size = model_config.get_vocab_size()
+    def __init__(self, vllm_config: VllmConfig):
+        tokenizer_group = init_tokenizer_from_configs(
+            model_config=vllm_config.model_config,
+            scheduler_config=vllm_config.scheduler_config,
+            parallel_config=vllm_config.parallel_config,
+            lora_config=vllm_config.lora_config)
+        tokenizer_group.ping()
+        self.model_config = vllm_config.model_config
+        self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.grammar_cache: dict[GuidedDecodingKey, GrammarCache] = {}
         self.executor = ThreadPoolExecutor()

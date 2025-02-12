@@ -260,19 +260,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert req_index is not None
             removed_req_indices.append(req_index)
 
-            # we should advance the FSM here
-            if req_id in scheduler_output.guided_decoding_bitmasks and req_state.grammar is not None:
-                token_idx = scheduler_output.num_scheduled_tokens[req_id] - 1
-                token_id = self.input_batch.token_ids_cpu[req_index, token_idx]
-                # Advance the FSM state
-                if not req_state.grammar.accept_token(token_id):
-                    # This shouldn't happen since we masked the logits, but handle gracefully
-                    logger.error(
-                        f"Grammar rejected token {token_id} for request {req_id}"
-                    )
-                    req_state.status = RequestStatus.FINISHED_ABORTED
-                    continue
-
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -296,6 +283,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                grammar=new_req_data.grammar,
+                bitmask=new_req_data.bitmask,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -359,6 +348,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
 
+            # Fill the bitmask
+            if req_id in scheduler_output.guided_decoding_request_ids and req_state.grammar is not None:
+                if not req_state.grammar.prefilled:
+                    req_state.grammar.prefilled = True
+                else:
+                    token_idx = scheduler_output.num_scheduled_tokens[
+                        req_id] - 1
+                    if not req_state.grammar.matcher.is_terminated():
+                        assert req_state.bitmask is not None
+                        req_state.grammar.fill_bitmask(req_state.bitmask,
+                                                       token_idx)
+
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
@@ -377,7 +378,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.condense(removed_req_indices)
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
-    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+    def _prepare_inputs(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> Tuple[FlashAttentionMetadata, torch.Tensor,
+               Optional[List[torch.Tensor]]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -386,6 +390,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
+
+        # Prepare bitmasks for guided decoding
+        bitmask: Optional[torch.Tensor] = None
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -397,6 +404,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_scheduled_tokens_list.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
+            if req_id in scheduler_output.guided_decoding_request_ids:
+                bitmask = self.requests[req_id].bitmask
         num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
                                                     dtype=np.int32)
         assert max_num_scheduled_tokens > 0
@@ -538,7 +547,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # tokens from the partial requests.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return attn_metadata, logits_indices
+
+        return attn_metadata, logits_indices, bitmask
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -798,7 +808,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        attn_metadata, logits_indices, bitmask = self._prepare_inputs(
+            scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -852,15 +863,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Apply guided decoding bitmasks if present
-        if hasattr(scheduler_output, 'guided_decoding_bitmasks'):
-            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-                if req_id in scheduler_output.guided_decoding_bitmasks:
-                    # TODO: We need to ensure that the bitmask
-                    bitmask = scheduler_output.guided_decoding_bitmasks[req_id]
-                    if bitmask is not None:
-                        # Apply bitmask to logits
-                        bitmask = bitmask.to(self.device, non_blocking=True)
-                        Grammar.apply_bitmask(logits, bitmask)
+        if bitmask is not None:
+            Grammar.apply_bitmask(logits,
+                                  bitmask.to(self.device, non_blocking=True))
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(batch_changed)
