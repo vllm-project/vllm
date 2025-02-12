@@ -16,7 +16,7 @@ TEST_MODELS = [
     }),
     ("neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic", {
         "dtype": torch.float16,
-        "quantization": "fp8"
+        "quantization": "compressed-tensors"
     }),
     ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {
         "quantization": "compressed-tensors"

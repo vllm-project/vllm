@@ -17,9 +17,9 @@ from vllm.worker.worker import Worker
 def test_worker_apply_lora(sql_lora_files):
     vllm_config = VllmConfig(
         model_config=ModelConfig(
-            "meta-llama/Llama-3.2-1B-Instruct",
+            "meta-llama/Llama-2-7b-hf",
             task="auto",
-            tokenizer="meta-llama/Llama-3.2-1B-Instruct",
+            tokenizer="meta-llama/Llama-2-7b-hf",
             tokenizer_mode="auto",
             trust_remote_code=False,
             seed=0,
