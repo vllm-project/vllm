@@ -10,7 +10,8 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 from PIL.Image import Image
-from transformers import AutoConfig, AutoTokenizer, BatchEncoding
+from transformers import (AutoConfig, AutoTokenizer, BatchEncoding,
+                          GenerationConfig)
 
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import patch_padding_side
@@ -528,13 +529,21 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = _processor
 
-    orig_generate = hf_model.model.generate
+    def _generate(self, max_new_tokens=None, do_sample=None, **kwargs):
+        batch = {
+            k: kwargs.pop(k)
+            for k in ("input_ids", "images", "image_input_idx", "image_masks")
+            if k in kwargs
+        }
 
-    def _generate(self, *args, **kwargs):
-        return orig_generate(
-            *args,
+        return self.generate_from_batch(
+            batch,
+            generation_config=GenerationConfig(
+                max_new_tokens=max_new_tokens,
+                stop_strings="<|endoftext|>",
+                do_sample=do_sample,
+            ),
             **kwargs,
-            stop_strings="<|endoftext|>",
         )
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
