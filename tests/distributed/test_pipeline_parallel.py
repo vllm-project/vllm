@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 WARNING: This test runs in both single-node (4 GPUs) and multi-node
  (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
@@ -214,7 +215,7 @@ MULTIMODAL_MODELS = {
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(trust_remote_code=True),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
-    "fixie-ai/ultravox-v0_3": PPTestSettings.fast(trust_remote_code=True),
+    "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     # [Encoder-decoder]
     # TODO: Implement PP
     # "meta-llama/Llama-3.2-11B-Vision-Instruct": PPTestSettings.fast(),
@@ -233,7 +234,7 @@ TEST_MODELS = [
     # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL2-1B",
     "microsoft/Phi-3-vision-128k-instruct",
-    "fixie-ai/ultravox-v0_3",
+    "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     # [LANGUAGE GENERATION - HYBRID ARCH]
     "ai21labs/Jamba-tiny-dev",
 ]

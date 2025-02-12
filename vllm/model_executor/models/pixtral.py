@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from dataclasses import dataclass, fields
 from functools import cached_property
@@ -52,8 +54,11 @@ def get_max_pixtral_image_tokens(ctx: InputContext):
         tokenizer_mode=ctx.model_config.tokenizer_mode)
     mm_encoder = tokenizer.instruct.mm_encoder
 
-    max_image_size = mm_encoder.mm_config.max_image_size
-    image_patch_size = mm_encoder.mm_config.image_patch_size
+    image_config = mm_encoder.mm_config if hasattr(
+        mm_encoder, "mm_config") else mm_encoder.image_config
+
+    max_image_size = image_config.max_image_size
+    image_patch_size = image_config.image_patch_size
 
     return ((max_image_size // image_patch_size)**2)
 

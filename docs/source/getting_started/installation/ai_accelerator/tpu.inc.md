@@ -30,6 +30,10 @@ For TPU pricing information, see [Cloud TPU pricing](https://cloud.google.com/tp
 You may need additional persistent storage for your TPU VMs. For more
 information, see [Storage options for Cloud TPU data](https://cloud.devsite.corp.google.com/tpu/docs/storage-options).
 
+:::{attention}
+There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
+:::
+
 ## Requirements
 
 - Google Cloud TPU VM
@@ -47,10 +51,10 @@ When you request queued resources, the request is added to a queue maintained by
 the Cloud TPU service. When the requested resource becomes available, it's
 assigned to your Google Cloud project for your immediate exclusive use.
 
-```{note}
+:::{note}
 In all of the following commands, replace the ALL CAPS parameter names with
 appropriate values. See the parameter descriptions table for more information.
-```
+:::
 
 ### Provision Cloud TPUs with GKE
 
@@ -75,33 +79,33 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
 --service-account SERVICE_ACCOUNT
 ```
 
-```{list-table} Parameter descriptions
+:::{list-table} Parameter descriptions
 :header-rows: 1
 
-* - Parameter name
-  - Description
-* - QUEUED_RESOURCE_ID
-  - The user-assigned ID of the queued resource request.
-* - TPU_NAME
-  - The user-assigned name of the TPU which is created when the queued
+- * Parameter name
+  * Description
+- * QUEUED_RESOURCE_ID
+  * The user-assigned ID of the queued resource request.
+- * TPU_NAME
+  * The user-assigned name of the TPU which is created when the queued
     resource request is allocated.
-* - PROJECT_ID
-  - Your Google Cloud project
-* - ZONE
-  - The GCP zone where you want to create your Cloud TPU. The value you use
+- * PROJECT_ID
+  * Your Google Cloud project
+- * ZONE
+  * The GCP zone where you want to create your Cloud TPU. The value you use
     depends on the version of TPUs you are using. For more information, see
     `TPU regions and zones <https://cloud.google.com/tpu/docs/regions-zones>`_
-* - ACCELERATOR_TYPE
-  - The TPU version you want to use. Specify the TPU version, for example
+- * ACCELERATOR_TYPE
+  * The TPU version you want to use. Specify the TPU version, for example
     `v5litepod-4` specifies a v5e TPU with 4 cores. For more information,
     see `TPU versions <https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions>`_.
-* - RUNTIME_VERSION
-  - The TPU VM runtime version to use. For more information see `TPU VM images <https://cloud.google.com/tpu/docs/runtimes>`_.
-* - SERVICE_ACCOUNT
-  - The email address for your service account. You can find it in the IAM
+- * RUNTIME_VERSION
+  * The TPU VM runtime version to use. For more information see `TPU VM images <https://cloud.google.com/tpu/docs/runtimes>`_.
+- * SERVICE_ACCOUNT
+  * The email address for your service account. You can find it in the IAM
     Cloud Console under *Service Accounts*. For example:
     `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`
-```
+:::
 
 Connect to your TPU using SSH:
 
@@ -178,15 +182,15 @@ Run the Docker image with the following command:
 docker run --privileged --net host --shm-size=16G -it vllm-tpu
 ```
 
-```{note}
+:::{note}
 Since TPU relies on XLA which requires static shapes, vLLM bucketizes the
 possible input shapes and compiles an XLA graph for each shape. The
 compilation time may take 20~30 minutes in the first run. However, the
 compilation time reduces to ~5 minutes afterwards because the XLA graphs are
 cached in the disk (in {code}`VLLM_XLA_CACHE_PATH` or {code}`~/.cache/vllm/xla_cache` by default).
-```
+:::
 
-````{tip}
+:::{tip}
 If you encounter the following error:
 
 ```console
@@ -198,9 +202,10 @@ file or directory
 Install OpenBLAS with the following command:
 
 ```console
-$ sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
+sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
 ```
-````
+
+:::
 
 ## Extra information
 

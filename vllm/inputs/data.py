@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from functools import cached_property
 from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List, Literal,

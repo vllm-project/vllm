@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -72,7 +74,16 @@ class PoolingModelRunner(
         prefill_meta = model_input.attn_metadata.prefill_metadata
         decode_meta = model_input.attn_metadata.decode_metadata
         virtual_engine = model_input.virtual_engine
-        if prefill_meta is None and decode_meta.use_cuda_graph:
+        # Pooling models are (ab-)used also to integrate non text models that
+        # are not autoregressive (PrithviGeosaptialMAE).
+        # These model might not use attention and do not really have a prefill
+        # and decode phase. The model input is processed in one shot and both
+        # decode_metadata and prefill_metadata would be None for such models.
+        # See the PlaceholderAttentionMetadata class.
+        # TODO: Figure out if cuda_graph is of any use for these models and
+        #  explore how to leverage it.
+        if (prefill_meta is None and decode_meta is not None
+                and decode_meta.use_cuda_graph):
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][

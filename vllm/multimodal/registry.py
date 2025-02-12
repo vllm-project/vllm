@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import functools
 from collections import UserDict
 from dataclasses import dataclass
@@ -262,7 +264,9 @@ class MultiModalRegistry:
             )
             processor = self.create_processor(model_config, tokenizer)
             seq_len = model_config.max_model_len
-            return processor.info.get_mm_max_tokens_per_item(seq_len)
+            mm_limits = self.get_mm_limits_per_prompt(model_config)
+            return processor.info.get_mm_max_tokens_per_item(
+                seq_len, mm_limits)
 
         return {
             key: plugin.get_max_multimodal_tokens(model_config)

@@ -192,7 +192,7 @@ set_gencode_flags_for_srcs(
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling cumem allocator extension.")
   # link against cuda driver library
-  list(APPEND CUMEM_LIBS cuda)
+  list(APPEND CUMEM_LIBS CUDA::cuda_driver)
   define_gpu_extension_target(
     cumem_allocator
     DESTINATION vllm
@@ -245,7 +245,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        GIT_TAG v3.6.0
+        GIT_TAG v3.7.0
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
@@ -299,7 +299,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # CUDA 12.0 or later (and only work on Hopper, 9.0a for now).
   cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
+    set(SRCS 
+       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
+       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_fp8.cu"
+       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_int8.cu"
+       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_azp_sm90_int8.cu"
+       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm90_fp8.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
@@ -446,9 +451,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 message(STATUS "Enabling C extension.")
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_C_LIBS cuda)
-endif()
 define_gpu_extension_target(
   _C
   DESTINATION vllm
@@ -457,7 +459,6 @@ define_gpu_extension_target(
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-  LIBRARIES ${VLLM_C_LIBS}
   USE_SABI 3
   WITH_SOABI)
 
@@ -580,7 +581,7 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG d4e09037abf588af1ec47d0e966b237ee376876c
+          GIT_TAG 720c94869cf2e0ff5a706e9c7f1dce0939686ade
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

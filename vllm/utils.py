@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import asyncio
 import concurrent
@@ -13,7 +15,6 @@ import ipaddress
 import multiprocessing
 import os
 import re
-import resource
 import signal
 import socket
 import subprocess
@@ -561,6 +562,10 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
+
+
 def _generate_random_fp8(
     tensor: torch.Tensor,
     low: float,
@@ -790,6 +795,12 @@ def async_tensor_h2d(
 def get_dtype_size(dtype: torch.dtype) -> int:
     """Get the size of the data type in bytes."""
     return torch.tensor([], dtype=dtype).element_size()
+
+
+def align_to_256bytes(extent: int, dtype: torch.dtype) -> int:
+    dtype_size = get_dtype_size(dtype)
+    eles_per_256bytes = 256 // dtype_size
+    return round_up(extent, eles_per_256bytes)
 
 
 # `collections` helpers
@@ -2079,6 +2090,11 @@ def memory_profiling(
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
 def set_ulimit(target_soft_limit=65535):
+    if sys.platform.startswith('win'):
+        logger.info("Windows detected, skipping ulimit adjustment.")
+        return
+
+    import resource
     resource_type = resource.RLIMIT_NOFILE
     current_soft, current_hard = resource.getrlimit(resource_type)
 
@@ -2227,3 +2243,34 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     else:
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
+
+
+def import_pynvml():
+    """
+    Historical comments:
+
+    libnvml.so is the library behind nvidia-smi, and
+    pynvml is a Python wrapper around it. We use it to get GPU
+    status without initializing CUDA context in the current process.
+    Historically, there are two packages that provide pynvml:
+    - `nvidia-ml-py` (https://pypi.org/project/nvidia-ml-py/): The official
+        wrapper. It is a dependency of vLLM, and is installed when users
+        install vLLM. It provides a Python module named `pynvml`.
+    - `pynvml` (https://pypi.org/project/pynvml/): An unofficial wrapper.
+        Prior to version 12.0, it also provides a Python module `pynvml`,
+        and therefore conflicts with the official one. What's worse,
+        the module is a Python package, and has higher priority than
+        the official one which is a standalone Python file.
+        This causes errors when both of them are installed.
+        Starting from version 12.0, it migrates to a new module
+        named `pynvml_utils` to avoid the conflict.
+    It is so confusing that many packages in the community use the
+    unofficial one by mistake, and we have to handle this case.
+    For example, `nvcr.io/nvidia/pytorch:24.12-py3` uses the unofficial
+    one, and it will cause errors, see the issue
+    https://github.com/vllm-project/vllm/issues/12847 for example.
+    After all the troubles, we decide to copy the official `pynvml`
+    module to our codebase, and use it directly.
+    """
+    import vllm.third_party.pynvml as pynvml
+    return pynvml
