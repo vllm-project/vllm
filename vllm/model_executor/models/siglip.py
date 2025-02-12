@@ -3,18 +3,15 @@
 within a vision language model."""
 
 import math
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
-import numpy as np
 import torch
 from PIL import Image
 from torch import nn
 from transformers import SiglipVisionConfig
 
 from vllm.attention.layer import MultiHeadAttention
-from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.inputs import DecoderOnlyInputs, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -23,9 +20,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges,
-                                   repeat_and_pad_placeholder_tokens)
+from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import SequenceData
 
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
@@ -91,26 +86,6 @@ def dummy_image_for_siglip(
 
     image = Image.new("RGB", (width, height), color=0)
     return {"image": image if num_images == 1 else [image] * num_images}
-
-
-def dummy_video_for_siglip(
-    hf_config: SiglipVisionConfig,
-    num_frames: int,
-    num_videos: int = 1,
-    *,
-    image_width_override: Optional[int] = None,
-    image_height_override: Optional[int] = None,
-):
-    pil_frame = dummy_image_for_siglip(
-        hf_config,
-        num_images=1,
-        image_width_override=image_width_override,
-        image_height_override=image_height_override)
-    np_frame = np.array(pil_frame["image"])
-    mm_data_per_video = np.repeat([np_frame], num_frames, axis=0)
-    video_data = [mm_data_per_video] * num_videos
-    mm_data = {"video": video_data}
-    return mm_data
 
 
 class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
