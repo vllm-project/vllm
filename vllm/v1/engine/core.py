@@ -79,12 +79,11 @@ class EngineCore:
 
         # Get the kv cache tensor size
         kv_cache_configs = []
-        num_gpu_blocks = None
         for kv_cache_spec in kv_cache_specs:
             kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                                   available_gpu_memory)
             kv_cache_configs.append(kv_cache_config)
-        assert len(set(config.num_blocks for config in kv_cache_configs)) == 1, 
+        assert len(set(config.num_blocks for config in kv_cache_configs)) == 1, \
             f"num_gpu_blocks need to be the same across workers: {num_gpu_blocks} != {kv_cache_config.num_blocks}"
         num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
