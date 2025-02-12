@@ -3,7 +3,7 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -180,6 +180,9 @@ class InputBatch:
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: Dict[str, int] = {}
 
+        self.logit_bias: List[Optional[Dict[int,
+                                            float]]] = [None] * max_num_reqs
+
     def add_request(
         self,
         request: "CachedRequestState",
@@ -244,6 +247,9 @@ class InputBatch:
             self.num_logprobs[req_id] = sampling_params.logprobs
         if sampling_params.prompt_logprobs is not None:
             self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
+        if sampling_params.logit_bias is not None:
+            self.logit_bias[req_index] = self._construct_logit_bias(
+                sampling_params.logit_bias)
 
         # Add request lora ID
         if request.lora_request:
@@ -284,6 +290,7 @@ class InputBatch:
                 self.lora_id_to_lora_request.pop(lora_id)
             self.request_lora_mapping[req_index] = 0
 
+        self.logit_bias[req_index] = None
         return req_index
 
     def clear(self) -> None:
@@ -302,6 +309,7 @@ class InputBatch:
         self.request_lora_mapping.fill(0)
         self.lora_id_to_lora_request.clear()
         self.lora_id_to_request_ids.clear()
+        self.logit_bias = [None] * self.max_num_reqs
 
     def condense(self, empty_req_indices: List[int]) -> None:
         if self.num_reqs == 0:
@@ -421,6 +429,7 @@ class InputBatch:
             min_tokens=self.min_tokens[:self.num_reqs],
             stop_token_ids=self.stop_token_ids[:self.num_reqs],
             no_penalties=self.no_penalties,
+            logit_bias=self.logit_bias,
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
@@ -462,6 +471,22 @@ class InputBatch:
             self.lora_id_to_lora_request.values())
 
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+
+    def _construct_logit_bias(
+        self, logit_bias: Union[Dict[int, float],
+                                Dict[str, float]]) -> Dict[int, float]:
+        try:
+            # Convert token_id to integer
+            # Clamp the bias between -100 and 100 per OpenAI API spec
+            clamped_logit_bias: Dict[int, float] = {
+                int(token_id): min(100.0, max(-100.0, bias))
+                for token_id, bias in logit_bias.items()
+            }
+        except ValueError as exc:
+            raise ValueError(
+                "Found token_id in logit_bias that is not "
+                "an integer or string representing an integer") from exc
+        return clamped_logit_bias
 
     @property
     def num_reqs(self) -> int:

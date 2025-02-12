@@ -166,3 +166,17 @@ class Sampler(nn.Module):
                 sampling_metadata.repetition_penalties,
                 sampling_metadata.output_token_ids)
         return logits
+
+    def apply_logits_bias(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        # TODO(houseroad): this implementation is extremely inefficient.
+        # One idea is implement this as a PyTorch C++ op, and we may
+        # even optimize the logit_bias layout.
+        for i, logit_bias in enumerate(sampling_metadata.logit_bias):
+            if logit_bias:
+                for token_id, bias in logit_bias.items():
+                    logits[i, token_id] += bias
+        return logits
