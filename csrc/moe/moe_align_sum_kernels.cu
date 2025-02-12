@@ -3,7 +3,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <ATen/ATen.h>
-#include <THC/THCAtomics.cuh>
+#include <ATen/cuda/Atomic.cuh>
 
 #include "../cuda_compat.h"
 #include "../dispatch_utils.h"
