@@ -162,7 +162,7 @@ class OutputProcessor:
 
             new_token_id_offsets = engine_core_outputs.new_token_id_offsets
 
-            num_tokens = last - first  # TODO: double check
+            num_tokens = last - first
             start = new_token_id_offsets[i]
             end = new_token_id_offsets[i + 1]
             events = engine_core_outputs.events[
