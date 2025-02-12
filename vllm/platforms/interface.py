@@ -306,6 +306,13 @@ class Platform:
         return True
 
     @classmethod
+    def empty_cache(cls) -> None:
+        """
+        Release all unoccupied cached memory.
+        """
+        raise NotImplementedError
+
+    @classmethod
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:

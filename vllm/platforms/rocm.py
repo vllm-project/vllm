@@ -165,6 +165,10 @@ class RocmPlatform(Platform):
         return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
     @classmethod
+    def empty_cache(cls) -> None:
+        return torch.cuda.empty_cache()
+
+    @classmethod
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:

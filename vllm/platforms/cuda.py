@@ -144,6 +144,10 @@ class CudaPlatformBase(Platform):
             cache_config.block_size = 16
 
     @classmethod
+    def empty_cache(cls) -> None:
+        return torch.cuda.empty_cache()
+
+    @classmethod
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
