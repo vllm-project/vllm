@@ -282,10 +282,9 @@ class repackage_wheel(build_ext):
             return base_commit
         except Exception as err:
             logger.warning(
-                "Failed to get the base commit in the main branch: %s", err)
-            logger.warning("Using the latest commit in the main branch as "
-                           "the base commit. The libraries in this commit may "
-                           "not be compatible with your dev branch.")
+                "Failed to get the base commit in the main branch. "
+                "Using the nightly wheel. The libraries in this "
+                "wheel may not be compatible with your dev branch: %s", err)
             return "nightly"
 
     def run(self) -> None:
