@@ -41,7 +41,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 ## Requirements
 
 - OS: Linux
-- Python: 3.9 -- 3.12
+- Python: 3.9 -- 3.13
 
 :::::{tab-set}
 :sync-group: device
