@@ -12,9 +12,8 @@ int64_t get_device_attribute(int64_t attribute, int64_t device_id) {
       CUDA_CHECK(cudaGetDevice(&device));
     }
     int value;
-    CUDA_CHECK(cudaDeviceGetAttribute(&value,
-                                      static_cast<cudaDeviceAttr>(attribute),
-                                      device));
+    CUDA_CHECK(cudaDeviceGetAttribute(
+        &value, static_cast<cudaDeviceAttr>(attribute), device));
     return static_cast<int>(value);
   }();
 
