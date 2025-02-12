@@ -13,7 +13,6 @@ class DeepSeekMTPConfig(PretrainedConfig):
     def __init__(self,
                  model: Union[PretrainedConfig, dict, None] = None,
                  **kwargs):
-        print("model: %s", model)
         if model is not None:
             self.model = DeepseekV3Config.from_dict(model, **kwargs)
         else:

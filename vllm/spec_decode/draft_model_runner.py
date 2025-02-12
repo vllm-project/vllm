@@ -277,6 +277,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             compute_logits_kwargs = {}
             # Run model
             if hasattr(self.model.config, "num_nextn_predict_layers"):
+                # for DeepSeek MTP only to use the corresponding layer for
+                # each step
                 kwargs["step_idx"] = step
                 compute_logits_kwargs["step_idx"] = step
             with set_forward_context(model_input.attn_metadata,
