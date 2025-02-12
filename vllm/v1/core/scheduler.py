@@ -482,14 +482,16 @@ class Scheduler:
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         new_running: List[Request] = []
-        output = EngineCoreOutputs(request_ids=[],
-                                   new_token_id_offsets=[],
-                                   new_token_ids=[],
-                                   new_logprobs = [],
-                                   new_prompt_logprobs_tensors = [],
-                                   finish_reason={},
-                                   scheduler_stats=None
-                                   )
+        output = EngineCoreOutputs(
+            request_ids=[],
+            new_token_id_offsets=[],
+            new_token_ids=[],
+            new_logprobs={},
+            new_prompt_logprobs_tensors={},
+            finish_reason={},
+            events={},
+            scheduler_stats=SchedulerStats(),
+        )
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -549,8 +551,8 @@ class Scheduler:
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
 
             stopped = False
-            new_logprobs = []# None
-            new_token_ids = []#None
+            new_logprobs = None
+            new_token_ids = None
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
@@ -580,19 +582,31 @@ class Scheduler:
                 new_ids = request.output_token_ids[-num_new_tokens:]
                 output.new_token_ids += new_ids
 
-                # TODO: This is not right
-                output.new_logprobs += new_logprobs
-                output.new_prompt_logprobs_tensors += (prompt_logprobs_tensors if prompt_logprobs_tensors is not None else [])
+                # TODO: This is not right, consider moving out of loop? turn into Dict
+                if new_logprobs is not None:
+                    output.new_logprobs[req_id] = new_logprobs
 
-                if request.get_finished_reason() is not None:
-                    output.finish_reason[req_id] = request.get_finished_reason()
-                #print(f"req stop = {request.stop_reason}, {request.status}")
-                output.events.append(request.fake_events())
-                offset = offset + len(new_ids)  # move out of if?
+                if prompt_logprobs_tensors is not None:
+                    output.new_prompt_logprobs_tensors[
+                        req_id] = prompt_logprobs_tensors
+
+                finish_reason = request.get_finished_reason()
+                if finish_reason is not None:
+                    output.finish_reason[req_id] = (finish_reason, None)
+
+                events = request.take_events()
+                if events is not None:
+                    output.events[req_id] = events
+                offset = offset + len(new_ids)
 
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
                 new_running.append(request)
+
+        # Add sentinel
+        num_new_tokens = len(output.new_token_ids)
+        if num_new_tokens > 0:
+            output.new_token_id_offsets.append(num_new_tokens)
 
         self.running = new_running
         output.scheduler_stats = self.make_stats()

@@ -8,7 +8,8 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest, FinishReason
+from vllm.v1.engine import (EngineCoreEvent, EngineCoreOutputs,
+                            EngineCoreRequest, FinishReason)
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.metrics.stats import IterationStats, RequestStateStats
@@ -152,27 +153,34 @@ class OutputProcessor:
 
         request_outputs: List[RequestOutput] = []
         reqs_to_abort: List[str] = []
-        for i, req_id in enumerate(engine_core_outputs.request_ids[first:last]):
+        for i, req_id in enumerate(
+                engine_core_outputs.request_ids[first:last]):
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
 
-            num_tokens = last - first  # might not be robust
-            start = engine_core_outputs.new_token_id_offsets[i]
-            end = engine_core_outputs.new_token_id_offsets[i + 1] if i < num_tokens - 1 else len(engine_core_outputs.new_token_ids)
+            new_token_id_offsets = engine_core_outputs.new_token_id_offsets
+
+            num_tokens = last - first  # TODO: double check
+            start = new_token_id_offsets[i]
+            end = new_token_id_offsets[i + 1]
 
             # 1) Compute stats for this iteration.
-            self._update_stats_from_output(req_state,
-                                           # XXXXXXXXX
-                                           engine_core_outputs,
-                                           engine_core_timestamp,
-                                           iteration_stats)
+            self._update_stats_from_output(
+                req_state, num_tokens, engine_core_outputs.events.get(req_id),
+                engine_core_timestamp, iteration_stats)
 
             new_token_ids = engine_core_outputs.new_token_ids[start:end]
-            new_logprobs = engine_core_outputs.new_logprobs[start:end]
-            new_prompt_logprobs_tensors = engine_core_outputs.new_prompt_logprobs_tensors[start:end]
-            finish_reason = engine_core_outputs.finish_reason.get(req_id)
+            new_logprobs = engine_core_outputs.new_logprobs.get(req_id)
+            new_prompt_logprobs_tensors = engine_core_outputs.new_prompt_logprobs_tensors.get(
+                req_id)
+            finish_stop_reasons = engine_core_outputs.finish_reason.get(req_id)
+            if finish_stop_reasons is not None:
+                finish_reason, stop_reason = finish_stop_reasons
+            else:
+                finish_reason = None
+                stop_reason = None
 
             # TODO(andy): prompt logprobs + chunked prefill can
             # result in engine core returning an output for a
@@ -230,20 +238,19 @@ class OutputProcessor:
             reqs_to_abort=reqs_to_abort,
         )
 
-    def _update_stats_from_output(self, req_state: RequestState,
-                                  engine_core_output: EngineCoreOutput,
-                                  engine_core_timestamp: Optional[float],
-                                  iteration_stats: Optional[IterationStats]):
+    def _update_stats_from_output(
+            self, req_state: RequestState, num_new_generation_tokens: int,
+            engine_events: Optional[List[EngineCoreEvent]],
+            engine_core_timestamp: Optional[float],
+            iteration_stats: Optional[IterationStats]):
         if iteration_stats is None:
             return
 
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
-        iteration_stats.update_from_output(engine_core_output,
-                                           engine_core_timestamp,
-                                           req_state.is_prefilling,
-                                           req_state.prompt_len,
-                                           req_state.stats)
+        iteration_stats.update_from_output(
+            num_new_generation_tokens, engine_events, engine_core_timestamp,
+            req_state.is_prefilling, req_state.prompt_len, req_state.stats)
 
     def _update_stats_from_finished(self, req_state: RequestState,
                                     request_output: RequestOutput,

@@ -2,7 +2,7 @@
 
 import enum
 import time
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import msgspec
 
@@ -85,27 +85,6 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
-#class EngineCoreOutput(
-#        msgspec.Struct,
-#        array_like=True,  # type: ignore[call-arg]
-#        omit_defaults=True,  # type: ignore[call-arg]
-#        gc=False):  # type: ignore[call-arg]
-#
-#    request_id: str
-#    new_token_ids: List[int]
-#
-#    new_logprobs: Optional[LogprobsLists] = None
-#    new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
-#
-#    finish_reason: Optional[FinishReason] = None
-#    stop_reason: Union[int, str, None] = None
-#    events: Optional[List[EngineCoreEvent]] = None
-#
-#    @property
-#    def finished(self) -> bool:
-#        return self.finish_reason is not None
-
-
 class EngineCoreOutputs(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -117,14 +96,16 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     request_ids: List[str]
-    new_token_id_offsets: List[int]
+    new_token_id_offsets: List[
+        int]  # consider making Optional since most of the time all will be 1
     new_token_ids: List[int]
-    # TODO: need offsets for logprobs?
-    new_logprobs: List[Optional[LogprobsLists]]
-    new_prompt_logprobs_tensors: List[Optional[LogprobsTensors]]
-    finish_reason: Dict[str, FinishReason]  # Union[List, Dict]?
-    events: List[Optional[List[EngineCoreEvent]]]
-    scheduler_stats: SchedulerStats
+
+    new_logprobs: Dict[str, LogprobsLists]
+    new_prompt_logprobs_tensors: Dict[str, LogprobsTensors]
+
+    finish_reason: Dict[str, Tuple[FinishReason, Union[int, str, None]]]
+    events: Dict[str, List[EngineCoreEvent]]
+    scheduler_stats: Optional[SchedulerStats]
     timestamp: float = 0.0
 
     def __post_init__(self):

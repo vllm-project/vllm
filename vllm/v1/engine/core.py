@@ -149,11 +149,11 @@ class EngineCore:
                 request_ids=[],
                 new_token_id_offsets=[],
                 new_token_ids=[],
-                new_logprobs = [],
-                new_prompt_logprobs_tensors = [],
+                new_logprobs={},
+                new_prompt_logprobs_tensors={},
                 finish_reason={},
-                scheduler_stats=self.scheduler.make_stats()
-            )
+                events={},
+                scheduler_stats=self.scheduler.make_stats())
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
@@ -383,6 +383,6 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 outputs = self.output_queue.get()
-                #print(outputs)
+                print(outputs)
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)
