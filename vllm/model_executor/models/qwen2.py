@@ -32,7 +32,7 @@ from transformers import Qwen2Config
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -176,6 +176,19 @@ class Qwen2Attention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+
+        # num heads is 2, head dim is 128
+        # Only GPU 6 and 7 is for dummies
+        # print("QHEADS", q.size(0), self.num_heads, self.head_dim, get_tensor_model_parallel_rank())
+        if get_tensor_model_parallel_rank() in (6, 7):
+            q = q.view(q.size(0), self.num_heads, self.head_dim)
+
+            # Zero out the dummy heads
+            q[:, :, :] = 0
+            # q[:, -self.dummy_heads:, :] = -1000
+
+            q = q.view(q.size(0), -1)
+
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output

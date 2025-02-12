@@ -979,6 +979,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             if not is_sharded_weight:
                 if start_idx + shard_size > loaded_weight.size(output_dim):
                     # print("LOADERSIZE", start_idx, shard_size, loaded_weight.size())
+                    # print("DUMMYHEAD", get_tensor_model_parallel_rank())
                     # Create a tensor of zeros with the same size as the shard
                     weight_shape = list(loaded_weight.shape)
                     weight_shape[output_dim] = shard_size
