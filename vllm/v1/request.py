@@ -6,8 +6,8 @@ import functools
 from typing import TYPE_CHECKING, List, Optional, Union, Dict, Any, Tuple
 
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import RequestMetrics
-from vllm.v1.engine import EngineCoreRequest, FinishReason
+from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
+                            EngineCoreRequest, FinishReason)
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -16,8 +16,6 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
-    from vllm.v1.core.guided_decoding import Grammar
-    from vllm.v1.core.kv_cache_utils import BlockHashType
 
 
 class GuidedDecodingOptions(enum.Enum):
@@ -50,14 +48,10 @@ class Request:
         self.sampling_params = sampling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
-        self.metrics = RequestMetrics(arrival_time=arrival_time,
-                                      last_token_time=arrival_time,
-                                      first_scheduled_time=None,
-                                      first_token_time=None,
-                                      time_in_queue=None)
         self.lora_request = lora_request
 
         self.status = RequestStatus.WAITING
+        self.events: List[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
         assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
@@ -79,11 +73,6 @@ class Request:
         if self.mm_hashes:
             assert len(self.mm_inputs) == len(self.mm_hashes)
 
-        # Cache the computed kv block hashes of the request to avoid
-        # recomputing.
-        self._kv_block_hashes: List[BlockHashType] = []
-        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
-
         # Read-only views
         # Prevent directly appending to the these lists since
         # they should also be updated simultaneously.
@@ -104,6 +93,21 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
         )
+
+    def queued(self, timestamp: Optional[float] = None) -> None:
+        self.events.append(
+            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, timestamp))
+
+    def scheduled(self, timestamp: Optional[float] = None) -> None:
+        self.events.append(
+            EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
+                                      timestamp))
+
+    def take_events(self) -> Optional[List[EngineCoreEvent]]:
+        if not self.events:
+            return None
+        events, self.events = self.events, []
+        return events
 
     def append_output_token_ids(
         self,
@@ -139,13 +143,6 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
-
-    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
-        self._kv_block_hashes = value
-        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
-
-    def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
-        self._kv_block_hashes.append(block_hash)
 
     @property
     def use_guided_decoding(self) -> bool:
