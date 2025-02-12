@@ -585,7 +585,7 @@ class InputPreprocessor:
                 )
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
-            if self.model_config.is_multimodal_model:
+            if self.model_config.is_multimodal_model and self._can_process_multimodal():
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
@@ -594,7 +594,7 @@ class InputPreprocessor:
                 prompt,
                 request_id=request_id,
             )
-            if self.model_config.is_multimodal_model:
+            if self.model_config.is_multimodal_model and self._can_process_multimodal():
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
@@ -635,7 +635,7 @@ class InputPreprocessor:
 
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
-            if self.model_config.is_multimodal_model:
+            if self.model_config.is_multimodal_model and self._can_process_multimodal():
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
                         encoder_inputs, decoder_inputs))
@@ -644,7 +644,7 @@ class InputPreprocessor:
                 prompt,
                 request_id=request_id,
             )
-            if self.model_config.is_multimodal_model:
+            if self.model_config.is_multimodal_model and self._can_process_multimodal():
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
                     self._separate_enc_dec_inputs_from_mm_processor_outputs(
