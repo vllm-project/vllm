@@ -28,12 +28,15 @@ from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
+    MistralToolCall)
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
+from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
+                                                truncate_tool_call_ids)
 
 logger = init_logger(__name__)
 
@@ -150,11 +153,12 @@ class OpenAIServingChat(OpenAIServing):
                 return self.create_error_response(
                     "tool_choice = \"required\" is not supported!")
 
-            # because of issues with pydantic we need to potentially
-            # re-serialize the tool_calls field of the request
-            # for more info: see comment in `maybe_serialize_tool_calls`
             if isinstance(tokenizer, MistralTokenizer):
+                # because of issues with pydantic we need to potentially
+                # re-serialize the tool_calls field of the request
+                # for more info: see comment in `maybe_serialize_tool_calls`
                 maybe_serialize_tool_calls(request)
+                truncate_tool_call_ids(request)
 
             if (request.tool_choice == "auto" and
                     not (self.enable_auto_tools and tool_parser is not None)
@@ -745,11 +749,13 @@ class OpenAIServingChat(OpenAIServing):
             elif request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
 
+                tool_call_class = MistralToolCall if isinstance(
+                    tokenizer, MistralTokenizer) else ToolCall
                 message = ChatMessage(
                     role=role,
                     content="",
                     tool_calls=[
-                        ToolCall(function=FunctionCall(
+                        tool_call_class(function=FunctionCall(
                             name=request.tool_choice.function.name,
                             arguments=output.text))
                     ])
