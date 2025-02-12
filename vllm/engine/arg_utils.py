@@ -122,7 +122,7 @@ class EngineArgs:
     max_num_batched_tokens: Optional[int] = None
     max_num_partial_prefills: Optional[int] = 1
     max_long_partial_prefills: Optional[int] = 1
-    long_prefill_threshold: Optional[float] = 0.04
+    long_prefill_token_threshold: Optional[int] = 0
     max_num_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
@@ -530,18 +530,18 @@ class EngineArgs:
             "--max-long-partial-prefills",
             type=int,
             default=EngineArgs.max_long_partial_prefills,
-            help="For chunked prefill, the max number of long concurrent "
-            "partial prefills. The length is determined by the "
-            "long-prefill-threshold argument. "
-            "Defaults to 1",
-        )
+            help="For chunked prefill, the maximum number of prompts longer "
+            "than --long-prefill-token-threshold that will be prefilled "
+            "concurrently. Setting this less than --max-num-partial-prefills "
+            "will allow shorter prompts to jump the queue in front of longer "
+            "prompts in some cases, improving latency. Defaults to 1.")
         parser.add_argument(
-            "--long-prefill-threshold",
+            "--long-prefill-token-threshold",
             type=float,
-            default=EngineArgs.long_prefill_threshold,
-            help="For chunked prefill, a request is considered long "
-            "if the prompt is longer than the "
-            "max_model_length * long_prefill_threshold. Defaults to 0.04",
+            default=EngineArgs.long_prefill_token_threshold,
+            help="For chunked prefill, a request is considered long if the "
+            "prompt is longer than this number of tokens. Defaults to 4%% of "
+            "the model's context length.",
         )
         parser.add_argument('--max-num-seqs',
                             type=int,
@@ -1275,7 +1275,7 @@ class EngineArgs:
             policy=self.scheduling_policy,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
-            long_prefill_threshold=self.long_prefill_threshold,
+            long_prefill_token_threshold=self.long_prefill_token_threshold,
         )
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,

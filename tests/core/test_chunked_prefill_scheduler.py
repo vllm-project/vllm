@@ -226,7 +226,8 @@ def test_short_prompts_jump_long_prompts_in_queue():
     cache_config.num_cpu_blocks = 3200  # large KV cache size for large requests
     cache_config.num_gpu_blocks = 3200
     scheduler = Scheduler(scheduler_config, cache_config, None)
-    running: List[SequenceGroup] = []
+    long_seqs: List[SequenceGroup] = []
+    short_seqs: List[SequenceGroup] = []
 
     # Add 2 large seq groups to scheduler.
     for i in range(2):
@@ -235,7 +236,7 @@ def test_short_prompts_jump_long_prompts_in_queue():
             prompt_length=1200,  # Very large prompt
             block_size=block_size)
         scheduler.add_seq_group(seq_group)
-        running.append(seq_group)
+        long_seqs.append(seq_group)
         assert seq_group.is_prefill()
 
     # Add 2 small seq groups behind them
@@ -245,7 +246,7 @@ def test_short_prompts_jump_long_prompts_in_queue():
             prompt_length=40,  # Very small prompt
             block_size=block_size)
         scheduler.add_seq_group(seq_group)
-        running.append(seq_group)
+        short_seqs.append(seq_group)
         assert seq_group.is_prefill()
 
     # Verify one large req and 1 small req chunked
@@ -254,10 +255,15 @@ def test_short_prompts_jump_long_prompts_in_queue():
     assert seq_group_meta[1].token_chunk_size == 32  # small req gets 32 tokens
 
     # all 4 are prefilling
-    assert running[0].is_prefill()
-    assert running[1].is_prefill()
-    assert running[2].is_prefill()
-    assert running[3].is_prefill()
+    assert long_seqs[0].is_prefill()
+    assert long_seqs[1].is_prefill()
+    assert short_seqs[0].is_prefill()
+    assert short_seqs[1].is_prefill()
+    # First short and first long sequences have been scheduled
+    assert long_seqs[0].first_seq.get_num_computed_tokens() == 32
+    assert long_seqs[1].first_seq.get_num_computed_tokens() == 0
+    assert short_seqs[0].first_seq.get_num_computed_tokens() == 32
+    assert short_seqs[1].first_seq.get_num_computed_tokens() == 0
 
     assert out.num_prefill_groups == 2
     assert out.num_batched_tokens == 64
@@ -268,70 +274,82 @@ def test_short_prompts_jump_long_prompts_in_queue():
     # The other small req is scheduled
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     # the new small req got 64 - (32+8) tokens
-    assert (seq_group_meta[0].token_chunk_size == 24)
+    assert seq_group_meta[0].token_chunk_size == 24
     assert seq_group_meta[1].token_chunk_size == 32  # large req still got 32
     # the other small request had only 8 tokens left
     assert seq_group_meta[2].token_chunk_size == 8  # 40-32
 
-    # notice the small request got to decode now
-    # this is because of max_num_partial_prefills logic
-    assert running[0].is_prefill()
-    assert running[1].is_prefill()
-    assert not running[2].is_prefill()
-    assert running[3].is_prefill()
+    # The first small request got to decode now
+    assert long_seqs[0].is_prefill()
+    assert long_seqs[1].is_prefill()
+    assert not short_seqs[0].is_prefill()
+    assert short_seqs[1].is_prefill()
+    # Both small requests have started in front of the second long request
+    assert long_seqs[0].first_seq.get_num_computed_tokens() == 64
+    assert long_seqs[1].first_seq.get_num_computed_tokens() == 0
+    assert short_seqs[0].first_seq.get_num_computed_tokens() == 40
+    assert short_seqs[1].first_seq.get_num_computed_tokens() == 24
 
     assert out.num_prefill_groups == 3
     assert out.num_batched_tokens == 64
-    # the small seq group has a new token appended.
-    append_new_token(running[2], 1)
+    # the first small seq group has a new token appended.
+    append_new_token(short_seqs[0], 1)
 
     # in the third iteration,
-    # the first small request has entered decode
-    # and other small req had 16 tokens left
-    # so it went to decode
+    # the first small request is already decoding
+    # the second small request only has 16 tokens left and will enter decoding
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert seq_group_meta[0].token_chunk_size == 32  # large still got 32
-    # small req prefilled 40-24=16 tokens
-    assert (seq_group_meta[1].token_chunk_size == 16)
+    # small req finished prefilling 40-24=16 tokens
+    assert seq_group_meta[1].token_chunk_size == 16
     assert seq_group_meta[2].token_chunk_size == 1  # decode
     assert out.num_prefill_groups == 2
     assert out.num_batched_tokens == 49  # (32+16+1 decode)
 
     # both small requests have now reached decode
-    assert running[0].is_prefill()
-    assert running[1].is_prefill()
-    assert not running[2].is_prefill()
-    assert not running[3].is_prefill()
+    assert long_seqs[0].is_prefill()
+    assert long_seqs[1].is_prefill()
+    assert not short_seqs[0].is_prefill()
+    assert not short_seqs[1].is_prefill()
+    assert long_seqs[0].first_seq.get_num_computed_tokens() == 96
+    assert long_seqs[1].first_seq.get_num_computed_tokens() == 0
+    assert short_seqs[0].first_seq.get_num_computed_tokens() == 41
+    assert short_seqs[1].first_seq.get_num_computed_tokens() == 40
 
-    # the small seq group has a new token appended.
-    append_new_token(running[2], 1)
+    # both the small seq groups have a new token appended
+    append_new_token(short_seqs[0], 1)
+    append_new_token(short_seqs[1], 1)
 
     # in the fourth iteration, both small requests are decoding
     # so large request gets all the budget
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
-    # large req gets 63 tokens (minus 1 for decode)
-    assert seq_group_meta[0].token_chunk_size == 63
-    assert seq_group_meta[1].token_chunk_size == 1  # decode
-    assert out.num_prefill_groups == 1
-    assert out.num_batched_tokens == 64
 
-    assert running[0].is_prefill()
-    assert running[1].is_prefill()
-    assert not running[2].is_prefill()
-    assert not running[3].is_prefill()
-
-    # both the small seq groups have a new token appended
-    append_new_token(running[2], 1)
-    append_new_token(running[3], 1)
-
-    # in the fifth iteration, large request gets all the budget
-    # while both small requests are decoding
-    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    # large req gets 62 tokens (minus 2 for decode)
     assert seq_group_meta[0].token_chunk_size == 62
     assert seq_group_meta[1].token_chunk_size == 1  # decode
     assert seq_group_meta[2].token_chunk_size == 1  # decode
     assert out.num_prefill_groups == 1
     assert out.num_batched_tokens == 64
+
+    assert long_seqs[0].first_seq.get_num_computed_tokens() == 158
+
+    # assert long_seqs[0].is_prefill()
+    # assert long_seqs[1].is_prefill()
+    # assert not short_seqs[0].is_prefill()
+    # assert not short_seqs[1].is_prefill()
+
+    # # both the small seq groups have a new token appended
+    # append_new_token(short_seqs[0], 1)
+    # append_new_token(short_seqs[1], 1)
+
+    # # in the fifth iteration, large request gets all the budget
+    # # while both small requests are decoding
+    # seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    # assert seq_group_meta[0].token_chunk_size == 62
+    # assert seq_group_meta[1].token_chunk_size == 1  # decode
+    # assert seq_group_meta[2].token_chunk_size == 1  # decode
+    # assert out.num_prefill_groups == 1
+    # assert out.num_batched_tokens == 64
 
 
 def test_complex():

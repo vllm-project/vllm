@@ -1378,8 +1378,15 @@ class Scheduler:
             [s.seq_group for s in swapped_in.prefill_seq_groups])
         self.running.extend(
             [s.seq_group for s in running_scheduled.decode_seq_groups])
+        # Because multiple prefills may be running concurrently, we need to
+        # make sure that prefills which are scheduled to finish are listed
+        # before those that won't. This is so that on the next scheduling
+        # iteration when they have transitioned to the decode stage, they are
+        # properly prioritized over sequences that are still in the prefill
+        # stage.
         self.running.extend(
-            [s.seq_group for s in running_scheduled.prefill_seq_groups])
+            self._order_finishing_prefills_first(
+                running_scheduled.prefill_seq_groups))
         self.running.extend([s.seq_group for s in prefills.seq_groups])
 
         # Update swapped requests.
@@ -1417,6 +1424,21 @@ class Scheduler:
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
         )
+
+    def _order_finishing_prefills_first(
+        self, scheduled_prefill_seqs: List[ScheduledSequenceGroup]
+    ) -> List[SequenceGroup]:
+        """Returns a list of prefilling SequenceGroups where sequences that are
+        scheduled to finish prefilling are listed first"""
+        finishing = [
+            s.seq_group for s in scheduled_prefill_seqs
+            if s.seq_group.get_num_uncomputed_tokens() == s.token_chunk_size
+        ]
+        not_finishing = [
+            s.seq_group for s in scheduled_prefill_seqs
+            if s.seq_group.get_num_uncomputed_tokens() != s.token_chunk_size
+        ]
+        return finishing + not_finishing
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
