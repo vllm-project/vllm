@@ -735,8 +735,7 @@ class MolmoVisionBackbone(nn.Module):
         image_features = image_features.reshape(
             (batch_size, num_image) + self.image_num_patch + (-1, ), )
 
-        missing_w = self.image_num_patch[0] % 2
-        if missing_w:
+        if (missing_w := self.image_num_patch[0] % 2):
             # Pad so we can still pool 2x2 patches
             image_features = F.pad(
                 image_features,
@@ -1068,6 +1067,22 @@ class MolmoProcessorWrapper:
         return True
 
     @property
+    def image_patch_id(self) -> int:
+        return DEFAULT_IMAGE_PATCH_TOKEN_ID
+
+    @property
+    def im_col_id(self) -> int:
+        return DEFAULT_IM_COL_TOKEN_ID
+
+    @property
+    def im_start_id(self) -> int:
+        return DEFAULT_IM_START_TOKEN_ID
+
+    @property
+    def im_end_id(self) -> int:
+        return DEFAULT_IM_END_TOKEN_ID
+
+    @property
     def pooling_size(self) -> int:
         return POOLING_SIZE
 
@@ -1143,7 +1158,7 @@ class MolmoProcessorWrapper:
 
         image_input_idx = outputs.pop("image_input_idx", None)
         if image_input_idx is not None:
-            input_is_patch = input_ids == DEFAULT_IMAGE_PATCH_TOKEN_ID
+            input_is_patch = input_ids == self.image_patch_id
             image_input_idx_flat: torch.Tensor = image_input_idx.view(-1)
             image_valid_flat = image_input_idx_flat >= 0
             feat_is_patch_flat = image_valid_flat.clone()
@@ -1154,14 +1169,14 @@ class MolmoProcessorWrapper:
             input_is_embed = torch.isin(
                 input_ids,
                 torch.tensor([
-                    DEFAULT_IMAGE_PATCH_TOKEN_ID,
-                    DEFAULT_IM_COL_TOKEN_ID,
-                    DEFAULT_IM_START_TOKEN_ID,
-                    DEFAULT_IM_END_TOKEN_ID,
+                    self.image_patch_id,
+                    self.im_col_id,
+                    self.im_start_id,
+                    self.im_end_id,
                 ]),
             )
             embed_ids = input_ids[input_is_embed]
-            embed_is_patch = embed_ids == DEFAULT_IMAGE_PATCH_TOKEN_ID
+            embed_is_patch = embed_ids == self.image_patch_id
             assert embed_is_patch.sum() == feat_is_patch.sum()
 
             tilings = [
@@ -1344,10 +1359,10 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
         user_tokens = tokenizer.encode(user_str, add_special_tokens=False)
 
-        img_patch_id = DEFAULT_IMAGE_PATCH_TOKEN_ID
-        img_col_id = DEFAULT_IM_COL_TOKEN_ID
-        img_start_id = DEFAULT_IM_START_TOKEN_ID
-        img_end_id = DEFAULT_IM_END_TOKEN_ID
+        img_patch_id = processor.image_patch_id
+        img_col_id = processor.im_col_id
+        img_start_id = processor.im_start_id
+        img_end_id = processor.im_end_id
 
         extra_row = [img_patch_id] * image_token_length_w + [img_col_id]
         extra_joint = ([img_start_id] + extra_row * image_token_length_h +
