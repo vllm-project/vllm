@@ -115,8 +115,6 @@ class OpenAIServingScores(OpenAIServing):
         async for i, res in result_generator:
             embeddings[i] = res
 
-        assert all(embed is not None for embed in embeddings)
-
         emb_text_1 = embeddings[:len(text_1)]
         emb_text_2 = embeddings[len(text_1):]
 
