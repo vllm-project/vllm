@@ -686,10 +686,24 @@ class MQLLMEngineClient(EngineClient):
             request=RPCResetPrefixCacheRequest.RESET_PREFIX_CACHE,
             socket=self.input_socket)
 
-    async def send_request_and_get_response(self, request: Any) -> Any:
+    async def sleep(self, level: int = 1) -> None:
+        """Sleep the engine for a given level"""
+        return await self._send_one_way_rpc_request(
+            request=RPCSleepRequest(level), socket=self.input_socket)
+
+    async def wake_up(self) -> None:
+        """Wake up the engine"""
+        return await self._send_one_way_rpc_request(
+            request=RPCWakeUpRequest.WAKE_UP, socket=self.input_socket)
+
+    async def add_lora(self, lora_request: LoRARequest) -> None:
+        """Load a new LoRA adapter into the engine for future requests."""
+        # Uses the same I/O as generate requests
+        request = RPCLoadAdapterRequest(lora_request)
+
         # Create output queue for this requests.
         queue: asyncio.Queue[Union[None, BaseException]] = asyncio.Queue()
-        self.output_queues[id(request)] = queue
+        self.output_queues[request.request_id] = queue
 
         # Send the request
         request_bytes = pickle.dumps(request)
@@ -697,26 +711,8 @@ class MQLLMEngineClient(EngineClient):
 
         # Wait for the response
         request_output = await queue.get()
-        self.output_queues.pop(id(request))
+        self.output_queues.pop(request.request_id)
 
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
-
-        return request_output
-
-    async def sleep(self, level: int = 1) -> None:
-        """Sleep the engine for a given level"""
-        return await self.send_request_and_get_response(
-            request=RPCSleepRequest(level))
-
-    async def wake_up(self) -> None:
-        """Wake up the engine"""
-        return await self.send_request_and_get_response(
-            request=RPCWakeUpRequest.WAKE_UP)
-
-    async def add_lora(self, lora_request: LoRARequest) -> None:
-        """Load a new LoRA adapter into the engine for future requests."""
-        # Uses the same I/O as generate requests
-        request = RPCLoadAdapterRequest(lora_request)
-        return await self.send_request_and_get_response(request)
