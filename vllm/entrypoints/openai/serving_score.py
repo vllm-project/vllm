@@ -267,7 +267,7 @@ class OpenAIServingScores(OpenAIServing):
 
         if truncate_prompt_tokens is not None and \
                 truncate_prompt_tokens > self.max_model_len:
-            raise ValueError(
+            return self.create_error_response(
                 f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
                 f"is greater than max_model_len ({self.max_model_len})."
                 f" Please, select a smaller truncation size.")
