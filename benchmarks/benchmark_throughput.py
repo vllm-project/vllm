@@ -8,7 +8,7 @@ import random
 import sys
 import time
 from functools import cache
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import uvloop
@@ -29,7 +29,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from benchmark_utils import save_to_pytorch_benchmark_format
+from benchmark_utils import convert_to_pytorch_benchmark_format
 
 
 @dataclasses.dataclass
@@ -343,6 +343,25 @@ def run_mii(
     return end - start
 
 
+def save_to_pytorch_benchmark_format(args: argparse.Namespace,
+                                     results: Dict[str, Any]) -> None:
+    pt_records = convert_to_pytorch_benchmark_format(
+        args=args,
+        metrics={
+            "requests_per_second": [results["requests_per_second"]],
+            "tokens_per_second": [results["tokens_per_second"]],
+        },
+        extra_info={
+            k: results[k]
+            for k in ["elapsed_time", "num_requests", "total_num_tokens"]
+        })
+    if pt_records:
+        # Don't use json suffix here as we don't want CI to pick it up
+        pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch"
+        with open(pt_file, "w") as f:
+            json.dump(pt_records, f)
+
+
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -440,22 +459,7 @@ def main(args: argparse.Namespace):
         }
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
-
-        pt_records = save_to_pytorch_benchmark_format(
-            args=args,
-            metrics={
-                "requests_per_second": results["requests_per_second"],
-                "tokens_per_second": results["tokens_per_second"],
-            },
-            extra_info={
-                k: results[k]
-                for k in ["elapsed_time", "num_requests", "total_num_tokens"]
-            })
-        if pt_records:
-            # Don't use json suffix here as we don't want CI to pick it up
-            pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch"
-            with open(pt_file, "w") as f:
-                json.dump(pt_records, f)
+        save_to_pytorch_benchmark_format(args, results)
 
 
 if __name__ == "__main__":

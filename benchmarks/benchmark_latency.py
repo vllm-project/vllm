@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -21,7 +21,21 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from benchmark_utils import save_to_pytorch_benchmark_format
+from benchmark_utils import convert_to_pytorch_benchmark_format
+
+
+def save_to_pytorch_benchmark_format(args: argparse.Namespace,
+                                     results: Dict[str, Any]) -> None:
+    pt_records = convert_to_pytorch_benchmark_format(
+        args=args,
+        metrics={"latency": results["latencies"]},
+        extra_info={k: results[k]
+                    for k in ["avg_latency", "percentiles"]})
+    if pt_records:
+        # Don't use json suffix here as we don't want CI to pick it up
+        pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch"
+        with open(pt_file, "w") as f:
+            json.dump(pt_records, f)
 
 
 def main(args: argparse.Namespace):
@@ -115,17 +129,7 @@ def main(args: argparse.Namespace):
         }
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
-
-        pt_records = save_to_pytorch_benchmark_format(
-            args=args,
-            metrics={"latency": results["latencies"]},
-            extra_info={k: results[k]
-                        for k in ["avg_latency", "percentiles"]})
-        if pt_records:
-            # Don't use json suffix here as we don't want CI to pick it up
-            pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch"
-            with open(pt_file, "w") as f:
-                json.dump(pt_records, f)
+        save_to_pytorch_benchmark_format(args, results)
 
 
 if __name__ == "__main__":

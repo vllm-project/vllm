@@ -31,6 +31,7 @@ import io
 import json
 import os
 import random
+import sys
 import time
 import warnings
 from dataclasses import dataclass
@@ -54,6 +55,9 @@ try:
     from vllm.utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
+
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from benchmark_utils import convert_to_pytorch_benchmark_format
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -372,21 +376,21 @@ async def get_request(
     burstiness: float = 1.0,
 ) -> AsyncGenerator[Tuple[str, int, int], None]:
     """
-    Asynchronously generates requests at a specified rate 
+    Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness.
-    
+
     Args:
-        input_requests: 
+        input_requests:
             A list of input requests, each represented as a tuple.
-        request_rate: 
+        request_rate:
             The rate at which requests are generated (requests/s).
-        burstiness (optional): 
-            The burstiness factor of the request generation. 
+        burstiness (optional):
+            The burstiness factor of the request generation.
             Only takes effect when request_rate is not inf.
             Default value is 1, which follows a Poisson process.
             Otherwise, the request intervals follow a gamma distribution.
-            A lower burstiness value (0 < burstiness < 1) results 
-            in more bursty requests, while a higher burstiness value 
+            A lower burstiness value (0 < burstiness < 1) results
+            in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
     """
     input_requests = iter(input_requests)
@@ -787,6 +791,23 @@ def parse_goodput(slo_pairs):
     return goodput_config_dict
 
 
+def save_to_pytorch_benchmark_format(args: argparse.Namespace,
+                                     results: Dict[str, Any],
+                                     file_name: str) -> None:
+    metrics = ["ttft", "tpot", "itl", "e2el"]
+    pt_records = convert_to_pytorch_benchmark_format(
+        args=args,
+        metrics={k: results[k]
+                 for k in metrics},
+        extra_info={k: results[k]
+                    for k in results if k not in metrics})
+    if pt_records:
+        # Don't use json suffix here as we don't want CI to pick it up
+        pt_file = f"{os.path.splitext(file_name)[0]}.pytorch"
+        with open(pt_file, "w") as f:
+            json.dump(pt_records, f)
+
+
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -959,6 +980,7 @@ def main(args: argparse.Namespace):
             file_name = os.path.join(args.result_dir, file_name)
         with open(file_name, "w", encoding='utf-8') as outfile:
             json.dump(result_json, outfile)
+        save_to_pytorch_benchmark_format(args, result_json, file_name)
 
 
 if __name__ == "__main__":

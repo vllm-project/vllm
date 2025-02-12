@@ -5,9 +5,9 @@ import os
 from typing import Any, Dict, List
 
 
-def save_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                     metrics: Dict[str, List],
-                                     extra_info: Dict[str, Any]) -> List:
+def convert_to_pytorch_benchmark_format(args: argparse.Namespace,
+                                        metrics: Dict[str, List],
+                                        extra_info: Dict[str, Any]) -> List:
     """
     Save the benchmark results in the format used by PyTorch OSS benchmark with
     on metric per record
