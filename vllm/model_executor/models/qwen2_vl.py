@@ -800,7 +800,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             preprocessed_size = ImageSize(width=image_width,
                                           height=image_height)
 
-        grid_t = max(num_frames // temporal_patch_size, 1)
+        # NOTE: Frames are padded to the next even number
+        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
+        padded_num_frames = num_frames + num_frames % temporal_patch_size
+
+        grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
         grid_w = preprocessed_size.width // patch_size
 
@@ -831,12 +835,10 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         num_frames: int,
         image_processor: Optional[Qwen2VLImageProcessor],
     ) -> int:
-        # NOTE: Frames are padded to the next even number
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
-            num_frames=num_frames + num_frames % 2,
+            num_frames=num_frames,
             image_processor=image_processor,
         )
         return num_video_tokens
