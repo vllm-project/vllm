@@ -7,12 +7,15 @@ from vllm.entrypoints.openai.protocol import RerankResponse
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "BAAI/bge-reranker-base"
+MODEL_NAME = "s3://vllm-ci-model-weights/bge-reranker-base"
 
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--enforce-eager", "--max-model-len", "100"]
+    args = [
+        "--enforce-eager", "--max-model-len", "100", "--load-format",
+        "runai_streamer"
+    ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

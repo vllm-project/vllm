@@ -9,7 +9,7 @@ from huggingface_hub import snapshot_download
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "s3://vllm-ci-model-weights/zephyr-7b-beta"
 # technically this needs Mistral-7B-v0.1 as base, but we're not testing
 # generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
@@ -40,6 +40,8 @@ def server(zephyr_lora_files):
         "2",
         "--max-num-seqs",
         "128",
+        "--load-format",
+        "runai_streamer",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

@@ -436,6 +436,7 @@ def runai_safetensors_weights_iterator(
     """Iterate over the weights in the model safetensor files."""
     enable_tqdm = not torch.distributed.is_initialized(
     ) or torch.distributed.get_rank() == 0
+    print("HF WEIGHT FILES: ", hf_weights_files)
     with SafetensorsStreamer() as streamer:
         for st_file in tqdm(
                 hf_weights_files,
@@ -443,6 +444,7 @@ def runai_safetensors_weights_iterator(
                 disable=not enable_tqdm,
                 bar_format=_BAR_FORMAT,
         ):
+            print("FILE: ", st_file)
             streamer.stream_file(st_file)
             yield from streamer.get_tensors()
 

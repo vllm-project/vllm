@@ -46,6 +46,7 @@ def glob(s3=None,
     """
     if s3 is None:
         s3 = boto3.client("s3")
+    path = path + "/" if not path.endswith("/") else path
     bucket_name, _, paths = list_files(s3,
                                        path=path,
                                        allow_pattern=allow_pattern)
@@ -147,8 +148,9 @@ class S3Model:
             return
 
         for file in files:
-            destination_file = os.path.join(self.dir,
-                                            file.removeprefix(base_dir))
+            destination_file = os.path.join(
+                self.dir,
+                file.removeprefix(base_dir).lstrip("/"))
             local_dir = Path(destination_file).parent
             os.makedirs(local_dir, exist_ok=True)
             self.s3.download_file(bucket_name, file, destination_file)

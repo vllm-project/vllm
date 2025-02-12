@@ -10,7 +10,7 @@ from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "s3://vllm-ci-model-weights/zephyr-7b-beta"
 
 PROMPTS = [
     "Hello, my name is",
@@ -27,6 +27,7 @@ def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
+              load_format="runai_streamer",
               tensor_parallel_size=1,
               max_model_len=8192,
               enable_lora=True,

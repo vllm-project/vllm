@@ -10,7 +10,7 @@ import pytest
 from ...utils import RemoteOpenAIServer
 
 # # any model with a chat template should work here
-MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
+MODEL_NAME = "s3://vllm-ci-model-weights/Qwen2-1.5B-Instruct"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 API_KEY = "abc-123"
 ERROR_API_KEY = "abc"
@@ -30,6 +30,8 @@ def server():
         "/" + ROOT_PATH,
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
+        "--load-format",
+        "runai_streamer",
     ]
     envs = os.environ.copy()
 

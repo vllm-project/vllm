@@ -24,7 +24,7 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, TokenizerPoolConfig
+from vllm.config import LoadFormat, TaskOption, TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -46,6 +46,45 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 _SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
+
+MODELS_ON_S3 = [
+    "sentence-transformers/all-MiniLM-L12-v2", "rhymes-ai/Aria",
+    "facebook/bart-base", "BAAI/bge-base-en-v1.5", "Salesforce/blip2-opt-2.7b",
+    "facebook/chameleon-7b", "deepseek-ai/deepseek-vl2-tiny",
+    "intfloat/e5-mistral-7b-instruct", "adept/fuyu-8b", "google/gemma-2-2b-it",
+    "google/gemma-2-9b", "google/gemma-2b", "google/gemma-7b",
+    "THUDM/glm-4v-9b", "openai-community/gpt2", "h2oai/h2ovl-mississippi-800m",
+    "HuggingFaceM4/Idefics3-8B-Llama3", "ArthurZ/Ilama-3.2-1B",
+    "OpenGVLab/InternVL2-1B", "microsoft/Jamba-tiny-dev",
+    "meta-llama/Llama-2-7b-AQLM-2Bit-1x16-hf", "meta-llama/Llama-2-7b-chat-hf",
+    "meta-llama/llama-2-7b-hf", "meta-llama/Llama-3.2-11B-Vision",
+    "meta-llama/Llama-3.2-1B-Instruct-FP8-KV",
+    "meta-llama/Llama-3.2-1B-Instruct", "llava-hf/llava-1.5-7b-hf",
+    "llava-hf/LLaVA-NeXT-Video-7B-hf",
+    "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+    "llava-hf/llava-v1.6-mistral-7b-hf", "lmsys/longchat-13b-16k",
+    "TIGER-Lab/Mantis-8B-siglip-llama3", "meta-llama/Meta-Llama-3-8B-Instruct",
+    "openbmb/MiniCPM-o-2_6", "openbmb/MiniCPM-V-2_6",
+    "microsoft/Ministral-8B-Instruct-2410",
+    "mistralai/Mistral-7B-Instruct-v0.2", "mistralai/Mistral-7B-Instruct-v0.3",
+    "mistralai/Mistral-7B-v0.1",
+    "sentence-transformers/ms-marco-MiniLM-L-6-v2", "nvidia/NVLM-D-72B",
+    "facebook/opt-125m", "facebook/opt-350m",
+    "microsoft/Phi-3-vision-128k-instruct",
+    "microsoft/Phi-3.5-vision-instruct", "mistralai/pixtral-12b",
+    "Qwen/Qwen-VL-Chat", "Qwen/Qwen1.5-7B", "Qwen/Qwen2-1.5B-Instruct",
+    "Qwen/Qwen2-Audio-7B-Instruct", "Qwen/Qwen2-VL-2B-Instruct",
+    "Qwen/Qwen2.5-1.5B-apeach", "Qwen/Qwen2.5-7B-Instruct",
+    "Qwen/Qwen2.5-VL-3B-Instruct", "fixie-ai/ultravox-v0_3",
+    "HuggingFaceH4/zephyr-7b-beta"
+]
+
+
+@pytest.fixture(scope="session")
+def s3_models():
+    return MODELS_ON_S3
+
+
 _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]
@@ -679,6 +718,11 @@ class VllmRunner:
         enforce_eager: Optional[bool] = False,
         **kwargs,
     ) -> None:
+        load_format = LoadFormat.AUTO
+        if model_name in MODELS_ON_S3:
+            model_name = (f"s3://vllm-ci-model-weights/"
+                          f"{model_name.split(' / ')[-1]}")
+            load_format = LoadFormat.RUNAI_STREAMER
         self.model = LLM(
             model=model_name,
             task=task,
@@ -693,6 +737,7 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
+            load_format=load_format,
             **kwargs,
         )
 

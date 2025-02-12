@@ -22,6 +22,7 @@ from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+S3_MODEL_NAME = "s3://vllm-ci-model-weights/zephyr-7b-beta"
 # technically these adapters use a different base model,
 # but we're not testing generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
@@ -89,6 +90,8 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
         "2",
         "--max-prompt-adapter-token",
         "128",
+        "--load-format",
+        "runai_streamer",
     ]
 
 
@@ -97,7 +100,8 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
 def server(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+    with RemoteOpenAIServer(S3_MODEL_NAME,
+                            default_server_args) as remote_server:
         yield remote_server
 
 

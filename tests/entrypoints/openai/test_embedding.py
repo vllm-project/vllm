@@ -13,7 +13,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
+MODEL_NAME = "s3://vllm-ci-model-weights/e5-mistral-7b-instruct"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 
 
@@ -29,6 +29,8 @@ def server():
         "--max-model-len",
         "8192",
         "--chat-template",
+        "--load-format",
+        "runai_streamer",
         DUMMY_CHAT_TEMPLATE,
     ]
 

@@ -13,7 +13,7 @@ import requests
 
 from tests.utils import RemoteOpenAIServer
 
-MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL_NAME = "s3://vllm-ci-model-weights/Qwen2.5-1.5B-Instruct"
 
 
 @pytest.fixture(scope="module")

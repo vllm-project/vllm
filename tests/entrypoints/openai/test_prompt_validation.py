@@ -11,8 +11,8 @@ from ...utils import RemoteOpenAIServer
 
 @pytest.mark.asyncio
 async def test_empty_prompt():
-    model_name = "gpt2"
-    server_args = ["--enforce-eager"]
+    model_name = "s3://vllm-ci-model-weights/gpt2"
+    server_args = ["--enforce-eager", "--load-format", "runai_streamer"]
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
@@ -26,8 +26,8 @@ async def test_empty_prompt():
 
 @pytest.mark.asyncio
 async def test_out_of_vocab_token_ids():
-    model_name = "gpt2"
-    server_args = ["--enforce-eager"]
+    model_name = "s3://vllm-ci-model-weights/gpt2"
+    server_args = ["--enforce-eager", "--load-format", "runai_streamer"]
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
@@ -41,8 +41,11 @@ async def test_out_of_vocab_token_ids():
 
 @pytest.mark.asyncio
 async def test_reject_multistep_with_guided_decoding():
-    model_name = "gpt2"
-    server_args = ["--enforce-eager", "--num-scheduler-steps", "8"]
+    model_name = "s3://vllm-ci-model-weights/gpt2"
+    server_args = [
+        "--enforce-eager", "--num-scheduler-steps", "8", "--load-format",
+        "runai_streamer"
+    ]
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 

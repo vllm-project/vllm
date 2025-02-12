@@ -11,7 +11,7 @@ from vllm.multimodal.utils import encode_audio_base64, fetch_audio
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
+MODEL_NAME = "s3://vllm-ci-model-weights/ultravox-v0_5-llama-3_2-1b"
 TEST_AUDIO_URLS = [
     AudioAsset("winning_call").url,
 ]
@@ -28,6 +28,8 @@ def server():
         "5",
         "--enforce-eager",
         "--trust-remote-code",
+        "--load-format",
+        "runai_streamer",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

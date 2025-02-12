@@ -13,7 +13,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "s3://vllm-ci-model-weights/zephyr-7b-beta"
 
 
 @pytest.fixture(scope='module')
@@ -63,6 +63,8 @@ def server(server_args):
         "--enforce-eager",
         "--max-num-seqs",
         "128",
+        "--load-format",
+        "runai_streamer",
         *server_args,
     ]
 
