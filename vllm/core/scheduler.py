@@ -302,27 +302,23 @@ class SchedulerPrefillOutputs:
 
 
 def seq_group_metadata_builder():
-    return SequenceGroupMetadata(
-        request_id="",
-        is_prompt=False,
-        seq_data={},
-        sampling_params=None,
-        block_tables={},
-    )
+    return SequenceGroupMetadata(request_id="",
+                                 is_prompt=False,
+                                 seq_data={},
+                                 sampling_params=None,
+                                 block_tables={})
 
 
 def scheduler_running_outputs_builder():
-    return SchedulerRunningOutputs(
-        decode_seq_groups=[],
-        prefill_seq_groups=[],
-        preempted=[],
-        swapped_out=[],
-        blocks_to_swap_out=[],
-        blocks_to_copy=[],
-        num_lookahead_slots=0,
-        prefill_seq_groups_list=[],
-        decode_seq_groups_list=[],
-    )
+    return SchedulerRunningOutputs(decode_seq_groups=[],
+                                   prefill_seq_groups=[],
+                                   preempted=[],
+                                   swapped_out=[],
+                                   blocks_to_swap_out=[],
+                                   blocks_to_copy=[],
+                                   num_lookahead_slots=0,
+                                   prefill_seq_groups_list=[],
+                                   decode_seq_groups_list=[])
 
 
 def scheduled_seq_group_builder():
