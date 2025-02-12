@@ -736,8 +736,8 @@ class MolmoVisionBackbone(nn.Module):
         image_features = image_features.reshape(
             (batch_size, num_image) + self.image_num_patch + (-1, ), )
 
-        if (missing_w := self.image_num_patch[0] % 2):
-            # Pad so we can still pool 2x2 patches
+        if (missing_w := self.image_num_patch[0] % POOLING_SIZE):
+            # Padding for image pooling (see below)
             image_features = F.pad(
                 image_features,
                 (0, 0, 0, missing_w, 0, missing_w, 0, 0, 0, 0),
