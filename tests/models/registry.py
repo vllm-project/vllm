@@ -104,7 +104,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B"),
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloomz-1b1"),
-    # ChatGLMModel supports multimodal
+    "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
+                                    trust_remote_code=True),
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",
                                          trust_remote_code=True),
     "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501
@@ -167,7 +168,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
-    # QWenLMHeadModel supports multimodal
+    "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
+                                       trust_remote_code=True),
     "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct"),
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b",
@@ -232,14 +234,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b"),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
-    "ChatGLMModel": _HfExamplesInfo("THUDM/glm-4v-9b",
-                                    extras={"text_only": "THUDM/chatglm3-6b"},
-                                    trust_remote_code=True),
-    "ChatGLMForConditionalGeneration": _HfExamplesInfo("chatglm2-6b",
-                                                       is_available_online=False),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
+    "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
+                                        trust_remote_code=True,
+                                        hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m"),
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
                                          trust_remote_code=True),
@@ -264,9 +264,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
                                                        tokenizer_mode="mistral"),
-    "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-VL-Chat",
-                                       extras={"text_only": "Qwen/Qwen-7B-Chat"},  # noqa: E501
-                                       trust_remote_code=True),
+    "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL-Chat",
+                                                      trust_remote_code=True,
+                                                      hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]}),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct",  # noqa: E501
