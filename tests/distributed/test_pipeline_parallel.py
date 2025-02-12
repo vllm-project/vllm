@@ -6,6 +6,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
  all workers in a node other than the head node, which can cause the test
  to fail.
 """
+import json
 import os
 from dataclasses import dataclass
 from typing import List, Literal, NamedTuple, Optional
@@ -15,6 +16,7 @@ import pytest
 from vllm.config import TaskOption
 from vllm.logger import init_logger
 
+from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import compare_two_settings, fork_new_process_for_each_test
 
 logger = init_logger("test_pipeline_parallel")
@@ -31,10 +33,7 @@ class ParallelSetup(NamedTuple):
 
 class PPTestOptions(NamedTuple):
     multi_node_only: bool
-    trust_remote_code: bool
-    tokenizer_mode: Optional[str]
     load_format: Optional[str] = None
-    hf_overrides: Optional[str] = None
 
 
 @dataclass
@@ -51,10 +50,7 @@ class PPTestSettings:
         pp_base: int = 2,
         multi_node_only: bool = False,
         task: TaskOption = "auto",
-        trust_remote_code: bool = False,
-        tokenizer_mode: Optional[str] = None,
         load_format: Optional[str] = None,
-        hf_overrides: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -82,10 +78,7 @@ class PPTestSettings:
             distributed_backends=["mp", "ray"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
-                                       trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode,
-                                       load_format=load_format,
-                                       hf_overrides=hf_overrides),
+                                       load_format=load_format),
         )
 
     @staticmethod
@@ -95,10 +88,7 @@ class PPTestSettings:
         pp_base: int = 2,
         task: TaskOption = "auto",
         multi_node_only: bool = False,
-        trust_remote_code: bool = False,
-        tokenizer_mode: Optional[str] = None,
         load_format: Optional[str] = None,
-        hf_overrides: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -110,18 +100,15 @@ class PPTestSettings:
             distributed_backends=["mp"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
-                                       trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode,
-                                       load_format=load_format,
-                                       hf_overrides=hf_overrides),
+                                       load_format=load_format),
         )
 
-    def iter_params(self, model_name: str):
+    def iter_params(self, model_id: str):
         opts = self.test_options
 
         for parallel_setup in self.parallel_setups:
             for distributed_backend in self.distributed_backends:
-                yield (model_name, parallel_setup, distributed_backend,
+                yield (model_id, parallel_setup, distributed_backend,
                        self.task, opts)
 
 
@@ -133,16 +120,16 @@ TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
-    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(tp_base=8, trust_remote_code=True),  # noqa: E501
-    "baichuan-inc/Baichuan-7B": PPTestSettings.fast(trust_remote_code=True),
-    "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(tp_base=8),  # noqa: E501
+    "baichuan-inc/Baichuan-7B": PPTestSettings.fast(),
+    "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),  # noqa: E501
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
-    "THUDM/chatglm3-6b": PPTestSettings.fast(trust_remote_code=True),
-    "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(tp_base=2, trust_remote_code=True),  # noqa: E501
+    "THUDM/chatglm3-6b": PPTestSettings.fast(),
+    "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(tp_base=2),  # noqa: E501
     "databricks/dbrx-instruct": PPTestSettings.fast(tp_base=8),
-    "Deci/DeciLM-7B-instruct": PPTestSettings.fast(trust_remote_code=True),
+    "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(),  # noqa: E501
     "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct": PPTestSettings.fast(),
     "tiiuae/falcon-7b": PPTestSettings.fast(),
     "google/gemma-2b": PPTestSettings.fast(),
@@ -155,12 +142,12 @@ TEXT_GENERATION_MODELS = {
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
     # Uses Llama
     # "internlm/internlm-chat-7b": PPTestSettings.fast(),
-    "internlm/internlm2-chat-7b": PPTestSettings.fast(trust_remote_code=True),
+    "internlm/internlm2-chat-7b": PPTestSettings.fast(),
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
-    "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(trust_remote_code=True),
-    "openbmb/MiniCPM3-4B": PPTestSettings.fast(trust_remote_code=True),
+    "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
+    "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
     "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
@@ -171,12 +158,12 @@ TEXT_GENERATION_MODELS = {
     "shanearora/OLMo-7B-1124-hf": PPTestSettings.fast(),
     "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
-    "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(trust_remote_code=True),
+    "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(),
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "microsoft/phi-2": PPTestSettings.fast(),
-    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
-    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True, load_format="dummy", hf_overrides='{"num_hidden_layers": 4, "hidden_size": 512, "intermediate_size": 800, "num_attention_heads": 4, "num_key_value_heads": 1}'),  # noqa: E501
-    "Qwen/Qwen-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
+    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),  # noqa: E501
+    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(multi_node_only=True, load_format="dummy"),  # noqa: E501
+    "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
@@ -184,7 +171,7 @@ TEXT_GENERATION_MODELS = {
     "upstage/solar-pro-preview-instruct": PPTestSettings.fast(tp_base=2),
     # FIXME: Cannot load tokenizer in latest transformers version.
     # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
-    # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
+    # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(),
     # [Encoder-only]
     # TODO: Implement PP
     # "facebook/bart-base": PPTestSettings.fast(),
@@ -194,7 +181,7 @@ EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
     "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
     "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(),
-    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(tp_base=4, trust_remote_code=True),  # noqa: E501
+    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(tp_base=4),  # noqa: E501
 }
 
 MULTIMODAL_MODELS = {
@@ -202,20 +189,20 @@ MULTIMODAL_MODELS = {
     "Salesforce/blip2-opt-2.7b": PPTestSettings.fast(),
     "facebook/chameleon-7b": PPTestSettings.fast(),
     "adept/fuyu-8b": PPTestSettings.fast(),
-    "THUDM/glm-4v-9b": PPTestSettings.fast(trust_remote_code=True),
-    "OpenGVLab/InternVL2-1B": PPTestSettings.fast(trust_remote_code=True),
+    "THUDM/glm-4v-9b": PPTestSettings.fast(),
+    "OpenGVLab/InternVL2-1B": PPTestSettings.fast(),
     "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
     "llava-hf/llava-v1.6-mistral-7b-hf": PPTestSettings.fast(),
     "llava-hf/LLaVA-NeXT-Video-7B-hf": PPTestSettings.fast(),
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
-    "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(trust_remote_code=True),
-    "allenai/Molmo-7B-D-0924": PPTestSettings.fast(trust_remote_code=True),
-    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
-    "mistralai/Pixtral-12B-2409": PPTestSettings.fast(tp_base=2, tokenizer_mode="mistral"),  # noqa: E501
-    "Qwen/Qwen-VL-Chat": PPTestSettings.fast(trust_remote_code=True),
+    "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
+    "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
+    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(),  # noqa: E501
+    "mistralai/Pixtral-12B-2409": PPTestSettings.fast(tp_base=2),  # noqa: E501
+    "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
-    "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),  # noqa: E501
     # [Encoder-decoder]
     # TODO: Implement PP
     # "meta-llama/Llama-3.2-11B-Vision-Instruct": PPTestSettings.fast(),
@@ -241,7 +228,7 @@ TEST_MODELS = [
 
 
 def _compare_tp(
-    model_name: str,
+    model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     task: TaskOption,
@@ -256,13 +243,23 @@ def _compare_tp(
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
-    (
-        multi_node_only,
-        trust_remote_code,
-        tokenizer_mode,
-        load_format,
-        hf_overrides,
-    ) = test_options
+
+    multi_node_only, load_format = test_options
+
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    trust_remote_code = model_info.trust_remote_code
+    tokenizer_mode = model_info.tokenizer_mode
+    hf_overrides = model_info.hf_overrides
+
+    if load_format == "dummy":
+        # Avoid OOM
+        hf_overrides.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+            "num_experts": 2,
+            "num_experts_per_tok": 2,
+            "num_local_experts": 2,
+        })
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
@@ -294,7 +291,7 @@ def _compare_tp(
     if load_format:
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
-        common_args.extend(["--hf-overrides", hf_overrides])
+        common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
     if (distributed_backend == "ray" and tp_size == 2 and pp_size == 2
             and chunked_prefill):
@@ -334,11 +331,7 @@ def _compare_tp(
     ]
 
     try:
-        compare_two_settings(model_name,
-                             pp_args,
-                             tp_args,
-                             pp_env,
-                             method=method)
+        compare_two_settings(model_id, pp_args, tp_args, pp_env, method=method)
     except Exception:
         if pp_env is None:
             raise
@@ -348,24 +341,23 @@ def _compare_tp(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend", "task",
+    ("model_id", "parallel_setup", "distributed_backend", "task",
      "test_options"),
     [
-        params for model_name, settings in TEXT_GENERATION_MODELS.items()
-        for params in settings.iter_params(model_name)
-        if model_name in TEST_MODELS
+        params for model_id, settings in TEXT_GENERATION_MODELS.items()
+        for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
 @fork_new_process_for_each_test
 def test_tp_language_generation(
-    model_name: str,
+    model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_name,
+    _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
                 task,
@@ -375,24 +367,23 @@ def test_tp_language_generation(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend", "task",
+    ("model_id", "parallel_setup", "distributed_backend", "task",
      "test_options"),
     [
-        params for model_name, settings in EMBEDDING_MODELS.items()
-        for params in settings.iter_params(model_name)
-        if model_name in TEST_MODELS
+        params for model_id, settings in EMBEDDING_MODELS.items()
+        for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
 @fork_new_process_for_each_test
 def test_tp_language_embedding(
-    model_name: str,
+    model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_name,
+    _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
                 task,
@@ -402,24 +393,23 @@ def test_tp_language_embedding(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend", "task",
+    ("model_id", "parallel_setup", "distributed_backend", "task",
      "test_options"),
     [
-        params for model_name, settings in MULTIMODAL_MODELS.items()
-        for params in settings.iter_params(model_name)
-        if model_name in TEST_MODELS
+        params for model_id, settings in MULTIMODAL_MODELS.items()
+        for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
 @fork_new_process_for_each_test
 def test_tp_multimodal_generation(
-    model_name: str,
+    model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_name,
+    _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
                 task,
