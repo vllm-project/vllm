@@ -165,16 +165,19 @@ class OutputProcessor:
             num_tokens = last - first  # TODO: double check
             start = new_token_id_offsets[i]
             end = new_token_id_offsets[i + 1]
+            events = engine_core_outputs.events[
+                i] if engine_core_outputs.events is not None else None
 
             # 1) Compute stats for this iteration.
-            self._update_stats_from_output(
-                req_state, num_tokens, engine_core_outputs.events.get(req_id),
-                engine_core_timestamp, iteration_stats)
+
+            self._update_stats_from_output(req_state, num_tokens, events,
+                                           engine_core_timestamp,
+                                           iteration_stats)
 
             new_token_ids = engine_core_outputs.new_token_ids[start:end]
             new_logprobs = engine_core_outputs.new_logprobs.get(req_id)
-            new_prompt_logprobs_tensors = engine_core_outputs.new_prompt_logprobs_tensors.get(
-                req_id)
+            new_prompt_logprobs_tensors = \
+                engine_core_outputs.new_prompt_logprobs_tensors.get(req_id)
             finish_stop_reasons = engine_core_outputs.finish_reason.get(req_id)
             if finish_stop_reasons is not None:
                 finish_reason, stop_reason = finish_stop_reasons
