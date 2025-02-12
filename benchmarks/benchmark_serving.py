@@ -794,13 +794,18 @@ def parse_goodput(slo_pairs):
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                                      results: Dict[str, Any],
                                      file_name: str) -> None:
-    metrics = ["ttfts", "itls"]
+    metrics = ["median_ttft_ms", "median_itl_ms"]
+    # These raw data might be useful, but they are rather big. They can be added
+    # later if needed
+    ignored_metrics = ["ttfts", "itls", "generated_texts"]
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={k: results[k]
                  for k in metrics},
-        extra_info={k: results[k]
-                    for k in results if k not in metrics})
+        extra_info={
+            k: results[k]
+            for k in results if k not in metrics and k not in ignored_metrics
+        })
     if pt_records:
         # Don't use json suffix here as we don't want CI to pick it up
         pt_file = f"{os.path.splitext(file_name)[0]}.pytorch"
