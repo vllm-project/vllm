@@ -2270,3 +2270,62 @@ def import_pynvml():
             sys.modules["pynvml"] = pynvml
             spec.loader.exec_module(pynvml)
             return pynvml
+
+
+def warn_for_unimplemented_methods():
+    """
+    A decorator that checks if all abstract methods from the base class 
+    are implemented in the subclass and gives warnings for unimplemented 
+    methods.
+    """
+
+    def decorator(cls: Type[T]) -> Type[T]:
+
+        original_init = cls.__init__
+
+        def warn_unimplemented_methods(self: object):
+            unimplemented_methods = []
+            for attr_name in dir(self):
+                # bypass inner method
+                if attr_name.startswith('_'):
+                    continue
+                base_method = getattr(self, attr_name)
+                # bypass method already defined
+                if getattr(base_method, '_avoid_check', False):
+                    continue
+                # get the func of callable method
+                if callable(base_method):
+                    base_method_name = base_method.__func__
+                else:
+                    continue
+                class_method_name = getattr(cls, attr_name, False)
+                # bypass method defined in sub class
+                if not class_method_name:
+                    continue
+                if class_method_name == base_method_name:
+                    unimplemented_methods.append(attr_name)
+            if unimplemented_methods:
+                method_names = ','.join(unimplemented_methods)
+                msg = (f"Methods {method_names} not implemented in {self}")
+                logger.warning(msg)
+
+        @wraps(original_init)
+        def wrapped_init(self, *args, **kwargs) -> None:
+            original_init(self, *args, **kwargs)
+            warn_unimplemented_methods(self)
+
+        type.__setattr__(cls, '__init__', wrapped_init)
+        return cls
+
+    return decorator
+
+
+def avoid_warn_for_unimplementation(
+        func: Callable[..., T]) -> Callable[..., T]:
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> T:
+        return func(*args, **kwargs)
+
+    wrapper._avoid_check = True  # type: ignore
+    return wrapper

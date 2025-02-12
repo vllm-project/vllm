@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from abc import abstractmethod
 from typing import Optional
 
 import torch
@@ -8,12 +7,14 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils import warn_for_unimplemented_methods
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.worker.worker_base import WorkerBase as WorkerBaseV0
 
 logger = init_logger(__name__)
 
 
+@warn_for_unimplemented_methods()
 class WorkerBase(WorkerBaseV0):
     """
     Abstract class for v1 worker, mainly define some methods for v1.
@@ -51,12 +52,10 @@ class WorkerBase(WorkerBaseV0):
         self.device: Optional[torch.device] = None
         self.model_runner: Optional[nn.Module] = None
 
-    @abstractmethod
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    @abstractmethod
     def compile_or_warm_up_model(self) -> None:
         """Prepare model for execution through compilation/warmup."""
         raise NotImplementedError

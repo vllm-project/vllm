@@ -3,10 +3,8 @@
 import dataclasses
 import os
 import time
-from abc import ABC, abstractmethod
-from functools import wraps
-from typing import (Any, Callable, Dict, List, Optional, Set, Tuple, Type,
-                    TypeVar, Union)
+from abc import abstractmethod
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import cloudpickle
 import torch
@@ -19,7 +17,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import (enable_trace_function_call_for_thread,
+from vllm.utils import (avoid_warn_for_unimplementation,
+                        enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
                         update_environment_variables)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
@@ -28,69 +27,8 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 
 logger = init_logger(__name__)
 
-T = TypeVar('T')
 
-
-def check_implementation():
-    """
-    A decorator that checks if all abstract methods from the base class 
-    are implemented in the subclass and gives warnings for unimplemented 
-    methods.
-    """
-
-    def decorator(cls: Type[T]) -> Type[T]:
-
-        original_init = cls.__init__
-
-        def warn_unimplemented_methods(self: object):
-            unimplemented_methods = []
-            for attr_name in dir(self):
-                # bypass inner method
-                if attr_name.startswith('_'):
-                    continue
-                base_method = getattr(self, attr_name)
-                # bypass method already defined
-                if getattr(base_method, '_avoid_check', False):
-                    continue
-                # get the func of callable method
-                if callable(base_method):
-                    base_method_name = base_method.__func__
-                else:
-                    continue
-                class_method_name = getattr(cls, attr_name, False)
-                # bypass method defined in sub class
-                if not class_method_name:
-                    continue
-                if class_method_name == base_method_name:
-                    unimplemented_methods.append(attr_name)
-            if unimplemented_methods:
-                method_names = ','.join(unimplemented_methods)
-                msg = (f"Methods {method_names} not implemented in {self}")
-                logger.warning(msg)
-
-        @wraps(original_init)
-        def wrapped_init(self, *args, **kwargs) -> None:
-            original_init(self, *args, **kwargs)
-            warn_unimplemented_methods(self)
-
-        type.__setattr__(cls, '__init__', wrapped_init)
-        return cls
-
-    return decorator
-
-
-def avoid_check(func: Callable[..., T]) -> Callable[..., T]:
-
-    @wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> T:
-        return func(*args, **kwargs)
-
-    wrapper._avoid_check = True  # type: ignore
-    return wrapper
-
-
-@check_implementation()
-class WorkerBase(ABC):
+class WorkerBase:
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
@@ -116,7 +54,6 @@ class WorkerBase(ABC):
         from vllm.platforms import current_platform
         self.current_platform = current_platform
 
-    @abstractmethod
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
@@ -142,7 +79,7 @@ class WorkerBase(ABC):
     ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
-    @avoid_check
+    @avoid_warn_for_unimplementation
     def start_worker_execution_loop(self) -> None:
         """Execute model loop in parallel worker.
 
