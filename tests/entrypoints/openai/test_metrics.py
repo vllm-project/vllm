@@ -94,16 +94,16 @@ EXPECTED_VALUES = {
     [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
      ("_count", _NUM_REQUESTS)],
     "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
-    "vllm:request_params_max_tokens": [
-        ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS)
-    ],
+    "vllm:request_params_max_tokens":
+    [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+     ("_count", _NUM_REQUESTS)],
     "vllm:prompt_tokens": [("_total",
                             _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
     "vllm:generation_tokens": [
         ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
     ],
-    "vllm:max_token_capacity_per_batch": [("", _MAX_MODEL_LEN * _MAX_NUM_SEQS)],
+    "vllm:max_token_capacity_per_batch": [("", _MAX_MODEL_LEN * _MAX_NUM_SEQS)
+                                          ],
     "vllm:time_per_prefill_token_requests_milliseconds": [("_count",
                                                            _NUM_REQUESTS)],
     "vllm:total_tokens_in_current_batch": [

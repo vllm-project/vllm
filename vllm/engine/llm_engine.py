@@ -1795,11 +1795,8 @@ class LLMEngine:
                     ])
                     # Track if this request had any token evictions
                     if self.device_config.device_type == "cuda":
-                        had_evicted_tokens = any(
-                            seq.metrics.num_evicted_tokens > 0
-                            for seq in seq_group.get_seqs())
-                        total_evicted = sum(seq.metrics.num_evicted_tokens
-                                            for seq in seq_group.get_seqs())
+                        had_evicted_tokens = seq_group.metrics.num_evicted_tokens > 0
+                        total_evicted = seq_group.metrics.num_evicted_tokens
                     else:
                         # For CPU mode, no token evictions
                         had_evicted_tokens = False
