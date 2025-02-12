@@ -107,6 +107,10 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
+  - tests/entrypoints/llm
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/offline_mode
   commands:
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
@@ -124,9 +128,10 @@ steps:
   source_file_dependencies:
   - vllm/distributed/
   - vllm/core/
-  - tests/distributed
+  - tests/distributed/test_utils
+  - tests/distributed/test_pynccl
   - tests/spec_decode/e2e/test_integration_dist_tp4
-  - tests/compile
+  - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
   commands:
@@ -174,6 +179,9 @@ steps:
   - vllm/
   - tests/engine
   - tests/tokenization
+  - tests/test_sequence
+  - tests/test_config
+  - tests/test_logger
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
   # OOM in the CI unless we run this separately
