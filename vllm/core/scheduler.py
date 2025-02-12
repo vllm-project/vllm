@@ -350,16 +350,16 @@ class PartialPrefillMetadata:
 
     scheduler_config: SchedulerConfig
 
-    def cannot_schedule(self, seq_group: SequenceGroup) -> bool:
+    def can_schedule(self, seq_group: SequenceGroup) -> bool:
         """When concurrent partial prefills are enabled,
         we limit the number of long requests and only accept
         shorter requests from the queue while running them
         concurrently"""
-        return (seq_group.first_seq.get_num_new_tokens()
-                > self.scheduler_config.long_prefill_token_threshold
-                and self.long_prefills
-                >= self.scheduler_config.max_long_partial_prefills
-                and self.scheduler_config.max_num_partial_prefills > 1)
+        return not (seq_group.first_seq.get_num_new_tokens()
+                    > self.scheduler_config.long_prefill_token_threshold
+                    and self.long_prefills
+                    >= self.scheduler_config.max_long_partial_prefills
+                    and self.scheduler_config.max_num_partial_prefills > 1)
 
     def increment_partial_prefills(self, seq_group: SequenceGroup) -> None:
         # When a new prefill is scheduled, we need to know if it is a
@@ -1068,7 +1068,7 @@ class Scheduler:
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
             if (partial_prefill_metadata is not None
-                    and partial_prefill_metadata.cannot_schedule(seq_group)):
+                    and not partial_prefill_metadata.can_schedule(seq_group)):
                 leftover_waiting_sequences.appendleft(seq_group)
                 waiting_queue.popleft()
                 continue
