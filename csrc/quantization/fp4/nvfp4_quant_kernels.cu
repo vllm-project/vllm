@@ -332,15 +332,6 @@ template void invokeFP4Quantization(int m, int n, __nv_bfloat16 const* input,
                                     int multiProcessorCount,
                                     cudaStream_t stream);
 
-inline int getMultiProcessorCount() {
-  static int multi_processor_count = []() {
-    int64_t count = get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
-    return static_cast<int>(count);
-  }();
-
-  return multi_processor_count;  // Return the cached value on subsequent calls
-}
-
 void scaled_fp4_quant_sm100a(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
@@ -350,7 +341,8 @@ void scaled_fp4_quant_sm100a(torch::Tensor const& output,
 
   TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
 
-  int multiProcessorCount = getMultiProcessorCount();
+  int multiProcessorCount = get_device_attribute(cudaDevAttrMultiProcessorCount,
+                                                 -1);
 
   auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
   auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
