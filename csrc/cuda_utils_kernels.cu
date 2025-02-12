@@ -9,11 +9,12 @@ int64_t get_device_attribute(int64_t attribute, int64_t device_id) {
   static int value = [=]() {
     int device = static_cast<int>(device_id);
     if (device < 0) {
-      cudaGetDevice(&device);
+      CUDA_CHECK(cudaGetDevice(&device));
     }
     int value;
-    cudaDeviceGetAttribute(&value, static_cast<cudaDeviceAttr>(attribute),
-                           device);
+    CUDA_CHECK(cudaDeviceGetAttribute(&value,
+                                      static_cast<cudaDeviceAttr>(attribute),
+                                      device));
     return static_cast<int>(value);
   }();
 
