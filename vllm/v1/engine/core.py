@@ -257,13 +257,15 @@ class EngineCoreProc(EngineCore):
 
         if request_type == EngineCoreRequestType.ADD:
             self.add_request(request)
+        elif request_type == EngineCoreRequestType.ABORT:
+            self.abort_requests(request)
         elif request_type == EngineCoreRequestType.PROFILE:
-            self.model_executor.profile(request.is_start)
+            self.model_executor.profile(request)
         elif request_type == EngineCoreRequestType.RESET_PREFIX_CACHE:
             self.reset_prefix_cache()
         elif request_type == EngineCoreRequestType.SLEEP:
-            self.sleep(request.level)
-        elif request_type == EngineCoreRequestType.WAKEUP:
+            self.sleep(request)
+        elif request_type == EngineCoreRequestType.WAKE_UP:
             self.wake_up()
         else:
             self.abort_requests(request)
@@ -280,24 +282,12 @@ class EngineCoreProc(EngineCore):
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
-                request_data = data_frame.buffer
 
                 # Deserialize the request data.
-                if request_type == EngineCoreRequestType.ADD:
-                    request = add_request_decoder.decode(request_data)
-                elif request_type in (
-                        EngineCoreRequestType.PROFILE.value,
-                        EngineCoreRequestType.RESET_PREFIX_CACHE.value,
-                ):
-                    request = generic_decoder.decode(request_data)
-                elif request_type in (
-                        EngineCoreRequestType.SLEEP.value,
-                        EngineCoreRequestType.WAKEUP.value,
-                ):
-                    import pickle
-                    request = pickle.loads(request_data)
-                else:
-                    raise ValueError(f"Unknown RequestType: {request_type}")
+                decoder = add_request_decoder if (
+                    request_type
+                    == EngineCoreRequestType.ADD) else generic_decoder
+                request = decoder.decode(data_frame.buffer)
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait((request_type, request))
 

@@ -140,7 +140,7 @@ class InprocClient(EngineCoreClient):
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
 
-    def wakeup(self) -> None:
+    def wake_up(self) -> None:
         self.engine_core.wake_up()
 
 
@@ -264,7 +264,7 @@ class SyncMPClient(MPClient):
         self._send_input(EngineCoreRequestType.SLEEP, level)
 
     def wake_up(self) -> None:
-        self._send_input(EngineCoreRequestType.WAKEUP, None)
+        self._send_input(EngineCoreRequestType.WAKE_UP, None)
 
 
 class AsyncMPClient(MPClient):
@@ -323,5 +323,5 @@ class AsyncMPClient(MPClient):
     async def sleep_async(self, level: int = 1) -> None:
         await self._send_input(EngineCoreRequestType.SLEEP, level)
 
-    async def wakeup_async(self) -> None:
-        await self._send_input(EngineCoreRequestType.WAKEUP, None)
+    async def wake_up_async(self) -> None:
+        await self._send_input(EngineCoreRequestType.WAKE_UP, None)
