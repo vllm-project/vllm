@@ -207,15 +207,17 @@ __global__ void sgl_moe_align_block_size_kernel(
   __shared__ int32_t shared_counts[32][8];
 
   const int warp_id = threadIdx.x / 32;
-  const int lane_id = threadIdx.x % 32;
   const int experts_per_warp = 8;
   const int my_expert_start = warp_id * experts_per_warp;
 
+  // Initialize shared_counts for this warp's experts
   for (int i = 0; i < experts_per_warp; ++i) {
     if (my_expert_start + i < num_experts) {
       shared_counts[warp_id][i] = 0;
     }
   }
+
+  __syncthreads();
 
   const size_t tokens_per_thread = CEILDIV(numel, blockDim.x);
   const size_t start_idx = threadIdx.x * tokens_per_thread;
@@ -229,6 +231,7 @@ __global__ void sgl_moe_align_block_size_kernel(
 
   __syncthreads();
 
+  // Single thread computes cumulative sum and total tokens
   if (threadIdx.x == 0) {
     cumsum[0] = 0;
     for (int i = 1; i <= num_experts; ++i) {
@@ -245,6 +248,7 @@ __global__ void sgl_moe_align_block_size_kernel(
 
   __syncthreads();
 
+  // Assign expert IDs to blocks
   if (threadIdx.x < num_experts) {
     for (int i = cumsum[threadIdx.x]; i < cumsum[threadIdx.x + 1];
          i += block_size) {
@@ -389,12 +393,9 @@ void sgl_moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
 
   VLLM_DISPATCH_INTEGRAL_TYPES(
       topk_ids.scalar_type(), "sgl_moe_align_block_size_kernel", [&] {
-        // calc needed amount of shared mem for `tokens_cnts` and `cumsum`
-        // tensors
+        // calc needed amount of shared mem for `cumsum` tensors
         auto options_int =
             torch::TensorOptions().dtype(torch::kInt).device(topk_ids.device());
-        // torch::Tensor token_cnts_buffer =
-        //     torch::zeros({(num_experts + 1) * num_experts}, options_int);
         torch::Tensor cumsum_buffer =
             torch::zeros({num_experts + 1}, options_int);
 
