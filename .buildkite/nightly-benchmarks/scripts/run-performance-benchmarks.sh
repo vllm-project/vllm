@@ -346,7 +346,7 @@ main() {
   check_hf_token
 
   # Set to v1 to run v1 benchmark
-  if [[ "${VLLM_VERSION:-v0}" == "v1" ]]; then
+  if [[ "${ENGINE_VERSION:-v0}" == "v1" ]]; then
     export VLLM_USE_V1=1
   fi
 

@@ -5,9 +5,10 @@ import argparse
 import dataclasses
 import json
 import os
+import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -19,36 +20,8 @@ from vllm.inputs import PromptType
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser
 
-
-def save_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                     results: Dict[str, Any]) -> None:
-    # https://github.com/pytorch/pytorch/wiki/How-to-integrate-with-PyTorch-OSS-benchmark-database
-    record = {
-        "benchmark": {
-            "name": "vLLM benchmark",
-            "extra_info": {
-                "args": vars(args),
-            },
-        },
-        "model": {
-            "name": args.model,
-        },
-        "metric": {
-            "name": "latency",
-            "benchmark_values": results.get("latencies", []),
-            "extra_info": {
-                "avg_latency": results.get("avg_latency", 0),
-                "percentiles": results.get("percentiles", {}),
-            },
-        },
-    }
-
-    if os.environ.get("SAVE_TO_PYTORCH_BENCHMARK_FORMAT", False):
-        # Don't use json suffix here as we don't want
-        # convert-results-json-to-markdown.py to pick it up
-        output_file = f"{os.path.splitext(args.output_json)[0]}.pytorch"
-        with open(output_file, "w") as f:
-            json.dump(record, f)
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from benchmark_utils import save_to_pytorch_benchmark_format
 
 
 def main(args: argparse.Namespace):
@@ -142,7 +115,17 @@ def main(args: argparse.Namespace):
         }
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
-        save_to_pytorch_benchmark_format(args, results)
+
+        pt_records = save_to_pytorch_benchmark_format(
+            args=args,
+            metrics={"latency": results["latencies"]},
+            extra_info={k: results[k]
+                        for k in ["avg_latency", "percentiles"]})
+        if pt_records:
+            # Don't use json suffix here as we don't want CI to pick it up
+            pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch"
+            with open(pt_file, "w") as f:
+                json.dump(pt_records, f)
 
 
 if __name__ == "__main__":
