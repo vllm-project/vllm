@@ -17,7 +17,7 @@ from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
-from .compiler_interface import EagerAdaptor, InductorAdaptor
+from .compiler_interface import CompilerRegistry
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
 from .monitor import end_monitoring_torch_compile
@@ -41,9 +41,15 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(self, use_inductor: bool):
+    def __init__(self, use_inductor: bool, backend: str = ""):
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
-        cls = InductorAdaptor if use_inductor else EagerAdaptor
+        if use_inductor:
+            cls = CompilerRegistry.registered_adaptors["inductor"]
+        else:
+            if backend == "":
+                backend = "eager"
+            cls = CompilerRegistry.registered_adaptors.get(backend)
+            assert cls is not None, f"Backend {backend} is not registered in the CompilerRegistry"
         self.compiler = cls()
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
@@ -328,7 +334,8 @@ class VllmBackend:
         self.compilation_config = vllm_config.compilation_config
 
         self.compiler_manager: CompilerManager = CompilerManager(
-            self.compilation_config.use_inductor)
+            use_inductor=self.compilation_config.use_inductor,
+            backend=self.compilation_config.backend)
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here

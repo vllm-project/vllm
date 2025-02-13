@@ -3,7 +3,7 @@ import copy
 import hashlib
 import os
 from contextlib import ExitStack
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 from unittest.mock import patch
 
 import torch
@@ -12,6 +12,15 @@ import torch.fx as fx
 
 from vllm.config import VllmConfig
 
+
+class CompilerRegistry:
+    registered_adaptors = {}
+
+def register_adaptor(compiler_cls_name: str):
+    def decorator(compiler_cls: Type[CompilerInterface]):
+        CompilerRegistry.registered_adaptors[compiler_cls_name] = compiler_cls
+        return compiler_cls
+    return decorator
 
 class CompilerInterface:
     """
@@ -121,7 +130,7 @@ class AlwaysHitShapeEnv:
     def produce_guards_expression(self, *args, **kwargs):
         return ""
 
-
+@register_adaptor("inductor")
 class InductorAdaptor(CompilerInterface):
     """
     The adaptor for the Inductor compiler, version 2.5 and 2.6.
@@ -324,7 +333,7 @@ class InductorAdaptor(CompilerInterface):
 
         return compiled_graph
 
-
+@register_adaptor("eager")
 class EagerAdaptor(CompilerInterface):
     name = "eager"
 
@@ -338,3 +347,23 @@ class EagerAdaptor(CompilerInterface):
         # we don't need to compile the graph, just return the graph itself.
         # It does not support caching, return None for the handle.
         return graph, None
+
+@register_adaptor("hidet")
+class HidetAdaptor(CompilerInterface):
+    name = "hidet"
+
+    def compile(
+        self,
+        graph: fx.GraphModule,
+        example_inputs: List[Any],
+        compiler_config: Dict[str, Any],
+        runtime_shape: Optional[int] = None
+    ) -> Tuple[Optional[Callable], Optional[Any]]:
+
+        graph = copy.deepcopy(graph)
+        import hidet
+        hidet.option.parallel_build(False)
+        from hidet.graph.frontend.torch import dynamo_backends
+        compiler_config['mode'] = 'max-autotune-no-cudagraphs'
+        return dynamo_backends.hidet_backend(graph, example_inputs,
+                                             **compiler_config), None
