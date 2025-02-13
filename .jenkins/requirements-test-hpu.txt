@@ -1,3 +1,2 @@
 lm_eval
 pytest
-transformers<=4.46.3
