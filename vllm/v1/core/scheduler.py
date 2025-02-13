@@ -2,7 +2,6 @@
 
 import time
 from collections import deque
-from concurrent.futures import Future
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
@@ -207,10 +206,10 @@ class Scheduler:
                 if request.use_guided_decoding:
                     guided_decoding_request_ids.add(request.request_id)
 
-                if request.status == RequestStatus.WAITING_FOR_FSM:
-                    if request.grammar and request.is_grammar_ready:
-                        request.status = RequestStatus.WAITING
-                        request.grammar.prefilled = True
+                if (request.status == RequestStatus.WAITING_FOR_FSM
+                        and request.grammar and request.is_grammar_ready):
+                    request.status = RequestStatus.WAITING
+                    request.grammar.prefilled = True
                     # else:
                     #     # Skip this request but keep in the queue
                     #     self.waiting.popleft()

@@ -55,7 +55,9 @@ class Request:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
 
-        self.status = RequestStatus.WAITING_FOR_FSM if sampling_params.guided_decoding is not None else RequestStatus.WAITING
+        self.status = (RequestStatus.WAITING_FOR_FSM
+                       if sampling_params.guided_decoding is not None else
+                       RequestStatus.WAITING)
         self.events: List[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
         assert sampling_params.max_tokens is not None
@@ -195,7 +197,8 @@ class Request:
     def is_grammar_ready(self) -> bool:
         if isinstance(self._grammar, Future):
             return not self._grammar.running() and self._grammar.done()
-        return self.status == RequestStatus.WAITING and self._grammar is not None
+        return (self.status == RequestStatus.WAITING
+                and self._grammar is not None)
 
     @property
     def grammar(self) -> Optional[Grammar]:
@@ -224,7 +227,7 @@ class RequestStatus(enum.IntEnum):
         return status > RequestStatus.PREEMPTED
 
     @staticmethod
-    def is_waiting(status: "RequestStatus") -> bool:
+    def is_waiting(status: RequestStatus) -> bool:
         return status < RequestStatus.WAITING_FOR_FSM
 
     @staticmethod
