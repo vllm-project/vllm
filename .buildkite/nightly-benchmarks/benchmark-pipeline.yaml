@@ -70,6 +70,12 @@ steps:
     #key: block-h100
     #depends_on: ~
 
+  - label: "Cleanup H100"
+    agents:
+      queue: H100
+    depends_on: ~
+    command: docker system prune -a --volumes --force
+
   - label: "H100"
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
