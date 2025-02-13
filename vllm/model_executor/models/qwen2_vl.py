@@ -226,11 +226,15 @@ def apply_rotary_emb_torch(x: torch.Tensor,
 
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
-                                freqs: torch.Tensor) -> torch.Tensor:
+                                freqs: torch.Tensor,
+                                use_flash_attn=False) -> torch.Tensor:
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
-    output = apply_rotary_emb_torch(t_, cos, sin).type_as(t)
+    apply_rotary_emb = apply_rotary_emb_torch
+    if use_flash_attn:
+        from flash_attn.layers.rotary import apply_rotary_emb
+    output = apply_rotary_emb(t_, cos, sin).type_as(t)
     return output
 
 
@@ -336,20 +340,23 @@ class Qwen2VisionAttention(nn.Module):
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
         elif self.attn_backend == _Backend.TORCH_SDPA:
-            seq_length = q.size(1)
-            q, k, v = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-            attention_mask = torch.zeros([1, seq_length, seq_length],
-                                         device=q.device,
-                                         dtype=torch.bool)
+            # Execute attention entry by entry for speed & less VRAM.
+            outputs = []
             for i in range(1, len(cu_seqlens)):
-                attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
-                               cu_seqlens[i - 1]:cu_seqlens[i]] = True
-            output = F.scaled_dot_product_attention(q,
-                                                    k,
-                                                    v,
-                                                    attention_mask,
-                                                    dropout_p=0.0)
-            context_layer = rearrange(output, "b h s d -> b s h d ")
+                start_idx = cu_seqlens[i - 1]
+                end_idx = cu_seqlens[i]
+                q_i = q[:, start_idx:end_idx]
+                k_i = k[:, start_idx:end_idx]
+                v_i = v[:, start_idx:end_idx]
+                q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+                                 for x in [q_i, k_i, v_i])
+                output_i = F.scaled_dot_product_attention(q_i,
+                                                          k_i,
+                                                          v_i,
+                                                          dropout_p=0.0)
+                output_i = rearrange(output_i, "b h s d -> b s h d ")
+                outputs.append(output_i)
+            context_layer = torch.cat(outputs, dim=1)
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
