@@ -1106,13 +1106,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.builder = self._builder_cls(weakref.proxy(self))
 
     def load_model(self) -> None:
+        self.model_load_start_time = time.time()
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:
             self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
+        self.model_load_time = time.time() - self.model_load_start_time
+        logger.info("Loading model weights took %.4f GB and %.4f seconds",
+                    self.model_memory_usage / float(2**30),
+                    self.model_load_time)
 
         if self.lora_config:
             assert supports_lora(
@@ -1556,10 +1559,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
+        self.cuda_graph_capture_time = elapsed_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
-                    elapsed_time, cuda_graph_size / GiB_bytes)
+                    self.cuda_graph_capture_time, cuda_graph_size / GiB_bytes)
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,
