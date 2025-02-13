@@ -350,6 +350,10 @@ class MLACommonState(AttentionState):
         assert self._is_graph_capturing
 
         attn_metadata = self.runner.attn_backend.make_metadata(
+            multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
+            use_cuda_graph=True,
+            attn_state=self.runner.attn_state,
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
