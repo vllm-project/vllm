@@ -62,10 +62,10 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 VIT_LAYERS = [-2, -9]
 NUM_PREFIX_TOKENS = 1
 ADDITIONAL_VOCAB_SIZE = 128
-DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"
-DEFAULT_IM_COL_TOKEN = "<im_col>"
-DEFAULT_IM_START_TOKEN = "<im_start>"
-DEFAULT_IM_END_TOKEN = "<im_end>"
+IMAGE_PATCH_TOKEN = "<im_patch>"
+IM_COL_TOKEN = "<im_col>"
+IM_START_TOKEN = "<im_start>"
+IM_END_TOKEN = "<im_end>"
 POOLING_SIZE = 2
 
 
@@ -1073,19 +1073,19 @@ class MolmoProcessorWrapper:
 
     @property
     def image_patch_id(self) -> int:
-        return self.vocab[DEFAULT_IMAGE_PATCH_TOKEN]
+        return self.vocab[IMAGE_PATCH_TOKEN]
 
     @property
     def im_col_id(self) -> int:
-        return self.vocab[DEFAULT_IM_COL_TOKEN]
+        return self.vocab[IM_COL_TOKEN]
 
     @property
     def im_start_id(self) -> int:
-        return self.vocab[DEFAULT_IM_START_TOKEN]
+        return self.vocab[IM_START_TOKEN]
 
     @property
     def im_end_id(self) -> int:
-        return self.vocab[DEFAULT_IM_END_TOKEN]
+        return self.vocab[IM_END_TOKEN]
 
     @property
     def pooling_size(self) -> int:
