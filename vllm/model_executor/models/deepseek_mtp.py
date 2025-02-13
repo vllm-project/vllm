@@ -62,7 +62,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
                                  config.hidden_size,
                                  bias=False)
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
-        self.block = DeepseekV2DecoderLayer(config, prefix, model_config,
+        self.mtp_block = DeepseekV2DecoderLayer(config, prefix, model_config,
                                             cache_config, quant_config)
 
     def forward(
@@ -86,7 +86,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         hidden_states = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
-        hidden_states, residual = self.block(positions=positions,
+        hidden_states, residual = self.mtp_block(positions=positions,
                                              hidden_states=hidden_states,
                                              kv_cache=kv_cache,
                                              attn_metadata=attn_metadata,
@@ -267,7 +267,7 @@ class DeepSeekMTP(nn.Module):
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """
         Rewrite the weight name to match the format of the original model.
-        Add .block for modules in transformer layer block for spec layer
+        Add .mtp_block for modules in transformer layer block for spec layer
         """
         spec_layer_weight_names = [
             "embed_tokens", "enorm", "hnorm", "eh_proj", "shared_head"
@@ -280,5 +280,5 @@ class DeepSeekMTP(nn.Module):
         if not spec_layer_weight:
             # treat rest weights as weights for transformer layer block
             name = name.replace(f"model.layers.{spec_layer}.",
-                                f"model.layers.{spec_layer}.block.")
+                                f"model.layers.{spec_layer}.mtp_block.")
         return name

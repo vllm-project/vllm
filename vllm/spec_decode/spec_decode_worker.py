@@ -303,7 +303,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             num_spec_prefill_steps: number of speculative prefill steps to run
                 before the speculative decoding starts. This is only used when
                 the draft model is a deepseek_mtp model that requires prefill
-                kv cache separately for each step layer.
+                kv cache separately for each MTP layer.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
