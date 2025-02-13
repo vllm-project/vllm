@@ -17,8 +17,7 @@ def run_normal():
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM without guided decoding as a baseline.
-    llm = LLM(model="facebook/opt-125m",
-              enforce_eager=True,
+    llm = LLM(model="/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B",
               gpu_memory_utilization=0.3)
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
@@ -33,8 +32,7 @@ def run_normal():
 
 def run_lmfe(sample_regex):
     # Create an LLM with guided decoding enabled.
-    llm = LLM(model="facebook/opt-125m",
-              enforce_eager=True,
+    llm = LLM(model="/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B",
               guided_decoding_backend="lm-format-enforcer",
               gpu_memory_utilization=0.3)
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
