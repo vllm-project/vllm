@@ -92,7 +92,6 @@ class Mamba2Model(nn.Module):
         assert not is_lora_enabled
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
                        (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
@@ -218,20 +217,12 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
         self.make_empty_intermediate_tensors = (
             self.backbone.make_empty_intermediate_tensors)
-        if self.scheduler_config is not None and \
-            not self.model_config.enforce_eager:
-            if self.scheduler_config.max_num_seqs > \
-                vllm_config.compilation_config.max_capture_size:
-                self.max_batch_size = \
-                    vllm_config.compilation_config.max_capture_size
-            else:
-                self.max_batch_size = vllm_config.pad_for_cudagraph(
-                    self.scheduler_config.max_num_seqs)
-        elif self.scheduler_config is not None:
-            # For eager just take the scheduler_config if avail
-            self.max_batch_size = self.scheduler_config.max_num_seqs
-        else:
-            self.max_batch_size = 128 + 2
+
+        # Determine max batch size to set size of MambaCache
+        self.max_batch_size = self.scheduler_config.max_num_seqs
+        if not self.model_config.enforce_eager:
+            self.max_batch_size = vllm_config.pad_for_cudagraph(
+                self.max_batch_size)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.backbone.get_input_embeddings(input_ids)
