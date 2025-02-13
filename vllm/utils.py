@@ -2273,13 +2273,15 @@ def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
             # bypass inner method
             if attr_name.startswith('_'):
                 continue
-            base_method = getattr(self, attr_name)
-            # get the func of callable method
-            if callable(base_method):
-                base_method_name = base_method.__func__
-            else:
+
+            try:
+                attr = getattr(self, attr_name)
+                # get the func of callable method
+                if callable(attr):
+                    attr_func = attr.__func__
+            except AttributeError:
                 continue
-            src = inspect.getsource(base_method_name)
+            src = inspect.getsource(attr_func)
             if "NotImplementedError" in src:
                 unimplemented_methods.append(attr_name)
         if unimplemented_methods:
