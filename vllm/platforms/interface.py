@@ -321,6 +321,13 @@ class Platform:
         """
         raise NotImplementedError
 
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        """
+        Get device specific communicator class for distributed communication.
+        """
+        raise NotImplementedError
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
