@@ -6,8 +6,8 @@ from typing import Callable, List, Optional, Tuple
 
 import torch
 
-from vllm.distributed import (get_expert_model_parallel_size,
-                              get_tensor_model_parallel_rank,
+import vllm.envs as envs
+from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
@@ -281,10 +281,11 @@ class FusedMoE(torch.nn.Module):
 
         self.tp_size = (tp_size if tp_size is not None else
                         get_tensor_model_parallel_world_size())
-        self.ep_size = (ep_size if ep_size is not None else
-                        get_expert_model_parallel_size())
-        assert self.tp_size % self.ep_size == 0
-        self.tp_size = self.tp_size // self.ep_size
+        if envs.VLLM_TEST_ENABLE_EP:
+            self.ep_size = self.tp_size
+            self.tp_size = 1
+        else:
+            self.ep_size = 1
         self.top_k = top_k
         self.global_num_experts = num_experts
         assert intermediate_size % self.tp_size == 0
@@ -300,17 +301,19 @@ class FusedMoE(torch.nn.Module):
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
-        
+
+        print(f"self.ep_size: {self.ep_size}, self.tp_size: {self.tp_size}")
+
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1
-            self.expert_map = torch.full((num_experts, ),
+            self.expert_map = torch.full((self.global_num_experts, ),
                                          -1,
                                          dtype=torch.int32)
             # Create a expert map for the local experts
             local_num_experts = num_experts // self.ep_size
             ep_rank = get_tensor_model_parallel_rank() // self.tp_size
             if ep_rank < (self.ep_size - 1):
-                # Each rank gets local_num_experts experts, except the last rank.
+                # Each non-last rank gets local_num_experts experts.
                 self.expert_map[ep_rank * local_num_experts:
                                 (ep_rank + 1) * local_num_experts] = \
                     torch.arange(0, local_num_experts,dtype=torch.int32)
@@ -633,10 +636,7 @@ class FusedMoE(torch.nn.Module):
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor) -> torch.Tensor:
         assert self.quant_method is not None
-        
-        if self.expert_map is not None:
-            self.expert_map = self.expert_map.to(hidden_states.device)
-            
+
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,

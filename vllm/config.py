@@ -712,8 +712,7 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        expert_parallel_size = parallel_config.expert_parallel_size
-        if expert_parallel_size > 1:
+        if envs.VLLM_TEST_ENABLE_EP:
             num_expert_names = [
                 "moe_num_experts",  # Dbrx
                 "num_experts",  # Jamba
@@ -729,11 +728,6 @@ class ModelConfig:
                 raise ValueError(
                     "Number of experts in the model must be greater than 0 "
                     "when using expert parallelism.")
-            if tensor_parallel_size % expert_parallel_size != 0:
-                raise ValueError(
-                    f"Tensor parallel group size ({tensor_parallel_size}) "
-                    f"is not divisible by expert parallelism size "
-                    f"({expert_parallel_size})")
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
@@ -1328,7 +1322,6 @@ class ParallelConfig:
 
     pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
-    expert_parallel_size: int = -1  # Number of expert parallel groups.
 
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
@@ -1377,25 +1370,9 @@ class ParallelConfig:
         factors: List[Any] = []
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
-        factors.append(self.expert_parallel_size)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
-        # When the user does not specify the expert parallel size,
-        # the number of expert parallelism in MoE layers will be the same
-        # as the tensor parallelism size. However, when the user specifies
-        # the expert parallel size, the number of expert parallelism in MoE
-        # layers will be the same as the specified number, and tensor
-        # parallelism of tensor_parallel_size will be applied within each
-        # expert parallel rank. Non-MoE layers without experts will use TP of
-        # tensor_parallel_size * expert_parallel_size.
-        if envs.VLLM_TEST_ENABLE_EP:
-            if self.expert_parallel_size == -1:
-                self.expert_parallel_size = self.tensor_parallel_size
-            else:
-                self.tensor_parallel_size *= self.expert_parallel_size
-        else:
-            self.expert_parallel_size = 1
 
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
@@ -3399,7 +3376,6 @@ class VllmConfig:
             f"load_format={self.load_config.load_format}, "
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size},"
             f" pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
-            f" expert_parallel_size={self.parallel_config.expert_parallel_size},"  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
