@@ -13,7 +13,7 @@ repos:
   rev: v0.9.3
   hooks:
   - id: ruff
-    args: [--output-format, github]
+    args: [--output-format, github, --fix]
     exclude: 'vllm/third_party/.*'
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.0
