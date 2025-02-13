@@ -45,6 +45,7 @@ class EngineCoreClient(ABC):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
+        log_stats: bool,
     ) -> "EngineCoreClient":
 
         # TODO: support this for debugging purposes.
@@ -54,12 +55,12 @@ class EngineCoreClient(ABC):
                 "is not currently supported.")
 
         if multiprocess_mode and asyncio_mode:
-            return AsyncMPClient(vllm_config, executor_class)
+            return AsyncMPClient(vllm_config, executor_class, log_stats)
 
         if multiprocess_mode and not asyncio_mode:
-            return SyncMPClient(vllm_config, executor_class)
+            return SyncMPClient(vllm_config, executor_class, log_stats)
 
-        return InprocClient(vllm_config, executor_class)
+        return InprocClient(vllm_config, executor_class, log_stats)
 
     @abstractmethod
     def shutdown(self):
@@ -219,13 +220,13 @@ class MPClient(EngineCoreClient):
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig,
-                 executor_class: Type[Executor]):
+    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor],
+                 log_stats: bool):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,
+            log_stats=log_stats,
         )
 
         self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
@@ -283,13 +284,13 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig,
-                 executor_class: Type[Executor]):
+    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor],
+                 log_stats: bool):
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=True,
+            log_stats=log_stats,
         )
 
         self.outputs_queue: Optional[asyncio.Queue[bytes]] = None
