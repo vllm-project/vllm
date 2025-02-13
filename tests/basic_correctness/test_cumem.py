@@ -148,6 +148,10 @@ def test_end_to_end(model: str, use_v1: bool):
     assert used_bytes < 2 * GiB_bytes
 
     llm.wake_up()
+    if use_v1:
+        # v1 returns before wake_up finishes
+        time.sleep(30)
+
     output2 = llm.generate(prompt, sampling_params)
 
     # cmp output
