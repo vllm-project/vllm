@@ -381,8 +381,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _prepare_inputs(
         self, scheduler_output: "SchedulerOutput"
-    ) -> Tuple[FlashAttentionMetadata, torch.Tensor,
-               Optional[List[torch.Tensor]]]:
+    ) -> Tuple[FlashAttentionMetadata, torch.Tensor, Optional[torch.Tensor]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
