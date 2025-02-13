@@ -1788,7 +1788,8 @@ class SpeculativeConfig:
         """
         if speculative_model is None:
             if num_speculative_tokens is not None:
-                if target_model_config.hf_text_config.model_type == "deepseek_v3":
+                if target_model_config.hf_text_config.model_type \
+                        == "deepseek_v3":
                     # use the draft model from the same model:
                     speculative_model = target_model_config.model
                 else:

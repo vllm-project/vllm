@@ -187,8 +187,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         draft_worker_kwargs[
                             "model_runner_cls"] = TP1DraftModelRunner
                 else:
-                    if draft_model_config.hf_config.model_type in (
-                            "eagle", "deepseek_mtp"):
+                    if draft_model_config.hf_config.model_type in ("eagle"):
                         raise NotImplementedError(
                             f"{draft_model_config.hf_config.model_type} "
                             "does not support TP > 1 yet")
