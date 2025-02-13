@@ -1579,8 +1579,33 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             num_crops: torch.Tensor,  # Shape: (num_images,)
             embed_is_patch: torch.Tensor,  # Shape: (num_embeds,)
     ) -> list[torch.Tensor]:
-        # The patch features are scattered into a tensor that
-        # matches the embedding dimension as defined in the multimodal processor
+        """
+        Scatter the patch features into a contiguous tensor that corresponds
+        to the embedding tokens defined by the multimodal processor.
+
+        See also:
+            :attr:`MolmoImageInputs.embed_is_patch`
+        
+        Example:
+            A simplified example for one item in the batch:
+
+            .. code-block::
+
+                Embedding tokens (from HF processor):
+                [<start> <patch> <patch>  <col>  <patch> <patch>  <col>  <end> ]
+
+                embed_is_patch (from HF processor):
+                [ False   True    True    False    True    True   False  False ]
+    
+                Encoder outputs (from model):
+                        [  p1      p2       0       p3      p4      0   ]
+
+                feat_is_patch (from HF processor):
+                        [ True    True    False    True    True   False ]
+
+                The resulting embedding tensor is:
+                [  nan     p1      p2      nan      p3      p4     nan    nan  ]
+        """
         num_crops_per_image = num_crops.tolist()
         feats_per_image = features.split(num_crops_per_image)
         f_is_patch_per_image = feat_is_patch.split(num_crops_per_image)
