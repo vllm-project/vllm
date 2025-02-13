@@ -176,7 +176,7 @@ class Request:
             raise ValueError("No valid guided decoding parameter found")
 
     def allocate_bitmask(self, batch_size: int, vocab_size: int) -> None:
-        if isinstance(self._grammar, Future):
+        if isinstance(self.grammar, Future):
             try:
                 self.grammar = self.grammar.result(timeout=0.05)
                 self.status = RequestStatus.WAITING
@@ -193,9 +193,9 @@ class Request:
 
     @property
     def is_grammar_ready(self) -> bool:
-        if isinstance(self._grammar, Future):
-            return not self._grammar.running() and self._grammar.done()
-        return self.status == RequestStatus.WAITING and self._grammar is not None
+        if isinstance(self.grammar, Future):
+            return not self.grammar.running() and self.grammar.done()
+        return self.status == RequestStatus.WAITING and self.grammar is not None
 
 
 class RequestStatus(enum.IntEnum):
