@@ -19,8 +19,8 @@ def test_cpu_offload_fp8():
                          ["--quantization", "fp8", "--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
     # Test loading a quantized checkpoint
-    compare_two_settings("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", [],
-                         ["--cpu-offload-gb", "2"],
+    compare_two_settings("neuralmagic/Qwen2-1.5B-Instruct-FP8", [],
+                         ["--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
 
 
