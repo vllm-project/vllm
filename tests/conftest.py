@@ -699,7 +699,7 @@ class VllmRunner:
         load_format = LoadFormat.AUTO
         if model_name in MODELS_ON_S3:
             model_name = (f"s3://vllm-ci-model-weights/"
-                          f"{model_name.split(" / ")[-1]}")
+                          f"{model_name.split('/')[-1]}")
             load_format = LoadFormat.RUNAI_STREAMER
         self.model = LLM(
             model=model_name,
