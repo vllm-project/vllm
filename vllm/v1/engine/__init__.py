@@ -88,8 +88,8 @@ class UtilityOutput(
     call_id: int
 
     # Non-None implies the call failed, result should be None.
-    failure_message: Optional[str]
-    result: Any
+    failure_message: Optional[str] = None
+    result: Any = None
 
 
 class EngineCoreOutputs(

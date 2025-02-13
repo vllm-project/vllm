@@ -3,7 +3,7 @@
 import asyncio
 import time
 import uuid
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pytest
 from transformers import AutoTokenizer
@@ -14,7 +14,9 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
+                                        SyncMPClient)
 from vllm.v1.executor.abstract import Executor
 
 if not current_platform.is_cuda():
@@ -63,7 +65,7 @@ def loop_until_done(client: EngineCoreClient, outputs: Dict):
 async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
 
     while True:
-        engine_core_outputs = await client.get_output_async().outputs
+        engine_core_outputs = (await client.get_output_async()).outputs
 
         if len(engine_core_outputs) == 0:
             break
@@ -78,12 +80,23 @@ async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
             break
 
 
+# Dummy utility function to monkey-patch into engine core.
+def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
+    if err_msg is not None:
+        raise ValueError(err_msg)
+    return msg
+
+
 @fork_new_process_for_each_test
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
 def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
+        #m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+
+        # Monkey-patch core engine utility function to test.
+        m.setattr(EngineCore, "echo", echo, raising=False)
 
         engine_args = EngineArgs(model=MODEL_NAME, compilation_config=3)
         vllm_config = engine_args.create_engine_config(
@@ -146,13 +159,29 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
         client.abort_requests([request.request_id])
 
+        if multiprocessing_mode:
+            """Utility method invocation"""
 
-@fork_new_process_for_each_test
+            core_client: SyncMPClient = client
+
+            result = core_client._call_utility("echo", "testarg")
+            assert result == "testarg"
+
+            with pytest.raises(Exception) as e_info:
+                core_client._call_utility("echo", None, "help!")
+
+            assert e_info.value == "Failed: help!"
+
+
+# @fork_new_process_for_each_test
 @pytest.mark.asyncio
 async def test_engine_core_client_asyncio(monkeypatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
+
+        # Monkey-patch core engine utility function to test.
+        m.setattr(EngineCore, "echo", echo, raising=False)
 
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config(
@@ -202,3 +231,14 @@ async def test_engine_core_client_asyncio(monkeypatch):
             else:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
                     f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+        """Utility method invocation"""
+
+        core_client: AsyncMPClient = client
+
+        result = await core_client._call_utility_async("echo", "testarg")
+        assert result == "testarg"
+
+        with pytest.raises(Exception) as e_info:
+            await core_client._call_utility_async("echo", None, "help!")
+
+        assert e_info.value == "Failed: help!"

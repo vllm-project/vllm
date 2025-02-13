@@ -252,14 +252,14 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
-            method, args, unary, caller_id = request
-            output = UtilityOutput(caller_id)
+            call_id, method, args, unary = request
+            output = UtilityOutput(call_id)
             try:
                 output.result = getattr(self, method)(*args)
             except BaseException as e:
-                logger.exception("Invocation of {method} method failed")
+                logger.exception("Invocation of %s method failed", method)
                 output.failure_message = str(e)
-            if unary:
+            if not unary:
                 self.output_queue.put_nowait(
                     EngineCoreOutputs(utility_output=output))
 

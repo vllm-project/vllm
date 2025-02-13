@@ -253,15 +253,15 @@ class SyncMPClient(MPClient):
         self.input_socket.send_multipart(msg, copy=False)
 
     def _call_utility(self, method: str, *args, unary: bool = False) -> Any:
-        call_id = uuid.uuid4().int
+        call_id = uuid.uuid1().int >> 64
         if not unary:
             future: Future[Any] = Future()
             self.utility_results[call_id] = future
 
         self._send_input(EngineCoreRequestType.UTILITY,
-                         (call_id, method, unary, args))
+                         (call_id, method, args, unary))
 
-        return future.result() if unary else None
+        return None if unary else future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
@@ -326,14 +326,14 @@ class AsyncMPClient(MPClient):
                                   method: str,
                                   *args,
                                   unary: bool = False) -> Any:
-        call_id = uuid.uuid4().int
+        call_id = uuid.uuid1().int >> 64
         if not unary:
             future = asyncio.get_running_loop().create_future()
             self.utility_results[call_id] = future
         await self._send_input(EngineCoreRequestType.UTILITY,
-                               (call_id, method, unary, args))
+                               (call_id, method, args, unary))
 
-        return await future if unary else None
+        return None if unary else await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
