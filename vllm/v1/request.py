@@ -85,7 +85,7 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
 
         # Grammar fields, including the grammar object and the bitmask
-        self.grammar: Future[Grammar] | Grammar | None = None
+        self._grammar: Future[Grammar] | Grammar | None = None
         self._bitmask = None
 
     @classmethod
@@ -176,15 +176,15 @@ class Request:
             raise ValueError("No valid guided decoding parameter found")
 
     def allocate_bitmask(self, batch_size: int, vocab_size: int) -> None:
-        if isinstance(self.grammar, Future):
+        if isinstance(self._grammar, Future):
             try:
-                self.grammar = self.grammar.result(timeout=0.05)
+                self._grammar = self._grammar.result(timeout=0.05)
                 self.status = RequestStatus.WAITING
             except TimeoutError:
                 return
 
-        if self.grammar is not None:
-            self._bitmask = self.grammar.allocate_bitmask(
+        if self._grammar is not None:
+            self._bitmask = self._grammar.allocate_bitmask(
                 batch_size, vocab_size)
 
     @functools.cached_property
@@ -193,9 +193,17 @@ class Request:
 
     @property
     def is_grammar_ready(self) -> bool:
-        if isinstance(self.grammar, Future):
-            return not self.grammar.running() and self.grammar.done()
-        return self.status == RequestStatus.WAITING and self.grammar is not None
+        if isinstance(self._grammar, Future):
+            return not self._grammar.running() and self._grammar.done()
+        return self.status == RequestStatus.WAITING and self._grammar is not None
+
+    @property
+    def grammar(self) -> Optional[Grammar]:
+        return self._grammar if isinstance(self._grammar, Grammar) else None
+
+    @grammar.setter
+    def grammar(self, grammar: Grammar | Future[Grammar]) -> None:
+        self._grammar = grammar
 
 
 class RequestStatus(enum.IntEnum):

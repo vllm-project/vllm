@@ -2,6 +2,7 @@
 
 import time
 from collections import deque
+from concurrent.futures import Future
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
@@ -207,7 +208,7 @@ class Scheduler:
                     guided_decoding_request_ids.add(request.request_id)
 
                 if request.status == RequestStatus.WAITING_FOR_FSM:
-                    if request.is_grammar_ready:
+                    if request.grammar and request.is_grammar_ready:
                         request.status = RequestStatus.WAITING
                         request.grammar.prefilled = True
                     # else:
@@ -504,7 +505,9 @@ class Scheduler:
             new_token_ids = None
 
             # Handle guided decoding FSM advancement if applicable
-            if request.use_guided_decoding and request.is_grammar_ready and not request.grammar.prefilled:
+            if (request.use_guided_decoding and request.grammar
+                    and request.is_grammar_ready
+                    and not request.grammar.prefilled):
                 req_index = model_runner_output.req_id_to_index.get(req_id)
                 if req_index is not None:
                     token_id = sampled_token_ids[req_index]
