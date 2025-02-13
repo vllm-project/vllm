@@ -2256,6 +2256,14 @@ def import_pynvml():
 
 
 def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
+    """
+    A replacement for `abc.ABC`.
+    When we use `abc.ABC`, subclasses will fail to instantiate
+    if they do not implement all abstract methods.
+    Here, we only require `raise NotImplementedError` in the
+    base class, and log a warning if the method is not implemented
+    in the subclass.
+    """
 
     original_init = cls.__init__
 
@@ -2271,11 +2279,8 @@ def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
                 base_method_name = base_method.__func__
             else:
                 continue
-            class_method_name = getattr(cls, attr_name, False)
-            # bypass method defined in sub class
-            if not class_method_name:
-                continue
-            if class_method_name == base_method_name:
+            src = inspect.getsource(base_method_name)
+            if "NotImplementedError" in src:
                 unimplemented_methods.append(attr_name)
         if unimplemented_methods:
             method_names = ','.join(unimplemented_methods)
