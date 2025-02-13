@@ -52,10 +52,6 @@ def llm(monkeypatch):
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_regex(sample_regex, llm, guided_decoding_backend: str):
-    use_v1 = os.getenv('VLLM_USE_V1') == '1'
-    if use_v1:
-        pytest.skip("Skipping test because V1 does not support regex")
-
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      guided_decoding=GuidedDecodingParams(

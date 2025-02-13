@@ -83,6 +83,15 @@ class Processor:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
 
+    def _validate_guided_decoding(
+            self, params: Union[SamplingParams, PoolingParams]) -> None:
+        if not isinstance(params, SamplingParams):
+            return
+        if (params.guided_decoding
+                and params.guided_decoding.backend != 'xgrammar'):
+            raise ValueError(
+                "Only xgrammar guided decoding is supported in V1.")
+
     def process_inputs(
         self,
         request_id: str,
@@ -100,6 +109,7 @@ class Processor:
 
         self._validate_logprobs(params)
         self._validate_lora(lora_request)
+        self._validate_guided_decoding(params)
 
         if arrival_time is None:
             arrival_time = time.time()
