@@ -299,7 +299,8 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
-        if self.supports_custom_op:
+        from vllm.platforms import current_platform
+        if current_platform.is_cuda_alike():
             return torch.ops.vllm.all_reduce(input_,
                                              group_name=self.unique_name)
         else:
@@ -673,14 +674,7 @@ class GroupCoordinator:
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
-        if dst is None:
-            dst = (self.rank_in_group + 1) % self.world_size
-
-        pynccl_comm = self.pynccl_comm
-        if pynccl_comm is not None and not pynccl_comm.disabled:
-            pynccl_comm.send(tensor, dst)
-        else:
-            torch.distributed.send(tensor, self.ranks[dst], self.device_group)
+        self.device_communicator.send(tensor, dst)
 
     def recv(self,
              size: torch.Size,
@@ -688,16 +682,7 @@ class GroupCoordinator:
              src: Optional[int] = None) -> torch.Tensor:
         """Receives a tensor from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
-        if src is None:
-            src = (self.rank_in_group - 1) % self.world_size
-
-        tensor = torch.empty(size, dtype=dtype, device=self.device)
-        pynccl_comm = self.pynccl_comm
-        if pynccl_comm is not None and not pynccl_comm.disabled:
-            pynccl_comm.recv(tensor, src)
-        else:
-            torch.distributed.recv(tensor, self.ranks[src], self.device_group)
-        return tensor
+        return self.device_communicator.recv(size, dtype, src)
 
     def destroy(self):
         if self.device_group is not None:

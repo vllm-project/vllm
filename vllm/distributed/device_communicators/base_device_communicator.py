@@ -91,5 +91,25 @@ class DeviceCommunicatorBase:
             output_tensor = None
         return output_tensor
 
+    def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
+        """Sends a tensor to the destination rank in a non-blocking way"""
+        """NOTE: `dst` is the local rank of the destination rank."""
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        torch.distributed.send(tensor, self.ranks[dst], self.device_group)
+
+    def recv(self,
+             size: torch.Size,
+             dtype: torch.dtype,
+             src: Optional[int] = None) -> torch.Tensor:
+        """Receives a tensor from the source rank."""
+        """NOTE: `src` is the local rank of the source rank."""
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+
+        tensor = torch.empty(size, dtype=dtype, device=self.device)
+        torch.distributed.recv(tensor, self.ranks[src], self.device_group)
+        return tensor
+
     def destroy(self):
         pass
