@@ -14,6 +14,11 @@ try:
         # vllm_flash_attn is not installed, try the ROCm FA metadata
         from vllm.attention.backends.rocm_flash_attn import (
             ROCmFlashAttentionMetadata as FlashAttentionMetadata)
+    try:
+        from vllm.attention.backends.triton_mla import TritonMLAMetadata
+    except (ModuleNotFoundError, ImportError):
+        TritonMLAMetadata = FlashAttentionMetadata
+
 except (ModuleNotFoundError, ImportError) as err:
     raise RuntimeError(
         "Draft model speculative decoding currently only supports "
@@ -57,7 +62,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 "return_hidden_states is not supported for TP1DraftModelRunner."
             )
         super().__init__(model_runner)
-
+        self.mtp = False
         self.indices_of_seq_with_bonus_tokens = None
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
@@ -92,7 +97,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
+        assert isinstance(attn_metadata,
+                          (FlashAttentionMetadata, TritonMLAMetadata))
 
         attn_metadata.advance_step(model_input, sampled_token_ids,
                                    self.block_size, num_seqs, num_queries)
@@ -193,6 +199,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         # iteration invokes this function only once
         # (Look at multi-step-worker code)
         is_fallback = num_steps == 1
+        self.mtp = self.model.config.model_type == "deepseek_mtp"
         if not is_fallback:
             # Since we do not broadcast data inside execute_model anymore,
             # we need to figure out the best way to support TP > 1 in this
@@ -269,6 +276,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             hidden_states = previous_hidden_states
 
         outputs: List[SamplerOutput] = []
+        input_tokens = model_input.input_tokens
+        input_positions = model_input.input_positions
+        attn_metadata = model_input.attn_metadata
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
@@ -277,17 +287,36 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
             compute_logits_kwargs = {}
             # Run model
-            if hasattr(self.model.config, "num_nextn_predict_layers"):
+            spec_step_idx = kwargs.get("spec_step_idx", 0)
+            if self.model_config.requires_multi_step_decode:
                 # for DeepSeek MTP only to use the corresponding layer for
                 # each step
                 spec_step_idx = kwargs.get("spec_step_idx", step)
-                model_execute_kwargs["spec_step_idx"] = spec_step_idx
-                compute_logits_kwargs["spec_step_idx"] = spec_step_idx
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config):
+                if spec_step_idx >= 0:
+                    model_execute_kwargs["spec_step_idx"] = spec_step_idx
+                    compute_logits_kwargs["spec_step_idx"] = spec_step_idx
+
+                    graph_batch_size = model_input.input_tokens.shape[0]
+                    graph_idx =  self.parallel_config.pipeline_parallel_size * spec_step_idx + model_input.virtual_engine
+                    model_executable = self.graph_runners[graph_idx][graph_batch_size]
+                elif not use_cuda_graph:
+                    # for single step prefill
+                    with set_forward_context(attn_metadata, self.vllm_config):
+                        return model_executable.generate_proposals(
+                            input_ids=input_tokens,
+                            positions=input_positions,
+                            kv_caches=kv_caches,
+                            attn_metadata=attn_metadata,
+                            sampling_metadata=model_input.sampling_metadata,
+                            **model_execute_kwargs,
+                        )
+                    # model_execute_kwargs["spec_step_idx"] = spec_step_idx
+            with set_forward_context(attn_metadata, self.vllm_config):
                 hidden_states = model_executable(
-                    input_ids=model_input.input_tokens,
-                    positions=model_input.input_positions,
+                    input_ids=input_tokens,
+                    positions=input_positions,
+                    kv_caches=kv_caches,
+                    attn_metadata=attn_metadata,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
@@ -295,9 +324,10 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 )
 
             # Compute the logits.
-            logits = self.model.compute_logits(hidden_states,
-                                               model_input.sampling_metadata,
-                                               **compute_logits_kwargs)
+            logits = self.model.compute_logits(
+                hidden_states,  # do not sample for the previous tokens
+                model_input.sampling_metadata,
+                **compute_logits_kwargs)
             if not self.is_driver_worker:
                 return []
             # Sample the next token.
@@ -305,9 +335,16 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 logits=logits,
                 sampling_metadata=model_input.sampling_metadata,
             )
+            # TODO: do sampling/compute logits for the last token only
+            if self.mtp:
+                # return last token only for each step for MTP
+                output = self.model.get_last_sample_output(
+                    output, attn_metadata)
+                input_tokens = self.model.get_next_layer_input(
+                    input_tokens, attn_metadata, output)
             outputs.append(output)
 
-            if model_input.attn_metadata.num_prefills == 0 \
+            if not self.mtp and model_input.attn_metadata.num_prefills == 0 \
                 and self.indices_of_seq_with_bonus_tokens is not None:
                 assert output.sampled_token_ids is not None
                 # output.sampled_token_ids should be of shape (num_seqs, 1)
@@ -327,7 +364,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                         count += 1
 
             # Prepare inputs for the next step
-            if step != num_steps - 1:
+            if step != num_steps - 1 and not self.mtp:
                 model_input = self._gpu_advance_step(model_input, outputs[-1])
 
         return outputs

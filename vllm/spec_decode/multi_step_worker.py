@@ -56,6 +56,10 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
             True)
 
+    @property
+    def has_mtp_runner(self) -> bool:
+        return getattr(self.model_runner, "mtp", False)
+
     @torch.inference_mode()
     def sampler_output(
         self,
@@ -74,10 +78,13 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         # Expand the batch for sequences with a bonus token.
         # Perform a forward pass on the expanded batch and filter the
         # response to retain only the original sequences' responses.
-        expanded_request, indices_of_seq_with_bonus_tokens =\
-            self._expand_execute_model_request(
-                execute_model_req, seq_ids_with_bonus_token_in_last_step)
-
+        if self.has_mtp_runner:
+            expanded_request, indices_of_seq_with_bonus_tokens =\
+                execute_model_req, []
+        else:
+            expanded_request, indices_of_seq_with_bonus_tokens =\
+                self._expand_execute_model_request(
+                    execute_model_req, seq_ids_with_bonus_token_in_last_step)
         # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
         if current_platform.is_cuda_alike() and isinstance(
@@ -109,10 +116,14 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
                 model_outputs.append(model_output)
 
         # move indices to device to avoid stream sync
-        indices_of_seq_with_bonus_tokens = torch.tensor(
-            indices_of_seq_with_bonus_tokens, device=self.device)
-        filtered_model_outputs = self._filter_model_output(
-            model_outputs, indices_of_seq_with_bonus_tokens)
+        if self.has_mtp_runner:
+            filtered_model_outputs = model_outputs
+        else:
+            indices_of_seq_with_bonus_tokens = torch.tensor(
+                indices_of_seq_with_bonus_tokens, device=self.device)
+            filtered_model_outputs = self._filter_model_output(
+                model_outputs, indices_of_seq_with_bonus_tokens)
+
         return filtered_model_outputs, True
 
     @staticmethod

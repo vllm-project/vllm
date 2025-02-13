@@ -365,6 +365,9 @@ class SequenceData(msgspec.Struct,
         self._new_appended_tokens = []
         return delta
 
+    def reset_new_appended_tokens(self) -> None:
+        self._new_appended_tokens = []
+
     def apply_delta(self, delta: SequenceDataDelta):
         self._num_computed_tokens = delta.new_num_computed_tokens
         self._cumulative_logprob = delta.new_cumulative_logprob
@@ -1212,12 +1215,13 @@ class HiddenStates(msgspec.Struct, array_like=True,
     # last proposed token is accepted (i.e., in case of bonus tokens). For the
     # case of no bonus tokens, these are ignored.
     second_last_token_hidden_states: Optional[torch.Tensor] = None
-
+    # for varseq
+    hidden_states_seq_indices: Optional[torch.Tensor] = None
     _seq_ids: List[int] = msgspec.field(default_factory=list)
 
     def __post_init__(self):
         if self.seq_group_metadata_list is not None:
-            assert len(self.seq_group_metadata_list) == len(self.hidden_states)
+            # TODO: add assertion for the group metadata list with var seqs
             self._seq_ids = get_all_seq_ids(self.seq_group_metadata_list)
 
     @property
@@ -1231,8 +1235,20 @@ class HiddenStates(msgspec.Struct, array_like=True,
         """Update hidden states from target model invocation. Only used for
         decode steps"""
         assert len(seq_group_metadata_list) == len(hidden_states)
-        self._seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
+        last_seq_indice = len(self._seq_ids)
+        new_seq_ids = get_all_seq_ids(seq_group_metadata_list)
+        self._seq_ids.extend(new_seq_ids)
         self.hidden_states = torch.cat([self.hidden_states, hidden_states])
+        if self.hidden_states_seq_indices is not None:
+            updated_indices = list(range(last_seq_indice, len(self._seq_ids)))
+            # assume new updated are hidden states from
+            # prefill which is always length of 1
+            new_seq_indices = torch.tensor(
+                updated_indices, device=self.hidden_states_seq_indices.device)
+            self.hidden_states_seq_indices = torch.concat([
+                self.hidden_states_seq_indices,
+                new_seq_indices,
+            ])
 
         if self.second_last_token_hidden_states is not None:
             # Adding dummy hidden_states to this to maintain same shape
@@ -1255,10 +1271,17 @@ class HiddenStates(msgspec.Struct, array_like=True,
         if seq_ids != self._seq_ids:
             # Batch contents changed - prune removed sequences.
             index = [self._seq_ids.index(seq_id) for seq_id in seq_ids]
-            self.hidden_states = self.hidden_states[index]
-            if self.second_last_token_hidden_states is not None:
-                self.second_last_token_hidden_states = self\
-                    .second_last_token_hidden_states[index]
+            if self.hidden_states_seq_indices is not None:
+                target_indices_tensor = torch.tensor(
+                    index, device=self.hidden_states_seq_indices.device)
+                index = (self.hidden_states_seq_indices[..., None] ==
+                         target_indices_tensor).any(dim=-1)
+                self.hidden_states = self.hidden_states[index]
+            else:
+                self.hidden_states = self.hidden_states[index]
+                if self.second_last_token_hidden_states is not None:
+                    self.second_last_token_hidden_states = self\
+                        .second_last_token_hidden_states[index]
             self._seq_ids = seq_ids
 
     def expand_with_bonus_tokens(

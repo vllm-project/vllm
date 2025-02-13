@@ -772,7 +772,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     def _get_cuda_graph_pad_size(self,
                                  num_seqs: int,
                                  max_decode_seq_len: int,
-                                 max_encoder_seq_len: int = 0) -> int:
+                                 max_encoder_seq_len: int = 0, 
+                                 total_seq_len: int = 0) -> int:
         """
         Determine the number of padding sequences required for running in
         CUDA graph mode. Returns -1 if CUDA graphs cannot be used.
@@ -792,6 +793,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             max_encoder_seq_len (int, optional): Greatest of all the encode
                 sequence lengths. Defaults to 0. Used only in checking the
                 viability of using CUDA graphs.
+            total_seq_len (int, optional): Total number of tokens,
+                if especified, it will be used to determine the number of
+                padding sequences.
         Returns:
             int: Returns the determined number of padding sequences. If
                 CUDA graphs is not viable, returns -1.
@@ -810,12 +814,22 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if not self._use_captured_graph(batch_size, decode_only,
                                         max_decode_seq_len,
                                         max_encoder_seq_len):
+            # print(f"do not use captured graph for batch_size {batch_size}")
             return -1
-
-        graph_batch_size = self.runner.vllm_config.pad_for_cudagraph(
-            batch_size)
-        assert graph_batch_size >= batch_size
-        return graph_batch_size - batch_size
+        if total_seq_len > batch_size:
+            # This is a multi-step case. We need to pad the batch size to
+            # the current batch size so that we can run the rest of the
+            # steps in CUDA graph mode.
+            graph_batch_size = self.runner.vllm_config.pad_for_cudagraph(
+                total_seq_len
+            )
+            assert graph_batch_size >= total_seq_len
+            return graph_batch_size - total_seq_len
+        else:
+            graph_batch_size = self.runner.vllm_config.pad_for_cudagraph(
+                batch_size)
+            assert graph_batch_size >= batch_size
+            return graph_batch_size - batch_size
 
     def build(self) -> ModelInputForGPU:
         """Finalize the builder intermediate data and
@@ -881,7 +895,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         cuda_graph_pad_size = self._get_cuda_graph_pad_size(
             num_seqs=len(seq_lens),
             max_decode_seq_len=max_decode_seq_len,
-            max_encoder_seq_len=max_encoder_seq_len)
+            max_encoder_seq_len=max_encoder_seq_len,
+            total_seq_len=len(input_tokens) if self.runner.model_config.requires_multi_step_decode else 0,
+        )
+        if self.runner.model_config.requires_multi_step_decode and cuda_graph_pad_size >=0:
+            batch_cuda_graph_pad_size = cuda_graph_pad_size +  len(input_tokens) -  len(seq_lens)
+        else:
+            batch_cuda_graph_pad_size = cuda_graph_pad_size
+
 
         batch_size = len(input_tokens)
         if cuda_graph_pad_size != -1:
@@ -918,9 +939,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                                       self.runner.device,
                                                       self.runner.pin_memory)
         # Sequence and query lengths.
-        if cuda_graph_pad_size:
-            seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
 
+        # print(f"before {seq_lens=}, {batch_cuda_graph_pad_size=}, {cuda_graph_pad_size=}")
+        if batch_cuda_graph_pad_size:
+            seq_lens.extend(itertools.repeat(1, batch_cuda_graph_pad_size))
+
+        # print(f"after {len(seq_lens)=}")
         # Attention metadata.
         attn_metadata = self.attn_metadata_builder.build(
             seq_lens, query_lens, cuda_graph_pad_size, batch_size)
@@ -1030,7 +1054,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.vllm_config.compilation_config.max_capture_size
 
         self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
-            {} for _ in range(self.parallel_config.pipeline_parallel_size)
+            {} for _ in range(self.parallel_config.pipeline_parallel_size * self.model_config.num_decode_modules)
         ]
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
@@ -1478,8 +1502,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
-            for virtual_engine in range(
-                    self.parallel_config.pipeline_parallel_size):
+            requires_spec_decode_idx = self.model_config.requires_multi_step_decode
+            graph_indices = range(
+                self.parallel_config.pipeline_parallel_size * 
+                self.model_config.num_decode_modules)
+            # [module 0: v0, v1, module 1: v0, v1, ...]
+            # print(f"{graph_indices=}")
+            for graph_idx in graph_indices:
+                virtual_engine = graph_idx % self.parallel_config.pipeline_parallel_size
+                spec_idx = int(graph_idx / self.parallel_config.pipeline_parallel_size)
                 # Only rank 0 should print progress bar during capture
                 cudagraph_capture_sizes = (tqdm(
                     self.vllm_config.compilation_config.
@@ -1530,8 +1561,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "memory_pool":
                         self.graph_memory_pool,
                         "stream":
-                        graph_capture_context.stream
+                        graph_capture_context.stream,
                     }
+                    if requires_spec_decode_idx:
+                        capture_inputs["spec_step_idx"] = spec_idx  
                     if previous_hidden_states is not None:
                         capture_inputs[
                             "previous_hidden_states"] = previous_hidden_states[:
@@ -1554,7 +1587,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                              virtual_engine):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
-                    self.graph_runners[virtual_engine][batch_size] = (
+                    self.graph_runners[graph_idx][batch_size] = (
                         graph_runner)
 
         end_time = time.perf_counter()
