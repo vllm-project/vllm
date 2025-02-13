@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import time
 from typing import Any, Callable, List, Optional
 
@@ -10,12 +11,32 @@ from vllm.inputs import TextPrompt
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.utils import merge_async_iterators
+from pathlib import Path
+from huggingface_hub import snapshot_download
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
-LORA_MODULE_PATH = "yard1/llama-2-7b-sql-lora-test"
+LORA_MODULE_HF_PATH = "yard1/llama-2-7b-sql-lora-test"
 LORA_RANK = 8
 DEFAULT_MAX_LORAS = 64
 
+LORA_MODULE_DOWNLOAD_PATH = "" # populated by download lora module
+
+def download_and_prepare_lora_module():
+    global LORA_MODULE_DOWNLOAD_PATH
+    LORA_MODULE_DOWNLOAD_PATH = snapshot_download(repo_id=LORA_MODULE_HF_PATH)
+
+    #tokenizer_path = Path(LORA_MODULE_DOWNLOAD_PATH) / "tokenizer.model"
+    #assert tokenizer_path.exists()
+    ## remove tokenizer 
+    #tokenizer_path.unlink()
+
+    files_to_delete = ['added_tokens.json', 'tokenizer_config.json', 'tokenizer.json', 'tokenizer.model']
+    for x in files_to_delete:
+        del_path =  Path(LORA_MODULE_DOWNLOAD_PATH) / x
+        del_path.unlink()
+
+    print (f"LORA MODULE DOWNLOAD PATH {LORA_MODULE_DOWNLOAD_PATH}")
+    
 
 @pytest.fixture(autouse=True)
 def v1(run_with_both_engines_lora):
@@ -75,11 +96,12 @@ async def requests_processing_time(
         if warmup_function:
             await warmup_function(llm, lora_requests)
             # Wait for the warmup functions complete
-            time.sleep(30)
+            await asyncio.sleep(30)
 
         generators = []
         start = time.perf_counter()
 
+        print ("adding requests to the engine ...")
         for idx, lora_request in enumerate(lora_requests):
             generator = llm.generate(
                 prompt=TextPrompt(prompt=f"hello {idx}",
@@ -88,6 +110,7 @@ async def requests_processing_time(
                 lora_request=lora_request,
                 request_id=f"test{idx}")
             generators.append(generator)
+        print ("finished adding all requests to the engine ...")
 
         all_gens = merge_async_iterators(*generators)
         async for i, res in all_gens:
@@ -101,9 +124,10 @@ def get_lora_requests() -> List[LoRARequest]:
     lora_requests: List[LoRARequest] = [
         LoRARequest(lora_name=f"{i}",
                     lora_int_id=i,
-                    lora_path=LORA_MODULE_PATH)
+                    lora_path=LORA_MODULE_DOWNLOAD_PATH)
         for i in range(1, DEFAULT_MAX_LORAS + 1)
     ]
+
     return lora_requests
 
 
@@ -118,6 +142,9 @@ async def test_add_lora():
     We measure the request processing time in both cases and expect the time 
     to be lesser in the case with add_lora() calls.
     """
+
+    download_and_prepare_lora_module()
+
     lora_requests: List[LoRARequest] = get_lora_requests()
 
     # Dummy run - So any 1-time functionality like triton kernel compilation
