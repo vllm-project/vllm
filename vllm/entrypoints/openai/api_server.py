@@ -258,7 +258,7 @@ async def validate_json_request(raw_request: Request):
         content_type = raw_request.headers.get("content-type", "").lower()
         if "application/json" not in content_type:
             raise HTTPException(
-                status_code=415,
+                status_code=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
                 detail=
                 "Unsupported Media Type: Only 'application/json' is allowed")
 
