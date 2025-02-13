@@ -114,7 +114,7 @@ class MMInputCacheClient:
         return ret_inputs
 
 
-class MMInputMapperServer:
+class MMInputCacheServer:
 
     def __init__(self, model_config):
         self.use_cache = not model_config.disable_mm_preprocessor_cache

@@ -20,7 +20,7 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType)
-from vllm.v1.engine.mm_input_cache import MMInputMapperServer
+from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -65,7 +65,7 @@ class EngineCore:
             log_stats=self.log_stats,
         )
 
-        self.mm_input_mapper_server = MMInputMapperServer(
+        self.mm_input_mapper_server = MMInputCacheServer(
             vllm_config.model_config)
 
     def _initialize_kv_caches(self,
