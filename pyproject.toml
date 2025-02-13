@@ -59,7 +59,8 @@ ignore = [
     "UP032",
     # Python 3.8 typing
     "UP006", "UP035",
-
+    # Can remove once 3.10+ is the minimum Python version
+    "UP007",
 ]
 
 [tool.mypy]
