@@ -7,7 +7,7 @@ import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
-from typing import TYPE_CHECKING, List, Optional, Union, cast
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
@@ -172,14 +172,19 @@ class Request:
         else:
             raise ValueError("No valid guided decoding parameter found")
 
-    def allocate_grammar_bitmask(self, batch_size: int,
-                                 vocab_size: int) -> None:
+    def _check_grammar_completion(self) -> bool:
         if isinstance(self._grammar, Future):
             try:
                 self._grammar = self._grammar.result(timeout=0.05)
                 self.status = RequestStatus.WAITING
             except TimeoutError:
-                return
+                return False
+        return True
+
+    def allocate_grammar_bitmask(self, batch_size: int,
+                                 vocab_size: int) -> None:
+        if not self._check_grammar_completion():
+            return
 
         if self._grammar is not None:
             self._grammar_bitmask = self._grammar.allocate_bitmask(
@@ -198,7 +203,8 @@ class Request:
 
     @property
     def grammar(self) -> Optional[Grammar]:
-        return cast(Optional[Grammar], self._grammar)
+        self._check_grammar_completion()
+        return self._grammar if isinstance(self._grammar, Grammar) else None
 
     @grammar.setter
     def grammar(self, grammar: Grammar | Future[Grammar]) -> None:

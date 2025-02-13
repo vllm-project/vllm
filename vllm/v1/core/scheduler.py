@@ -206,15 +206,15 @@ class Scheduler:
                 if request.use_guided_decoding:
                     guided_decoding_request_ids.add(request.request_id)
 
-                if (request.status == RequestStatus.WAITING_FOR_FSM
-                        and request.grammar and request.is_grammar_ready):
-                    request.status = RequestStatus.WAITING
-                    request.grammar.prefilled = True
-                    # else:
-                    #     # Skip this request but keep in the queue
-                    #     self.waiting.popleft()
-                    #     self.waiting.append(request)
-                    #     continue
+                if request.status == RequestStatus.WAITING_FOR_FSM:
+                    if request.grammar and request.is_grammar_ready:
+                        request.status = RequestStatus.WAITING
+                        request.grammar.prefilled = True
+                    else:
+                        # Skip this request but keep in the queue
+                        self.waiting.popleft()
+                        self.waiting.append(request)
+                        continue
                 #
                 # Check that adding the request still respects the max_loras
                 # constraint.
