@@ -54,6 +54,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
