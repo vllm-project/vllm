@@ -21,19 +21,21 @@ class HpuCommunicator(DeviceCommunicatorBase):
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
-    def all_gather(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
         if dim < 0:
             # Convert negative dim to positive.
-            dim += x.dim()
-        input_size = x.size()
+            dim += input_.dim()
+        input_size = input_.size()
         # Allocate output tensor.
         output_tensor = torch.empty((world_size, ) + input_size,
-                                    dtype=x.dtype,
-                                    device=x.device)
+                                    dtype=input_.dtype,
+                                    device=input_.device)
         # All-gather.
         htorch.core.mark_step()
-        dist.all_gather_into_tensor(output_tensor, x, group=self.device_group)
+        dist.all_gather_into_tensor(output_tensor,
+                                    input_,
+                                    group=self.device_group)
         # Reshape
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(input_size[:dim] +
