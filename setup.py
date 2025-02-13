@@ -268,14 +268,33 @@ class cmake_build_ext(build_ext):
 
 class repackage_wheel(build_ext):
     """Extracts libraries and other files from an existing wheel."""
-    default_wheel = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+
+    def get_base_commit_in_main_branch(self) -> str:
+        import subprocess
+
+        try:
+            current_branch = subprocess.check_output(
+                ["git", "branch", "--show-current"]).decode("utf-8").strip()
+
+            base_commit = subprocess.check_output(
+                ["git", "merge-base", "main",
+                 current_branch]).decode("utf-8").strip()
+            return base_commit
+        except Exception as err:
+            logger.warning(
+                "Failed to get the base commit in the main branch. "
+                "Using the nightly wheel. The libraries in this "
+                "wheel may not be compatible with your dev branch: %s", err)
+            return "nightly"
 
     def run(self) -> None:
-        wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION",
-                                   self.default_wheel)
-
         assert _is_cuda(
         ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+
+        wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
+        if wheel_location is None:
+            base_commit = self.get_base_commit_in_main_branch()
+            wheel_location = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
 
         import zipfile
 
@@ -670,7 +689,7 @@ setup(
     package_data=package_data,
     entry_points={
         "console_scripts": [
-            "vllm=vllm.scripts:main",
+            "vllm=vllm.entrypoints.cli.main:main",
         ],
     },
 )
