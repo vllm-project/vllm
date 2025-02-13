@@ -10,7 +10,6 @@ import os
 import re
 import signal
 import socket
-import sys
 import tempfile
 import uuid
 from argparse import Namespace
@@ -831,6 +830,7 @@ def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.bind(addr)
 
     return sock
@@ -878,8 +878,17 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         model_config = await engine_client.get_model_config()
         await init_app_state(engine_client, model_config, app.state, args)
 
+        def _listen_addr(a: str) -> str:
+            if is_valid_ipv6_address(a):
+                return '[' + a + ']'
+            return a or "0.0.0.0"
+
+        logger.info("Starting vLLM API server on http://%s:%d",
+                    _listen_addr(sock_addr[0]), sock_addr[1])
+
         shutdown_task = await serve_http(
             app,
+            sock=sock,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
@@ -888,8 +897,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
-            # Workaround to work on macOS
-            fd=sock.fileno() if sys.platform.startswith("darwin") else None,
             **uvicorn_kwargs,
         )
 
