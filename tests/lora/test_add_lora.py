@@ -16,7 +16,7 @@ from vllm.utils import merge_async_iterators
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 LORA_MODULE_DOWNLOAD_PATH = None  # Populated by download_and_prepare_lora_module #noqa
 LORA_RANK = 8
-DEFAULT_MAX_LORAS = 96
+DEFAULT_MAX_LORAS = 63
 
 
 def download_and_prepare_lora_module():
