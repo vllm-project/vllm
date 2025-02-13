@@ -44,6 +44,7 @@ class ParentRequestState:
     def add_output(
         self,
         child_req_output: RequestOutput,
+        index: int,
     ) -> None:
         """Aggregate a parallel sampling child
         request output.
@@ -55,7 +56,8 @@ class ParentRequestState:
         Args:
           child_req_output: a single request output
                             from a parallel sampling
-                            child request.       
+                            child request.   
+          index: index within `n` child    
         """
         if self.request_output is None:
             # Save the first request output; reinstate
@@ -69,7 +71,15 @@ class ParentRequestState:
             # output
             new_completion = child_req_output.outputs[0]
             new_completion.index = index
-            self.request_output.outputs[index] = new_completion
+            # Note: will be sorted by index later
+            self.request_output.outputs.append(new_completion)
+
+    def get_parent_request_output(self) -> RequestOutput:
+        """Invariant: parent completion outputs sorted by index"""
+        assert self.request_output is not None
+        self.request_output.outputs = sorted(self.request_output.outputs,
+                                             key=lambda x: x.index)
+        return self.request_output
 
     def transform_output(
         self,
@@ -171,11 +181,11 @@ class ParallelSamplingOutputProcessor:
         if self.parent_state.output_kind != RequestOutputKind.FINAL_ONLY:
             # stream=true: return child completions immediately
             return self.parent_state.transform_output(child_req_output, index)
-            
+
         # stream=false: aggregate child completions
-        self.parent_state.add_output(child_req_output)
+        self.parent_state.add_output(child_req_output, index)
         if self.parent_state.num_completions == self.parent_state.n:
             # Return aggregated request output after obtaining
             # all completions
-            return self.parent_state.request_output
+            return self.parent_state.get_parent_request_output()
         return None
