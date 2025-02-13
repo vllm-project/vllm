@@ -1,0 +1,7 @@
+.vertical-table-header > thead > tr > th:not(.stub) {
+    writing-mode: sideways-lr;
+    white-space: nowrap;
+    p {
+        margin: 0;
+    }
+}
