@@ -137,13 +137,13 @@ TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
-    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(tp_base=8),
+    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),  # noqa: E501
     "baichuan-inc/Baichuan-7B": PPTestSettings.fast(),
     "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "THUDM/chatglm3-6b": PPTestSettings.fast(),
-    "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(tp_base=2),
-    "databricks/dbrx-instruct": PPTestSettings.fast(tp_base=8),
+    "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
+    "databricks/dbrx-instruct": PPTestSettings.fast(load_format="dummy"),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
     "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(),
@@ -168,7 +168,7 @@ TEXT_GENERATION_MODELS = {
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
     "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(tp_base=4),
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(load_format="dummy"),  # noqa: E501
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
@@ -185,7 +185,7 @@ TEXT_GENERATION_MODELS = {
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
-    "upstage/solar-pro-preview-instruct": PPTestSettings.fast(tp_base=2),
+    "upstage/solar-pro-preview-instruct": PPTestSettings.fast(load_format="dummy"),  # noqa: E501
     # FIXME: Cannot load tokenizer in latest transformers version.
     # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
     # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(),
@@ -198,7 +198,7 @@ EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
     "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
     "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(),
-    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(tp_base=4),
+    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(load_format="dummy"),
 }
 
 MULTIMODAL_MODELS = {
@@ -215,7 +215,7 @@ MULTIMODAL_MODELS = {
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
     "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
     "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(),
-    "mistralai/Pixtral-12B-2409": PPTestSettings.fast(tp_base=2),
+    "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
@@ -254,6 +254,7 @@ def _compare_tp(
     num_gpus_available: int,
     *,
     method: Literal["generate", "encode"],
+    is_multimodal: bool,
 ):
     (
         tp_size,
@@ -273,13 +274,18 @@ def _compare_tp(
 
     if load_format == "dummy":
         # Avoid OOM
-        hf_overrides.update({
+        text_overrides = {
             "num_layers": 1,
             "num_hidden_layers": 1,
             "num_experts": 2,
             "num_experts_per_tok": 2,
             "num_local_experts": 2,
-        })
+        }
+
+        if is_multimodal:
+            hf_overrides.update({"text_config": text_overrides})
+        else:
+            hf_overrides.update(text_overrides)
     else:
         model_info.check_available_online(on_fail="skip")
 
@@ -390,7 +396,8 @@ def test_tp_language_generation(
                 task,
                 test_options,
                 num_gpus_available,
-                method="generate")
+                method="generate",
+                is_multimodal=False)
 
 
 @pytest.mark.parametrize(
@@ -418,7 +425,8 @@ def test_tp_language_embedding(
                 task,
                 test_options,
                 num_gpus_available,
-                method="encode")
+                method="encode",
+                is_multimodal=False)
 
 
 @pytest.mark.parametrize(
@@ -446,4 +454,5 @@ def test_tp_multimodal_generation(
                 task,
                 test_options,
                 num_gpus_available,
-                method="generate")
+                method="generate",
+                is_multimodal=True)
