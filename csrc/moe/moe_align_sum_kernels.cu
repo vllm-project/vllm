@@ -389,7 +389,7 @@ void sgl_moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                               torch::Tensor num_tokens_post_pad) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   TORCH_CHECK(num_experts == 256,
-              "sgl_moe_align_block_size kernel only support deepseek v3 now.");
+              "sgl_moe_align_block_size kernel only supports deepseek v3.");
 
   VLLM_DISPATCH_INTEGRAL_TYPES(
       topk_ids.scalar_type(), "sgl_moe_align_block_size_kernel", [&] {
