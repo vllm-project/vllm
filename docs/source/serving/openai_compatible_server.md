@@ -41,6 +41,8 @@ We currently support the following OpenAI APIs:
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
   - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
+- [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
+  - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
 
 In addition, we have the following custom APIs:
 
@@ -295,6 +297,17 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 :start-after: begin-chat-embedding-extra-params
 :end-before: end-chat-embedding-extra-params
 :::
+
+(transcriptions-api)=
+
+### Transcriptions API
+
+Our Transcriptions API is compatible with [OpenAI's Transcriptions API](https://platform.openai.com/docs/api-reference/audio/createTranscription);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+
+<!-- TODO: api enforced limits + uploading audios -->
+
+Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
 
 (tokenizer-api)=
 

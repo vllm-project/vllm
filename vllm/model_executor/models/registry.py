@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 
 from .interfaces import (has_inner_state, is_attention_free, is_hybrid,
                          supports_cross_encoding, supports_multimodal,
-                         supports_pp)
+                         supports_pp, supports_transcription)
 from .interfaces_base import is_text_generation_model
 
 logger = init_logger(__name__)
@@ -224,6 +224,7 @@ class _ModelInfo:
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
+    supports_transcription: bool
 
     @staticmethod
     def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
@@ -237,7 +238,7 @@ class _ModelInfo:
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
-        )
+            supports_transcription=supports_transcription(model))
 
 
 class _BaseRegisteredModel(ABC):
@@ -484,6 +485,13 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_hybrid
+
+    def is_transcription_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.supports_transcription
 
 
 ModelRegistry = _ModelRegistry({

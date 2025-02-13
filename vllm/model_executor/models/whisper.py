@@ -31,7 +31,7 @@ from vllm.multimodal.audio import resample_audio
 from vllm.sequence import SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsTranscription
 from .utils import AutoWeightsLoader, WeightsMapper, make_layers
 
 logger = init_logger(__name__)
@@ -637,7 +637,8 @@ def input_mapper_for_whisper(
 @MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_whisper)
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
     "audio", get_max_whisper_audio_tokens)
-class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
+class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
+                                      SupportsMultiModal):
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
             "self_attn.q_proj",
