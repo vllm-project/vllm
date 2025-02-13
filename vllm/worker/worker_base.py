@@ -3,7 +3,7 @@
 import dataclasses
 import os
 import time
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import cloudpickle
@@ -19,7 +19,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
-                        update_environment_variables)
+                        update_environment_variables,
+                        warn_for_unimplemented_methods)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
@@ -27,7 +28,8 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 logger = init_logger(__name__)
 
 
-class WorkerBase(ABC):
+@warn_for_unimplemented_methods
+class WorkerBase:
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
@@ -53,33 +55,29 @@ class WorkerBase(ABC):
         from vllm.platforms import current_platform
         self.current_platform = current_platform
 
-    @abstractmethod
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Determine the number of available blocks for the GPU KV cache and
-        swappable CPU KV cache.
-
-        The implementation may run profiling or other heuristics to determine
-        the size of caches.
-
-        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
-        are blocks that are "active" on the device and can be appended to.
-        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
-        appended to.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Initialize the KV cache with the given size in blocks.
         """
+        raise NotImplementedError
+
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
+
+    def load_model(self) -> None:
+        """Load model onto target device."""
+        raise NotImplementedError
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
     def start_worker_execution_loop(self) -> None:
@@ -94,39 +92,42 @@ class WorkerBase(ABC):
                 if output is None:
                     return None
 
-    @abstractmethod
-    def get_model(self) -> nn.Module:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        """Determine the number of available blocks for the GPU KV cache and
+        swappable CPU KV cache.
+
+        The implementation may run profiling or other heuristics to determine
+        the size of caches.
+
+        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        are blocks that are "active" on the device and can be appended to.
+        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
+        appended to.
+        """
         raise NotImplementedError
 
-    @abstractmethod
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
-        raise NotImplementedError
-
-    @abstractmethod
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
         """
         raise NotImplementedError
 
-    @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def list_loras(self) -> Set[int]:
         raise NotImplementedError
+
+    @property
+    def vocab_size(self) -> int:
+        """Get vocabulary size from model configuration."""
+        return self.model_config.get_vocab_size()
 
 
 class DelegateWorkerBase(WorkerBase):
@@ -155,6 +156,10 @@ class DelegateWorkerBase(WorkerBase):
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def load_model(self) -> None:
+        """Load model onto target device."""
+        self.worker.load_model()
 
     def get_model(self) -> nn.Module:
         return self.worker.get_model()
