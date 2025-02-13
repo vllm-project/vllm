@@ -491,10 +491,6 @@ def gguf_quant_weights_iterator(
             if weight_type.name != "F32":
                 weight_type_name = name.replace("weight", "qweight_type")
                 weight_type = torch.tensor(weight_type)
-                if "$EXP_ID$" in name:
-                    # we only need to load weight type once
-                    weight_type_name = weight_type_name.replace(
-                        "$EXP_ID$", "0")
                 yield weight_type_name, weight_type
 
     for tensor in reader.tensors:
@@ -505,11 +501,7 @@ def gguf_quant_weights_iterator(
             if weight_type.name != "F32":
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
-            if "$EXP_ID$" in name:
-                for i in range(param.shape[0]):
-                    yield name.replace("$EXP_ID$", str(i)), param[i]
-            else:
-                yield name, param
+            yield name, param
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:

@@ -464,17 +464,20 @@ class FusedMoE(torch.nn.Module):
         if is_transposed:
             shard_dim = int(not shard_dim)
 
+        full_load = len(loaded_weight.shape) == 3
+        if full_load:
+            shard_dim += 1
+
         # Materialize GGUF UninitializedParameter
         if is_gguf_weight and isinstance(param, UninitializedParameter):
             final_shape = list(loaded_weight.shape)
             if shard_id in ["w1", "w3"]:
-                final_shape[0] *= 2
+                final_shape[1] *= 2
             final_shape[shard_dim] = final_shape[
                 shard_dim] // get_tensor_model_parallel_world_size()
-            param.materialize([self.num_experts] + final_shape,
-                              dtype=loaded_weight.dtype)
+            param.materialize(final_shape, dtype=loaded_weight.dtype)
 
-        expert_data = param.data[expert_id]
+        expert_data = param.data if full_load else param.data[expert_id]
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
