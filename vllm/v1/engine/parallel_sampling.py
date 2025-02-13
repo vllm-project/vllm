@@ -168,14 +168,14 @@ class ParallelSamplingOutputProcessor:
           `None`, unless a processed request output is ready to
           send back to the caller.
         """
-        if self.parent_state.output_kind == RequestOutputKind.FINAL_ONLY:
-            # stream=false: aggregate child completions
-            self.parent_state.add_output(child_req_output)
-            if self.parent_state.num_completions == self.parent_state.n:
-                # Return aggregated request output after obtaining
-                # all completions
-                return self.parent_state.request_output
-        else:
+        if self.parent_state.output_kind != RequestOutputKind.FINAL_ONLY:
             # stream=true: return child completions immediately
             return self.parent_state.transform_output(child_req_output, index)
+            
+        # stream=false: aggregate child completions
+        self.parent_state.add_output(child_req_output)
+        if self.parent_state.num_completions == self.parent_state.n:
+            # Return aggregated request output after obtaining
+            # all completions
+            return self.parent_state.request_output
         return None
