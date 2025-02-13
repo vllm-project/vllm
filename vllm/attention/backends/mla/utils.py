@@ -353,7 +353,6 @@ class MLACommonState(AttentionState):
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
             use_cuda_graph=True,
-            attn_state=self.runner.attn_state,
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
@@ -411,7 +410,9 @@ class MLACommonState(AttentionState):
                 "TritonMLAState does not support encoder/decoder yet")
 
     def begin_forward(self, model_input):
-        return
+        if self.chunked_prefill_enabled:
+            model_input.attn_metadata.chunked_prefill_workspace = \
+                self.chunked_prefill_workspace
 
 
 @dataclass
@@ -430,11 +431,6 @@ class MLACommonMetadata(AttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
-
-    # Smuggle the state to the impl via meta-data, we need this for the
-    # `chunked_prefill_workspace` but passing that directly will result in
-    # it unnecessarily being broadcasted to all workers.
-    attn_state: MLACommonState
 
     # Input positions for rotrary embeddings since for MLA the rotary
     # position embeddings are applied inside the attention backend
@@ -550,7 +546,6 @@ class MLACommonMetadata(AttentionMetadata):
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
             # MLACommonMetadata
-            attn_state=self.attn_state,
             input_positions=input_positions,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
@@ -602,7 +597,6 @@ class MLACommonMetadata(AttentionMetadata):
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
             # MLACommonMetadata
-            attn_state=self.attn_state,
             seq_lens=None,
             seq_lens_tensor=seq_lens_tensor,
             max_decode_query_len=self.max_decode_query_len,
@@ -709,7 +703,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
         self.block_size = input_builder.block_size
         self.chunked_prefill_enabled = \
             self.runner.scheduler_config.chunked_prefill_enabled
-        self.attn_state = self.input_builder.runner.attn_state
+
+        if self.chunked_prefill_enabled:
+            attn_state = self.input_builder.runner.attn_state
+            self.chunked_prefill_workspace_size = \
+                attn_state.chunked_prefill_workspace.shape[0]
+            self.page_size = self.runner.block_size
 
     def prepare(self):
         self.slot_mapping: List[int] = []
@@ -885,10 +884,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
             # the comment at the top of the file before trying to understand
             # the following code
 
-            chunked_prefill_workspace_size = \
-                self.attn_state.chunked_prefill_workspace.shape[0]
-            page_size = self.runner.block_size
-
             num_prefills_with_context = \
                 (context_lens_tensor[:self.num_prefills] > 0).sum().item()
 
@@ -897,12 +892,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
             # algorithm here and allocate more workspace to prefills with
             # longer context lengths
             max_context_chunk = \
-                chunked_prefill_workspace_size // num_prefills_with_context
+                self.chunked_prefill_workspace_size // num_prefills_with_context
 
             # align max_context_chunk to page_size by rounding down,
             # currently the `gather_cache` kernel cannot handle
             # `context_chunk_starts` that are not aligned to page_size
-            max_context_chunk = round_down(max_context_chunk, page_size)
+            max_context_chunk = round_down(max_context_chunk, self.page_size)
             assert max_context_chunk > 0
             num_chunks = cdiv(context_lens_tensor.max(), max_context_chunk)
 
@@ -938,7 +933,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
             multi_modal_placeholder_index_maps=None,  # Not Attention Related
             enable_kv_scales_calculation=False,
             # MLACommonMetadata
-            attn_state=self.attn_state,
             input_positions=input_positions,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
@@ -1252,7 +1246,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         output = None
         iters = len(prefill_metadata.context_chunk_seq_tot)
-        workspace = prefill_metadata.attn_state.chunked_prefill_workspace
+        assert hasattr(attn_metadata, "chunked_prefill_workspace")
+        workspace = attn_metadata.chunked_prefill_workspace
 
         for i in range(iters):
             toks = prefill_metadata.context_chunk_seq_tot[i]
