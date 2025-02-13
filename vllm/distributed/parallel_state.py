@@ -254,7 +254,6 @@ class GroupCoordinator:
     @contextmanager
     def graph_capture(
             self, graph_capture_context: Optional[GraphCaptureContext] = None):
-
         if graph_capture_context is None:
             stream = torch.cuda.Stream()
             graph_capture_context = GraphCaptureContext(stream)
