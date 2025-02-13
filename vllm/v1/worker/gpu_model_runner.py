@@ -349,7 +349,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                     req_data.new_block_ids)
 
             # Fill the bitmask
-            if req_id in scheduler_output.guided_decoding_request_ids and req_state.grammar is not None:
+            if (req_id in scheduler_output.guided_decoding_request_ids
+                    and req_state.grammar is not None):
                 if not req_state.grammar.prefilled:
                     req_state.grammar.prefilled = True
                 else:

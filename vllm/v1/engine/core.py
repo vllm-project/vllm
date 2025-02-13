@@ -8,7 +8,6 @@ from multiprocessing.connection import Connection
 from typing import Any, List, Tuple, Type
 
 import psutil
-import torch
 import zmq
 import zmq.asyncio
 
@@ -24,7 +23,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.guided_decoding import GuidedDecodingManager
-from vllm.v1.request import GuidedDecodingOptions, Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -70,8 +69,8 @@ class EngineCore:
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
 
-        # initialize the tokenizer on the scheduler (this is used for constrained decoding)
-        # and guided decoding manager
+        # initialize the tokenizer on the scheduler (this is used for
+        # constrained decoding) and guided decoding manager
         self.use_guided_decoding = False
         self.guided_decoding_manager = GuidedDecodingManager(
             vllm_config=vllm_config)

@@ -15,8 +15,6 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
-    from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
     from vllm.v1.request import GuidedDecodingKey, Request
 
 
@@ -24,8 +22,8 @@ class Grammar:
 
     def __init__(self, matcher: xgr.GrammarMatcher, vocab_size: int,
                  ctx: xgr.CompiledGrammar) -> None:
-        # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string for jump-forward decoding
-        # TODO: support max_rollback_tokens
+        # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
+        # for jump-forward decoding TODO: support max_rollback_tokens
         self.matcher = matcher
         self.vocab_size = vocab_size
         self.ctx = ctx
@@ -103,7 +101,8 @@ class GuidedDecodingManager:
                        ctx=ctx)
 
     def should_cache(self, request: Request):
-        if not request.use_guided_decoding: return False
+        if not request.use_guided_decoding:
+            return False
         request.grammar = self.get(request)
         if not request.grammar:
             request.grammar = self.cache(request)
@@ -134,5 +133,6 @@ class GuidedDecodingManager:
     def get(self, request: Request):
         with self._lock:
             entry = self.grammar_cache.get(request.guided_decoding_key)
-            if entry is None or not entry.event.is_set(): return None
+            if entry is None or not entry.event.is_set():
+                return None
             return copy.copy(entry.value) if entry.value else None
