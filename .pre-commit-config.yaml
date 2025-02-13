@@ -52,15 +52,6 @@ repos:
     types: [python]
     additional_dependencies: &mypy_deps [mypy==1.11.1, types-setuptools, types-PyYAML, types-requests]
     stages: [pre-commit] # Don't run in CI
-    exclude: 'vllm/third_party/.*'
-  - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.9
-    entry: tools/mypy.sh 1 "3.9"
-    language: python
-    types: [python]
-    additional_dependencies: *mypy_deps
-    stages: [manual] # Only run in CI
-    exclude: 'vllm/third_party/.*'
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: tools/mypy.sh 1 "3.10"
