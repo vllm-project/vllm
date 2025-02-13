@@ -281,7 +281,7 @@ class TransformersModel(nn.Module, SupportsPP):
 
         tp_plan = self.model._tp_plan
 
-        def tensor_parallel(module: nn.Module, prefix: str = ""):
+        def _tensor_parallel(module: nn.Module, prefix: str = ""):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
                 for pattern, style in tp_plan.items():
@@ -292,9 +292,9 @@ class TransformersModel(nn.Module, SupportsPP):
                         setattr(module, child_name, new_module)
                         log_replacement(qual_name, child_module, new_module)
                 else:
-                    tensor_parallel(child_module, prefix=qual_name)
+                    _tensor_parallel(child_module, prefix=qual_name)
 
-        tensor_parallel(self.model)
+        _tensor_parallel(self.model)
 
     def create_attention_instances(
         self,
