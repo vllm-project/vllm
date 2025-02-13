@@ -15,7 +15,7 @@ from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
 
 MODELS = [
-    "openai-community/distilgpt2",
+    "distilbert/distilgpt2",
 ]
 
 
@@ -229,7 +229,6 @@ def test_metric_spec_decode(
 
     with vllm_runner(
             model,
-            load_format="runai_streamer",
             dtype=dtype,
             disable_log_stats=False,
             gpu_memory_utilization=0.4,

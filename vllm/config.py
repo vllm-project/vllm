@@ -414,16 +414,9 @@ class ModelConfig:
                                         "*.safetensors"
                                     ])
                 self.model_weights = self.model
-                import os
-                print(f"{self.model} is now {s3_model.dir}")
-                # list files in s3_model.dir
-                print(f"Files in {s3_model.dir}:")
-                for file in os.listdir(s3_model.dir):
-                    print(file)
-                print()
                 self.model = s3_model.dir
 
-
+            if is_s3(tokenizer):
                 s3_tokenizer = S3Model()
                 s3_tokenizer.pull_files(
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])

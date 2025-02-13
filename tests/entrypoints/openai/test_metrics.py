@@ -15,7 +15,6 @@ from transformers import AutoTokenizer
 
 from ...utils import RemoteOpenAIServer
 
-S3_MODEL_NAME = "s3://vllm-ci-model-weights/TinyLlama-1.1B-Chat-v1.0"
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 
@@ -48,8 +47,6 @@ def default_server_args():
         "--enforce-eager",
         "--max-num-seqs",
         "128",
-        "--load-format",
-        "runai_streamer",
     ]
 
 
@@ -63,8 +60,7 @@ def server(use_v1, default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
     env_dict = dict(VLLM_USE_V1='1' if use_v1 else '0')
-    with RemoteOpenAIServer(S3_MODEL_NAME,
-                            default_server_args,
+    with RemoteOpenAIServer(MODEL_NAME, default_server_args,
                             env_dict=env_dict) as remote_server:
         yield remote_server
 

@@ -17,7 +17,7 @@ from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
 from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
-MODEL_NAME = "s3://vllm-ci-model-weights/zephyr-7b-beta"
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
@@ -42,8 +42,6 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
         "2",
         "--max-num-seqs",
         "128",
-        "--load-format",
-        "runai_streamer",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

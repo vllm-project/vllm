@@ -118,13 +118,16 @@ def test_cumem_with_cudagraph():
 @pytest.mark.parametrize(
     "model",
     [
-        "meta-llama/Llama-3.2-1B",  # sleep mode with safetensors
-        "facebook/opt-125m"  # sleep mode with pytorch checkpoint
+        # sleep mode with safetensors
+        "s3://vllm-ci-model-weights/Llama-3.2-1B",
+        # sleep mode with pytorch checkpoint
+        "facebook/opt-125m"
     ])
 def test_end_to_end(model):
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
-    llm = LLM(model, enable_sleep_mode=True)
+    load_format = "runai_streamer" if "Llama" in model else "auto"
+    llm = LLM(model, load_format=load_format, enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)

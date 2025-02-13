@@ -6,7 +6,7 @@ import pytest_asyncio
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "s3://vllm-ci-model-weights/bart-base"
+MODEL_NAME = "facebook/bart-base"
 
 
 @pytest.fixture(scope="module")
@@ -15,8 +15,6 @@ def server():
         "--dtype",
         "bfloat16",
         "--enforce-eager",
-        "--load-format",
-        "runai_streamer",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

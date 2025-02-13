@@ -11,7 +11,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "s3://vllm-ci-model-weights/Qwen2.5-1.5B-apeach"
+MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 
 
@@ -27,8 +27,6 @@ def server():
         "--max-model-len",
         "8192",
         "--chat-template",
-        "--load-format",
-        "runai_streamer",
         DUMMY_CHAT_TEMPLATE,
     ]
 

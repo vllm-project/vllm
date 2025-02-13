@@ -7,7 +7,7 @@ import pytest_asyncio
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "s3://vllm-ci-model-weights/zephyr-7b-beta"
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
@@ -27,8 +27,6 @@ def server():
         "1000",
         # large prompts create a lot of output
         "--disable-log-requests",
-        "--load-format",
-        "runai_streamer",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
