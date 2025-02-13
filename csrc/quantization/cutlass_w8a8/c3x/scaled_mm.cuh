@@ -53,7 +53,9 @@ struct cutlass_3x_gemm {
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
-  static constexpr int AlignmentAB = 16;
+  // These are the minimum alignments needed for the kernels to compile
+  static constexpr int AlignmentAB =
+      128 / cutlass::sizeof_bits<ElementAB>::value;
   static constexpr int AlignmentCD = 4;
 
   using CollectiveEpilogue =

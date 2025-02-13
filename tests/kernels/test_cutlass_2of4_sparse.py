@@ -59,7 +59,12 @@ def prune_to_2_4(tensor):
 def check_compress_decompress_invariance(dtype: torch.dtype, b: torch.Tensor,
                                          b_compressed: torch.Tensor,
                                          b_metadata: torch.Tensor):
+
+    # For float16 and bfloat16, cutlass_scaled_sparse_mm's output must be the
+    # same dtype as its inputs. This line addresses that constraint while
+    # arbitrarily using bfloat16 for the int8/fp8 cases.
     out_dtype = torch.float16 if dtype is torch.float16 else torch.bfloat16
+
     eye = torch.eye(b.shape[0], device='cuda', dtype=dtype)
     eye_scale = torch.ones(1, device='cuda', dtype=torch.float32)
     b_decomp = ops.cutlass_scaled_sparse_mm(eye,
@@ -78,7 +83,8 @@ def make_rand_sparse_tensors(
     a = torch.randn((m, k), device='cuda')
     b = torch.randn((n, k), device='cuda').t()
 
-    if dtype == torch.int8 or dtype == torch.float8_e4m3fn:
+    if dtype == torch.int8:
+        # ensure A and B aren't all zeros after rounding
         a = a * 5.0
         b = b * 5.0
 
@@ -221,7 +227,7 @@ def test_cutlass_sparse_fp8_gemm(m: int, n: int, k: int, use_bias: bool):
                                   out_dtype=out_dtype,
                                   bias=bias)
 
-    torch.testing.assert_close(out, baseline, rtol=1e0, atol=2e0)
+    torch.testing.assert_close(out, baseline, rtol=1e-2, atol=3e-1)
 
 
 @pytest.mark.skipif(not sparse_cutlass_supported(),

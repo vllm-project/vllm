@@ -200,8 +200,8 @@ struct ScaledEpilogueBias
 
 /*
  * This epilogue performs the same operation as ScaledEpilogueBias, but the
- * bias, but the bias is a column vector. Useful e.g. if we are computing a
- * GEMM via C^T += B^T A^T, as is the case for the 2:4 sparse kernels.
+ * bias is a column vector instead of a row vector. Useful e.g. if we are
+ * computing a GEMM via C^T += B^T A^T. This happens in the 2:4 sparse kernels.
  */
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
 struct ScaledEpilogueColumnBias

@@ -9,7 +9,7 @@ bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability) {
   // sparse CUTLASS kernels need at least
   //   CUDA 12.2 and SM90 (Hopper)
 
-#if defined ENABLE_SPARSE_SCALED_MM_C3X && ENABLE_SPARSE_SCALED_MM_C3X
+#if defined CUDA_VERSION
   return CUDA_VERSION >= 12020 && cuda_device_capability >= 90;
 #endif
 
