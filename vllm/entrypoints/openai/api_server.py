@@ -72,7 +72,6 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
-from vllm.entrypoints.openai.serving_rerank import JinaAIServingRerank
 from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
@@ -311,8 +310,8 @@ def score(request: Request) -> Optional[OpenAIServingScores]:
     return request.app.state.openai_serving_scores
 
 
-def rerank(request: Request) -> Optional[JinaAIServingRerank]:
-    return request.app.state.jinaai_serving_reranking
+def rerank(request: Request) -> Optional[OpenAIServingScores]:
+    return request.app.state.openai_serving_scores
 
 
 def tokenization(request: Request) -> OpenAIServingTokenization:
@@ -807,7 +806,7 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger) if model_config.task in (
             "score", "embed", "pooling") else None
-    state.jinaai_serving_reranking = JinaAIServingRerank(
+    state.jinaai_serving_reranking = OpenAIServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
