@@ -1,0 +1,38 @@
+name: Add label on pre-commit success
+on:
+    workflow_run:
+        workflows: [pre-commit]
+        types: [requested, completed]
+jobs:
+    add-label-on-pre-commit-success:
+        runs-on: ubuntu-latest
+        if: ${{ github.event.workflow_run.conclusion == 'success' }}
+        steps:
+            -   name: Add label
+                uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+                with:
+                    script: |
+                        github.rest.issues.addLabels({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            issue_number: context.issue.number,
+                            labels: ['pre-commit-passed']
+                        })
+                env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    remove-label-on-pre-commit-not-success:
+        runs-on: ubuntu-latest
+        if: ${{ github.event.workflow_run.conclusion != 'success' }}
+        steps:
+            -   name: Remove label
+                uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+                with:
+                    script: |
+                        github.rest.issues.removeLabels({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            issue_number: context.issue.number,
+                            labels: ['pre-commit passed']
+                        })
+                env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
