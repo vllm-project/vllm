@@ -48,8 +48,8 @@ kv_c        latent/compressed KV                shape [Skv, Lkv]
 k_pe        decoupled k position embeddings     shape [Skv, R]
 new_kv_c    new kv_c from current iter          shape [Sq, Lkv]
 new_k_pe    new k_pe from current iter          shape [Sq, R]
-cache_kv_c  cached k_c from previous iters      shape [C, N, Lkv]
-cache_k_pe  cached k_pe from previous iters     shape [C, N, R]
+cache_kv_c  cached k_c from previous iters      shape [C, Lkv]
+cache_k_pe  cached k_pe from previous iters     shape [C, R]
 W_DQ        project h_t to q_c                  shape [H, Lq]
 W_UQ        project q_c to q_nope               shape [Lq, N * P]
 W_QR        project q_c to q_pe                 shape [Lq, N * R]
@@ -77,7 +77,7 @@ v        = (kv_c @ W_UV).view(Skv, N, V)
 //      spda_o shape [Sq, N, V]
 spda_o = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
-    torch.cat([k_nope, k_pe.repeat(Skv, N, R)], dim=-1),
+    torch.cat([k_nope, k_pe.unsqueeze(1).expand(-1, N, -1)], dim=-1),
     v
 ) 
 return spda_o @ W_O
@@ -155,7 +155,7 @@ new_v      = (new_kv_c @ W_UV).view(Sq, N, V)
 //    curr_lse shape [N, Sq], this is just order FA returns
 curr_o, curr_lse = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
-    torch.cat([new_k_nope, new_k_pe.repeat(Sq, N, R)], dim=-1),
+    torch.cat([new_k_nope, new_k_pe..unsqueeze(1).expand(-1, N, -1)], dim=-1),
     new_v,
     casual=True,
     return_softmax_lse=True
@@ -173,7 +173,8 @@ for chunk_idx in range(cdiv(C, MCC)):
     
     chunk_o, chunk_lse = scaled_dot_product_attention(
         torch.cat([q_nope, q_pe], dim=-1),
-        torch.cat([cache_k_nope_chunk, cache_k_pe_chunk.repeat(Sc, N, R)], 
+        torch.cat([cache_k_nope_chunk, 
+                   cache_k_pe_chunk.unsqueeze(1).expand(-1, N, -1)], 
                    dim=-1),
         cache_v_chunk,
         casual=False,
