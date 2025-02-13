@@ -4,8 +4,6 @@ import asyncio
 import os
 from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
 
-import numpy as np
-
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
@@ -254,21 +252,23 @@ class AsyncLLM(EngineClient):
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
-                num_outputs = len(outputs.new_token_id_offsets)
+                num_requests = len(outputs.request_ids)
 
-                if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
-                    slices = [(0, num_outputs)]
+                if num_requests <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
+                    slices = [(0, num_requests)]
                 else:
                     slices = []
-                    parts = np.linspace(
-                        0,
-                        num_outputs,
-                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE) + 1,
-                        dtype='int')[1:]
-                    last = 0
-                    for i in parts:
-                        slices.append((last, i))
-                        last = i
+                    num_chunks = cdiv(num_requests,
+                                      VLLM_V1_OUTPUT_PROC_CHUNK_SIZE)
+                    chunk_size = num_requests // num_chunks
+                    rem = num_requests % num_chunks
+                    start = 0
+                    for i in range(num_chunks):
+                        adj = 1 if rem > 0 else 0
+                        rem = rem - 1
+                        end = start + chunk_size + adj
+                        slices.append((start, end))
+                        start = end
 
                 for i, slice in enumerate(slices):
                     slice_start, slice_end = slice
