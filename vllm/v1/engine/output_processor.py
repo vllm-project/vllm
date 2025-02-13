@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
@@ -164,6 +164,7 @@ class OutputProcessor:
 
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
+            stop_reason = engine_core_output.stop_reason
 
             # TODO(andy): prompt logprobs + chunked prefill can
             # result in engine core returning an output for a
@@ -181,9 +182,10 @@ class OutputProcessor:
 
             # 2) Detokenize the token ids into text and check for stop
             #    strings.
-            stop_reason = req_state.detokenizer.update(new_token_ids)
-            if stop_reason:
+            stop_string = req_state.detokenizer.update(new_token_ids)
+            if stop_string and finish_reason != FinishReason.STOP:
                 finish_reason = FinishReason.STOP
+                stop_reason = stop_string
 
             # 3) Compute sample and prompt logprobs for request,
             #    if required.
@@ -250,7 +252,7 @@ class OutputProcessor:
         request_state: RequestState,
         new_token_ids: List[int],
         finish_reason: Optional[FinishReason],
-        stop_reason: Optional[str],
+        stop_reason: Union[int, str, None],
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
