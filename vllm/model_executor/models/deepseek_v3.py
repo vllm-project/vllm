@@ -54,6 +54,10 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
+import habana_frameworks.torch as htorch
+
+from vllm.platforms import current_platform
+is_hpu = current_platform.is_hpu()
 
 class DeepseekV3MLP(nn.Module):
 
@@ -651,11 +655,16 @@ class DeepseekV3Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        if is_hpu:
+            htorch.core.mark_step()
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i - self.start_layer],
                                             attn_metadata, residual)
+            if is_hpu:
+                htorch.core.mark_step()
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
