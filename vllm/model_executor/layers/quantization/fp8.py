@@ -188,8 +188,6 @@ class Fp8LinearMethod(LinearMethodBase):
         weight_loader = extra_weight_attrs.get("weight_loader")
 
         if self.block_quant:
-            assert not envs.VLLM_FP8_PADDING, (
-                "FP8 weight padding is not supported in block quantization.")
             tp_size = get_tensor_model_parallel_world_size()
             assert self.quant_config.weight_block_size is not None
             block_n, block_k = (
@@ -273,6 +271,17 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.register_parameter("input_scale", None)
 
+    def add_padding_to_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        # Pad the weight tensor. This is an optimization on ROCm platform, which
+        # can benefit from tensors located far enough from one another in memory
+        if (current_platform.is_rocm() and envs.VLLM_FP8_PADDING
+                and weight.stride(-1) == 1
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0):
+            num_pad = 256 // weight.element_size()
+            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+            torch.cuda.empty_cache()
+        return weight
+
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
@@ -285,6 +294,8 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 weight = layer.weight.data
                 weight_scale_inv = layer.weight_scale_inv.data
+
+            weight = self.add_padding_to_weight(weight)
 
             # Torch.compile cannot use Parameter subclasses.
             layer.weight = Parameter(weight, requires_grad=False)
@@ -353,14 +364,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     logical_widths=layer.logical_widths,
                 )
 
-            # Pad the weight
-            if envs.VLLM_FP8_PADDING and weight.stride(-1) == 1 \
-                and (weight.stride(-2) * weight.element_size()) % 512 == 0:
-                num_pad = 256 // weight.element_size()
-                weight = F.pad(weight, (0, num_pad), "constant",
-                               0)[..., :-num_pad]
-                torch.cuda.empty_cache()
-
+            weight = self.add_padding_to_weight(weight)
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
