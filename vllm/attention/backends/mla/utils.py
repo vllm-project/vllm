@@ -268,7 +268,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
-                eye = torch.eye(layer.input_size,
+                eye = torch.eye(layer.input_size_per_partition,
                                 dtype=act_dtype,
                                 device=get_layer_weight(layer).device)
                 dequant_weights = layer.quant_method.apply(layer,
