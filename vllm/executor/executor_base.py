@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
                     Union)
@@ -200,14 +201,22 @@ class ExecutorBase(ABC):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
             return
+        start_time = time.time()
         self.collective_rpc("sleep", kwargs=dict(level=level))
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        logger.info("Sleeping took %.2f seconds.", elapsed_time)
         self.is_sleeping = True
 
     def wake_up(self):
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
+        start_time = time.time()
         self.collective_rpc("wake_up")
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        logger.info("Waking up took %.2f seconds.", elapsed_time)
         self.is_sleeping = False
 
     def save_sharded_state(
