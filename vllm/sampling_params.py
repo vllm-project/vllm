@@ -244,7 +244,7 @@ class SamplingParams(
     ) -> "SamplingParams":
         if logit_bias is not None:
             logit_bias = {
-                int(token): bias
+                int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
 

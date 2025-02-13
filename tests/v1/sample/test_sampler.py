@@ -364,6 +364,7 @@ def test_sampler_logit_bias(device: str, batch_size: int, bias_value: float):
         biased_index = min(batch_idx, VOCAB_SIZE - 1)
         for token_id in range(VOCAB_SIZE):
             if biased_index == token_id:
-                assert logits_for_req[token_id] == bias_value + 1e-2
+                assert logits_for_req[token_id] == pytest.approx(bias_value +
+                                                                 1e-2)
             else:
-                assert logits_for_req[token_id] == 1e-2
+                assert logits_for_req[token_id] == pytest.approx(1e-2)
