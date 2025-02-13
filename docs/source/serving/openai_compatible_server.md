@@ -483,11 +483,11 @@ The following extra parameters are supported:
 
 ### Re-rank API
 
-Our Re-rank API applies a cross-encoder model to predict relevant scores between a single query, and
+Our Re-rank API can apply an embedding model or a cross-encoder model to predict relevant scores between a single query, and
 each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences, on
 a scale of 0 to 1.
 
-You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
 The rerank endpoints support popular re-rank models such as `BAAI/bge-reranker-base` and other models supporting the
 `score` task. Additionally, `/rerank`, `/v1/rerank`, and `/v2/rerank`
