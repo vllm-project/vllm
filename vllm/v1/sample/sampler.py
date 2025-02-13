@@ -37,6 +37,8 @@ class Sampler(nn.Module):
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
+        # Apply logits bias.
+        logits = self.apply_logits_bias(logits, sampling_metadata)
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
         # Apply temperature.

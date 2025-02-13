@@ -428,7 +428,7 @@ class InputBatch:
             min_tokens=self.min_tokens[:self.num_reqs],
             stop_token_ids=self.stop_token_ids[:self.num_reqs],
             no_penalties=self.no_penalties,
-            logit_bias=self.logit_bias,
+            logit_bias=self.logit_bias[:self.num_reqs],
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
