@@ -284,7 +284,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
                 grammar=new_req_data.grammar,
-                bitmask=new_req_data.bitmask,
+                grammar_bitmask=new_req_data.grammar_bitmask,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -357,9 +357,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     token_idx = scheduler_output.num_scheduled_tokens[
                         req_id] - 1
                     if not req_state.grammar.matcher.is_terminated():
-                        assert req_state.bitmask is not None
-                        req_state.grammar.fill_bitmask(req_state.bitmask,
-                                                       token_idx)
+                        assert req_state.grammar_bitmask is not None
+                        req_state.grammar.fill_bitmask(
+                            req_state.grammar_bitmask, token_idx)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -408,7 +408,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                            num_tokens)
             if req_id in scheduler_output.guided_decoding_request_ids:
                 print(self.requests[req_id])
-                bitmask = self.requests[req_id].bitmask
+                bitmask = self.requests[req_id].grammar_bitmask
         num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
                                                     dtype=np.int32)
         assert max_num_scheduled_tokens > 0

@@ -1,28 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import enum
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Optional, Set
+from typing import TYPE_CHECKING, Dict, Set, Tuple
 
 import torch
 import xgrammar as xgr
 
 from vllm.config import VllmConfig
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.v1.request import GuidedDecodingOptions, RequestStatus
 
 if TYPE_CHECKING:
-    from vllm.v1.request import GuidedDecodingKey, Request
+    from vllm.v1.request import Request
+
+
+class GuidedDecodingOptions(enum.Enum):
+    json = enum.auto()
+    regex = enum.auto()
+    grammar = enum.auto()
+    choice = enum.auto()
+
+
+GuidedDecodingKey = Tuple[GuidedDecodingOptions, str]
 
 
 class Grammar:
+    # NOTE: This would be a generic-enough class for
+    # supporting different backends, in the future.
+    # For now, just xgrammar.
+    #
+    # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
+    # for jump-forward decoding
+    # TODO: support max_rollback_tokens
 
     def __init__(self, matcher: xgr.GrammarMatcher, vocab_size: int,
                  ctx: xgr.CompiledGrammar) -> None:
-        # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
-        # for jump-forward decoding TODO: support max_rollback_tokens
         self.matcher = matcher
         self.vocab_size = vocab_size
         self.ctx = ctx
@@ -57,12 +71,6 @@ class Grammar:
         return self.copy()
 
 
-@dataclass
-class GrammarCache:
-    value: Optional[Grammar]
-    event: threading.Event
-
-
 class GuidedDecodingManager:
 
     def __init__(self, vllm_config: VllmConfig):
@@ -74,39 +82,25 @@ class GuidedDecodingManager:
         tokenizer_group.ping()
         self.model_config = vllm_config.model_config
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        self.grammar_cache: Dict[GuidedDecodingKey, GrammarCache] = {}
+
+        tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+            tokenizer_group.get_lora_tokenizer(None),
+            vocab_size=self.vocab_size)
+        self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
+
+        self.grammar_cache: Dict[GuidedDecodingKey, Grammar] = {}
+
         self.executor = ThreadPoolExecutor()
-        self._lock = threading.Lock()
         self.requests: Set[Request] = set()
 
-    def initialize_cache(self, key: GuidedDecodingKey) -> Grammar:
-        request_type, grammar_spec = key
-        tokenizer_info = xgr.TokenizerInfo.from_huggingface(
-            self.tokenizer, vocab_size=self.vocab_size)
-        compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
-
-        if request_type == GuidedDecodingOptions.json:
-            if not isinstance(grammar_spec, str):
-                ctx = compiler.compile_builtin_json_grammar()
-            else:
-                ctx = compiler.compile_json_schema(grammar_spec)
-        elif request_type == GuidedDecodingOptions.grammar:
-            ctx = compiler.compile_grammar(grammar_spec)
-        else:
-            raise ValueError("grammar is not of valid supported types.")
-
-        return Grammar(matcher=xgr.GrammarMatcher(ctx),
-                       vocab_size=self.model_config.hf_text_config.vocab_size,
-                       ctx=ctx)
+        self._lock = threading.Lock()
 
     def should_cache(self, request: Request):
         if not request.use_guided_decoding:
             return False
-        request.grammar = self.get(request)
+        request.grammar = self.get_grammar(request)
         if not request.grammar:
             request.grammar = self.cache(request)
-            request.status = RequestStatus.WAITING_FOR_FSM
             return True
         return False
 
@@ -117,23 +111,31 @@ class GuidedDecodingManager:
         key = request.guided_decoding_key
         self.requests.add(request)
         with self._lock:
-            cache_hit = False
             if key in self.grammar_cache:
-                cache_hit, entry = True, self.grammar_cache[key]
+                return self.grammar_cache[key]
+
+        self.grammar_cache[key] = self.initialize_grammar(key)
+        return self.grammar_cache[key]
+
+    def initialize_grammar(self, key: GuidedDecodingKey) -> Grammar:
+        request_type, grammar_spec = key
+
+        if request_type == GuidedDecodingOptions.json:
+            if not isinstance(grammar_spec, str):
+                ctx = self.compiler.compile_builtin_json_grammar()
             else:
-                entry = GrammarCache(None, threading.Event())
-                self.grammar_cache[key] = entry
-
-        if cache_hit:
-            entry.event.wait()
+                ctx = self.compiler.compile_json_schema(grammar_spec)
+        elif request_type == GuidedDecodingOptions.grammar:
+            ctx = self.compiler.compile_grammar(grammar_spec)
         else:
-            entry.value = self.initialize_cache(key)
-            entry.event.set()
-        return entry.value if entry.value else None
+            raise ValueError(
+                f"`grammar` is not of valid supported types. ({request_type!s})"
+            )
 
-    def get(self, request: Request):
+        return Grammar(matcher=xgr.GrammarMatcher(ctx),
+                       vocab_size=self.vocab_size,
+                       ctx=ctx)
+
+    def get_grammar(self, request: Request):
         with self._lock:
-            entry = self.grammar_cache.get(request.guided_decoding_key)
-            if entry is None or not entry.event.is_set():
-                return None
-            return entry.value if entry.value else None
+            return self.grammar_cache.get(request.guided_decoding_key)

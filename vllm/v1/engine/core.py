@@ -153,13 +153,13 @@ class EngineCore:
         for req in self.guided_decoding_manager.requests:
 
             # Check if grammar is ready in cache
-            grammar = self.guided_decoding_manager.get(req)
+            grammar = self.guided_decoding_manager.get_grammar(req)
             if grammar is not None:
                 print(req.use_guided_decoding, req.is_grammar_ready,
                       req.grammar, grammar)
                 req.grammar = grammar
-                req.allocate_bitmask(1,
-                                     self.guided_decoding_manager.vocab_size)
+                req.allocate_grammar_bitmask(
+                    1, self.guided_decoding_manager.vocab_size)
                 print(req.status)
                 continue
 

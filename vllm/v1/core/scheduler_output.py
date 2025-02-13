@@ -28,7 +28,7 @@ class NewRequestData:
     num_computed_tokens: int
     lora_request: Optional["LoRARequest"]
     grammar: Optional["Grammar"]
-    bitmask: Optional["torch.Tensor"]
+    grammar_bitmask: Optional["torch.Tensor"]
 
     @classmethod
     def from_request(
@@ -48,7 +48,7 @@ class NewRequestData:
                    num_computed_tokens=num_computed_tokens,
                    lora_request=request.lora_request,
                    grammar=request.grammar,
-                   bitmask=request.bitmask)
+                   grammar_bitmask=request.grammar_bitmask)
 
 
 @dataclass

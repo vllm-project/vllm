@@ -41,7 +41,7 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
     grammar: Optional[Grammar] = None
-    bitmask: Optional[torch.Tensor] = None
+    grammar_bitmask: Optional[torch.Tensor] = None
 
     @property
     def num_tokens(self) -> int:
@@ -253,7 +253,7 @@ class InputBatch:
             self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
 
         if request.grammar is not None:
-            self.grammar_reqs[req_id] = request.bitmask
+            self.grammar_reqs[req_id] = request.grammar_bitmask
 
         # Add request lora ID
         if request.lora_request:

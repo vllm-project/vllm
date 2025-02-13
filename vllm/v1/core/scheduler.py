@@ -365,7 +365,6 @@ class Scheduler:
         request: Request,
         new_block_ids: List[int],
         num_computed_tokens: int,
-        *,
         resumed_from_preemption: bool,
     ) -> "CachedRequestData":
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating

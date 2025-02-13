@@ -7,11 +7,13 @@ import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
+from vllm.v1.guided_decoding import (Grammar, GuidedDecodingKey,
+                                     GuidedDecodingOptions)
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -20,18 +22,6 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
-    from vllm.v1.guided_decoding import Grammar
-
-
-class GuidedDecodingOptions(enum.Enum):
-    json = enum.auto()
-    regex = enum.auto()
-    grammar = enum.auto()
-    choice = enum.auto()
-
-
-GuidedDecodingObject = Union[str, Dict[str, Any]]
-GuidedDecodingKey = Tuple[GuidedDecodingOptions, GuidedDecodingObject]
 
 
 class Request:
@@ -88,7 +78,7 @@ class Request:
 
         # Grammar fields, including the grammar object and the bitmask
         self._grammar: Future[Grammar] | Grammar | None = None
-        self._bitmask = None
+        self._grammar_bitmask = None
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> Request:
@@ -164,20 +154,26 @@ class Request:
         params = self.sampling_params.guided_decoding
         assert params is not None, "params can't be None."
         if params.json is not None:
-            key = params.json
-            if params.json_object or type(key) is not str:
-                key = json.dumps(params.json)
-            return (GuidedDecodingOptions.json, key)
+            if params.json_object or not isinstance(params.json, str):
+                json_str = json.dumps(params.json)
+            else:
+                json_str = params.json
+            return (GuidedDecodingOptions.json, json_str)
         elif params.regex is not None:
             return (GuidedDecodingOptions.regex, params.regex)
         elif params.choice is not None:
-            return (GuidedDecodingOptions.choice, params.choice)
+            if not isinstance(params.choice, str):
+                json_str = json.dumps(params.choice)
+            else:
+                json_str = params.choice
+            return (GuidedDecodingOptions.choice, json_str)
         elif params.grammar is not None:
             return (GuidedDecodingOptions.grammar, params.grammar)
         else:
             raise ValueError("No valid guided decoding parameter found")
 
-    def allocate_bitmask(self, batch_size: int, vocab_size: int) -> None:
+    def allocate_grammar_bitmask(self, batch_size: int,
+                                 vocab_size: int) -> None:
         if isinstance(self._grammar, Future):
             try:
                 self._grammar = self._grammar.result(timeout=0.05)
@@ -186,12 +182,12 @@ class Request:
                 return
 
         if self._grammar is not None:
-            self._bitmask = self._grammar.allocate_bitmask(
+            self._grammar_bitmask = self._grammar.allocate_bitmask(
                 batch_size, vocab_size)
 
     @functools.cached_property
-    def bitmask(self) -> Optional[torch.Tensor]:
-        return self._bitmask
+    def grammar_bitmask(self) -> Optional[torch.Tensor]:
+        return self._grammar_bitmask
 
     @property
     def is_grammar_ready(self) -> bool:
