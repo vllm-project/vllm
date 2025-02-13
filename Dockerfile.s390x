@@ -26,7 +26,7 @@ RUN microdnf install -y \
 FROM base as python-install
 ARG PYTHON_VERSION
 
-ENV VIRTUAL_ENV=/opt/venv/vllm
+ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 RUN microdnf install -y \
