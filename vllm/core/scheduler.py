@@ -1159,7 +1159,8 @@ class Scheduler:
             self._allocate_and_set_running(seq_group)
 
             if partial_prefill_metadata is not None:
-                partial_prefill_metadata.increment_partial_prefills(seq_group)
+                partial_prefill_metadata.maybe_increment_partial_prefills(
+                    seq_group)
 
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
