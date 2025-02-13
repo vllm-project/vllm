@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from functools import partial
+from functools import cached_property, partial
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
                     Union, cast)
 
@@ -1003,11 +1003,11 @@ class MolmoProcessorWrapper:
 
         self.processor = processor
 
-    @property
+    @cached_property
     def vocab(self) -> dict[str, int]:
         return self.processor.tokenizer.vocab  # type: ignore
 
-    @property
+    @cached_property
     def max_crops(self) -> int:
         image_processor = self.processor.image_processor  # type: ignore
 
@@ -1016,7 +1016,7 @@ class MolmoProcessorWrapper:
 
         return max_crops
 
-    @property
+    @cached_property
     def base_image_input_size(self) -> tuple[int, int]:
         image_processor = self.processor.image_processor  # type: ignore
 
@@ -1026,7 +1026,7 @@ class MolmoProcessorWrapper:
 
         return tuple(base_image_input_size)
 
-    @property
+    @cached_property
     def image_patch_size(self) -> int:
         image_processor = self.processor.image_processor  # type: ignore
 
@@ -1035,7 +1035,7 @@ class MolmoProcessorWrapper:
 
         return image_patch_size
 
-    @property
+    @cached_property
     def overlap_margins(self) -> tuple[int, int]:
         image_processor = self.processor.image_processor  # type: ignore
 
@@ -1045,7 +1045,7 @@ class MolmoProcessorWrapper:
 
         return left_margin, right_margin
 
-    @property
+    @cached_property
     def image_token_length_w(self) -> int:
         image_processor = self.processor.image_processor  # type: ignore
 
@@ -1054,7 +1054,7 @@ class MolmoProcessorWrapper:
 
         return image_token_length_w
 
-    @property
+    @cached_property
     def image_token_length_h(self) -> int:
         image_processor = self.processor.image_processor  # type: ignore
 
@@ -1071,19 +1071,19 @@ class MolmoProcessorWrapper:
     def always_start_with_space(self) -> bool:
         return True
 
-    @property
+    @cached_property
     def image_patch_id(self) -> int:
         return self.vocab[IMAGE_PATCH_TOKEN]
 
-    @property
+    @cached_property
     def im_col_id(self) -> int:
         return self.vocab[IM_COL_TOKEN]
 
-    @property
+    @cached_property
     def im_start_id(self) -> int:
         return self.vocab[IM_START_TOKEN]
 
-    @property
+    @cached_property
     def im_end_id(self) -> int:
         return self.vocab[IM_END_TOKEN]
 
