@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import enum
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Dict, Set, Tuple
 
@@ -80,12 +79,11 @@ class GuidedDecodingManager:
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
         tokenizer_group.ping()
-        self.model_config = vllm_config.model_config
         self.vocab_size = vllm_config.model_config.get_vocab_size()
 
+        tokenizer = tokenizer_group.get_lora_tokenizer(None)
         tokenizer_info = xgr.TokenizerInfo.from_huggingface(
-            tokenizer_group.get_lora_tokenizer(None),
-            vocab_size=self.vocab_size)
+            tokenizer, vocab_size=self.vocab_size)
         self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
 
         self.grammar_cache: Dict[GuidedDecodingKey, Grammar] = {}
@@ -93,14 +91,13 @@ class GuidedDecodingManager:
         self.executor = ThreadPoolExecutor()
         self.requests: Set[Request] = set()
 
-        self._lock = threading.Lock()
-
     def should_cache(self, request: Request):
         if not request.use_guided_decoding:
             return False
-        request.grammar = self.get_grammar(request)
+        request.grammar = self.grammar_cache.get(request.guided_decoding_key)
         if not request.grammar:
             request.grammar = self.cache(request)
+            print(request.grammar)
             return True
         return False
 
@@ -110,9 +107,8 @@ class GuidedDecodingManager:
     def _executor_loop(self, request: Request):
         key = request.guided_decoding_key
         self.requests.add(request)
-        with self._lock:
-            if key in self.grammar_cache:
-                return self.grammar_cache[key]
+        if key in self.grammar_cache:
+            return self.grammar_cache[key]
 
         self.grammar_cache[key] = self.initialize_grammar(key)
         return self.grammar_cache[key]
@@ -135,7 +131,3 @@ class GuidedDecodingManager:
         return Grammar(matcher=xgr.GrammarMatcher(ctx),
                        vocab_size=self.vocab_size,
                        ctx=ctx)
-
-    def get_grammar(self, request: Request):
-        with self._lock:
-            return self.grammar_cache.get(request.guided_decoding_key)

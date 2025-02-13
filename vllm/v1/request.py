@@ -7,7 +7,7 @@ import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union, cast
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
@@ -198,7 +198,7 @@ class Request:
 
     @property
     def grammar(self) -> Optional[Grammar]:
-        return self._grammar if isinstance(self._grammar, Grammar) else None
+        return cast(Optional[Grammar], self._grammar)
 
     @grammar.setter
     def grammar(self, grammar: Grammar | Future[Grammar]) -> None:
@@ -224,7 +224,7 @@ class RequestStatus(enum.IntEnum):
 
     @staticmethod
     def is_waiting(status: RequestStatus) -> bool:
-        return status < RequestStatus.WAITING_FOR_FSM
+        return status <= RequestStatus.WAITING_FOR_FSM
 
     @staticmethod
     def get_finished_reason(
