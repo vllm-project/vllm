@@ -7,6 +7,7 @@ from vllm import LLM, SamplingParams
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.utils import GiB_bytes
 
+from ..conftest import MODEL_WEIGHTS_S3_BUCKET
 from ..utils import fork_new_process_for_each_test
 
 
@@ -119,7 +120,7 @@ def test_cumem_with_cudagraph():
     "model",
     [
         # sleep mode with safetensors
-        "s3://vllm-ci-model-weights/Llama-3.2-1B",
+        f"{MODEL_WEIGHTS_S3_BUCKET}/Llama-3.2-1B",
         # sleep mode with pytorch checkpoint
         "facebook/opt-125m"
     ])

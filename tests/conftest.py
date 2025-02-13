@@ -57,11 +57,7 @@ MODELS_ON_S3 = [
     "ArthurZ/Ilama-3.2-1B",
 ]
 
-
-@pytest.fixture(scope="session")
-def s3_models():
-    return MODELS_ON_S3
-
+MODEL_WEIGHTS_S3_BUCKET = "s3://vllm-ci-model-weights"
 
 _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
 

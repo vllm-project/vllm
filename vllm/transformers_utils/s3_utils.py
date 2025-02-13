@@ -110,6 +110,7 @@ class S3Model:
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
+
         self.dir = tempfile.mkdtemp()
 
     def __del__(self):
@@ -141,10 +142,11 @@ class S3Model:
             ignore_pattern: A list of patterns of which files not to pull.
 
         """
+        s3_model_path = s3_model_path + "/" if not s3_model_path.endswith(
+            "/") else s3_model_path
         bucket_name, base_dir, files = list_files(self.s3, s3_model_path,
                                                   allow_pattern,
                                                   ignore_pattern)
-        print("List files: ", files)
         if len(files) == 0:
             return
 

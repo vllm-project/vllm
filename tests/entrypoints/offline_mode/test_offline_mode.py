@@ -11,7 +11,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_CONFIGS = [
     {
-        "model": "distilbert/distilgpt2",
+        "model": "s3://vllm-ci-model-weights/distilgpt2",
         "load_format": "runai_streamer",
         "enforce_eager": True,
         "gpu_memory_utilization": 0.20,

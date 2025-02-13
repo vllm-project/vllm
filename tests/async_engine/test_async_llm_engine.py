@@ -140,8 +140,7 @@ def start_engine():
     print(f"Starting engine with num_scheduler_steps={num_scheduler_steps}")
 
     return AsyncLLMEngine.from_engine_args(
-        AsyncEngineArgs(model="s3://vllm-ci-model-weights/distilgpt2",
-                        load_format="runai_streamer",
+        AsyncEngineArgs(model="facebook/opt-125m",
                         enforce_eager=True,
                         num_scheduler_steps=num_scheduler_steps))
 
