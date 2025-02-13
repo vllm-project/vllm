@@ -25,6 +25,8 @@ jobs:
   update-label:
     needs: pre-commit
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: 'write'
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
