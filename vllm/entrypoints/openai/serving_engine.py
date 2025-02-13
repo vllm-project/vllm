@@ -31,7 +31,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ErrorResponse, RerankRequest,
                                               ScoreRequest,
                                               TokenizeChatRequest,
-                                              TokenizeCompletionRequest)
+                                              TokenizeCompletionRequest,
+                                              TranscriptionRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
@@ -57,7 +58,8 @@ CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 
-AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest]
+AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest,
+                   TranscriptionRequest]
 
 
 class TextTokensPrompt(TypedDict):
