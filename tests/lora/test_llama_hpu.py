@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from multiprocessing import Process
 from typing import List
 
