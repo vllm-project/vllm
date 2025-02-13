@@ -3,6 +3,7 @@
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -32,8 +33,10 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.model_executor.layers.quantization.utils.fp8_utils import dequant_block_fp8_weight_naive
 
 if current_platform.is_hpu():
+    import habana_frameworks.torch as htorch
     from vllm_hpu_extension.ops import scaled_fp8_quant
     ops.scaled_fp8_quant = scaled_fp8_quant
 
@@ -385,6 +388,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     bias=bias,
                     original_M=layer.orig_M,
                     original_N=layer.orig_N,
+                    do_unpad=True,
                 )
             else:
                 return apply_w8a8_block_fp8_linear(
@@ -766,15 +770,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         ep_rank=0,
     ):
-        # #assert not use_grouped_topk, 'use_grouped_topk must be False on HPU'
-        # # assert num_expert_group is None, ('num_expert_group is '
-        # #                                   'not supported on HPU')
-        # # assert topk_group is None, 'topk_group is not supported on HPU'
-        # if layer is not None:
-        #     return layer.hpu_fused_moe(x, router_logits, top_k)
-        assert len(x.shape) == 2
-        import habana_frameworks.torch as htorch
-        htorch.core.mark_step()
+        batch_size, seq_len, hidden_dim = x.shape
+        bt = batch_size * seq_len
+        x = x.view(-1, hidden_dim)
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -791,15 +790,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         n_expert_slice = layer.w13_weight.shape[0] // self.moe_n_slice
         assert n_expert_slice * self.moe_n_slice == num_experts
 
-        # w13_list = layer.hpu_fused_moe.MoeOp.w13_list
-        # w2_list = layer.hpu_fused_moe.MoeOp.w2_list
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import dequant_block_fp8_weight_naive
-
         orig_M_w13 = layer.orig_M_w13.data
         orig_N_w13 = layer.orig_N_w13.data
         orig_M_w2 = layer.orig_M_w2.data
         orig_N_w2 = layer.orig_N_w2.data
         ep_shift = ep_rank * num_experts
+
         w13_weight = dequant_block_fp8_weight_naive(layer.w13_weight,
                                                     layer.w13_weight_scale_inv,
                                                     block_size=self.quant_config.weight_block_size,

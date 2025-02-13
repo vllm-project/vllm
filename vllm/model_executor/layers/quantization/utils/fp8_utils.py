@@ -136,6 +136,8 @@ def pad_weight(weight, block_size):
 
 def unpad_weight(weight, original_M, original_N, keep_first_dim=False):
     """Removes padding from the matrix to restore its original shape."""
+    # if weight.shape[-2] == original_M and weight.shape[-1] == original_N:
+    #     return weight
     if keep_first_dim:
         return weight[:, :original_M, :original_N]
     else:
@@ -157,7 +159,7 @@ def pad_block_fp8_weight_naive(weight, weight_scale, block_size):
     return weight, orig_M, orig_N
 
 
-def dequant_block_fp8_weight_naive(weight, weight_scale, block_size, dtype, original_M, original_N):
+def dequant_block_fp8_weight_naive(weight, weight_scale, block_size, dtype, original_M, original_N, do_unpad=False):
 
     assert len(block_size) == 2
     
@@ -183,7 +185,8 @@ def dequant_block_fp8_weight_naive(weight, weight_scale, block_size, dtype, orig
     else:
         raise ValueError("Only support original weight shape is either 2 or 3")
 
-    dequant_weight = unpad_weight(dequant_weight, original_M, original_N, keep_first_dim=keep_first_dim)
+    if do_unpad:
+        dequant_weight = unpad_weight(dequant_weight, original_M, original_N, keep_first_dim=keep_first_dim)
 
     return dequant_weight
 
@@ -197,6 +200,7 @@ def apply_block_fp8_linear_hpu(
     bias: Optional[torch.Tensor] = None,
     original_M: Optional[torch.Tensor] = None,
     original_N: Optional[torch.Tensor] = None,
+    do_unpad: bool = False,
 ) -> torch.Tensor:
     assert input_scale is None
     # View input as 2D matrix for fp8 methods
@@ -204,7 +208,7 @@ def apply_block_fp8_linear_hpu(
     original_M = original_M.data
     original_N = original_N.data
     output_shape = [*input.shape[:-1], original_M]
-    dequant_weight = dequant_block_fp8_weight_naive(weight, weight_scale, block_size, input_2d.dtype, original_M, original_N)
+    dequant_weight = dequant_block_fp8_weight_naive(weight, weight_scale, block_size, input_2d.dtype, original_M, original_N, do_unpad)
     output = torch.nn.functional.linear(input_2d, dequant_weight, bias=None)
     if bias is not None:
         output = output + bias
