@@ -485,7 +485,7 @@ class ModelConfig:
             return "embed"
         if ModelRegistry.is_cross_encoder_model(architectures):
             return "score"
-        if "WhisperForConditionalGeneration" in architectures:
+        if ModelRegistry.is_transcription_model(architectures):
             return "transcription"
 
         suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
@@ -519,8 +519,8 @@ class ModelConfig:
         runner_support: Dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
-            "transcription": "WhisperForConditionalGeneration" in \
-                hf_config.architectures,
+            "transcription":
+            ModelRegistry.is_transcription_model(architectures),
             "generate": ModelRegistry.is_text_generation_model(architectures),
             "pooling": ModelRegistry.is_pooling_model(architectures),
         }
