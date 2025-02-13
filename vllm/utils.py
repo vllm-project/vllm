@@ -947,6 +947,9 @@ def current_stream() -> torch.cuda.Stream:
     if _current_stream is None:
         # when this function is called before any stream is set,
         # we return the default stream.
+        # On ROCm using the default 0 stream in combination with RCCL
+        # is hurting performance. Therefore creating a dedicated stream
+        # per process
         _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
         ) else torch.cuda.current_stream()
     return _current_stream
