@@ -9,17 +9,21 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               UnquantizedLinearMethod,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.gptq_utils import (
+    get_linear_quant_method)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, marlin_moe_permute_scales,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
                                            PackedColumnParameter,
@@ -47,11 +51,40 @@ class GPTQMarlinConfig(QuantizationConfig):
         desc_act: bool,
         is_sym: bool,
         lm_head_quantized: bool,
+        dynamic: Dict[str, Dict[str, Union[int, bool]]],
     ) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
             desc_act = False
+
+        # GPTQModel use `dynamic` config property to allow per module
+        # quantization config so each module can be individually optimized.
+        # Format is Dict[str, Dict] where key is a regex string that can
+        # perform both positive ("+:" prefixed) or negative ("-:" prefixed)
+        # matching of a module.
+        # Default to positive match, override base quant config mode, if no
+        # prefix is used. Value is in dict format of field key and override
+        # value.
+        # Negative matching will skip quantization init for this module
+        # entirely:
+        # non-quantized inference. More details and quantization examples can be
+        # found at: https://github.com/ModelCloud/GPTQModel
+        # Example:
+        #  # last 1/2 of the layers 10-21 has 8bit vs 4bit for 0-9
+        #  # last 1/4 of the layers 16-21 has 8bit and group_size 64
+        # dynamic = {
+        #  #`.*\.` matches the layers_node prefix
+        #  # positive match layer 10-15
+        #  r"+:.*\.(?:1[0-5])\..*": {"bits": 8,},
+        #  # positive match layer 16-21
+        #  r"+:.*\.(?:1[6-9]|20|21)\..*": {"bits": 8, "group_size": 64,},
+        #  r"-:.*\.moe\..*": {}, # negative match (skip) all `moe` layers
+        # }
+        self.dynamic = dynamic
+
+        self.weight_bits = weight_bits
+        self.is_sym = is_sym
 
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
@@ -68,7 +101,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         return (f"GPTQMarlinConfig(quant_type={self.quant_type}, "
                 f"group_size={self.group_size}, "
                 f"desc_act={self.desc_act}, "
-                f"lm_head_quantized={self.lm_head_quantized})")
+                f"lm_head_quantized={self.lm_head_quantized}), "
+                f"dynamic={self.dynamic}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -88,6 +122,9 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlinConfig":
+        dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
+        dynamic = {} if dynamic is None else dynamic
+
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
@@ -95,7 +132,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
         return cls(weight_bits, group_size, desc_act, is_sym,
-                   lm_head_quantized)
+                   lm_head_quantized, dynamic)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -120,17 +157,15 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod"]]:
-        if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
-                                             and self.lm_head_quantized):
-            return GPTQMarlinLinearMethod(self)
-        elif isinstance(layer, FusedMoE):
+    ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod",
+                        UnquantizedLinearMethod, UnquantizedEmbeddingMethod]]:
+        if isinstance(layer, FusedMoE):
             return GPTQMarlinMoEMethod(self)
-        return None
+        return get_linear_quant_method(self, layer, prefix,
+                                       GPTQMarlinLinearMethod)
 
     @classmethod
     def is_gptq_marlin_compatible(cls, quant_config: Dict[str, Any]):
-        # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")
         group_size = quant_config.get("group_size")
@@ -143,7 +178,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         if quant_method != "gptq":
             return False
 
-        # If we cannot find the info needed in the config, cannot convert.
+        # Marlin conversion is only valid if required properties are found
         if (num_bits is None or group_size is None or sym is None
                 or desc_act is None):
             return False
