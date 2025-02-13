@@ -201,8 +201,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     input_batch.condense(req_indices_to_remove)
 
     # Generate the sampling metadata
-    sampling_metadata = input_batch.make_sampling_metadata(
-        req_id_output_token_ids, skip_copy=False)
+    sampling_metadata = input_batch._make_sampling_metadata()
 
     # Create expected output.
     expected_sampling_metadata = _construct_expected_sampling_metadata(

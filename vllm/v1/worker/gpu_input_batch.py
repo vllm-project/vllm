@@ -3,7 +3,7 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, cast
 
 import numpy as np
 import torch
@@ -12,6 +12,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
@@ -61,7 +62,7 @@ class InputBatch:
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
 
-        self.req_ids: List[Optional[str]] = [None] * max_num_reqs
+        self._req_ids: List[Optional[str]] = []
         self.req_id_to_index: Dict[str, int] = {}
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
@@ -159,10 +160,7 @@ class InputBatch:
         self.repetition_penalties_reqs: Set[str] = set()
 
         self.min_tokens: List[int] = [0] * max_num_reqs
-        self.stop_token_ids: List[Set[int]] = [
-            set() for _ in range(max_num_reqs)
-        ]
-        self.prompt_token_ids: Optional[torch.Tensor] = None
+        self.stop_token_ids: List[Set[int]] = [set()] * max_num_reqs
 
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
@@ -183,6 +181,17 @@ class InputBatch:
         self.logit_bias: List[Optional[Dict[int,
                                             float]]] = [None] * max_num_reqs
 
+        self.req_output_token_ids: List[Optional[List[int]]] = []
+
+        # This is updated each time the batch constituents change.
+        self.sampling_metadata = self._make_sampling_metadata()
+
+    @property
+    def req_ids(self) -> List[str]:
+        # None elements should only be present transiently
+        # while performing state updates to the batch.
+        return cast(List[str], self._req_ids)
+
     def add_request(
         self,
         request: "CachedRequestState",
@@ -193,7 +202,13 @@ class InputBatch:
         assert req_index < self.max_num_reqs
 
         req_id = request.req_id
-        self.req_ids[req_index] = req_id
+        if req_index == len(self._req_ids):
+            self._req_ids.append(req_id)
+            self.req_output_token_ids.append(request.output_token_ids)
+        else:
+            self._req_ids[req_index] = req_id
+            self.req_output_token_ids[req_index] = request.output_token_ids
+
         self.req_id_to_index[req_id] = req_index
 
         # Copy the prompt token ids and output token ids.
@@ -264,10 +279,13 @@ class InputBatch:
             self.request_lora_mapping[req_index] = 0
 
     def remove_request(self, req_id: str) -> Optional[int]:
+        """This method must always be followed by a call to condense()."""
+
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
-        self.req_ids[req_index] = None
+        self._req_ids[req_index] = None
+        self.req_output_token_ids[req_index] = None
 
         self.greedy_reqs.discard(req_id)
         self.random_reqs.discard(req_id)
@@ -293,7 +311,8 @@ class InputBatch:
         return req_index
 
     def clear(self) -> None:
-        self.req_ids = [None] * self.max_num_reqs
+        self._req_ids.clear()
+        self.req_output_token_ids.clear()
         self.req_id_to_index.clear()
         self.greedy_reqs.clear()
         self.random_reqs.clear()
@@ -311,13 +330,15 @@ class InputBatch:
         self.logit_bias = [None] * self.max_num_reqs
 
     def condense(self, empty_req_indices: List[int]) -> None:
-        if self.num_reqs == 0:
+        num_reqs = self.num_reqs
+        if num_reqs == 0:
             # The batched states are empty.
+            self.clear()
             return
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
         # is sorted in descending order.
-        last_req_index = self.num_reqs + len(empty_req_indices) - 1
+        last_req_index = num_reqs + len(empty_req_indices) - 1
         while empty_req_indices:
             # Find the largest non-empty index.
             while last_req_index in empty_req_indices:
@@ -329,10 +350,13 @@ class InputBatch:
                 break
 
             # Swap the states.
-            req_id = self.req_ids[last_req_index]
+            req_id = self._req_ids[last_req_index]
+            output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None
-            self.req_ids[empty_index] = req_id
-            self.req_ids[last_req_index] = None
+            self._req_ids[empty_index] = req_id
+            self._req_ids[last_req_index] = None
+            self.req_output_token_ids[empty_index] = output_token_ids
+            self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
             num_tokens = self.num_tokens[last_req_index]
@@ -369,43 +393,39 @@ class InputBatch:
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
-    def make_sampling_metadata(
-        self,
-        req_id_output_token_ids: Dict[str, List[int]],
-        skip_copy: bool = False,
-    ) -> SamplingMetadata:
-        if not skip_copy:
-            self.temperature[:self.num_reqs].copy_(
-                self.temperature_cpu_tensor[:self.num_reqs], non_blocking=True)
-            self.top_p[:self.num_reqs].copy_(
-                self.top_p_cpu_tensor[:self.num_reqs], non_blocking=True)
-            self.top_k[:self.num_reqs].copy_(
-                self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
-            if not self.no_penalties:
-                # Since syncing these tensors is expensive only copy them
-                # if necessary i.e. if there are requests which require
-                # penalties to be applied during sampling.
-                self.frequency_penalties[:self.num_reqs].copy_(
-                    self.frequency_penalties_cpu_tensor[:self.num_reqs],
-                    non_blocking=True,
-                )
-                self.presence_penalties[:self.num_reqs].copy_(
-                    self.presence_penalties_cpu_tensor[:self.num_reqs],
-                    non_blocking=True,
-                )
-                self.repetition_penalties[:self.num_reqs].copy_(
-                    self.repetition_penalties_cpu_tensor[:self.num_reqs],
-                    non_blocking=True,
-                )
-                # The prompt tokens are used only for applying penalties during
-                # the sampling process. Hence copy these tensors only when
-                # there are requests which need penalties to be applied.
-                self.prompt_token_ids = self._make_prompt_token_ids_tensor()
+        del self._req_ids[self.num_reqs:]
+        del self.req_output_token_ids[self.num_reqs:]
 
-        output_token_ids: List[List[int]] = []
+        # num_reqs entries should be non-None
+        assert all(req_id is not None
+                   for req_id in self._req_ids), "req_ids contains None"
 
-        for req_id in self.req_ids[:self.num_reqs]:
-            assert req_id is not None
+    def refresh_sampling_metadata(self):
+        self.sampling_metadata = self._make_sampling_metadata()
+
+    def _make_sampling_metadata(self) -> SamplingMetadata:
+
+        num_reqs = self.num_reqs
+        copy_slice(self.temperature_cpu_tensor, self.temperature, num_reqs)
+        copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
+        copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
+
+        if not self.no_penalties:
+            # Since syncing these tensors is expensive only copy them
+            # if necessary i.e. if there are requests which require
+            # penalties to be applied during sampling.
+            copy_slice(self.frequency_penalties_cpu_tensor,
+                       self.frequency_penalties, num_reqs)
+            copy_slice(self.presence_penalties_cpu_tensor,
+                       self.presence_penalties, num_reqs)
+            copy_slice(self.repetition_penalties_cpu_tensor,
+                       self.repetition_penalties, num_reqs)
+
+            # The prompt tokens are used only for applying penalties during
+            # the sampling process. Hence copy these tensors only when
+            # there are requests which need penalties to be applied.
+            prompt_token_ids = self._make_prompt_token_ids_tensor()
+
             # Currently we create a tensor for output_token_ids from scratch
             # at each step. However, for the penalties computation what we
             # need is stats about the token ids present in the output. This
@@ -413,27 +433,28 @@ class InputBatch:
             # from scratch at each step.
             # TODO - Replace this with incremental update to output token
             # statistics.
-            output_token_ids.append(req_id_output_token_ids[req_id])
+        else:
+            prompt_token_ids = None
 
         return SamplingMetadata(
-            temperature=self.temperature[:self.num_reqs],
+            temperature=self.temperature[:num_reqs],
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            top_p=self.top_p[:self.num_reqs],
-            top_k=self.top_k[:self.num_reqs],
+            top_p=self.top_p[:num_reqs],
+            top_k=self.top_k[:num_reqs],
             no_top_p=self.no_top_p,
             no_top_k=self.no_top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
-            prompt_token_ids=self.prompt_token_ids,
-            frequency_penalties=self.frequency_penalties[:self.num_reqs],
-            presence_penalties=self.presence_penalties[:self.num_reqs],
-            repetition_penalties=self.repetition_penalties[:self.num_reqs],
-            output_token_ids=output_token_ids,
-            min_tokens=self.min_tokens[:self.num_reqs],
-            stop_token_ids=self.stop_token_ids[:self.num_reqs],
+            prompt_token_ids=prompt_token_ids,
+            frequency_penalties=self.frequency_penalties[:num_reqs],
+            presence_penalties=self.presence_penalties[:num_reqs],
+            repetition_penalties=self.repetition_penalties[:num_reqs],
+            output_token_ids=cast(List[List[int]], self.req_output_token_ids),
+            min_tokens=self.min_tokens[:num_reqs],
+            stop_token_ids=self.stop_token_ids[:num_reqs],
             no_penalties=self.no_penalties,
-            logit_bias=self.logit_bias[:self.num_reqs],
+            logit_bias=self.logit_bias[:num_reqs],
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
