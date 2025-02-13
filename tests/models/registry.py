@@ -139,7 +139,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "InternLM3ForCausalLM": _HfExamplesInfo("internlm/internlm3-8b-instruct",
                                             trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
-    "JambaForCausalLM": _HfExamplesInfo("ai21labs/Jamba-tiny-dev"),
+    "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
+                                        extras={"tiny": "ai21labs/Jamba-tiny-dev"}),  # noqa: E501
     "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Meta-Llama-3-8B"),
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
@@ -240,10 +241,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
-    "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m"),
+    "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
+                                      extras={"2b": "h2oai/h2ovl-mississippi-2b"}),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
+                                         extras={"2B": "OpenGVLab/InternVL2-2B"},  # noqa: E501
                                          trust_remote_code=True),
-    "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3"),  # noqa: E501
+    "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
+                                                        {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
                                                      extras={"mistral": "mistral-community/pixtral-12b"}),  # noqa: E501
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-v1.6-mistral-7b-hf"),  # noqa: E501
@@ -253,7 +257,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
                                 trust_remote_code=True),
-    "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-V-2_6",
+    "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
+                                extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
                                         trust_remote_code=True),
