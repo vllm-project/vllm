@@ -354,7 +354,7 @@ class AsyncLLM(EngineClient):
             for task in active:
                 task.cancel()
 
-    async def generate(
+    def generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -367,10 +367,8 @@ class AsyncLLM(EngineClient):
         n = sampling_params.n
         _generate  = self._generate if n is None or n == 1 \
             else self._generate_parallel_sampling
-        return _generate(prompt, sampling_params,
-                                    request_id, lora_request,
-                                    trace_headers,
-                                    prompt_adapter_request, priority)
+        return _generate(prompt, sampling_params, request_id, lora_request,
+                         trace_headers, prompt_adapter_request, priority)
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
