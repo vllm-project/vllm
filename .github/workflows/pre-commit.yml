@@ -16,5 +16,34 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+      id: pre-commit
+      continue-on-error: true
       with:
         extra_args: --all-files --hook-stage manual
+    - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+      if: steps.pre-commit.outcome == 'success'
+      with:
+        script: |
+          github.rest.issues.addLabels({
+            owner: context.repo.owner,
+            repo: context.repo.name,
+            issue_number: context.issue.number,
+            labels: ['pre-commit-passed']
+          })
+    - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+      if: steps.pre-commit.outcome != 'success'
+      with:
+        script: |
+          try {
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.name,
+              issue_number: context.issue.number,
+              name: 'pre-commit-passed'
+            })
+          } catch (e) {
+            // Label might not exist, which is fine
+            if (e.status !== 404) {
+              throw e;
+            }
+          }
