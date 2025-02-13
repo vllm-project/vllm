@@ -25,6 +25,7 @@ class DeviceCommunicatorBase:
         self.world_size = dist.get_world_size(cpu_group)
         self.ranks = dist.get_process_group_ranks(cpu_group)
         self.global_rank = dist.get_rank()
+        self.global_world_size = dist.get_world_size()
         self.rank_in_group = dist.get_group_rank(self.cpu_group,
                                                  self.global_rank)
 
