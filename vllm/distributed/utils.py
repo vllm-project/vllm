@@ -80,17 +80,9 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
         if sum(partitions) != num_hidden_layers:
             raise ValueError(
                 f"{sum(partitions)=} does not match {num_hidden_layers=}.")
-        if envs.VLLM_USE_V1 and len(set(partitions)) != 1:
-            raise NotImplementedError(
-                f"Currently in V1, all pipeline parallel stages need to have "
-                f"the same number of layers. Got {partitions=}.")
         start_layer = sum(partitions[:pp_rank])
         end_layer = start_layer + partitions[pp_rank]
     else:
-        if envs.VLLM_USE_V1 and num_hidden_layers % pp_size != 0:
-            raise NotImplementedError(
-                f"Currently in V1, num_hidden_layers={num_hidden_layers} "
-                f"must be divisible by pp_size={pp_size}.")
         layers_per_partition = num_hidden_layers // pp_size
         start_layer = pp_rank * layers_per_partition
         end_layer = start_layer + layers_per_partition
