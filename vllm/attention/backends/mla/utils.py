@@ -444,28 +444,30 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         num_prefill_tokens: int = attn_metadata.num_prefill_tokens
 
+        decode_hs_or_q_c = hidden_states_or_q_c[num_prefill_tokens:]
+        decode_k_pe = k_pe[num_prefill_tokens:]
+        decode_input_positions = \
+            attn_metadata.input_positions[num_prefill_tokens:]
+
+        prefill_hs_or_q_c = hidden_states_or_q_c[:num_prefill_tokens]
+        prefill_k_pe = k_pe[:num_prefill_tokens]
+        prefill_input_positions = \
+            attn_metadata.input_positions[:num_prefill_tokens]
+        prefill_k_c_normed = k_c_normed[:num_prefill_tokens]
+
         if has_decode:
-            decode_q = hidden_states_or_q_c[num_prefill_tokens:]
-            decode_q_nope = self._q_proj_and_k_up_proj(decode_q)
-            decode_q_pe = torch.matmul(decode_q, self.W_QR)\
+            decode_q_nope = self._q_proj_and_k_up_proj(decode_hs_or_q_c)
+            decode_q_pe = torch.matmul(decode_hs_or_q_c, self.W_QR)\
                 .view(-1, self.num_heads, self.qk_rope_head_dim)
-            decode_q_pe, k_pe[num_prefill_tokens:] = \
-                self.rotary_emb(
-                    attn_metadata.input_positions[num_prefill_tokens:],
-                    decode_q_pe, k_pe[num_prefill_tokens:])
+            decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
+                decode_input_positions, decode_q_pe, decode_k_pe)
 
         if has_prefill:
-            prefill_q = \
-                self.q_proj(hidden_states_or_q_c[:num_prefill_tokens])[0]\
+            prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
                 .view(-1, self.num_heads, self.qk_head_dim)
-
-            # TODO(lucas): there must be a nicer way to write this line
-            prefill_q[..., self.qk_nope_head_dim:], \
-                k_pe[:num_prefill_tokens] = \
-                self.rotary_emb(
-                    attn_metadata.input_positions[:num_prefill_tokens],
-                    prefill_q[..., self.qk_nope_head_dim:],
-                    k_pe[:num_prefill_tokens])
+            prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
+            prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
+                prefill_input_positions, prefill_q_pe, prefill_k_pe)
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
@@ -477,16 +479,15 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 kv_cache_dtype=self.kv_cache_dtype,
                 scale=layer._k_scale,
             )
+
         output = torch.empty(attn_metadata.num_prefill_tokens +
                              attn_metadata.num_decode_tokens,
                              self.o_proj.output_size,
                              device=hidden_states_or_q_c.device,
                              dtype=hidden_states_or_q_c.dtype)
-
         if has_prefill:
             output[:num_prefill_tokens] = self._forward_prefill(
-                prefill_q, k_c_normed[:num_prefill_tokens].contiguous(),
-                k_pe[:num_prefill_tokens].contiguous(), kv_cache,
+                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
                 attn_metadata)
 
         if has_decode:
