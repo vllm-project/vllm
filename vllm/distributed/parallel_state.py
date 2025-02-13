@@ -153,6 +153,7 @@ class GroupCoordinator:
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
     use_device_communicator: bool  # whether to use device communicator
+    device_communicator: DeviceCommunicatorBase  # device communicator
     mq_broadcaster: Optional[Any]  # shared memory broadcaster
 
     def __init__(
@@ -199,7 +200,7 @@ class GroupCoordinator:
 
         self.use_device_communicator = use_device_communicator
 
-        self.device_communicator: Optional[DeviceCommunicatorBase] = None
+        self.device_communicator: DeviceCommunicatorBase = None  # type: ignore
         if use_device_communicator and self.world_size > 1:
             device_comm_cls = resolve_obj_by_qualname(
                 current_platform.get_device_communicator_cls())

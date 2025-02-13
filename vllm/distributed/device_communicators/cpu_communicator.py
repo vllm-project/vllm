@@ -13,7 +13,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
     def __init__(self,
                  cpu_group: ProcessGroup,
                  device: Optional[torch.device] = None,
-                 device_group: Optional[Optional] = None,
+                 device_group: Optional[ProcessGroup] = None,
                  unique_name: str = ""):
         super().__init__(cpu_group, device, device_group, unique_name)
         self.ipex_available = False
