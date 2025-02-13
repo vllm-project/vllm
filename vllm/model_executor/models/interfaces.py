@@ -455,3 +455,30 @@ class SupportsQuant:
         self.quant_config = quant_config
         self.quant_config.packed_modules_mapping.update(
             self.packed_modules_mapping)
+
+
+@runtime_checkable
+class SupportsTranscription(Protocol):
+    """The interface required for all models that support transcription."""
+
+    supports_transcription: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_transcription(
+        model: Type[object]) -> TypeIs[Type[SupportsTranscription]]:
+    ...
+
+
+@overload
+def supports_transcription(model: object) -> TypeIs[SupportsTranscription]:
+    ...
+
+
+def supports_transcription(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsTranscription]], TypeIs[SupportsTranscription]]:
+    if isinstance(model, type):
+        return isinstance(model, SupportsTranscription)
+
+    return isinstance(model, SupportsTranscription)
