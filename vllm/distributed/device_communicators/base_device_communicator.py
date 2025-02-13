@@ -24,8 +24,9 @@ class DeviceCommunicatorBase:
         self.rank = dist.get_rank(cpu_group)
         self.world_size = dist.get_world_size(cpu_group)
         self.ranks = dist.get_process_group_ranks(cpu_group)
-        global_rank = dist.get_rank()
-        self.rank_in_group = dist.get_group_rank(self.cpu_group, global_rank)
+        self.global_rank = dist.get_rank()
+        self.rank_in_group = dist.get_group_rank(self.cpu_group,
+                                                 self.global_rank)
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
