@@ -54,7 +54,8 @@ pip list | grep triton
 
 ### 2. Install VLLM
 ```bash
-pip install vllm
+cd vllm-fork
+pip install -e .
 ```
 
 ---
