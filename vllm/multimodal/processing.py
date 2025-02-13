@@ -830,6 +830,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_kwargs,
         )
 
+    def _hf_processor_applies_repl(self) -> bool:
+        """
+        Return whether the HF processor applies prompt replacements.
+
+        For most HF processors, this should be :code:`True`.
+        """
+        return True
+
     def _apply_hf_processor_text_mm(
         self,
         prompt_text: str,
@@ -840,8 +848,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Apply the HF processor on the prompt text and multi-modal data
         together.
 
-        In addition, return whether prompt replacements have been applied
-        (for most HF processors, this should be `True`).
+        In addition, return whether prompt replacements have been applied.
         """
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
@@ -859,7 +866,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
         )
 
-        return prompt_ids, mm_kwargs, True
+        return prompt_ids, mm_kwargs, self._hf_processor_applies_repl()
 
     def _apply_hf_processor_text_only(self, prompt_text: str) -> list[int]:
         """
