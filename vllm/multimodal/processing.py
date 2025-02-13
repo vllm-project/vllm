@@ -830,7 +830,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_kwargs,
         )
 
-    def _hf_processor_applies_repl(self) -> bool:
+    def _hf_processor_applies_repl(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
         """
         Return whether the HF processor applies prompt replacements.
 
@@ -866,7 +871,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
         )
 
-        return prompt_ids, mm_kwargs, self._hf_processor_applies_repl()
+        is_repl_applied = self._hf_processor_applies_repl(
+            prompt_text=prompt_text,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return prompt_ids, mm_kwargs, is_repl_applied
 
     def _apply_hf_processor_text_only(self, prompt_text: str) -> list[int]:
         """
