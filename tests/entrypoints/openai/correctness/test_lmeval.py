@@ -13,7 +13,7 @@ import pytest
 
 from vllm.platforms import current_platform
 
-from ...utils import RemoteOpenAIServer
+from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
 NUM_CONCURRENT = 500
