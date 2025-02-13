@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
     Implements a distributed key-value (KV) cache transfer mechanism.
 
@@ -75,14 +76,18 @@ class SimpleDictBuffer(KVLookupBufferBase):
                     break
 
                 key_bytes = self.data_pipe.recv_tensor()
-                key_hash = _byte_tensor_to_string(key_bytes)
+                key_hashes = _byte_tensor_to_string(key_bytes).split(";")
 
                 with self.buffer_lock:
-                    if key_hash in self.buffer:
+                    for key_hash in key_hashes:
+                        if key_hash not in self.buffer:
+                            self.data_pipe.send_tensor(None)
+                            raise RuntimeError(
+                                f"Key {key_hash} not found in buffer")
+
+                    for key_hash in key_hashes:
                         self.data_pipe.send_tensor(self.buffer[key_hash])
                         del self.buffer[key_hash]
-                    else:
-                        self.data_pipe.send_tensor(None)
 
         except RuntimeError as e:
             if 'Connection closed by peer' not in str(e):
@@ -90,16 +95,19 @@ class SimpleDictBuffer(KVLookupBufferBase):
 
         logger.debug("Closing drop_select_handler")
 
-    def drop_select(self, key: str) -> List[Optional[torch.Tensor]]:
+    def drop_select(self, keys: List[str]) -> List[Optional[torch.Tensor]]:
 
         assert self.request_handling_thread is None, \
             "drop_select should be called by the KV cache consumer "\
             "(e.g. the decode vLLM instance)"
 
         self.signal_pipe.send_tensor(self.normal_signal)
-        self.data_pipe.send_tensor(_string_to_byte_tensor(key))
 
-        value = self.data_pipe.recv_tensor()
+        self.data_pipe.send_tensor(_string_to_byte_tensor(";".join(keys)))
+
+        value = []
+        for _ in range(len(keys)):
+            value.append(self.data_pipe.recv_tensor())
 
         return value
 

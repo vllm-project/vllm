@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Simple KV Cache Connector for Distributed Machine Learning Inference
 
@@ -103,7 +104,7 @@ class LayerwiseConnector(KVConnectorBase):
                 self.config.kv_buffer_size,
             )
 
-    def select(self, key: str) -> Optional[torch.Tensor]:
+    def select(self, key: List[str]) -> Optional[List[torch.Tensor]]:
 
         assert self.consumer_buffer is not None, "Please initialize the "\
             "consumer buffer before calling select."
@@ -140,9 +141,8 @@ class LayerwiseConnector(KVConnectorBase):
             end_pos = start_pos + slen
             current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
-            page_index = [
-                x // block_size for x in current_slot_mapping[::block_size]
-            ]
+            page_index = current_slot_mapping[::block_size].div(
+                block_size, rounding_mode='floor').long()
 
             paged_kv_cache = kv_cache[:, page_index, ...]
 
@@ -189,6 +189,7 @@ class LayerwiseConnector(KVConnectorBase):
         hidden_or_intermediate_states_for_one_req = []
 
         try:
+
             for idx, slen in enumerate(seq_lens):
 
                 start_pos = sum(seq_lens[:idx])
@@ -198,27 +199,35 @@ class LayerwiseConnector(KVConnectorBase):
                 current_slot_mapping = slot_mapping[start_pos:end_pos]
                 num_tokens = slen
 
+                page_index = current_slot_mapping[::block_size].div(
+                    block_size, rounding_mode='floor').long()
+
+                keys = [
+                    self._get_kv_cache_key(current_tokens_hash, i)
+                    for i in range(model_executable.model.start_layer,
+                                   model_executable.model.end_layer)
+                ]
+
+                recv_kv_cache = self.select(keys)
+
+                assert model_executable.model.end_layer - \
+                    model_executable.model.start_layer == len(recv_kv_cache)
+
                 for i in range(model_executable.model.start_layer,
                                model_executable.model.end_layer):
 
                     kv_cache = kv_caches[i -
                                          model_executable.model.start_layer]
 
-                    kv_cache_key = self._get_kv_cache_key(
-                        current_tokens_hash, i)
-                    recv_kv_cache = self.select(kv_cache_key)
-                    page_index = [
-                        x // block_size
-                        for x in current_slot_mapping[::block_size]
-                    ]
-                    kv_cache[:, page_index, ...] = recv_kv_cache
+                    kv_cache[:, page_index, ...] = recv_kv_cache[i]
 
                 hs_cache_key = self._get_hs_cache_key(current_tokens_hash)
-                hidden_states = self.select(hs_cache_key)
+                hidden_states = self.select([hs_cache_key])
 
-                hidden_or_intermediate_states_for_one_req.append(hidden_states)
+                hidden_or_intermediate_states_for_one_req.append(
+                    hidden_states[0])
 
-                assert num_tokens == hidden_states.shape[0]
+                assert num_tokens == hidden_states[0].shape[0]
 
         except Exception as e:
             import traceback
