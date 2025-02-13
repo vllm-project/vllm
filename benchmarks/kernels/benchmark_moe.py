@@ -208,12 +208,12 @@ def get_configs_compute_bound(use_fp16) -> List[Dict[str, int]]:
 
 
 def prune_rocm_search_space(num_tokens, shard_intermediate_size, hidden_size,
-                            search_space, is_fp16):
+                            search_space, is_fp16, topk):
     N1, K1 = shard_intermediate_size, hidden_size
     N2, K2 = hidden_size, shard_intermediate_size // 2
-    pruned_space_1 = prune_rocm_configs(num_tokens * 2, N1, K1, search_space,
+    pruned_space_1 = prune_rocm_configs(num_tokens * topk, N1, K1, search_space,
                                         is_fp16)
-    pruned_space_2 = prune_rocm_configs(num_tokens * 2, N2, K2, search_space,
+    pruned_space_2 = prune_rocm_configs(num_tokens * topk, N2, K2, search_space,
                                         is_fp16)
     search_space = merge_unique_dicts(pruned_space_1, pruned_space_2)
     return search_space
@@ -380,7 +380,7 @@ class BenchmarkWorker:
             search_space = prune_rocm_search_space(num_tokens,
                                                    shard_intermediate_size,
                                                    hidden_size, search_space,
-                                                   is_fp16)
+                                                   is_fp16, topk)
 
         with torch.cuda.device(self.device_id):
             for config in tqdm(search_space):
@@ -437,7 +437,7 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
 def save_configs(configs: Dict[int, BenchmarkConfig], num_experts: int,
                  shard_intermediate_size: int, hidden_size: int, topk: int,
                  dtype: torch.dtype, use_fp8_w8a8: bool,
-                 use_int8_w8a16: bool) -> None:
+                 use_int8_w8a16: bool, block_quant_shape: List[int]) -> None:
     dtype_str = get_config_dtype_str(dtype,
                                      use_int8_w8a16=use_int8_w8a16,
                                      use_fp8_w8a8=use_fp8_w8a8)
@@ -445,7 +445,7 @@ def save_configs(configs: Dict[int, BenchmarkConfig], num_experts: int,
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
     filename = get_config_file_name(num_experts, shard_intermediate_size // 2,
-                                    dtype_str)
+                                    dtype_str, block_quant_shape)
 
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
@@ -458,6 +458,7 @@ def main(args: argparse.Namespace):
 
     config = AutoConfig.from_pretrained(
         args.model, trust_remote_code=args.trust_remote_code)
+    block_quant_shape = None
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
@@ -473,6 +474,7 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
+        block_quant_shape = [128, 128]
     else:
         # Default: Mixtral.
         E = config.num_local_experts
@@ -523,7 +525,7 @@ def main(args: argparse.Namespace):
             for M, config in zip(batch_sizes, configs)
         }
         save_configs(best_configs, E, shard_intermediate_size, hidden_size,
-                     topk, dtype, use_fp8_w8a8, use_int8_w8a16)
+                     topk, dtype, use_fp8_w8a8, use_int8_w8a16, block_quant_shape)
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
     else:
