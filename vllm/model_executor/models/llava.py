@@ -294,7 +294,7 @@ class PixtralHFMultiModalProcessor(
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
             # Before/after https://github.com/huggingface/transformers/pull/35122
-            if Version(TRANSFORMERS_VERSION) <= Version("4.48.2"):
+            if Version(TRANSFORMERS_VERSION) <= Version("4.48.3"):
                 images = mm_data["images"]
                 assert isinstance(images, list)
 
