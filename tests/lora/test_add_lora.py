@@ -14,7 +14,7 @@ from vllm.utils import merge_async_iterators
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 LORA_MODULE_PATH = "yard1/llama-2-7b-sql-lora-test"
 LORA_RANK = 8
-DEFAULT_MAX_LORAS = 32
+DEFAULT_MAX_LORAS = 64
 
 
 @pytest.fixture(autouse=True)
@@ -45,11 +45,13 @@ async def requests_processing_time(
     max_loras = len(set([lr.lora_int_id for lr in lora_requests]))
     # Create engine in eager-mode. Due to high max_loras, the CI can
     # OOM during cuda-graph capture.
-    engine_args = AsyncEngineArgs(model=MODEL_PATH,
-                                  enable_lora=True,
-                                  max_loras=max_loras,
-                                  max_lora_rank=LORA_RANK,
-                                  enforce_eager=True)
+    engine_args = AsyncEngineArgs(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=max_loras,
+        max_lora_rank=LORA_RANK,
+        gpu_memory_utilization=0.8,  #avoid OOM
+        enforce_eager=True)
     sampling_params = SamplingParams(n=1,
                                      temperature=0.0,
                                      top_p=1.0,
