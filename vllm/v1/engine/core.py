@@ -158,8 +158,6 @@ class EngineCore:
         for req in self.guided_decoding_manager.requests:
 
             # Check if grammar is ready in cache
-            print(req.is_grammar_ready, req.grammar,
-                  self.guided_decoding_manager.grammar_cache)
             grammar = self.guided_decoding_manager.grammar_cache.get(
                 req.guided_decoding_key)
             if grammar is not None:
