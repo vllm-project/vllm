@@ -1,4 +1,194 @@
 # SPDX-License-Identifier: Apache-2.0
+"""
+This file implements common components for MLA implementations.
+
+First we define:
+
+Sq      as Q sequence length
+Skv     as KV sequence length
+
+MLA has two possible ways of computing, a data-movement friendly approach and a 
+compute friendly approach, we generally want to use the compute friendly 
+approach for "prefill" (i.e. the ratio Sq / Skv is "small", is near 1) 
+and the data-movement friendly approach for "decode" (i.e. the ratio 
+Sq / Skv is "large"). 
+
+NOTE what we deem small and large is currently determined by if its labelled 
+prefill or decode by the scheduler, but this is something we should probably 
+tune.
+
+Main reference: DeepseekV2 paper, and FlashInfer Implementation
+(https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
+
+Deepseek's MLA attention works the following way:
+* Use a single latent vector to represent the entire KV cache.
+* The attention "simulates" a multi-head attention, while the compute is
+    similar to multi-query attention.
+
+Below is example of both paths assuming batchsize = 1
+
+## More Extent Definitions:
+
+C           Context length, `Skv - Sq`
+H           hidden size
+N           number of attention heads
+Lq          latent dimension for Q              1536 in DSV3
+Lkv         latent dimension for K/V            512 in DSV3
+P           nope dimension, no rope.            128 in DSV3
+R           rope dimension, goes through rope.  64 in DSV3
+V           V head dim.                         128 in DSV3
+
+## Vector/Matrix Definitions
+
+h_t         hidden states (input to attention)  shape [Sq, H]
+q_c         latent/compressed Q                 shape [Sq, Lq]
+q_nope      uncompressed Q (no-rope)            shape [Sq, N, P]
+q_pe        uncompressed Q (rope)               shape [Sq, N, R]
+kv_c        latent/compressed KV                shape [Skv, Lkv]
+k_pe        decoupled k position embeddings     shape [Skv, R]
+new_kv_c    new kv_c from current iter          shape [Sq, Lkv]
+new_k_pe    new k_pe from current iter          shape [Sq, R]
+cache_kv_c  cached k_c from previous iters      shape [C, N, Lkv]
+cache_k_pe  cached k_pe from previous iters     shape [C, N, R]
+W_DQ        project h_t to q_c                  shape [H, Lq]
+W_UQ        project q_c to q_nope               shape [Lq, N * P]
+W_QR        project q_c to q_pe                 shape [Lq, N * R]
+W_DKV       project h_t to kv_c                 shape [H, Lkv]
+W_UK        project kv_c to k_nope              shape [Lkv, N * P]
+W_KR        project h_t to k_pe                 shape [H, N * R]
+W_UV        project kv_c to v                   shape [Lkv, N * V]
+W_O         project v to h_t                    shape [N * V, H]
+
+
+## Compute Friendly Approach (i.e. "_forward_prefill"):
+
+q_c      = h_t @ W_DQ
+q_nope   = (q_c @ W_UQ).view(Sq, N, P)
+q_pe     = RoPE(q_c @ W_QR).view(Sq, N, R)
+new_kv_c = h_t @ W_DKV
+new_k_pe = RoPE(h_t @ W_KR)
+kv_c     = torch.cat([new_kv_c, cache_kv_c], dim=0)
+k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
+k_nope   = (kv_c @ W_UK).view(Skv, N, P)
+v        = (kv_c @ W_UV).view(Skv, N, V)
+
+// MHA with QK headdim = P + R
+//           V headdim = V
+//      spda_o shape [Sq, N, V]
+spda_o = scaled_dot_product_attention(
+    torch.cat([q_nope, q_pe], dim=-1),
+    torch.cat([k_nope, k_pe.repeat(Skv, N, R)], dim=-1),
+    v
+) 
+return spda_o @ W_O
+
+NOTE: in the actual code, 
+    `kv_b_proj` is [W_UK; W_UV]
+    `q_b_proj` is [W_UQ; W_QR]
+    `out_proj` is W_O
+
+
+## Data-Movement Friendly Approach (i.e. "_forward_decode"):
+
+Ahead of time, compute:
+
+% this projects from q_c to [Sq, N * Lkv]
+W_UQ_UK = einsum("qnp,knp -> qnk"
+                     W_UQ.view(Lq, N, P), W_UK.view(Lkv, N, P)
+                ).view(Lkv, N * Lkv)
+% this projects from attn output [Sq, N * Lkv] to [Sq, H]
+W_UV_O  = einsum("knv,nvh -> nkh"
+                     W_UV.view(Lkv, N, V), W_O.view(N, V, H)
+                ).view(N * Lkv, H)
+
+Runtime
+q_c      = h_t @ W_DQ
+q_latent = q_c @ W_UQ_UK.view(Sq, N, Lkv)
+q_pe     = RoPE(q_c @ W_QR).view(Sq, N, R)
+new_kv_c = h_t @ W_DKV
+new_k_pe = RoPE(h_t @ W_KR)
+kv_c     = torch.cat([new_kv_c, cache_kv_c], dim=0)
+k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
+
+// MQA with QK headdim = Lkv + R
+//           V headdim = Lkv
+//      spda_o shape [Sq, N, Lkv]
+// NOTE: this is less compute-friendly since Lkv > P
+//       but is more data-movement friendly since its MQA vs MHA
+spda_o = scaled_dot_product_attention(
+    torch.cat([q_latent, q_pe], dim=-1),
+    torch.cat([kv_c, k_pe)], dim=-1),
+    kv_c
+)
+return spda_o.reshape(-1, N * Lkv) @ W_UV_O
+
+
+## Chunked Prefill
+
+For chunked prefill we want to use the compute friendly. We are assuming 
+sufficiently large Sq / Skv ratio, in the future may want to switch to the 
+data-movement friendly approach if the chunk (i.e. `Sq`) is small.
+
+However, the compute-friendly approach can potentially run out of memory if Skv
+is large due to: `k_nope = (kv_c @ W_UK).view(Skv, N, P)`
+
+To mitigate this, we chunk the computation of attention with current context 
+i.e. `cache_kv_c` and `cache_k_pe` so that we can used a fixed workspace size.
+
+The chunked prefill approach is as follows:
+
+MCC        Max chunk of context to process per iter, computed dynamically, 
+           used to bound the memory usage
+
+q_c        = h_t @ W_DQ
+q_nope     = (q_c @ W_UQ).view(Sq, N, P)
+q_pe       = RoPE(q_c @ W_QR).view(Sq, N, R)
+new_kv_c   = h_t @ W_DKV
+new_k_pe   = RoPE(h_t @ W_KR)
+new_k_nope = (new_kv_c @ W_UK).view(Sq, N, P)
+new_v      = (new_kv_c @ W_UV).view(Sq, N, V)
+
+// MHA between queries and new KV
+//     with QK headdim = P + R
+//           V headdim = V
+//    curr_o   shape [Sq, N, V]
+//    curr_lse shape [N, Sq], this is just order FA returns
+curr_o, curr_lse = scaled_dot_product_attention(
+    torch.cat([q_nope, q_pe], dim=-1),
+    torch.cat([new_k_nope, new_k_pe.repeat(Sq, N, R)], dim=-1),
+    new_v,
+    casual=True,
+    return_softmax_lse=True
+) 
+
+// Compute attention with the already existing context
+for chunk_idx in range(cdiv(C, MCC)):
+    chunk_start  = chunk_idx * MCC
+    chunk_end    = min(chunk_start + MCC, C)
+    Sc           = chunk_end - chunk_start
+    cache_kv_c_chunk   = cache_kv_c[chunk_start:chunk_end]
+    cache_k_pe_chunk   = cache_k_pe[chunk_start:chunk_end]
+    cache_k_nope_chunk = (cache_kv_c_chunk @ W_UK).view(-1, N, P)
+    cache_v_chunk      = (cache_kv_c_chunk @ W_UV).view(-1, N, V)
+    
+    chunk_o, chunk_lse = scaled_dot_product_attention(
+        torch.cat([q_nope, q_pe], dim=-1),
+        torch.cat([cache_k_nope_chunk, cache_k_pe_chunk.repeat(Sc, N, R)], 
+                   dim=-1),
+        cache_v_chunk,
+        casual=False,
+        return_softmax_lse=True
+    )
+    
+    curr_o, curr_lse = merge_attn_states(
+        suffix_output=curr_o,
+        suffix_lse=curr_lse,
+        prefix_output=chunk_o,
+        prefix_lse=chunk_lse,
+    )
+
+return curr_o @ W_O
+"""
 
 from abc import abstractmethod
 from collections import defaultdict
@@ -40,7 +230,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
-from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 if TYPE_CHECKING:
@@ -221,7 +411,10 @@ class MLACommonState(AttentionState):
 
 @dataclass
 class MLACommonMetadata(AttentionMetadata):
-    """Metadata for MLACommon.
+    """Metadata for MLACommon. 
+    
+    NOTE: Please read the comment at the top of the file before trying to 
+    understand this class
 
     NOTE: Any python object stored here is not updated when it is
     cuda-graph replayed. If you have values that need to be changed
@@ -298,10 +491,10 @@ class MLACommonMetadata(AttentionMetadata):
     head_dim: Optional[int] = None
 
     # For chunked prefill
-    chunk_cu_seq_lens: Optional[torch.Tensor] = None
-    chunk_seq_starts: Optional[torch.Tensor] = None
-    chunk_iter_toks: Optional[List[int]] = None
-    chunk_max_seq_lens: Optional[List[int]] = None
+    context_chunk_cu_seq_lens: Optional[torch.Tensor] = None
+    context_chunk_starts: Optional[torch.Tensor] = None
+    context_chunk_seq_tot: Optional[List[int]] = None
+    context_chunk_max_seq_lens: Optional[List[int]] = None
 
     def __post_init__(self):
         supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
@@ -366,10 +559,10 @@ class MLACommonMetadata(AttentionMetadata):
             block_tables=block_tables,
             head_dim=self.head_dim,
             # MLACommonMetadata Chunk prefill specific
-            chunk_cu_seq_lens=self.chunk_cu_seq_lens,
-            chunk_seq_starts=self.chunk_seq_starts,
-            chunk_iter_toks=self.chunk_iter_toks,
-            chunk_max_seq_lens=self.chunk_max_seq_lens,
+            context_chunk_cu_seq_lens=self.context_chunk_cu_seq_lens,
+            context_chunk_starts=self.context_chunk_starts,
+            context_chunk_seq_tot=self.context_chunk_seq_tot,
+            context_chunk_max_seq_lens=self.context_chunk_max_seq_lens,
         )
         return self._cached_prefill_metadata
 
@@ -499,6 +692,10 @@ class MLACommonMetadata(AttentionMetadata):
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
+    """
+    NOTE: Please read the comment at the top of the file before trying to 
+    understand this class
+    """
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -670,45 +867,59 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
         seq_start_loc_tensor = async_tensor_h2d(seq_start_loc, torch.int32,
                                                 device, self.runner.pin_memory)
 
-        chunk_cu_seq_lens = None
-        chunk_seq_starts = None
-        chunk_iter_toks = None
-        chunk_max_seq_lens = None
+        context_chunk_cu_seq_lens = None
+        context_chunk_starts = None
+        context_chunk_seq_tot = None
+        context_chunk_max_seq_lens = None
 
         if self.chunked_prefill_enabled and self.num_prefills > 0 \
-            and context_lens_tensor is not None:
+            and context_lens_tensor is not None \
+            and context_lens_tensor[:self.num_prefills].max() > 0:
+
+            # NOTE: it is recommend you read the `Chunked Prefill` section in
+            # the comment at the top of the file before trying to understand
+            # the following code
+
             chunked_prefill_workspace_size = \
                 self.attn_state.chunked_prefill_workspace.shape[0]
             page_size = self.runner.block_size
-            seq_chunk_size = chunked_prefill_workspace_size // self.num_prefills
 
-            print(self.attn_state.chunked_prefill_workspace.shape,
-                  self.num_prefills, page_size, seq_chunk_size)
+            num_prefills_with_context = \
+                (context_lens_tensor[:self.num_prefills] > 0).sum().item()
 
-            # align seq_chunk_size to page_size by rounding down
-            seq_chunk_size = seq_chunk_size - (seq_chunk_size % page_size)
-            assert seq_chunk_size > 0
-            num_chunks = (context_lens_tensor.max() + seq_chunk_size -
-                          1) // seq_chunk_size
+            # currently we allocate an equal amount of workspace for each
+            # prefill in the batch, we could probably use a more advanced
+            # algorithm here and allocate more workspace to prefills with
+            # longer context lengths
+            max_context_chunk = \
+                chunked_prefill_workspace_size // num_prefills_with_context
 
-            # if `seq_chunk_size = 256`, `num_chunks = 3`, and
-            #   `num_prefills = 4`, create a tensor that looks like
+            # align max_context_chunk to page_size by rounding down,
+            # currently the `gather_cache` kernel cannot handle
+            # `context_chunk_starts` that are not aligned to page_size
+            max_context_chunk = round_down(max_context_chunk, page_size)
+            assert max_context_chunk > 0
+            num_chunks = cdiv(context_lens_tensor.max(), max_context_chunk)
+
+            # if `max_context_chunk = 256`, `num_chunks = 3`, and
+            #   `num_prefills_with_context = 4`, create a tensor that looks like
             #  [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512]]
-            # Note: we only chunk the current context so we can separate the
-            #       causal masked and un-masked portions of the computation
-            chunk_seq_starts = \
+            context_chunk_starts = \
                 torch.arange(num_chunks, device=device, dtype=torch.int32)\
                 .unsqueeze(1).expand(-1, self.num_prefills)\
-                * seq_chunk_size
+                * max_context_chunk
             chunk_ends = torch.min(context_lens_tensor[:self.num_prefills]\
-                .unsqueeze(0), chunk_seq_starts + seq_chunk_size)
-            chunk_seq_lens = (chunk_ends - chunk_seq_starts).clamp(min=0)
-            _chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(torch.int32)
+                .unsqueeze(0), context_chunk_starts + max_context_chunk)
+            chunk_seq_lens = (chunk_ends - context_chunk_starts).clamp(min=0)
+            _context_chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(
+                torch.int32)
             zero = torch.zeros(num_chunks, dtype=torch.int32, device=device)\
                 .unsqueeze(-1)
-            chunk_cu_seq_lens = torch.cat([zero, _chunk_cu_seq_lens], dim=1)
-            chunk_max_seq_lens = chunk_seq_lens.max(dim=1).values.tolist()
-            chunk_iter_toks = chunk_seq_lens.sum(dim=1).tolist()
+            context_chunk_cu_seq_lens = \
+                torch.cat([zero, _context_chunk_cu_seq_lens], dim=1)
+            context_chunk_max_seq_lens = \
+                chunk_seq_lens.max(dim=1).values.tolist()
+            context_chunk_seq_tot = chunk_seq_lens.sum(dim=1).tolist()
 
         return MLACommonMetadata(
             # Required by ModelRunner
@@ -736,103 +947,17 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
             block_tables=block_tables,
             head_dim=self.runner.model_config.get_head_size(),
             # MLACommonMetadata Chunk prefill specific
-            chunk_cu_seq_lens=chunk_cu_seq_lens,
-            chunk_seq_starts=chunk_seq_starts,
-            chunk_iter_toks=chunk_iter_toks,
-            chunk_max_seq_lens=chunk_max_seq_lens,
+            context_chunk_cu_seq_lens=context_chunk_cu_seq_lens,
+            context_chunk_starts=context_chunk_starts,
+            context_chunk_seq_tot=context_chunk_seq_tot,
+            context_chunk_max_seq_lens=context_chunk_max_seq_lens,
         )
 
 
 class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     """
-    Common class for implementing repeated parts
-
-    Main reference: DeepseekV2 paper, and FlashInfer Implementation
-    (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
-
-    Deepseek's MLA attention works the following way:
-    * Use a single latent vector to represent the entire KV cache.
-    * The attention "simulates" a multi-head attention, while the compute is
-      similar to multi-query attention.
-    * The dataflow is as follows,
-
-        * B: batch/sequence length
-        * H: hidden size
-        * N: number of attention heads
-        * Lq: latent dimension for Q
-        * Lkv: latent dimension for K/V
-        * P: nope dimension, P+R is the actual head_dim in common attention.
-        * R: rope dimension, this slide of the head_dim goes through rope.
-        * V: V head dim.
-        * kv_c: latent/compressed KV
-        * q_c: latent/compressed Q
-
-        #
-        # Outside the MLA attention backend
-        #
-
-        1. The hidden states (B, H) are projected down into cq (B, Lq) and
-           kv_c_k_pe (B, Lkv+R).
-        2. The kv_c_k_pe is split into kv_c (B, Lkv) and k_pe (B, R). cq
-           and kv_c are normalized.
-
-        #
-        # Inside the MLA attention backend
-        #
-
-        * if prefill:
-
-        3. The q_c is then projected up into the multi-head version.
-           * q_c goes from (B, Lq) to (B, N, (P+R)), which is split into q_nope
-             (B, N, P) and q_pe (B, N, R).
-        4. q_pe, k_pe are then passed through rotary embeddings.
-        5. kv_c and k_pe are concatenated and inserted into the cache
-        6. The kv_c is then projected up into the multi-head version.
-           * kv_c goes from (B, Lkv) to (B, N, (P+V)) which has the nope
-             dimensions for K and V, which is split into k_nope (B, N, P)
-             and v (B, N, V).
-        7. q (B, N, (P+R)) and k (B, N, (P+R)) matrices are assembled from
-           q_nope, q_pe, k_nope, k_pe.
-        8. Attention is computued with q, k, v.
-        9. The attention computation returns (B, N, V), which is projected back
-           to (B, H) using out projection.
-
-        * if decode:
-
-        3. Here's the change, we do not perform up the full up projection for
-           q_c, and there is no up projection at all for kv_c. This is
-           achieved by the technique of "weight absorption". The paper says
-           "Fortunately, due to the associative law of matrix multiplication,
-           we can absorb WUK into WUQ, and WUV into WO"
-           * The q up projection turns (B, Lq) into (B, N, (P+R)), we split it
-             into W_UQ (Lq, N, P) and W_QR (Lq, N, R).
-           * The kv_c up projection turns (B, Lkv) into (B, N, (P+V)), we split
-             it into W_UK (Lkv, N, P) and W_UV (Lkv, N, V).
-           * The out projection shape W_O (N*V, H) turns (B, N, V) into (B, H).
-           * We can precompute the product of W_UQ and W_UK into
-             W_UQ_UK (Lq, N, Lkv), which is possible due to QK^T operation in
-             attention.
-           * We can precompute the product of W_UV and W_O into
-             W_UV_O (N, Lkv, H), which is possible due to V@O as the
-             "epilogue" of attention
-        4. We still need to compute q_pe (B, N, R) by applying W_QR to q_latent.
-        5. q_pe, k_pe are then passed through rotary embeddings.
-        6. kv_c and k_pe are concatenated and inserted into the cache
-        7. By applying W_UQ_UK to q_latent, we have the new q_nope of shape
-           (B, N, Lkv).
-        8. q (B, N, (Lkv+R)), k (B, (Lkv+R)) are assembled from q_nope, q_pe,
-           kv_a, k_pe. v (B, Lkv) is exactly the same vector as kv_a.
-        9. The attention is computed with q, k, v. Note that we just performed
-           a MQA attention with (LKv+R) as our head dim.
-        10. The KV cache is updated using the new entries k (B, N, (Lkv+R)),
-           which included the v and rope values.
-        11. The attention computation returns (B, N, Lkv), which is projected
-           back to (B, H) using W_UV_O.
-
-    From @tsu-bin's calculation, we only want to use the absorption technique
-    for decode. The prefill algorithm should still use the up-projected MHA
-    for less flops and memory usage.
-
+    NOTE: Please read the comment at the top of the file before trying to 
+    understand this class
     """
 
     def __init__(
@@ -1113,30 +1238,28 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     ):
         prefill_metadata = attn_metadata.prefill_metadata
         assert prefill_metadata is not None
-        assert prefill_metadata.chunk_iter_toks is not None
-        assert prefill_metadata.chunk_cu_seq_lens is not None
-        assert prefill_metadata.chunk_seq_starts is not None
-        assert prefill_metadata.chunk_max_seq_lens is not None
+        assert prefill_metadata.context_chunk_seq_tot is not None
+        assert prefill_metadata.context_chunk_cu_seq_lens is not None
+        assert prefill_metadata.context_chunk_starts is not None
+        assert prefill_metadata.context_chunk_max_seq_lens is not None
         # assert prefill_metadata.block_tables is not None
         assert prefill_metadata.context_lens_tensor is not None
 
         output = None
-        iters = len(prefill_metadata.chunk_iter_toks)
+        iters = len(prefill_metadata.context_chunk_seq_tot)
         workspace = prefill_metadata.attn_state.chunked_prefill_workspace
 
         for i in range(iters):
-            chunk_cu_seq_lens = prefill_metadata.chunk_cu_seq_lens[i]
-            chunk_seq_starts = prefill_metadata.chunk_seq_starts[i]
-            toks = prefill_metadata.chunk_iter_toks[i]
-            max_seq_len = prefill_metadata.chunk_max_seq_lens[i]
+            toks = prefill_metadata.context_chunk_seq_tot[i]
+            max_seq_len = prefill_metadata.context_chunk_max_seq_lens[i]
 
             ops.gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
                 block_table=prefill_metadata.block_tables,
-                cu_seq_lens=chunk_cu_seq_lens,
+                cu_seq_lens=prefill_metadata.context_chunk_cu_seq_lens[i],
                 batch_size=prefill_metadata.num_prefills,
-                seq_starts=chunk_seq_starts,
+                seq_starts=prefill_metadata.context_chunk_starts[i],
             )
 
             k_c_normed = workspace[:toks]\
@@ -1163,7 +1286,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 k=k,
                 v=v_padded,
                 cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=chunk_cu_seq_lens,
+                cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
                 max_seqlen_q=prefill_metadata.max_query_len,
                 max_seqlen_k=max_seq_len,
                 softmax_scale=self.scale,
