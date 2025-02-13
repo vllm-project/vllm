@@ -90,12 +90,6 @@ class MolmoImageInputs(TypedDict):
     to patch tokens.
     
     Shape: `(batch_size, num_embeds)`
-
-    Note:
-        The original code only considers patch tokens as feature
-        tokens, but our processor considers all image-related tokens
-        as feature tokens because the feature tokens need to be
-        consecutive in `input_ids`.
     """
 
     num_crops: torch.Tensor
@@ -1583,8 +1577,11 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         Scatter the patch features into a contiguous tensor that corresponds
         to the embedding tokens defined by the multimodal processor.
 
-        See also:
-            :attr:`MolmoImageInputs.embed_is_patch`
+        Note:
+            The original code only considers patch tokens as feature
+            tokens, but our processor considers all image-related tokens
+            as feature tokens because the feature tokens need to be
+            consecutive in `input_ids`.
         
         Example:
             A simplified example for one item in the batch:
