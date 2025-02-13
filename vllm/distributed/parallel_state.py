@@ -133,9 +133,8 @@ class GroupCoordinator:
     PyTorch ProcessGroup is bound to one specific communication backend,
         e.g. NCCL, Gloo, MPI, etc.
     GroupCoordinator takes charge of all the communication operations among
-        the processes in the group. It can route the communication to
-        a specific implementation (e.g. switch allreduce implementation
-        based on the tensor size and cuda graph mode).
+        the processes in the group. It manages both CPU and device
+        communication.
     """
 
     # available attributes:
@@ -190,11 +189,12 @@ class GroupCoordinator:
         assert self.device_group is not None
 
         from vllm.platforms import current_platform
-        if current_platform.device_type == "cpu":
-            self.device = torch.device("cpu")
+
+        # TODO: fix it for other platforms
+        if current_platform.is_cuda_alike():
+            self.device = torch.device(f"cuda:{local_rank}")
         else:
-            self.device = torch.device(
-                f"{current_platform.device_type}:{local_rank}")
+            self.device = torch.device("cpu")
 
         self.use_device_communicator = use_device_communicator
 
