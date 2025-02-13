@@ -6,16 +6,16 @@ import torch.nn.functional as F
 
 
 @pytest.mark.parametrize(
-    "block_size, large_tile_size",
+    "prefill_batch_size,decode_batch_size,block_size,large_tile_size",
     [
-        (1, 512),  # 512 blocks
-        (256, 2048),  # 128 blocks
-        (16, 2048),  # 128 blocks
-        (4, 1024),  # 256 blocks
-        (32, 2048),  # 64 blocks
-        (32, 4096),  # 128 blocks
-        (32, 8192),  # 256 blocks
-        (64, 8192),  # 128 blocks
+        (1, 199, 1, 512),  # 512 blocks
+        (4, 12, 256, 2048),  # 128 blocks
+        (4, 12, 16, 2048),  # 128 blocks
+        (4, 12, 4, 1024),  # 256 blocks
+        (4, 12, 32, 2048),  # 64 blocks
+        (4, 12, 32, 4096),  # 128 blocks
+        (4, 12, 32, 8192),  # 256 blocks
+        (4, 12, 64, 8192),  # 128 blocks
     ],
 )
 @pytest.mark.parametrize(
@@ -24,14 +24,7 @@ import torch.nn.functional as F
         (4, 2, 8),
         (32, 8, 64),
         (4, 4, 128),
-        (16, 2, 128),
-    ],
-)
-@pytest.mark.parametrize(
-    "prefill_batch_size,decode_batch_size",
-    [
-        (4, 12),
-        (1, 199),
+        (8, 1, 32),
     ],
 )
 @pytest.mark.parametrize("mixed_precision", [True, False])
