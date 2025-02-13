@@ -129,7 +129,7 @@ class MMInputCacheServer:
         self.use_cache = not model_config.disable_mm_preprocessor_cache
         self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
-    def process_inputs(
+    def get_and_update(
         self,
         mm_inputs: List[Optional[MultiModalKwargs]],
         mm_hashes: List[str],
