@@ -11,14 +11,15 @@ class DeviceCommunicatorBase:
     Base class for device-specific communicator.
     It can use the `cpu_group` to initialize the communicator.
     If the device has PyTorch integration (PyTorch can recognize its
-    communication backend), the `device_group` can be set to the
-    corresponding device group.
+    communication backend), the `device_group` will also be given.
     """
-    cpu_group: ProcessGroup
-    device_group: Optional[Optional]
 
-    def __init__(self, cpu_group: ProcessGroup, unique_name: str = ""):
+    def __init__(self,
+                 cpu_group: ProcessGroup,
+                 device_group: Optional[Optional] = None,
+                 unique_name: str = ""):
         self.cpu_group = cpu_group
+        self.device_group = device_group
         self.unique_name = unique_name
         self.rank = dist.get_rank(cpu_group)
         self.world_size = dist.get_world_size(cpu_group)
