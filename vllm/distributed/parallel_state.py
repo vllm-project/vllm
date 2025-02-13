@@ -694,7 +694,8 @@ class GroupCoordinator:
         if self.cpu_group is not None:
             torch.distributed.destroy_process_group(self.cpu_group)
             self.cpu_group = None
-        self.device_communicator.destroy()
+        if self.device_communicator is not None:
+            self.device_communicator.destroy()
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
