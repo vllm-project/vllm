@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config
+from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
                             EngineCoreRequest, EngineCoreRequestType,
@@ -78,11 +78,8 @@ class EngineCore:
         available_gpu_memory = self.model_executor.determine_available_memory()
 
         # Get the kv cache tensor size
-        kv_cache_configs = []
-        for kv_cache_spec in kv_cache_specs:
-            kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                                  available_gpu_memory)
-            kv_cache_configs.append(kv_cache_config)
+        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
+                                                available_gpu_memory)
         num_gpu_blocks_set = set(config.num_blocks
                                  for config in kv_cache_configs)
         assert len(num_gpu_blocks_set) == 1, (
