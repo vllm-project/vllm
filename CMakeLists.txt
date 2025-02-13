@@ -192,7 +192,7 @@ set_gencode_flags_for_srcs(
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling cumem allocator extension.")
   # link against cuda driver library
-  list(APPEND CUMEM_LIBS cuda)
+  list(APPEND CUMEM_LIBS CUDA::cuda_driver)
   define_gpu_extension_target(
     cumem_allocator
     DESTINATION vllm
@@ -264,6 +264,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
+    "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_compressor_entry.cu"
     "csrc/cutlass_extensions/common.cpp")
@@ -377,6 +378,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
+  # FP4 Archs and flags
+  cuda_archs_loose_intersection(FP4_ARCHS "10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND FP4_ARCHS)
+    set(SRCS 
+      "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
+    )
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${FP4_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4=1")
+    message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
+  else()
+    message(STATUS "Not building NVFP4 as no compatible archs were found.")
+    # clear FP4_ARCHS
+    set(FP4_ARCHS)
+  endif()
 
   #
   # Machete kernels
@@ -581,7 +599,7 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG d4e09037abf588af1ec47d0e966b237ee376876c
+          GIT_TAG 720c94869cf2e0ff5a706e9c7f1dce0939686ade
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

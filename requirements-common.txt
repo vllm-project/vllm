@@ -8,12 +8,11 @@ py-cpuinfo
 transformers >= 4.48.2  # Required for Bamba model and Transformers backend.
 tokenizers >= 0.19.1  # Required for Llama 3.
 protobuf # Required by LlamaTokenizer.
-fastapi >= 0.107.0, < 0.113.0; python_version < '3.9'
-fastapi >= 0.107.0, != 0.113.*, != 0.114.0; python_version >= '3.9'
+fastapi[standard] >= 0.107.0, < 0.113.0; python_version < '3.9'
+fastapi[standard]  >= 0.107.0, != 0.113.*, != 0.114.0; python_version >= '3.9'
 aiohttp
 openai >= 1.52.0 # Ensure modern openai package (ensure types module present and max_completion_tokens field support)
-uvicorn[standard]
-pydantic >= 2.9  # Required for fastapi >= 0.113.0
+pydantic >= 2.9
 prometheus_client >= 0.18.0
 pillow  # Required for image processing
 prometheus-fastapi-instrumentator >= 7.0.0

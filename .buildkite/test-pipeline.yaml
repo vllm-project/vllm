@@ -107,13 +107,17 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
+  - tests/entrypoints/llm
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/offline_mode
   commands:
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/correctness/
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -124,11 +128,12 @@ steps:
   source_file_dependencies:
   - vllm/distributed/
   - vllm/core/
-  - tests/distributed
+  - tests/distributed/test_utils
+  - tests/distributed/test_pynccl
   - tests/spec_decode/e2e/test_integration_dist_tp4
-  - tests/compile
+  - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
-  - examples/offline_inference/ray_placement.py
+  - examples/offline_inference/rlhf_colocate.py
   commands:
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
@@ -137,7 +142,7 @@ steps:
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - python3 ../examples/offline_inference/rlhf.py
-  - RAY_DEDUP_LOGS=0 python3 ../examples/offline_inference/ray_placement.py
+  - RAY_DEDUP_LOGS=0 python3 ../examples/offline_inference/rlhf_colocate.py
 
 - label: Metrics, Tracing Test # 10min
   num_gpus: 2 
@@ -174,6 +179,9 @@ steps:
   - vllm/
   - tests/engine
   - tests/tokenization
+  - tests/test_sequence
+  - tests/test_config
+  - tests/test_logger
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
   # OOM in the CI unless we run this separately
@@ -195,6 +203,9 @@ steps:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - VLLM_USE_V1=1 pytest -v -s v1/e2e
+    # Integration test for streaming correctness (requires special branch).
+    - pip install -U git+https://github.com/robertgshaw2-neuralmagic/lm-evaluation-harness.git@streaming-api
+    - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: Examples Test # 25min
   working_dir: "/vllm-workspace/examples"
@@ -327,6 +338,14 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
+
+- label: OpenAI API correctness
+  source_file_dependencies:
+  - csrc/
+  - vllm/entrypoints/openai/
+  - vllm/model_executor/models/whisper.py
+  commands: # LMEval+Transcription WER check
+  - pytest -s entrypoints/openai/correctness/
 
 - label: Encoder Decoder tests # 5min
   source_file_dependencies:

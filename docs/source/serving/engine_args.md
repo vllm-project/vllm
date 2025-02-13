@@ -4,7 +4,7 @@
 
 Below, you can find an explanation of every engine argument for vLLM:
 
-<!--- pyml disable-num-lines 7 no-space-in-emphasis-->
+<!--- pyml disable-num-lines 7 no-space-in-emphasis -->
 ```{eval-rst}
 .. argparse::
     :module: vllm.engine.arg_utils
@@ -17,7 +17,7 @@ Below, you can find an explanation of every engine argument for vLLM:
 
 Below are the additional arguments related to the asynchronous engine:
 
-<!--- pyml disable-num-lines 7 no-space-in-emphasis-->
+<!--- pyml disable-num-lines 7 no-space-in-emphasis -->
 ```{eval-rst}
 .. argparse::
     :module: vllm.engine.arg_utils

@@ -429,7 +429,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `TeleChat2ForCausalLM`
   * TeleChat2
-  * `TeleAI/TeleChat2-3B`, `TeleAI/TeleChat2-7B`, `TeleAI/TeleChat2-35B`, etc.
+  * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
   * ✅︎
   * ✅︎
 - * `XverseForCausalLM`
@@ -699,10 +699,10 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `DeepseekVLV2ForCausalLM`
+- * `DeepseekVLV2ForCausalLM`<sup>^</sup>
   * DeepSeek-VL2
   * T + I<sup>+</sup>
-  * `deepseek-ai/deepseek-vl2-tiny`, `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
+  * `deepseek-ai/deepseek-vl2-tiny`, `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc.
   *
   * ✅︎
   * ✅︎
@@ -713,13 +713,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `ChatGLMModel`
+- * `GLM4VForCausalLM`<sup>^</sup>
   * GLM-4V
   * T + I
-  * `THUDM/glm-4v-9b` etc.
+  * `THUDM/glm-4v-9b`, `THUDM/cogagent-9b-20241220` etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `H2OVLChatModel`
   * H2OVL
   * T + I<sup>E+</sup>
@@ -793,7 +793,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `MolmoForCausalLM`
   * Molmo
   * T + I
-  * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-72B-0924`, etc.
+  * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc.
   * ✅︎
   * ✅︎
   * ✅︎
@@ -825,7 +825,7 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `QWenLMHeadModel`
+- * `QwenVLForConditionalGeneration`<sup>^</sup>
   * Qwen-VL
   * T + I<sup>E+</sup>
   * `Qwen/Qwen-VL`, `Qwen/Qwen-VL-Chat`, etc.
@@ -856,18 +856,17 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
-  * `fixie-ai/ultravox-v0_3`
+  * `fixie-ai/ultravox-v0_5-llama-3_2-1b`
   * ✅︎
   * ✅︎
   * ✅︎
 :::
 
+<sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.  
+&nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:  
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`--hf-overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'`  
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
-
-:::{note}
-To use DeepSeek-VL2 series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
-:::
 
 :::{note}
 H2O-VL series models will be available in V1 once we support backends other than FlashAttention.
