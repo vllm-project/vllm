@@ -29,6 +29,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 :header-rows: 1
 :stub-columns: 1
 :widths: auto
+:class: vertical-table-header
 
 - * Feature
   * [CP](#chunked-prefill)
