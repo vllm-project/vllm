@@ -33,8 +33,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
-                    NamedTuple, Optional, Tuple, Type, TypeVar, Union,
-                    overload)
+                    NamedTuple, Optional, Tuple, Type, TypeVar, Union)
 from uuid import uuid4
 
 import cloudpickle
@@ -824,38 +823,6 @@ def is_list_of(
 JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
                  Tuple["JSONTree[T]", ...], T]
 """A nested JSON structure where the leaves need not be JSON-serializable."""
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Dict[str, JSONTree[T]],
-) -> Dict[str, JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: List[JSONTree[T]],
-) -> List[JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Tuple[JSONTree[T], ...],
-) -> Tuple[JSONTree[U], ...]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: JSONTree[T],
-) -> JSONTree[U]:
-    ...
 
 
 def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:

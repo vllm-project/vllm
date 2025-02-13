@@ -256,6 +256,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-V-2_6",
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
+                                        extras={"olmo": "allenai/Molmo-7B-O-0924"},  # noqa: E501
                                         trust_remote_code=True),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B",
                               trust_remote_code=True),

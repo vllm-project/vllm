@@ -168,6 +168,8 @@ def _test_processing_correctness(
     "mistral-community/pixtral-12b",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
+    "allenai/Molmo-7B-D-0924",
+    "allenai/Molmo-7B-O-0924",
     "nvidia/NVLM-D-72B",
     "Qwen/Qwen-VL-Chat",
     "Qwen/Qwen2-VL-2B-Instruct",

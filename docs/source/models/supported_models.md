@@ -793,7 +793,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `MolmoForCausalLM`
   * Molmo
   * T + I
-  * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-72B-0924`, etc.
+  * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc.
   * ✅︎
   * ✅︎
   * ✅︎

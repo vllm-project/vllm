@@ -27,7 +27,7 @@ from ...utils import check_logprobs_close
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "THUDM/chatglm3-6b",  # ChatGLM (text-only)
+            "THUDM/chatglm3-6b",  # chatglm (text-only)
         ),
         pytest.param(
             "meta-llama/Llama-3.2-1B-Instruct",  # llama
