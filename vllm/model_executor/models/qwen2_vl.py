@@ -994,14 +994,6 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
             ) for modality in ("image", "video")
         ]
 
-    def _always_apply_prompt_replacements(self) -> bool:
-        # HF never applies prompt replacements, so we have to do it ourselves
-        # _find_placeholders may incorrectly think that HF has already performed
-        # processing for multi-audio input when the input audios are short
-        # (the corresponding placeholders may take up fewer tokens than
-        # the number of audio items)
-        return True
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
