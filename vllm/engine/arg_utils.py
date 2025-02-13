@@ -118,7 +118,7 @@ class EngineArgs:
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
-    gpu_memory_utilization: Optional[float] = None
+    gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
@@ -1097,6 +1097,33 @@ class EngineArgs:
                            "has been disabled.")
             self.enable_prefix_caching = False
 
+        cache_config = CacheConfig(
+            block_size=self.block_size,
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            swap_space=self.swap_space,
+            cache_dtype=self.kv_cache_dtype,
+            is_attention_free=model_config.is_attention_free,
+            num_gpu_blocks_override=self.num_gpu_blocks_override,
+            sliding_window=model_config.get_sliding_window(),
+            enable_prefix_caching=self.enable_prefix_caching,
+            cpu_offload_gb=self.cpu_offload_gb,
+            calculate_kv_scales=self.calculate_kv_scales,
+        )
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=self.pipeline_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
+            max_parallel_loading_workers=self.max_parallel_loading_workers,
+            disable_custom_all_reduce=self.disable_custom_all_reduce,
+            tokenizer_pool_config=TokenizerPoolConfig.create_config(
+                self.tokenizer_pool_size,
+                self.tokenizer_pool_type,
+                self.tokenizer_pool_extra_config,
+            ),
+            ray_workers_use_nsight=self.ray_workers_use_nsight,
+            distributed_executor_backend=self.distributed_executor_backend,
+            worker_cls=self.worker_cls,
+        )
+
         max_model_len = model_config.max_model_len
         use_long_context = max_model_len > 32768
         if self.enable_chunked_prefill is None:
@@ -1140,33 +1167,6 @@ class EngineArgs:
               and model_config.runner_type == "pooling"):
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
-
-        cache_config = CacheConfig(
-            block_size=self.block_size,
-            gpu_memory_utilization=self.gpu_memory_utilization,
-            swap_space=self.swap_space,
-            cache_dtype=self.kv_cache_dtype,
-            is_attention_free=model_config.is_attention_free,
-            num_gpu_blocks_override=self.num_gpu_blocks_override,
-            sliding_window=model_config.get_sliding_window(),
-            enable_prefix_caching=self.enable_prefix_caching,
-            cpu_offload_gb=self.cpu_offload_gb,
-            calculate_kv_scales=self.calculate_kv_scales,
-        )
-        parallel_config = ParallelConfig(
-            pipeline_parallel_size=self.pipeline_parallel_size,
-            tensor_parallel_size=self.tensor_parallel_size,
-            max_parallel_loading_workers=self.max_parallel_loading_workers,
-            disable_custom_all_reduce=self.disable_custom_all_reduce,
-            tokenizer_pool_config=TokenizerPoolConfig.create_config(
-                self.tokenizer_pool_size,
-                self.tokenizer_pool_type,
-                self.tokenizer_pool_extra_config,
-            ),
-            ray_workers_use_nsight=self.ray_workers_use_nsight,
-            distributed_executor_backend=self.distributed_executor_backend,
-            worker_cls=self.worker_cls,
-        )
 
         if self.enable_chunked_prefill and model_config.use_mla:
             # Currently chunked prefill with MLA is not supported with CUDA
