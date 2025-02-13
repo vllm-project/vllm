@@ -95,5 +95,5 @@ class TpuPlatform(Platform):
                 parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"
 
     @classmethod
-    def get_device_communicator_cls() -> str:
+    def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.tpu_communicator.TpuCommunicator"  # noqa

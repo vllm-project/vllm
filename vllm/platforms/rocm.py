@@ -173,5 +173,5 @@ class RocmPlatform(Platform):
             device)[0]
 
     @classmethod
-    def get_device_communicator_cls() -> str:
+    def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
