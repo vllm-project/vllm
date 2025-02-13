@@ -117,7 +117,7 @@ k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
 //       but is more data-movement friendly since its MQA vs MHA
 spda_o = scaled_dot_product_attention(
     torch.cat([q_latent, q_pe], dim=-1),
-    torch.cat([kv_c, k_pe)], dim=-1),
+    torch.cat([kv_c, k_pe], dim=-1),
     kv_c
 )
 return spda_o.reshape(-1, N * Lkv) @ W_UV_O
@@ -155,7 +155,7 @@ new_v      = (new_kv_c @ W_UV).view(Sq, N, V)
 //    curr_lse shape [N, Sq], this is just order FA returns
 curr_o, curr_lse = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
-    torch.cat([new_k_nope, new_k_pe..unsqueeze(1).expand(-1, N, -1)], dim=-1),
+    torch.cat([new_k_nope, new_k_pe.unsqueeze(1).expand(-1, N, -1)], dim=-1),
     new_v,
     casual=True,
     return_softmax_lse=True
