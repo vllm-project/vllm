@@ -10,10 +10,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               UnquantizedLinearMethod,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
 from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
@@ -23,8 +22,6 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, marlin_moe_permute_scales,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
                                            PackedColumnParameter,
@@ -152,10 +149,8 @@ class GPTQMarlinConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod",
-                        UnquantizedLinearMethod, UnquantizedEmbeddingMethod]]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, FusedMoE):
             if layer.num_experts > 32:
                 # For MoEs with many experts the moe_wna16 kernel is faster
