@@ -264,7 +264,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
                                                        tokenizer_mode="mistral"),
-    "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL-Chat",
+    "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",
+                                                      extras={"chat": "Qwen/Qwen-VL-Chat"},  # noqa: E501
                                                       trust_remote_code=True,
                                                       hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]}),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501

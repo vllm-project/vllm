@@ -247,6 +247,8 @@ def _compare_tp(
     multi_node_only, load_format = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info.check_transformers_version(on_fail="skip")
+
     trust_remote_code = model_info.trust_remote_code
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
@@ -260,6 +262,8 @@ def _compare_tp(
             "num_experts_per_tok": 2,
             "num_local_experts": 2,
         })
+    else:
+        model_info.check_available_online(on_fail="skip")
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
