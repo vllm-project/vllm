@@ -43,10 +43,13 @@ async def requests_processing_time(
     """
 
     max_loras = len(set([lr.lora_int_id for lr in lora_requests]))
+    # Create engine in eager-mode. Due to high max_loras, the CI can
+    # OOM during cuda-graph capture.
     engine_args = AsyncEngineArgs(model=MODEL_PATH,
                                   enable_lora=True,
                                   max_loras=max_loras,
-                                  max_lora_rank=LORA_RANK)
+                                  max_lora_rank=LORA_RANK,
+                                  enforce_eager=True)
     sampling_params = SamplingParams(n=1,
                                      temperature=0.0,
                                      top_p=1.0,
