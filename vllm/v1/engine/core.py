@@ -97,8 +97,8 @@ class EngineCore:
         """Add request to the scheduler."""
 
         if request.mm_hashes is not None:
-            # Here, if hash exists for an multimodal input, then it will
-            # be fetched from the cache, else it will be added to the cache.
+            # Here, if hash exists for a multimodal input, then it will be
+            # fetched from the cache, else it will be added to the cache.
             # Note that the cache here is mirrored with the client cache, so
             # anything that has a hash must have a HIT cache entry here
             # as well.
