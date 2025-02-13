@@ -2273,9 +2273,6 @@ def warn_for_unimplemented_methods():
                 if attr_name.startswith('_'):
                     continue
                 base_method = getattr(self, attr_name)
-                # bypass method already defined
-                if getattr(base_method, '_avoid_check', False):
-                    continue
                 # get the func of callable method
                 if callable(base_method):
                     base_method_name = base_method.__func__
