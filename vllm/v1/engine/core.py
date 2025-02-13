@@ -288,6 +288,7 @@ class EngineCoreProc(EngineCore):
                     request_type
                     == EngineCoreRequestType.ADD) else generic_decoder
                 request = decoder.decode(data_frame.buffer)
+
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait((request_type, request))
 
