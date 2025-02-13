@@ -49,7 +49,7 @@ In addition, we have the following custom APIs:
 - [Pooling API](#pooling-api) (`/pooling`)
   - Applicable to all [pooling models](../models/pooling_models.md).
 - [Score API](#score-api) (`/score`)
-  - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
+  - Applicable to embedding models and [cross-encoder models](../models/pooling_models.md) (`--task score`).
 - [Re-rank API](#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
   - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
   - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
@@ -320,10 +320,10 @@ Code example: <gh-file:examples/online_serving/openai_pooling_client.py>
 
 ### Score API
 
-Our Score API applies a cross-encoder model to predict scores for sentence pairs.
+Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
 Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
 
-You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
 Code example: <gh-file:examples/online_serving/openai_cross_encoder_score.py>
 
