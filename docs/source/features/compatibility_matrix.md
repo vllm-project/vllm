@@ -49,7 +49,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * beam-search
   * <abbr title="Guided Decoding">guided dec</abbr>
 - * [CP](#chunked-prefill)
-  *
+  * ✅
   *
   *
   *
@@ -67,7 +67,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   *
 - * [APC](#automatic-prefix-caching)
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -85,7 +85,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
 - * [LoRA](#lora-adapter)
   * ✅
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -103,7 +103,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ✅
   * ✅
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -121,7 +121,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ✅
   * ❌
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -139,7 +139,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ✅
   * ✅
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -157,7 +157,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ❌
   * ❌
   * ❌
-  *
+  * ✅
   *
   *
   *
@@ -175,7 +175,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * [❌](gh-issue:7366)
   * ✅
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -193,7 +193,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ✅
   * ❌
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -211,7 +211,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ❌
   * ✅
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -229,7 +229,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ❌
   * ✅
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -247,7 +247,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ✅
   * ✅
   * ✅
-  *
+  * ✅
   *
   *
   *
@@ -265,7 +265,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ✅
   * ✅
   * ❔
-  *
+  * ✅
   *
   *
   *
@@ -283,7 +283,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ❔
   * [❌](gh-issue:7968)
   * ✅
-  *
+  * ✅
   *
   *
 - * beam-search
@@ -301,7 +301,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * [❌](gh-issue:7968)
   * ❔
   * ✅
-  *
+  * ✅
   *
 - * <abbr title="Guided Decoding">guided dec</abbr>
   * ✅
@@ -319,7 +319,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ❔
   * ✅
   * ✅
-  *
+  * ✅
 :::
 
 (feature-x-hardware)=
