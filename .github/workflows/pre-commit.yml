@@ -20,9 +20,17 @@ jobs:
       continue-on-error: true
       with:
         extra_args: --all-files --hook-stage manual
+    outputs:
+      status: ${{ steps.pre-commit.outcome }}
+  update-label:
+    needs: pre-commit
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
     - name: Add `pre-commit-passed` if success
       uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
-      if: steps.pre-commit.outcome == 'success'
+      if: needs.pre-commit.outputs.status == 'success'
       with:
         script: |
           github.rest.issues.addLabels({
@@ -31,11 +39,9 @@ jobs:
             issue_number: context.issue.number,
             labels: ['pre-commit-passed']
           })
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: Remove `pre-commit-passed` otherwise
       uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
-      if: steps.pre-commit.outcome != 'success'
+      if: needs.pre-commit.outputs.status != 'success'
       with:
         script: |
           try {
@@ -51,5 +57,3 @@ jobs:
               throw e;
             }
           }
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
