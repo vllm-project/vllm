@@ -69,7 +69,7 @@ async def requests_processing_time(
         if warmup_function:
             await warmup_function(llm, lora_requests)
             # Wait for the warmup functions complete
-            time.sleep(10)
+            time.sleep(30)
 
         generators = []
         start = time.perf_counter()
