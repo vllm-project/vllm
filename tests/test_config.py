@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
+        ("openai/whisper-small", "transcription", "transcription"),
     ],
 )
 def test_auto_task(model_id, expected_runner_type, expected_task):
