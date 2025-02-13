@@ -385,7 +385,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         such that the number of blocks is equal in both KV caches.
         """
         num_gpu_blocks, num_cpu_blocks = (
-            self.scorer_worker.determine_num_available_blocks())
+            self.scorer_worker.determine_num_available_blocks(self.proposer_worker.model_runner.model_memory_usage))
 
         scorer_cache_block_size_bytes = (
             self.scorer_worker.get_cache_block_size_bytes())
