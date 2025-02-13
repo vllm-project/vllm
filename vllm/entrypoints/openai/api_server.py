@@ -593,7 +593,7 @@ if envs.VLLM_SERVER_DEV_MODE:
         return Response(status_code=200)
 
 
-@router.post("/invocations")
+@router.post("/invocations", dependencies=[Depends(validate_json_request)])
 async def invocations(raw_request: Request):
     """
     For SageMaker, routes requests to other handlers based on model `task`.
