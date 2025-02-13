@@ -20,7 +20,7 @@ from http import HTTPStatus
 from typing import AsyncIterator, Dict, Optional, Set, Tuple, Union
 
 import uvloop
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -253,7 +253,17 @@ async def build_async_engine_client_from_engine_args(
             multiprocess.mark_process_dead(engine_process.pid)
 
 
-router = APIRouter()
+async def validate_json_request(raw_request: Request):
+    if raw_request.method == "POST":
+        content_type = raw_request.headers.get("content-type", "").lower()
+        if "application/json" not in content_type:
+            raise HTTPException(
+                status_code=415,
+                detail=
+                "Unsupported Media Type: Only 'application/json' is allowed")
+
+
+router = APIRouter(dependencies=[Depends(validate_json_request)])
 
 
 def mount_metrics(app: FastAPI):
