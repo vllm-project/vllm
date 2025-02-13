@@ -201,20 +201,24 @@ class MPClient(EngineCoreClient):
         self.utility_results: Dict[int, Union[asyncio.Future[Any],
                                               Future]] = {}
 
-    def _process_utility_output(self, output: UtilityOutput):
-        future = self.utility_results.pop(output.call_id)
-        if output.failure_message is not None:
-            future.set_exception(
-                ValueError(f"Failed: {output.failure_message}"))
-        else:
-            future.set_result(output.result)
-
     def shutdown(self):
         """Clean up background resources."""
         if hasattr(self, "proc_handle"):
             self.proc_handle.shutdown()
 
         self._finalizer()
+
+
+def _process_utility_output(output: UtilityOutput,
+                            utility_results: Dict[int,
+                                                  Union[asyncio.Future[Any],
+                                                        Future]]):
+    """Set the result from a utility method in the waiting future"""
+    future = utility_results.pop(output.call_id)
+    if output.failure_message is not None:
+        future.set_exception(ValueError(f"Failed: {output.failure_message}"))
+    else:
+        future.set_result(output.result)
 
 
 class SyncMPClient(MPClient):
@@ -231,14 +235,22 @@ class SyncMPClient(MPClient):
 
         self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
 
+        # Ensure that the outputs socket processing thread does not have
+        # a ref to the client which prevents gc.
+        output_socket = self.output_socket
+        decoder = self.decoder
+        utility_results = self.utility_results
+        outputs_queue = self.outputs_queue
+
         def process_outputs_socket():
             while True:
-                (frame, ) = self.output_socket.recv_multipart(copy=False)
-                outputs = self.decoder.decode(frame.buffer)
+                (frame, ) = output_socket.recv_multipart(copy=False)
+                outputs = decoder.decode(frame.buffer)
                 if outputs.utility_output:
-                    self._process_utility_output(outputs.utility_output)
+                    _process_utility_output(outputs.utility_output,
+                                            utility_results)
                 else:
-                    self.outputs_queue.put_nowait(outputs)
+                    outputs_queue.put_nowait(outputs)
 
         # Process outputs from engine in separate thread.
         Thread(target=process_outputs_socket, daemon=True).start()
@@ -315,7 +327,8 @@ class AsyncMPClient(MPClient):
             if not outputs.utility_output:
                 return outputs
 
-            self._process_utility_output(outputs.utility_output)
+            _process_utility_output(outputs.utility_output,
+                                    self.utility_results)
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
