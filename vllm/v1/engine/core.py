@@ -78,11 +78,7 @@ class EngineCore:
         self.batch_queue_size = self.model_executor.max_concurrent_batches
         self.batch_queue: Optional[queue.Queue[Tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
-        if self.batch_queue_size > 0:
-            if self.batch_queue_size == 1:
-                logger.warning(
-                    "batch_queue_size=1 may result in suboptimal "
-                    "performance and should only be used for testing")
+        if self.batch_queue_size > 1:
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
     def _initialize_kv_caches(self,

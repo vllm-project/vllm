@@ -254,6 +254,7 @@ def test_engine_core_concurrent_batches(monkeypatch):
         )
         vllm_config = engine_args.create_engine_config()
         engine_core = EngineCore(vllm_config=vllm_config,
+                                 log_stats=False,
                                  executor_class=DummyExecutor)
         assert engine_core.batch_queue is not None
 

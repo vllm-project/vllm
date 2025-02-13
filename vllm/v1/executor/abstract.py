@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Type, Union
 from concurrent.futures import Future
+from typing import List, Type, Union
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.ray_distributed_executor import (  # noqa
-    RayDistributedExecutor as RayDistributedExecutorV0)
 from vllm.executor.uniproc_executor import (  # noqa
     ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0)
 from vllm.executor.uniproc_executor import (  # noqa
@@ -34,7 +32,9 @@ class Executor(ExecutorBase):
                     f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
-            executor_class = RayDistributedExecutor
+            from vllm.v1.executor.ray_distributed_executor import (  # noqa
+                RayDistributedExecutor as RayDistributedExecutorV0)
+            executor_class = RayDistributedExecutorV0
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor
@@ -89,8 +89,4 @@ class UniProcExecutor(UniProcExecutorV0, Executor):
 
 
 class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
-    pass
-
-
-class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
     pass
