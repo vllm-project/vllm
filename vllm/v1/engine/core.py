@@ -20,7 +20,7 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType)
-from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
+from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -65,7 +65,7 @@ class EngineCore:
             log_stats=self.log_stats,
         )
 
-        self.mm_input_mapper_server = MMInputMapperServer(
+        self.mm_input_cache_server = MMInputCacheServer(
             vllm_config.model_config)
 
     def _initialize_kv_caches(self,
@@ -102,13 +102,13 @@ class EngineCore:
         """Add request to the scheduler."""
 
         if request.mm_hashes is not None:
-            # Here, if hash exists for an image, then it will be fetched
-            # from the cache, else it will be added to the cache.
-            # Note that the cache here is mirrored with the client side of the
-            # MM mapper, so anything that has a hash must have a HIT cache
-            # entry here as well.
+            # Here, if hash exists for a multimodal input, then it will be
+            # fetched from the cache, else it will be added to the cache.
+            # Note that the cache here is mirrored with the client cache, so
+            # anything that has a hash must have a HIT cache entry here
+            # as well.
             assert request.mm_inputs is not None
-            request.mm_inputs = self.mm_input_mapper_server.process_inputs(
+            request.mm_inputs = self.mm_input_cache_server.get_and_update(
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
