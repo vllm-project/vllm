@@ -259,10 +259,10 @@ class EngineCoreProc(EngineCore):
             self.add_request(request)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
-        elif request_type == EngineCoreRequestType.PROFILE:
-            self.model_executor.profile(request)
         elif request_type == EngineCoreRequestType.RESET_PREFIX_CACHE:
             self.reset_prefix_cache()
+        elif request_type == EngineCoreRequestType.PROFILE:
+            self.model_executor.profile(request)
         elif request_type == EngineCoreRequestType.SLEEP:
             self.sleep(request)
         elif request_type == EngineCoreRequestType.WAKE_UP:
