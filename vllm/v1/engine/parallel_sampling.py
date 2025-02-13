@@ -25,15 +25,6 @@ class ParentRequestState:
         self.request_id = request_id
         self.sampling_params = sampling_params
 
-    def get_warmup_sampling_params(self, ) -> SamplingParams:
-        sampling_params = copy(self.sampling_params)
-        sampling_params.max_tokens = 1
-        sampling_params.n = 1
-        sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
-        sampling_params.logprobs = None
-        sampling_params.prompt_logprobs = None
-        return sampling_params
-
     def get_child_sampling_params(
         self,
         seed: Optional[int],

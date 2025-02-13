@@ -298,22 +298,6 @@ class AsyncLLM(EngineClient):
         # python/sglang/srt/managers/
         # tokenizer_manager.py#L456-L532
 
-        if self.enable_prefix_caching:
-            # If engine uses APC, generate a “warmup request” with
-            # max_tokens=1 which populates the APC
-            w_sampling_params = parent_state.get_warmup_sampling_params()
-            async for _ in self._generate(
-                    prompt,
-                    w_sampling_params,
-                    parent_state.get_warmup_request_id(),
-                    lora_request,
-                    trace_headers,
-                    prompt_adapter_request,
-                    priority,
-            ):
-                # Exhaust the generator
-                pass
-
         # Aggregate generators for n child requests
         gens: List[AsyncGenerator[RequestOutput, None]] = []
         active: Dict[asyncio.Task, int] = {}
