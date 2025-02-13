@@ -404,11 +404,10 @@ VLM_TEST_SETTINGS = {
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
         test_type=(VLMTestType.IMAGE),
-        prompt_formatter=lambda img_prompt:"User: " + img_prompt + " Assistant:", # noqa: E501
+        prompt_formatter=identity,
         max_model_len=4096,
         max_num_seqs=2,
-        image_size_factors=[(),(1.0, 1.0, 1.0)],
-        patch_hf_runner=model_utils.mlomo_patch_hf_runner,
+        patch_hf_runner=model_utils.molmo_patch_hf_runner,
         postprocess_inputs=model_utils.molmo_post_processor,
     ),
     # Tests for phi3v currently live in another file because of a bug in

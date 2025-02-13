@@ -27,7 +27,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -95,9 +95,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
-        # NOTE: Initialized input mapper is only used for processing dummy
+        # NOTE: Initialized client is only used for processing dummy
         # multimodal data into multimodal kwargs for GPU memory profiling.
-        self.mm_input_mapper_profiling = MMInputMapperClient(self.model_config)
+        # Only applicable to multimodal models with legacy input mapper.
+        self.mm_input_mapper_profiling = MMInputCacheClient(self.model_config)
         self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
