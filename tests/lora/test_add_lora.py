@@ -50,6 +50,7 @@ async def requests_processing_time(
         enable_lora=True,
         max_loras=max_loras,
         max_lora_rank=LORA_RANK,
+        max_model_len=128,
         gpu_memory_utilization=0.8,  #avoid OOM
         enforce_eager=True)
     sampling_params = SamplingParams(n=1,
