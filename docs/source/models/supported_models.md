@@ -716,7 +716,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `GLM4VForCausalLM`<sup>^</sup>
   * GLM-4V
   * T + I
-  * `THUDM/glm-4v-9b` etc.
+  * `THUDM/glm-4v-9b`, `THUDM/cogagent-9b-20241220` etc.
   * ✅︎
   * ✅︎
   * ✅︎
