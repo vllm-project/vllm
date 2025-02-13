@@ -266,13 +266,14 @@ class GroupCoordinator:
 
         # only cuda uses this function,
         # so we don't abstract it into the base class
+        maybe_ca_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator)
-        assert isinstance(self.device_communicator, CudaCommunicator)
-
-        ca_comm = self.device_communicator.ca_comm
-        maybe_ca_context = nullcontext(
-        ) if ca_comm is None else ca_comm.capture()
+        if self.device_communicator is not None:
+            assert isinstance(self.device_communicator, CudaCommunicator)
+            ca_comm = self.device_communicator.ca_comm
+            if ca_comm is not None:
+                maybe_ca_context = ca_comm.capture()
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
