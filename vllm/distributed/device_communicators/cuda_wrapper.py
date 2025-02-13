@@ -5,7 +5,6 @@ convenient for use when we just need to call a few functions.
 """
 
 import ctypes
-import glob
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -62,29 +61,6 @@ def find_loaded_library(lib_name) -> Optional[str]:
     return path
 
 
-def get_cudart_lib_path_from_env() -> Optional[str]:
-    """
-    In some system, find_loaded_library() may not work. So we allow users to
-    specify the path through environment variable VLLM_CUDART_SO_PATH.
-    """
-    cudart_so_env = envs.VLLM_CUDART_SO_PATH
-    if cudart_so_env is not None:
-        cudart_paths = [
-            cudart_so_env,
-        ]
-        for path in cudart_paths:
-            file_paths = glob.glob(path)
-            if len(file_paths) > 0:
-                logger.info(
-                    "Found cudart library at %s through env var"
-                    "VLLM_CUDART_SO_PATH=%s",
-                    file_paths[0],
-                    cudart_so_env,
-                )
-                return file_paths[0]
-    return None
-
-
 class CudaRTLibrary:
     exported_functions = [
         # ​cudaError_t cudaSetDevice ( int  device )
@@ -131,7 +107,7 @@ class CudaRTLibrary:
         if so_file is None:
             so_file = find_loaded_library("libcudart")
             if so_file is None:
-                so_file = get_cudart_lib_path_from_env()
+                so_file = envs.VLLM_CUDART_SO_PATH  # fallback to env var
             assert so_file is not None, \
                 (
                     "libcudart is not loaded in the current process, "
