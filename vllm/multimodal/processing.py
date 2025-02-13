@@ -20,9 +20,9 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
 from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
 from .hasher import MultiModalHasher
-from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                     MultiModalInputs, MultiModalKwargs, MultiModalKwargsItem,
-                     PlaceholderRange)
+from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
+                     MultiModalFieldConfig, MultiModalInputs, MultiModalKwargs,
+                     MultiModalKwargsItem, PlaceholderRange)
 from .parse import MultiModalDataItems, MultiModalDataParser
 
 if TYPE_CHECKING:
@@ -1293,3 +1293,57 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
+
+
+class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
+
+    @abstractmethod
+    def create_encoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        """Create input prompt for the encoder."""
+        raise NotImplementedError
+
+    def apply(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalEncDecInputs:
+        """
+        Process multi-modal inputs to be used in vLLM.
+        The main processing steps are modified to fit encoder-decoder model:
+        1. Create encoder prompt from input prompt text.
+        2. Apply the HF processor on encoder prompt.
+        3. Copy the input prompt text as decoder prompt inputs.
+        """
+        encoder_prompt = self.create_encoder_prompt(prompt, mm_data)
+        encoder_inputs = super().apply(
+            encoder_prompt,
+            mm_data,
+            hf_processor_mm_kwargs,
+        )
+
+        # We assumed the decoder prompt text is copied from
+        # the original encoder prompt without extra process
+        tokenizer = self.info.get_tokenizer()
+        if isinstance(prompt, str):
+            decoder_prompt = prompt
+            decoder_prompt_ids = encode_tokens(tokenizer,
+                                               prompt,
+                                               add_special_tokens=False)
+        else:
+            decoder_prompt = decode_tokens(tokenizer, prompt)
+            decoder_prompt_ids = prompt
+
+        mm_inputs = MultiModalEncDecInputs(
+            encoder_prompt=encoder_inputs["prompt"],
+            encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
+            **encoder_inputs)
+        mm_inputs.update({
+            "prompt": decoder_prompt,
+            "prompt_token_ids": decoder_prompt_ids
+        })
+        return mm_inputs

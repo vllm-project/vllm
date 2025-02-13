@@ -793,7 +793,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `MolmoForCausalLM`
   * Molmo
   * T + I
-  * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-72B-0924`, etc.
+  * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc.
   * ✅︎
   * ✅︎
   * ✅︎
@@ -856,7 +856,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
-  * `fixie-ai/ultravox-v0_3`
+  * `fixie-ai/ultravox-v0_5-llama-3_2-1b`
   * ✅︎
   * ✅︎
   * ✅︎
