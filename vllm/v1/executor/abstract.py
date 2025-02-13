@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Type
+from typing import List, Type
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
@@ -48,12 +48,12 @@ class Executor(ExecutorBase):
                              f"{distributed_executor_backend}")
         return executor_class
 
-    def initialize(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize(self, kv_cache_configs: List[KVCacheConfig]) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_cache", args=(kv_cache_config, ))
+        self.collective_rpc("initialize_cache", args=(kv_cache_configs, ))
         self.collective_rpc("compile_or_warm_up_model")
 
     def determine_available_memory(self) -> int:  # in bytes
@@ -63,11 +63,9 @@ class Executor(ExecutorBase):
         # operators can be applied to all workers.
         return min(output)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_specs(self) -> List[KVCacheSpec]:
         output = self.collective_rpc("get_kv_cache_spec")
-        for x in output:
-            assert x == output[0]
-        return output[0]
+        return output
 
     def execute_model(
         self,
