@@ -6,7 +6,7 @@ import pytest
 
 from vllm import LLM
 
-from ..conftest import MODEL_WEIGHTS_S3_BUCKET
+from ...conftest import MODEL_WEIGHTS_S3_BUCKET
 from ..openai.test_vision import TEST_IMAGE_URLS
 
 
