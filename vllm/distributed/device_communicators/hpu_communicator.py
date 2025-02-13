@@ -13,13 +13,13 @@ if current_platform.is_hpu():
 
 class HpuCommunicator(DeviceCommunicatorBase):
 
-    def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         # FIXME(kzawora): this is a workaround for a bug in Habana PT bridge
         # occurring when PT_HPU_ENABLE_LAZY_COLLECTIVES=true env var is used
         # (which is required for tensor parallel HPUGraph inference)
         htorch.core.mark_step()
-        dist.all_reduce(x, group=self.device_group)
-        return x
+        dist.all_reduce(input_, group=self.device_group)
+        return input_
 
     def all_gather(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
