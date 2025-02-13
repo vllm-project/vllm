@@ -17,7 +17,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_input_cache import MMInputMapperClient
+from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 
 
 class Processor:
@@ -46,7 +46,7 @@ class Processor:
             model_config)
 
         # Multi-modal (huggingface) input mapper
-        self.mm_input_mapper_client = MMInputMapperClient(model_config)
+        self.mm_input_mapper_client = MMInputCacheClient(model_config)
 
         # Multi-modal hasher (for images)
         self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \

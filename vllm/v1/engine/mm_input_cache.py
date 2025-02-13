@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 MM_CACHE_SIZE = 256
 
 
-class MMInputMapperClient:
+class MMInputCacheClient:
 
     def __init__(
         self,
