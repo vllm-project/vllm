@@ -30,7 +30,8 @@ class DeviceCommunicatorBase:
                                                  self.global_rank)
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        dist.all_reduce(input_, group=self.device_group)
+        return input_
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
