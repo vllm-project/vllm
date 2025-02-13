@@ -152,4 +152,4 @@ class CpuPlatform(Platform):
         """
         Get device specific communicator class for distributed communication.
         """
-        return "vllm.distributed.device_communicators.base_communicator.CommunicatorBase"  # noqa: E501"
+        return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa

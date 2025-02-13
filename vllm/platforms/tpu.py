@@ -93,3 +93,7 @@ class TpuPlatform(Platform):
                     "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"
+
+    @classmethod
+    def get_device_communicator_cls() -> str:
+        return "vllm.distributed.device_communicators.tpu_communicator.TpuCommunicator"  # noqa
