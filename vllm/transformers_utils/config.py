@@ -213,25 +213,10 @@ def get_config(
             # don't have files cached and may need to go online.
             # This is conveniently triggered by calling file_exists().
 
-            # Call HF to check if the file exists
-            # 2 retries and exponential backoff
-            max_retries = 2
-            retry_delay = 2
-            for attempt in range(max_retries):
-                try:
-                    file_exists(model,
-                                HF_CONFIG_NAME,
-                                revision=revision,
-                                token=HF_TOKEN)
-                except Exception as e:
-                    logger.error(
-                        "Error checking file existence: %s, retrying %d of %d",
-                        e, attempt + 1, max_retries)
-                    if attempt == max_retries:
-                        logger.error("Error checking file existence: %s", e)
-                        raise e
-                    time.sleep(retry_delay)
-                    retry_delay *= 2
+            file_exists(model,
+                        HF_CONFIG_NAME,
+                        revision=revision,
+                        token=HF_TOKEN)
 
             raise ValueError(f"No supported config format found in {model}")
 

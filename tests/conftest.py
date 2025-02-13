@@ -53,7 +53,7 @@ MODELS_ON_S3 = [
     "facebook/chameleon-7b", "deepseek-ai/deepseek-vl2-tiny",
     "intfloat/e5-mistral-7b-instruct", "adept/fuyu-8b", "google/gemma-2-2b-it",
     "google/gemma-2-9b", "google/gemma-2b", "google/gemma-7b",
-    "THUDM/glm-4v-9b", "openai-community/gpt2", "h2oai/h2ovl-mississippi-800m",
+    "THUDM/glm-4v-9b", "openai-community/gpt2", "openai-community/distilgpt2", "h2oai/h2ovl-mississippi-800m",
     "HuggingFaceM4/Idefics3-8B-Llama3", "ArthurZ/Ilama-3.2-1B",
     "OpenGVLab/InternVL2-1B", "microsoft/Jamba-tiny-dev",
     "meta-llama/Llama-2-7b-AQLM-2Bit-1x16-hf", "meta-llama/Llama-2-7b-chat-hf",
@@ -721,7 +721,7 @@ class VllmRunner:
         load_format = LoadFormat.AUTO
         if model_name in MODELS_ON_S3:
             model_name = (f"s3://vllm-ci-model-weights/"
-                          f"{model_name.split(' / ')[-1]}")
+                          f"{model_name.split("/")[-1]}")
             load_format = LoadFormat.RUNAI_STREAMER
         self.model = LLM(
             model=model_name,
