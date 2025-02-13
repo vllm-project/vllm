@@ -579,7 +579,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
-  
+    
     # Contiguous cache fetching to avoid using costly gather operation on
     # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
     # contiguous cache fetch will be used.
