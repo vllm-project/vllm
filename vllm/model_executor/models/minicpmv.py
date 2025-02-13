@@ -675,7 +675,7 @@ class MiniCPMVMultiModalProcessor(
                 self.info.get_video_max_slice_num()
             ) * inputs[modality]["num_frames"][index]
         else:
-            raise ValueError(f"UnExpected modality: {modality}")
+            raise ValueError(f"Unexpected modality: {modality}")
 
     def check_mm_inputs(self, inputs: Dict[str, object],
                         matches: List[str]) -> None:
@@ -700,7 +700,7 @@ class MiniCPMVMultiModalProcessor(
                 inputs["video"]["video_image_sizes"][index],
                 inputs["video"]["num_frames"][index])
         else:
-            raise ValueError(f"UnExpected modality: {modality}")
+            raise ValueError(f"Unexpected modality: {modality}")
 
     def call_base_hf_processor(
         self,
@@ -741,6 +741,14 @@ class MiniCPMVMultiModalProcessor(
                 for modality in mm_input_modalities
             }
         }
+
+    def _hf_processor_applies_repl(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
 
     def _get_prompt_replacements(
             self, mm_items: MultiModalDataItems,
