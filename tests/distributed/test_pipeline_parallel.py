@@ -35,6 +35,7 @@ class PPTestOptions(NamedTuple):
     tokenizer_mode: Optional[str]
     load_format: Optional[str] = None
     hf_overrides: Optional[str] = None
+    model_impl: Optional[str] = None
 
 
 @dataclass
@@ -55,6 +56,7 @@ class PPTestSettings:
         tokenizer_mode: Optional[str] = None,
         load_format: Optional[str] = None,
         hf_overrides: Optional[str] = None,
+        model_impl: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -85,7 +87,8 @@ class PPTestSettings:
                                        trust_remote_code=trust_remote_code,
                                        tokenizer_mode=tokenizer_mode,
                                        load_format=load_format,
-                                       hf_overrides=hf_overrides),
+                                       hf_overrides=hf_overrides,
+                                       model_impl=model_impl),
         )
 
     @staticmethod
@@ -99,6 +102,7 @@ class PPTestSettings:
         tokenizer_mode: Optional[str] = None,
         load_format: Optional[str] = None,
         hf_overrides: Optional[str] = None,
+        model_impl: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -113,7 +117,8 @@ class PPTestSettings:
                                        trust_remote_code=trust_remote_code,
                                        tokenizer_mode=tokenizer_mode,
                                        load_format=load_format,
-                                       hf_overrides=hf_overrides),
+                                       hf_overrides=hf_overrides,
+                                       model_impl=model_impl),
         )
 
     def iter_params(self, model_name: str):
@@ -159,6 +164,7 @@ TEXT_GENERATION_MODELS = {
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
+    "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.fast(model_impl="transformers"),  # noqa: E501
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(trust_remote_code=True),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(trust_remote_code=True),
     # Uses Llama
@@ -227,6 +233,7 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Meta-Llama-3-8B",
+    "meta-llama/Llama-3.2-1B-Instruct",
     "ibm/PowerLM-3b",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
@@ -262,6 +269,7 @@ def _compare_tp(
         tokenizer_mode,
         load_format,
         hf_overrides,
+        model_impl,
     ) = test_options
 
     if num_gpus_available < tp_size * pp_size:
@@ -295,6 +303,8 @@ def _compare_tp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", hf_overrides])
+    if model_impl:
+        common_args.extend(["--model-impl", model_impl])
 
     if (distributed_backend == "ray" and tp_size == 2 and pp_size == 2
             and chunked_prefill):
