@@ -365,17 +365,12 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         n = sampling_params.n
-        if n is None or sampling_params.n == 1:
-            async for out in self._generate(prompt, sampling_params,
-                                            request_id, lora_request,
-                                            trace_headers,
-                                            prompt_adapter_request, priority):
-                yield out
-        else:
-            async for out in self._generate_parallel_sampling(
-                    prompt, sampling_params, request_id, lora_request,
-                    trace_headers, prompt_adapter_request, priority):
-                yield out
+        _generate  = self._generate if n is None or n == 1 \
+            else self._generate_parallel_sampling
+        return _generate(prompt, sampling_params,
+                                    request_id, lora_request,
+                                    trace_headers,
+                                    prompt_adapter_request, priority)
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
