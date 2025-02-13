@@ -49,8 +49,12 @@ class Sampler(nn.Module):
         logits = logits.to(torch.float32)
         # Apply logits bias.
         logits = self.apply_logits_bias(logits, sampling_metadata)
+        # Apply allowed toekn ids.
+        logits = self.apply_allowed_token_ids(logits, sampling_metadata)
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
+        # Apply temperature.
+        logits = self.apply_temperature(logits, sampling_metadata.temperature)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
 
@@ -227,3 +231,15 @@ class Sampler(nn.Module):
                 for token_id, bias in logit_bias.items():
                     logits[i, token_id] += bias
         return logits
+
+
+    def apply_allowed_token_ids(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        # One idea is implement this as a PyTorch C++ op, and we may
+        # even optimize the logit_bias layout.
+        for i, allowed_token_ids in enumerate(sampling_metadata.has_allowed_token_ids):
+            if allowed_token_ids:
+                logits[i].masked_fill_(sampling_metadata.allowed_token_ids_mask[i], float("-inf"))
