@@ -5,7 +5,7 @@
 The tables below show mutually exclusive features and the support on some hardware.
 
 :::{note}
-Check the '✗' with links to see tracking issue for unsupported feature/hardware combination.
+Check the ❌ with links to see tracking issue for unsupported feature/hardware combination.
 :::
 
 ## Feature x Feature
@@ -83,7 +83,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   *
   *
 - * [LoRA](#lora-adapter)
-  * [✗](gh-pr:9057)
+  * ✅
   * ✅
   *
   *
@@ -119,7 +119,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 - * [SD](#spec_decode)
   * ✅
   * ✅
-  * ✗
+  * ❌
   * ✅
   *
   *
@@ -151,12 +151,12 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   *
   *
 - * <abbr title="Pooling Models">pooling</abbr>
-  * ✗
-  * ✗
-  * ✗
-  * ✗
-  * ✗
-  * ✗
+  * ❌
+  * ❌
+  * ❌
+  * ❌
+  * ❌
+  * ❌
   *
   *
   *
@@ -168,11 +168,11 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   *
   *
 - * <abbr title="Encoder-Decoder Models">enc-dec</abbr>
-  * ✗
-  * [✗](gh-issue:7366)
-  * ✗
-  * ✗
-  * [✗](gh-issue:7366)
+  * ❌
+  * [❌](gh-issue:7366)
+  * ❌
+  * ❌
+  * [❌](gh-issue:7366)
   * ✅
   * ✅
   *
@@ -191,7 +191,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * ✗
+  * ❌
   * ✅
   *
   *
@@ -206,9 +206,9 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * [✗](gh-pr:8199)
+  * [❌](gh-pr:8199)
   * ✅
-  * ✗
+  * ❌
   * ✅
   * ✅
   *
@@ -223,10 +223,10 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * ✗
+  * ❌
   * ✅
-  * ✗
-  * ✗
+  * ❌
+  * ❌
   * ✅
   * ✅
   *
@@ -236,16 +236,16 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   *
   *
 - * multi-step
-  * ✗
+  * ❌
   * ✅
-  * ✗
+  * ❌
   * ✅
-  * ✗
+  * ❌
   * ✅
-  * ✗
-  * ✗
+  * ❌
+  * ❌
   * ✅
-  * [✗](gh-issue:8198)
+  * ✅
   * ✅
   *
   *
@@ -254,17 +254,17 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   *
 - * <abbr title="Multimodal Inputs">mm</abbr>
   * ✅
-  * [✗](gh-pr:8348)
-  * [✗](gh-pr:7199)
-  * ?
-  * ?
+  * ✅
+  * ✅
+  * ❔
+  * ❔
   * ✅
   * ✅
   * ✅
   * ✅
   * ✅
   * ✅
-  * ?
+  * ❔
   *
   *
   *
@@ -274,14 +274,14 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * [✗](gh-issue:6137)
+  * [❌](gh-issue:6137)
   * ✅
-  * ✗
+  * ❌
   * ✅
   * ✅
   * ✅
-  * ?
-  * [✗](gh-issue:7968)
+  * ❔
+  * [❌](gh-issue:7968)
   * ✅
   *
   *
@@ -291,32 +291,32 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * [✗](gh-issue:6137)
+  * [❌](gh-issue:6137)
   * ✅
-  * ✗
+  * ❌
   * ✅
   * ✅
   * ✅
-  * ?
-  * [✗](gh-issue:7968)
-  * ?
+  * ❔
+  * [❌](gh-issue:7968)
+  * ❔
   * ✅
   *
   *
 - * <abbr title="Guided Decoding">guided dec</abbr>
   * ✅
   * ✅
-  * ?
-  * ?
-  * [✗](gh-issue:11484)
+  * ❔
+  * ❔
+  * [❌](gh-issue:11484)
   * ✅
-  * ✗
-  * ?
+  * ❌
+  * ❔
   * ✅
   * ✅
   * ✅
-  * [✗](gh-issue:9893)
-  * ?
+  * [❌](gh-issue:9893)
+  * ❔
   * ✅
   * ✅
   *
@@ -340,7 +340,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * CPU
   * AMD
 - * [CP](#chunked-prefill)
-  * [✗](gh-issue:2729)
+  * [❌](gh-issue:2729)
   * ✅
   * ✅
   * ✅
@@ -348,7 +348,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
 - * [APC](#automatic-prefix-caching)
-  * [✗](gh-issue:3687)
+  * [❌](gh-issue:3687)
   * ✅
   * ✅
   * ✅
@@ -369,7 +369,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * [✗](gh-issue:8475)
+  * [❌](gh-issue:8475)
   * ✅
 - * [SD](#spec_decode)
   * ✅
@@ -385,7 +385,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * ✗
+  * ❌
   * ✅
 - * <abbr title="Pooling Models">pooling</abbr>
   * ✅
@@ -394,7 +394,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * ?
+  * ❔
 - * <abbr title="Encoder-Decoder Models">enc-dec</abbr>
   * ✅
   * ✅
@@ -402,7 +402,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * ✗
+  * ❌
 - * <abbr title="Multimodal Inputs">mm</abbr>
   * ✅
   * ✅
@@ -433,15 +433,15 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
   * ✅
   * ✅
   * ✅
-  * ✗
-  * ✗
+  * ❌
+  * ❌
 - * multi-step
   * ✅
   * ✅
   * ✅
   * ✅
   * ✅
-  * [✗](gh-issue:8477)
+  * [❌](gh-issue:8477)
   * ✅
 - * best-of
   * ✅
