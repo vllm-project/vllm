@@ -28,7 +28,7 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 logger = init_logger(__name__)
 
 
-@warn_for_unimplemented_methods()
+@warn_for_unimplemented_methods
 class WorkerBase:
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
