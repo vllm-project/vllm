@@ -19,26 +19,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 
-def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
-    assert image_size % patch_size == 0
-    return image_size // patch_size
-
-
-def get_clip_num_patches(*, image_size: int, patch_size: int) -> int:
-    grid_length = get_clip_patch_grid_length(image_size=image_size,
-                                             patch_size=patch_size)
-    return grid_length * grid_length
-
-
-def get_clip_image_feature_size(hf_config: CLIPVisionConfig) -> int:
-    return get_clip_num_patches(image_size=hf_config.image_size,
-                                patch_size=hf_config.patch_size) + 1
-
-
-def get_max_clip_image_tokens(hf_config: CLIPVisionConfig) -> int:
-    return get_clip_image_feature_size(hf_config)
-
-
 class CLIPEncoderInfo(VisionEncoderInfo[CLIPVisionConfig]):
 
     def get_num_image_tokens(
@@ -47,10 +27,10 @@ class CLIPEncoderInfo(VisionEncoderInfo[CLIPVisionConfig]):
         image_width: int,
         image_height: int,
     ) -> int:
-        return get_clip_image_feature_size(self.vision_config)
+        return self.get_patch_grid_length()**2 + 1
 
     def get_max_image_tokens(self) -> int:
-        return get_max_clip_image_tokens(self.vision_config)
+        return self.get_patch_grid_length()**2 + 1
 
     def get_image_size(self) -> int:
         return self.vision_config.image_size
@@ -59,10 +39,9 @@ class CLIPEncoderInfo(VisionEncoderInfo[CLIPVisionConfig]):
         return self.vision_config.patch_size
 
     def get_patch_grid_length(self) -> int:
-        return get_clip_patch_grid_length(
-            image_size=self.vision_config.image_size,
-            patch_size=self.vision_config.patch_size,
-        )
+        image_size, patch_size = self.get_image_size(), self.get_patch_size()
+        assert image_size % patch_size == 0
+        return image_size // patch_size
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa
@@ -74,6 +53,7 @@ class CLIPVisionEmbeddings(nn.Module):
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
+        assert self.image_size % self.patch_size == 0
 
         self.class_embedding = nn.Parameter(torch.randn(self.embed_dim))
 
@@ -85,8 +65,7 @@ class CLIPVisionEmbeddings(nn.Module):
             bias=False,
         )
 
-        self.num_patches = get_clip_num_patches(image_size=self.image_size,
-                                                patch_size=self.patch_size)
+        self.num_patches = (self.image_size // self.patch_size)**2
         self.num_positions = self.num_patches + 1
         self.position_embedding = nn.Embedding(self.num_positions,
                                                self.embed_dim)
