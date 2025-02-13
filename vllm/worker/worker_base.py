@@ -157,6 +157,10 @@ class DelegateWorkerBase(WorkerBase):
                          num_cpu_blocks: int) -> None:
         self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
+    def load_model(self) -> None:
+        """Load model onto target device."""
+        self.worker.load_model()
+
     def get_model(self) -> nn.Module:
         return self.worker.get_model()
 
