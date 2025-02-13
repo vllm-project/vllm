@@ -52,7 +52,7 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
       and torch.version.hip is None):
     # if cuda or hip is not available and VLLM_TARGET_DEVICE is not set,
     # fallback to cpu
-    VLLM_TARGET_DEVICE = "cpu"
+    VLLM_TARGET_DEVICE = "empty"
 
 MAIN_CUDA_VERSION = "12.1"
 
