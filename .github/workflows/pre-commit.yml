@@ -20,24 +20,26 @@ jobs:
       continue-on-error: true
       with:
         extra_args: --all-files --hook-stage manual
-    - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+    - name: Add `pre-commit-passed` if success
+      uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
       if: steps.pre-commit.outcome == 'success'
       with:
         script: |
           github.rest.issues.addLabels({
             owner: context.repo.owner,
-            repo: context.repo.name,
+            repo: context.repo.repo,
             issue_number: context.issue.number,
             labels: ['pre-commit-passed']
           })
-    - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+    - name: Remove `pre-commit-passed` otherwise
+      uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
       if: steps.pre-commit.outcome != 'success'
       with:
         script: |
           try {
             await github.rest.issues.removeLabel({
               owner: context.repo.owner,
-              repo: context.repo.name,
+              repo: context.repo.repo,
               issue_number: context.issue.number,
               name: 'pre-commit-passed'
             })
