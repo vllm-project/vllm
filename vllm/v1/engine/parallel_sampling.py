@@ -30,6 +30,8 @@ class ParentRequestState:
         sampling_params.max_tokens = 1
         sampling_params.n = 1
         sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
+        sampling_params.logprobs = None
+        sampling_params.prompt_logprobs = None
         return sampling_params
 
     def get_child_sampling_params(
@@ -124,14 +126,6 @@ class ParentRequestState:
     @property
     def n(self) -> int:
         return self.sampling_params.n
-
-    @property
-    def logprobs(self) -> Optional[int]:
-        return self.sampling_params.logprobs
-
-    @property
-    def prompt_logprobs(self) -> Optional[int]:
-        return self.sampling_params.prompt_logprobs
 
     @property
     def output_kind(self) -> RequestOutputKind:
