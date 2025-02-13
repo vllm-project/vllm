@@ -333,8 +333,7 @@ class LoRAModelManager(AdapterModelManager):
         self.scaling_factor_to_offset: Dict[float, int] = {}
         super().__init__(model)
 
-        self.supported_lora_modules = get_supported_lora_modules(
-            self.model)
+        self.supported_lora_modules = get_supported_lora_modules(self.model)
         if lora_config.long_lora_scaling_factors:
             # We need to replace rotary emb layer to do batch computation
             # for long lora.
@@ -751,7 +750,7 @@ def create_lora_manager(
         lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager,
         **kwargs) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
-    if not hasattr(model, "supported_lora_modules"):
+    if not hasattr(model, "packed_modules_mapping"):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
     lora_manager = lora_manager_cls(
         model=model,

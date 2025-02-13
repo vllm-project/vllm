@@ -177,7 +177,7 @@ def get_supported_lora_modules(model: nn.Module) -> List[str]:
     for name, module in model.named_modules():
         if isinstance(module, (LinearBase, )):
             supported_lora_modules.add(name.split(".")[-1])
-    # step 2: get the embedding modules if the modele's mbedding_modules 
+    # step 2: get the embedding modules if the modele's mbedding_modules
     # is not empty.
     if model.embedding_modules:
         for name in model.embedding_modules:
