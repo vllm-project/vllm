@@ -2271,11 +2271,8 @@ def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
                 base_method_name = base_method.__func__
             else:
                 continue
-            class_method_name = getattr(cls, attr_name, False)
-            # bypass method defined in sub class
-            if not class_method_name:
-                continue
-            if class_method_name == base_method_name:
+            src = inspect.getsource(base_method_name)
+            if "NotImplementedError" in src:
                 unimplemented_methods.append(attr_name)
         if unimplemented_methods:
             method_names = ','.join(unimplemented_methods)
