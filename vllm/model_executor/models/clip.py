@@ -351,7 +351,6 @@ class CLIPVisionModel(nn.Module, SupportsQuant):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        SupportsQuant.__init__(self, quant_config)
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,

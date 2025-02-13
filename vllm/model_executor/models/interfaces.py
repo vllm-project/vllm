@@ -7,13 +7,14 @@ import torch
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.utils import supports_kw
 
 from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
-    from vllm.config import QuantizationConfig
     from vllm.multimodal.inputs import NestedTensors  # noqa: F401
     from vllm.sequence import IntermediateTensors
 
@@ -448,13 +449,30 @@ class SupportsQuant:
     """The interface required for all models that support quantization."""
 
     packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
-    quant_config: Optional["QuantizationConfig"] = None
+    quant_config: Optional[QuantizationConfig] = None
 
-    def __init__(self, quant_config: "QuantizationConfig"):
-        super().__init__()
-        self.quant_config = quant_config
-        self.quant_config.packed_modules_mapping.update(
-            self.packed_modules_mapping)
+    def __new__(cls, *args, **kwargs) -> "SupportsQuant":
+        instance = super().__new__(cls)
+        quant_config = cls._find_quant_config(*args, **kwargs)
+        if quant_config is not None:
+            instance.quant_config = quant_config
+            instance.quant_config.packed_modules_mapping.update(
+                cls.packed_modules_mapping)
+        return instance
+
+    @staticmethod
+    def _find_quant_config(*args, **kwargs) -> Optional[QuantizationConfig]:
+        from vllm.config import VllmConfig  # avoid circular import
+
+        args_values = list(args) + list(kwargs.values())
+        for arg in args_values:
+            if isinstance(arg, VllmConfig):
+                return arg.quant_config
+
+            if isinstance(arg, QuantizationConfig):
+                return arg
+
+        return None
 
 
 @runtime_checkable
