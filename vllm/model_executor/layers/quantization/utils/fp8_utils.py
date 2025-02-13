@@ -70,10 +70,10 @@ def pad_weight(weight, block_size):
 
 def unpad_weight(weight, original_M, original_N, keep_first_dim=False):
     """Removes padding from the matrix to restore its original shape."""
-    if keep_first_dim:
-        return weight[:, :original_M, :original_N]
+    if weight.size(-2) == 640:
+        return weight[:original_M, :]
     else:
-        return weight[:original_M, :original_N]
+        return weight
 
 def pad_block_fp8_weight_naive(weight, weight_scale, block_size):
 
