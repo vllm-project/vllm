@@ -10,12 +10,18 @@ from vllm.utils import LRUCache
 
 logger = init_logger(__name__)
 
-# The idea of MM preprocessor caching is based on having a client and a server,
-# where the client executes in the frontend process (=P0) and the server in the
-# core process (=P1).
+# The idea of multimodal preprocessing caching is based on having a client and
+# a server, where the client executes in the frontend process (=P0) and the
+# server in the core process (=P1).
 #
-# -- Client: Executes the MM mapper and performs caching of the results.
-# -- Server: Performs caching of the results
+# -- Client:
+#  - Apply legacy input_mapper (if one exists) to generate MultiModalKwargs.
+#  - Perform caching of the generated MultiModalKwargs.
+#  - This client can be deprecated once all mutimodal models migrate to use
+#    merged preprocessor with built-in caching functionality.
+#
+# -- Server:
+#  - Perform caching of the received MultiModalKwargs.
 #
 # The caching for both client and server is mirrored/similar, and this allows us
 # to avoid the serialization of "mm_inputs" (like pixel values) between
@@ -27,7 +33,9 @@ logger = init_logger(__name__)
 MM_CACHE_SIZE = 256
 
 
-class MMInputMapperClient:
+# TODO(ywang96): Deprecate this class once all multimodal models migrate to use
+# merged preprocessor with built-in caching functionality.
+class MMInputCacheClient:
 
     def __init__(
         self,
@@ -54,7 +62,8 @@ class MMInputMapperClient:
             logger.debug("MMInputMapper: cache_hit_ratio = %.2f ",
                          self.mm_cache_hits / self.mm_cache_total)
 
-    # TODO: Support modalities beyond image.
+    # NOTE: process_inputs only supports image inputs since all multimodal
+    # models with other modalities have migrated to use merged preprocessor.
     def process_inputs(
         self,
         mm_data: MultiModalDataDict,
@@ -95,7 +104,7 @@ class MMInputMapperClient:
                     # Reuse precomputed input (for merged preprocessor)
                     mm_input = precomputed_mm_inputs[input_id]
                 else:
-                    # Apply MM mapper
+                    # Apply legacy input_mapper
                     mm_input = self.multi_modal_input_mapper(
                         {"image": [image_inputs[input_id]]},
                         mm_processor_kwargs=mm_processor_kwargs,
@@ -114,13 +123,13 @@ class MMInputMapperClient:
         return ret_inputs
 
 
-class MMInputMapperServer:
+class MMInputCacheServer:
 
     def __init__(self, model_config):
         self.use_cache = not model_config.disable_mm_preprocessor_cache
         self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
-    def process_inputs(
+    def get_and_update(
         self,
         mm_inputs: List[Optional[MultiModalKwargs]],
         mm_hashes: List[str],
