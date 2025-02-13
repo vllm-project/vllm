@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
+from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_linear_quant_method)
@@ -160,7 +161,12 @@ class GPTQMarlinConfig(QuantizationConfig):
     ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod",
                         UnquantizedLinearMethod, UnquantizedEmbeddingMethod]]:
         if isinstance(layer, FusedMoE):
-            return GPTQMarlinMoEMethod(self)
+            if layer.num_experts > 32:
+                # For MoEs with many experts the moe_wna16 kernel is faster
+                MoeWNA16Config.from_config(self.full_config).get_quant_method(
+                    layer, prefix)
+            else:
+                return GPTQMarlinMoEMethod(self)
         return get_linear_quant_method(self, layer, prefix,
                                        GPTQMarlinLinearMethod)
 
