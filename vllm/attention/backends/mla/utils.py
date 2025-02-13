@@ -30,11 +30,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
-try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
-except ImportError:
-    from flash_attn import flash_attn_varlen_func
-
 
 @dataclass
 class MLACommonMetadata(AttentionMetadata):
@@ -411,6 +406,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: T,
     ) -> torch.Tensor:
         raise NotImplementedError
@@ -447,8 +443,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         assert hasattr(attn_metadata, "input_positions")
 
         num_prefill_tokens: int = attn_metadata.num_prefill_tokens
-
-        # print("has_decode:", has_decode, " has_prefill: ", has_prefill)
 
         if has_decode:
             decode_q = hidden_states_or_q_c[num_prefill_tokens:]
@@ -500,45 +494,3 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 decode_q_nope, decode_q_pe, kv_cache, attn_metadata)
 
         return output
-
-    # Optional common flash-attn based prefill
-    def _forward_prefill_flash(
-        self,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        seq_start_loc: torch.Tensor,
-        max_query_len: int,
-        max_prefill_seq_len: int,
-    ) -> torch.Tensor:
-
-        kv_nope = self.kv_b_proj(k_c_normed)[0]\
-            .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope\
-            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
-
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
-
-        attn_output = flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v_padded,
-            cu_seqlens_q=query_start_loc,
-            cu_seqlens_k=seq_start_loc,
-            max_seqlen_q=max_query_len,
-            max_seqlen_k=max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            fa_version=self.vllm_flash_attn_version,
-        )
-        attn_output = attn_output\
-            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                .reshape(-1, self.num_heads * v.shape[-1])
-
-        return self.o_proj(attn_output)[0]

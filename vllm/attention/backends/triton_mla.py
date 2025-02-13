@@ -279,8 +279,6 @@ class TritonMLAMetadata(MLACommonMetadata):
     chunk_iter_toks: Optional[List[int]] = None
     chunk_max_seq_lens: Optional[List[int]] = None
 
-    first_layer: bool = True
-
     def __post_init__(self):
         supported_head_sizes = TritonMLABackend.get_supported_head_sizes()
         if self.head_dim is not None and self.head_dim \
@@ -520,9 +518,6 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
 
-        print("scheduling", inter_data.is_prompt, inter_data,
-              inter_data.seq_lens, inter_data.context_lens)
-
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block, input_positions) in zip(
                  inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
@@ -613,12 +608,10 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             for inter_data in self.input_builder.inter_data_list
         ])
 
-        print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled,
                                 prefix_cache_hit)
-        print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
@@ -677,14 +670,12 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
         chunk_iter_toks = None
         chunk_max_seq_lens = None
 
-        print("seq_start_loc_tensor", seq_start_loc_tensor.device)
-
         chunked_prefill_enabled = self.input_builder.chunked_prefill_enabled
         if chunked_prefill_enabled and self.num_prefills > 0 \
             and context_lens_tensor is not None:
             page_size = self.runner.block_size
             seq_chunk_size = chunked_prefill_workspace_size // self.num_prefills
-            print("seq_chunk_size", seq_chunk_size)
+
             # align seq_chunk_size to page_size by rounding down
             seq_chunk_size = seq_chunk_size - (seq_chunk_size % page_size)
             assert seq_chunk_size > 0
@@ -706,19 +697,9 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             _chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(torch.int32)
             zero = torch.zeros(num_chunks, dtype=torch.int32, device=device)\
                 .unsqueeze(-1)
-            print("zero", zero.shape)
-            print("self.num_prefills", self.num_prefills, "_chunk_cu_seq_lens",
-                  _chunk_cu_seq_lens.shape)
             chunk_cu_seq_lens = torch.cat([zero, _chunk_cu_seq_lens], dim=1)
             chunk_max_seq_lens = chunk_seq_lens.max(dim=1).values.tolist()
             chunk_iter_toks = chunk_seq_lens.sum(dim=1).tolist()
-
-            print("chunk_seq_starts", chunk_seq_starts)
-            print("chunk_ends", chunk_ends)
-            #print(_chunk_cu_seq_lens)
-            print("chunk_cu_seq_lens", chunk_cu_seq_lens)
-            print("chunk_max_seq_lens", chunk_max_seq_lens)
-            print("chunk_iter_toks", chunk_iter_toks)
 
         return TritonMLAMetadata(
             num_prefills=self.num_prefills,
@@ -809,12 +790,6 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
             toks = prefill_metadata.chunk_iter_toks[i]
             max_seq_len = prefill_metadata.chunk_max_seq_lens[i]
 
-            if attn_metadata.first_layer:
-                print("running gather")
-                print(prefill_metadata.block_tables)
-                print("chunk_cu_seq_lens", chunk_cu_seq_lens)
-                print("chunk_seq_starts", chunk_seq_starts)
-
             ops.gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=self.workspace,
@@ -828,9 +803,7 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                 [..., :self.kv_lora_rank].unsqueeze(1)
             k_pe = self.workspace[:toks]\
                 [..., self.kv_lora_rank:].unsqueeze(1)
-            # print("====================================")
-            # print(prefill_metadata.block_tables)
-            # print("====================================")
+
             kv_nope = self.kv_b_proj(k_c_normed)[0].view( \
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = kv_nope\
@@ -844,10 +817,6 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
             v_padded = torch.nn.functional.pad(v,
                                                [0, q.shape[-1] - v.shape[-1]],
                                                value=0)
-
-            if attn_metadata.first_layer:
-                print("prefill_metadata.query_start_loc",
-                      prefill_metadata.query_start_loc)
 
             attn_output, attn_softmax_lse = flash_attn_varlen_func(
                 q=q,
@@ -863,28 +832,10 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                 fa_version=self.vllm_flash_attn_version,
             )
 
-            if attn_metadata.first_layer:
-                print("q", q.shape)
-                print("k", k.shape)
-                print("v", v_padded.shape)
-                print("prefill_metadata.query_start_loc",
-                      prefill_metadata.query_start_loc)
-                print("chunk_cu_seq_lens", chunk_cu_seq_lens)
-                print(attn_output.shape)
-
             if output is None:
                 output = attn_output
                 output_lse = attn_softmax_lse
-                if attn_metadata.first_layer:
-                    print("============  first output =============")
-                    print("output", output.shape, output[0])
-                    print("output_lse", output_lse.shape, output_lse[0])
-                    print("========================================")
-
             else:
-                if attn_metadata.first_layer:
-                    print("merging", output.shape, attn_output.shape)
-
                 output_tmp = torch.ones_like(output)
                 output_lse_tmp = torch.ones_like(output_lse)
                 merge_attn_states(
@@ -895,19 +846,52 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
                     suffix_output=attn_output,
                     suffix_lse=attn_softmax_lse,
                 )
-
-                if attn_metadata.first_layer:
-                    print("attn_softmax_lse", attn_softmax_lse.shape,
-                          attn_softmax_lse[0])
-                    print("output_lse_tmp", output_lse_tmp.shape,
-                          output_lse_tmp[0])
-                    print("output_tmp", output_tmp.shape, output_tmp[0])
-                    print("output", output.shape, output[0])
-                    print("att_output", attn_output.shape, attn_output[0])
                 output = output_tmp
                 output_lse = output_lse_tmp
 
         return output, output_lse
+
+    # Optional common flash-attn based prefill
+    def _forward_prefill_flash(
+        self,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_start_loc: torch.Tensor,
+        max_query_len: int,
+        max_prefill_seq_len: int,
+    ) -> torch.Tensor:
+
+        kv_nope = self.kv_b_proj(k_c_normed)[0]\
+            .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = kv_nope\
+            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+
+        # For MLA the v head dim is smaller than qk head dim so we pad out
+        # v with 0s to match the qk head dim
+        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
+                                           value=0)
+
+        attn_output = flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v_padded,
+            cu_seqlens_q=query_start_loc,
+            cu_seqlens_k=seq_start_loc,
+            max_seqlen_q=max_query_len,
+            max_seqlen_k=max_prefill_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            fa_version=self.vllm_flash_attn_version,
+        )
+        attn_output = attn_output\
+            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
+                .reshape(-1, self.num_heads * v.shape[-1])
+
+        return self.o_proj(attn_output)[0]
 
     def _forward_prefill(
         self,
@@ -924,60 +908,54 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
         has_context = prefill_metadata.context_lens_tensor is not None \
             and prefill_metadata.context_lens_tensor.max() > 0
 
+        kv_nope = self.kv_b_proj(kv_c)[0].view(\
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = kv_nope\
+            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+
+        # For MLA the v head dim is smaller than qk head dim so we pad out
+        # v with 0s to match the qk head dim
+        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
+                                           value=0)
+
+        output = flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v_padded,
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            cu_seqlens_k=attn_metadata.query_start_loc,
+            max_seqlen_q=attn_metadata.max_prefill_seq_len,
+            max_seqlen_k=attn_metadata.max_prefill_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax_lse=has_context,
+            fa_version=self.vllm_flash_attn_version,
+        )
+
         if has_context:
+            suffix_output, suffix_lse = output
             context_output, context_lse = \
                 self._compute_prefill_context_attention(
                 q, kv_c_and_k_pe_cache, attn_metadata)
 
-            kv_nope = self.kv_b_proj(kv_c)[0].view(\
-                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = kv_nope\
-                .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
-                          dim=-1)
-
-            # For MLA the v head dim is smaller than qk head dim so we pad out
-            # v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-
-            extend_output, extend_lse = flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=attn_metadata.query_start_loc,
-                cu_seqlens_k=attn_metadata.query_start_loc,
-                max_seqlen_q=attn_metadata.max_prefill_seq_len,
-                max_seqlen_k=attn_metadata.max_prefill_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=True,
-                fa_version=self.vllm_flash_attn_version,
-            )
-
-            output = torch.empty_like(context_output)
+            output = torch.empty_like(suffix_output)
             merge_attn_states(
                 output=output,
                 prefix_output=context_output,
                 prefix_lse=context_lse,
-                suffix_output=extend_output,
-                suffix_lse=extend_lse,
+                suffix_output=suffix_output,
+                suffix_lse=suffix_lse,
             )
 
-            output = output\
-                .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                    .reshape(-1, self.num_heads * v.shape[-1])
+        output = output\
+            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
+                .reshape(-1, self.num_heads * v.shape[-1])
 
-            attn_metadata.first_layer = False
+        attn_metadata.first_layer = False
 
-            return self.o_proj(output)[0]
-        else:
-            return self._forward_prefill_flash(
-                q, kv_c, k_pe, attn_metadata.query_start_loc,
-                attn_metadata.seq_start_loc, attn_metadata.max_query_len,
-                attn_metadata.max_prefill_seq_len)
+        return self.o_proj(output)[0]
 
     def _forward_decode(
         self,
@@ -989,8 +967,6 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError("FP8 Triton MLA not yet supported")
-
-        # print("running decode")
 
         decode_meta = attn_metadata.decode_metadata
         assert decode_meta is not None
