@@ -211,10 +211,10 @@ def prune_rocm_search_space(num_tokens, shard_intermediate_size, hidden_size,
                             search_space, is_fp16, topk):
     N1, K1 = shard_intermediate_size, hidden_size
     N2, K2 = hidden_size, shard_intermediate_size // 2
-    pruned_space_1 = prune_rocm_configs(num_tokens * topk, N1, K1, search_space,
-                                        is_fp16)
-    pruned_space_2 = prune_rocm_configs(num_tokens * topk, N2, K2, search_space,
-                                        is_fp16)
+    pruned_space_1 = prune_rocm_configs(num_tokens * topk, N1, K1,
+                                        search_space, is_fp16)
+    pruned_space_2 = prune_rocm_configs(num_tokens * topk, N2, K2,
+                                        search_space, is_fp16)
     search_space = merge_unique_dicts(pruned_space_1, pruned_space_2)
     return search_space
 
@@ -436,8 +436,8 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
 
 def save_configs(configs: Dict[int, BenchmarkConfig], num_experts: int,
                  shard_intermediate_size: int, hidden_size: int, topk: int,
-                 dtype: torch.dtype, use_fp8_w8a8: bool,
-                 use_int8_w8a16: bool, block_quant_shape: List[int]) -> None:
+                 dtype: torch.dtype, use_fp8_w8a8: bool, use_int8_w8a16: bool,
+                 block_quant_shape: List[int]) -> None:
     dtype_str = get_config_dtype_str(dtype,
                                      use_int8_w8a16=use_int8_w8a16,
                                      use_fp8_w8a8=use_fp8_w8a8)
@@ -525,7 +525,8 @@ def main(args: argparse.Namespace):
             for M, config in zip(batch_sizes, configs)
         }
         save_configs(best_configs, E, shard_intermediate_size, hidden_size,
-                     topk, dtype, use_fp8_w8a8, use_int8_w8a16, block_quant_shape)
+                     topk, dtype, use_fp8_w8a8, use_int8_w8a16,
+                     block_quant_shape)
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
     else:
