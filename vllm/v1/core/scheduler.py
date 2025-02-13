@@ -1,25 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import time
 from collections import deque
-from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
+                                           SchedulerOutput)
+from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
+                            EngineCoreOutput, EngineCoreOutputs)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-
-if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.base import PlaceholderRange
 
 logger = init_logger(__name__)
 
@@ -32,10 +28,12 @@ class Scheduler:
         model_config: ModelConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        log_stats: bool,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.log_stats = log_stats
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -51,7 +49,8 @@ class Scheduler:
             num_gpu_blocks=num_gpu_blocks,
             max_model_len=self.max_model_len,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+            enable_caching=self.cache_config.enable_prefix_caching,
+            log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
@@ -112,6 +111,8 @@ class Scheduler:
         # Encoder-related.
         scheduled_encoder_inputs: Dict[str, List[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
+
+        scheduled_timestamp = time.monotonic()
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -252,6 +253,7 @@ class Scheduler:
                 self.running.append(request)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
+                    self.request_scheduled(request, scheduled_timestamp)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
@@ -514,7 +516,8 @@ class Scheduler:
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        stop_reason=request.stop_reason))
+                        stop_reason=request.stop_reason,
+                        events=request.take_events()))
 
             if not stopped:
                 new_running.append(request)
@@ -547,6 +550,7 @@ class Scheduler:
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
+        self.request_queued(request)
 
     def finish_requests(
         self,
@@ -594,86 +598,25 @@ class Scheduler:
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
 
-    def make_stats(self) -> SchedulerStats:
+    def request_queued(self, request: Request):
+        if not self.log_stats:
+            return
+        request.events.append(
+            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED))
+
+    def request_scheduled(self, request: Request, timestamp: float):
+        if not self.log_stats:
+            return
+        request.events.append(
+            EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
+                                      timestamp))
+
+    def make_stats(self) -> Optional[SchedulerStats]:
+        if not self.log_stats:
+            return None
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             gpu_cache_usage=self.kv_cache_manager.usage,
+            prefix_cache_stats=self.kv_cache_manager.make_prefix_cache_stats(),
         )
-
-
-@dataclass
-class NewRequestData:
-
-    req_id: str
-    prompt_token_ids: List[int]
-    prompt: Optional[str]
-    mm_inputs: List["MultiModalKwargs"]
-    mm_hashes: List[str]
-    mm_positions: List["PlaceholderRange"]
-    sampling_params: SamplingParams
-    block_ids: List[int]
-    num_computed_tokens: int
-    lora_request: Optional[LoRARequest]
-
-    @classmethod
-    def from_request(
-        cls,
-        request: Request,
-        block_ids: List[int],
-        num_computed_tokens: int,
-    ) -> "NewRequestData":
-        return cls(
-            req_id=request.request_id,
-            prompt_token_ids=request.prompt_token_ids,
-            prompt=request.prompt,
-            mm_inputs=request.mm_inputs,
-            mm_hashes=request.mm_hashes,
-            mm_positions=request.mm_positions,
-            sampling_params=request.sampling_params,
-            block_ids=block_ids,
-            num_computed_tokens=num_computed_tokens,
-            lora_request=request.lora_request,
-        )
-
-
-@dataclass
-class CachedRequestData:
-
-    req_id: str
-    # If resumed_from_preemption is False, new_block_ids will be appended to
-    # the request's block IDs. If True, new_block_ids will be used as the
-    # request's block IDs instead of appending to the existing block IDs.
-    resumed_from_preemption: bool
-    new_block_ids: List[int]
-    num_computed_tokens: int
-
-    @classmethod
-    def from_request(
-        cls,
-        request: Request,
-        resumed_from_preemption: bool,
-        new_block_ids: List[int],
-        num_computed_tokens: int,
-    ) -> "CachedRequestData":
-        return cls(
-            req_id=request.request_id,
-            resumed_from_preemption=resumed_from_preemption,
-            new_block_ids=new_block_ids,
-            num_computed_tokens=num_computed_tokens,
-        )
-
-
-@dataclass
-class SchedulerOutput:
-
-    scheduled_new_reqs: List[NewRequestData]
-    scheduled_cached_reqs: List[CachedRequestData]
-
-    num_scheduled_tokens: Dict[str, int]
-    total_num_scheduled_tokens: int
-    scheduled_encoder_inputs: Dict[str, List[int]]
-    num_common_prefix_blocks: int
-
-    finished_req_ids: Set[str]
-    free_encoder_input_ids: List[Tuple[str, int]]
