@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 import re
 import weakref
 
@@ -14,23 +15,47 @@ from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
+GUIDED_DECODING_BACKENDS_V1 = ["xgrammar"]
 
 
-@pytest.fixture(scope="module")
-def llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(model=MODEL_NAME, max_model_len=1024)
+@pytest.fixture(autouse=True)
+def v1(request, run_with_both_engines, monkeypatch):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    use_v1 = os.getenv('VLLM_USE_V1') == '1'
+    if use_v1 and 'guided_decoding_backend' in request.fixturenames:
+        guided_decoding_backend = request.getfixturevalue(
+            'guided_decoding_backend')
+        if guided_decoding_backend not in GUIDED_DECODING_BACKENDS_V1:
+            pytest.skip(f"Skipping test because {guided_decoding_backend} "
+                        "is not in GUIDED_DECODING_BACKENDS_V1")
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
-        del llm
-    cleanup_dist_env_and_memory()
+    if use_v1 and "regex" in request.node.name:
+        pytest.skip("Skipping test because V1 does not support regex")
+
+
+@pytest.fixture(scope="function")
+def llm(monkeypatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        # pytest caches the fixture so we use weakref.proxy to
+        # enable garbage collection
+        llm = LLM(model=MODEL_NAME, max_model_len=1024)
+
+        with llm.deprecate_legacy_api():
+            yield weakref.proxy(llm)
+            del llm
+        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_regex(sample_regex, llm, guided_decoding_backend: str):
+    use_v1 = os.getenv('VLLM_USE_V1') == '1'
+    if use_v1:
+        pytest.skip("Skipping test because V1 does not support regex")
+
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      guided_decoding=GuidedDecodingParams(
