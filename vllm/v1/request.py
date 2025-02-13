@@ -9,6 +9,7 @@ from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
+
+logger = init_logger(__name__)
 
 
 class Request:
@@ -187,8 +190,13 @@ class Request:
             return
 
         if self._grammar is not None:
-            self._grammar_bitmask = self._grammar.allocate_bitmask(
-                batch_size, vocab_size)
+            if isinstance(self._grammar, Grammar):
+                self._grammar_bitmask = self._grammar.allocate_bitmask(
+                    batch_size, vocab_size)
+            else:
+                logger.error(
+                    "Grammar is not ready yet. This should never happen."
+                    " Please file an issue.")
 
     @functools.cached_property
     def grammar_bitmask(self) -> Optional[torch.Tensor]:
