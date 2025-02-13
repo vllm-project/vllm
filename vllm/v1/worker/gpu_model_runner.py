@@ -393,6 +393,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_batch.block_table.commit(num_reqs)
 
         # Prepare bitmasks for guided decoding
+        # OPTIMIZATION: We shouldn't copy over
+        # the bitmask like this multiple times
         bitmask: Optional[torch.Tensor] = None
 
         # Get the number of scheduled tokens for each request.
@@ -406,6 +408,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
             if req_id in scheduler_output.guided_decoding_request_ids:
+                print(self.requests[req_id])
                 bitmask = self.requests[req_id].bitmask
         num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
                                                     dtype=np.int32)

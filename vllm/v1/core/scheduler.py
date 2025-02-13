@@ -124,6 +124,11 @@ class Scheduler:
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
+            if request.status == RequestStatus.WAITING_FOR_FSM:
+                # wait for grammar to be ready
+                req_index += 1
+                continue
+
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
                 self._try_schedule_encoder_inputs(request,
@@ -201,6 +206,16 @@ class Scheduler:
                 if request.use_guided_decoding:
                     guided_decoding_request_ids.add(request.request_id)
 
+                if request.status == RequestStatus.WAITING_FOR_FSM:
+                    if request.is_grammar_ready:
+                        request.status = RequestStatus.WAITING
+                        request.grammar.prefilled = True
+                    # else:
+                    #     # Skip this request but keep in the queue
+                    #     self.waiting.popleft()
+                    #     self.waiting.append(request)
+                    #     continue
+                #
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if self.lora_config and request.lora_request:
@@ -256,7 +271,7 @@ class Scheduler:
 
                 self.waiting.popleft()
                 self.running.append(request)
-                if request.status == RequestStatus.WAITING:
+                if RequestStatus.is_waiting(request.status):
                     scheduled_new_reqs.append(request)
                     self.request_scheduled(request, scheduled_timestamp)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -489,14 +504,13 @@ class Scheduler:
             new_token_ids = None
 
             # Handle guided decoding FSM advancement if applicable
-            if request.use_guided_decoding and request.is_grammar_ready:
+            if request.use_guided_decoding and request.is_grammar_ready and not request.grammar.prefilled:
                 req_index = model_runner_output.req_id_to_index.get(req_id)
                 if req_index is not None:
                     token_id = sampled_token_ids[req_index]
-                    # grammar should already be ready here.
+                    # accept token will also advance the FSM
                     can_accept_token = request.grammar.accept_token(token_id)
                     if not can_accept_token:
-                        request.status = RequestStatus.FINISHED_GRAMMAR_ERROR
                         self._free_request(request)
                         continue
 

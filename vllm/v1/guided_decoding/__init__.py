@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Dict, Optional, Set
 
 import torch
 import xgrammar as xgr
 
 from vllm.config import VllmConfig
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import GuidedDecodingOptions, RequestStatus
 
 if TYPE_CHECKING:
     from vllm.v1.request import GuidedDecodingKey, Request
@@ -76,9 +75,10 @@ class GuidedDecodingManager:
         self.model_config = vllm_config.model_config
         self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        self.grammar_cache: dict[GuidedDecodingKey, GrammarCache] = {}
+        self.grammar_cache: Dict[GuidedDecodingKey, GrammarCache] = {}
         self.executor = ThreadPoolExecutor()
         self._lock = threading.Lock()
+        self.requests: Set[Request] = set()
 
     def initialize_cache(self, key: GuidedDecodingKey) -> Grammar:
         request_type, grammar_spec = key
@@ -86,12 +86,12 @@ class GuidedDecodingManager:
             self.tokenizer, vocab_size=self.vocab_size)
         compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
 
-        if request_type == "json":
-            if type(grammar_spec) is not str:
+        if request_type == GuidedDecodingOptions.json:
+            if not isinstance(grammar_spec, str):
                 ctx = compiler.compile_builtin_json_grammar()
             else:
                 ctx = compiler.compile_json_schema(grammar_spec)
-        elif request_type == "grammar":
+        elif request_type == GuidedDecodingOptions.grammar:
             ctx = compiler.compile_grammar(grammar_spec)
         else:
             raise ValueError("grammar is not of valid supported types.")
@@ -115,6 +115,7 @@ class GuidedDecodingManager:
 
     def _executor_loop(self, request: Request):
         key = request.guided_decoding_key
+        self.requests.add(request)
         with self._lock:
             cache_hit = False
             if key in self.grammar_cache:
@@ -128,11 +129,11 @@ class GuidedDecodingManager:
         else:
             entry.value = self.initialize_cache(key)
             entry.event.set()
-        return copy.copy(entry.value) if entry.value else None
+        return entry.value if entry.value else None
 
     def get(self, request: Request):
         with self._lock:
             entry = self.grammar_cache.get(request.guided_decoding_key)
             if entry is None or not entry.event.is_set():
                 return None
-            return copy.copy(entry.value) if entry.value else None
+            return entry.value if entry.value else None

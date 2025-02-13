@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import functools
+import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -54,7 +55,7 @@ class Request:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
 
-        self.status = RequestStatus.WAITING
+        self.status = RequestStatus.WAITING_FOR_FSM if sampling_params.guided_decoding is not None else RequestStatus.WAITING
         self.events: List[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
         assert sampling_params.max_tokens is not None
@@ -84,7 +85,7 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
 
         # Grammar fields, including the grammar object and the bitmask
-        self._grammar: Future[Grammar] | Grammar | None = None
+        self.grammar: Future[Grammar] | Grammar | None = None
         self._bitmask = None
 
     @classmethod
@@ -161,7 +162,10 @@ class Request:
         params = self.sampling_params.guided_decoding
         assert params is not None, "params can't be None."
         if params.json is not None:
-            return (GuidedDecodingOptions.json, params.json)
+            key = params.json
+            if params.json_object or type(key) is not str:
+                key = json.dumps(params.json)
+            return (GuidedDecodingOptions.json, key)
         elif params.regex is not None:
             return (GuidedDecodingOptions.regex, params.regex)
         elif params.choice is not None:
@@ -171,22 +175,15 @@ class Request:
         else:
             raise ValueError("No valid guided decoding parameter found")
 
-    @property
-    def grammar(self) -> Optional[Grammar | Future[Grammar]]:
-        return self._grammar
-
-    @grammar.setter
-    def grammar(self, grammar: Grammar | Future[Grammar]) -> None:
-        self._grammar = grammar
-
     def allocate_bitmask(self, batch_size: int, vocab_size: int) -> None:
         if isinstance(self._grammar, Future):
             try:
                 self.grammar = self.grammar.result(timeout=0.05)
                 self.status = RequestStatus.WAITING
             except TimeoutError:
-                pass
-        if self.grammar:
+                return
+
+        if self.grammar is not None:
             self._bitmask = self.grammar.allocate_bitmask(
                 batch_size, vocab_size)
 
@@ -197,8 +194,8 @@ class Request:
     @property
     def is_grammar_ready(self) -> bool:
         if isinstance(self._grammar, Future):
-            return self._grammar.done()
-        return self._grammar is not None
+            return not self._grammar.running() and self._grammar.done()
+        return self.status == RequestStatus.WAITING and self._grammar is not None
 
 
 class RequestStatus(enum.IntEnum):
@@ -213,11 +210,14 @@ class RequestStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
-    FINISHED_GRAMMAR_ERROR = enum.auto()
 
     @staticmethod
     def is_finished(status: RequestStatus) -> bool:
         return status > RequestStatus.PREEMPTED
+
+    @staticmethod
+    def is_waiting(status: "RequestStatus") -> bool:
+        return status < RequestStatus.WAITING_FOR_FSM
 
     @staticmethod
     def get_finished_reason(

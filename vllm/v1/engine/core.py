@@ -69,9 +69,6 @@ class EngineCore:
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
 
-        # initialize the tokenizer on the scheduler (this is used for
-        # constrained decoding) and guided decoding manager
-        self.use_guided_decoding = False
         self.guided_decoding_manager = GuidedDecodingManager(
             vllm_config=vllm_config)
 
@@ -115,11 +112,8 @@ class EngineCore:
 
         req = Request.from_engine_core_request(request)
         if req.use_guided_decoding:
-            self.use_guided_decoding = True
             # Start grammar compilation asynchronously
             self.guided_decoding_manager.should_cache(req)
-        else:
-            self.use_guided_decoding = False
 
         self.scheduler.add_request(req)
 
@@ -136,8 +130,7 @@ class EngineCore:
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         # Calculate bitmasks for all active requests
-        if self.use_guided_decoding:
-            self.calculate_grammar_bitmasks()
+        self.calculate_grammar_bitmasks()
 
         scheduler_output = self.scheduler.schedule()
 
@@ -157,18 +150,17 @@ class EngineCore:
         self.scheduler.reset_prefix_cache()
 
     def calculate_grammar_bitmasks(self):
-        for req in self.scheduler.running:
-            # ignore requests that doesn't use guided decoding
-            # or ignore requests that grammar is not ready
-            if not req.use_guided_decoding or not req.is_grammar_ready:
-                continue
+        for req in self.guided_decoding_manager.requests:
 
             # Check if grammar is ready in cache
             grammar = self.guided_decoding_manager.get(req)
             if grammar is not None:
+                print(req.use_guided_decoding, req.is_grammar_ready,
+                      req.grammar, grammar)
                 req.grammar = grammar
                 req.allocate_bitmask(1,
                                      self.guided_decoding_manager.vocab_size)
+                print(req.status)
                 continue
 
 
