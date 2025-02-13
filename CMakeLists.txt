@@ -264,6 +264,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
+    "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_compressor_entry.cu"
     "csrc/cutlass_extensions/common.cpp")
@@ -377,6 +378,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
+  # FP4 Archs and flags
+  cuda_archs_loose_intersection(FP4_ARCHS "10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND FP4_ARCHS)
+    set(SRCS 
+      "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
+    )
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${FP4_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4=1")
+    message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
+  else()
+    message(STATUS "Not building NVFP4 as no compatible archs were found.")
+    # clear FP4_ARCHS
+    set(FP4_ARCHS)
+  endif()
 
   #
   # Machete kernels
