@@ -9,9 +9,11 @@ from fastapi import Request
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (ErrorResponse, ScoreRequest,
-                                              ScoreResponse, ScoreResponseData,
-                                              UsageInfo)
+from vllm.entrypoints.openai.protocol import (ErrorResponse, RerankDocument,
+                                              RerankRequest, RerankResponse,
+                                              RerankResult, RerankUsage,
+                                              ScoreRequest, ScoreResponse,
+                                              ScoreResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
@@ -47,7 +49,7 @@ class OpenAIServingScores(OpenAIServing):
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         text_1: List[str],
         text_2: List[str],
-        request: ScoreRequest,
+        request: Union[RerankRequest | ScoreRequest],
         request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[Union[LoRARequest, None]] = None,
@@ -149,7 +151,7 @@ class OpenAIServingScores(OpenAIServing):
         tokenizer: Union[AnyTokenizer],
         text_1: List[str],
         text_2: List[str],
-        request: ScoreRequest,
+        request: Union[RerankRequest | ScoreRequest],
         request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[Union[LoRARequest, None]] = None,
@@ -230,24 +232,15 @@ class OpenAIServingScores(OpenAIServing):
 
         return [out for out in final_res_batch if out is not None]
 
-    async def create_score(
+    async def _run_scoring(
         self,
-        request: ScoreRequest,
+        text_1: Union[str, list[str]],
+        text_2: Union[str, list[str]],
+        request: Union[ScoreRequest, RerankRequest],
+        request_id: str,
         raw_request: Optional[Request] = None,
-    ) -> Union[ScoreResponse, ErrorResponse]:
-        """
-        Score API similar to Sentence Transformers cross encoder
-
-        See https://sbert.net/docs/package_reference/cross_encoder
-        """
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
-
-        model_name = request.model
-        request_id = f"score-{self._base_request_id(raw_request)}"
-        created_time = int(time.time())
-        truncate_prompt_tokens = request.truncate_prompt_tokens
+        truncate_prompt_tokens: Optional[int] = None,
+    ) -> List[PoolingRequestOutput]:
 
         tokenization_kwargs: Dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
@@ -267,16 +260,13 @@ class OpenAIServingScores(OpenAIServing):
 
         if truncate_prompt_tokens is not None and \
                 truncate_prompt_tokens > self.max_model_len:
-            return self.create_error_response(
+            raise ValueError(
                 f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
                 f"is greater than max_model_len ({self.max_model_len})."
                 f" Please, select a smaller truncation size.")
 
         trace_headers = (None if raw_request is None else await
                          self._get_trace_headers(raw_request.headers))
-
-        text_1 = request.text_1
-        text_2 = request.text_2
 
         if isinstance(text_1, str):
             text_1 = [text_1]
@@ -289,32 +279,64 @@ class OpenAIServingScores(OpenAIServing):
         if len(text_2) == 0:
             raise ValueError("At least one text_pair element must be given")
 
+        if self.model_config.is_cross_encoder:
+            return await self._cross_encoding_score(
+                tokenizer=tokenizer,
+                text_1=text_1,
+                text_2=text_2,
+                request=request,
+                request_id=request_id,
+                tokenization_kwargs=tokenization_kwargs,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+                trace_headers=trace_headers)
+
+        else:
+            return await self._embedding_score(
+                tokenizer=tokenizer,
+                text_1=text_1,
+                text_2=text_2,
+                request=request,
+                request_id=request_id,
+                tokenization_kwargs=tokenization_kwargs,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+                trace_headers=trace_headers)
+
+    async def create_score(
+        self,
+        request: ScoreRequest,
+        raw_request: Optional[Request] = None,
+    ) -> Union[ScoreResponse, ErrorResponse]:
+        """
+        Score API similar to Sentence Transformers cross encoder
+
+        See https://sbert.net/docs/package_reference/cross_encoder
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        model_name = request.model
+        request_id = f"score-{self._base_request_id(raw_request)}"
+        created_time = int(time.time())
+
+        text_1 = request.text_1
+        text_2 = request.text_2
+
+        truncate_prompt_tokens = request.truncate_prompt_tokens
+
         try:
-            if self.model_config.is_cross_encoder:
-                final_res_batch = await self._cross_encoding_score(
-                    tokenizer=tokenizer,
-                    text_1=text_1,
-                    text_2=text_2,
-                    request=request,
-                    request_id=request_id,
-                    tokenization_kwargs=tokenization_kwargs,
-                    lora_request=lora_request,
-                    prompt_adapter_request=prompt_adapter_request,
-                    trace_headers=trace_headers)
+            final_res_batch = await self._run_scoring(
+                text_1,
+                text_2,
+                request,
+                request_id,
+                raw_request,
+                truncate_prompt_tokens,
+            )
 
-            else:
-                final_res_batch = await self._embedding_score(
-                    tokenizer=tokenizer,
-                    text_1=text_1,
-                    text_2=text_2,
-                    request=request,
-                    request_id=request_id,
-                    tokenization_kwargs=tokenization_kwargs,
-                    lora_request=lora_request,
-                    prompt_adapter_request=prompt_adapter_request,
-                    trace_headers=trace_headers)
-
-            response = self.request_output_to_score_response(
+            return self.request_output_to_score_response(
                 final_res_batch,
                 request_id,
                 created_time,
@@ -326,7 +348,48 @@ class OpenAIServingScores(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        return response
+    async def do_rerank(
+        self,
+        request: RerankRequest,
+        raw_request: Optional[Request] = None
+    ) -> Union[RerankResponse, ErrorResponse]:
+        """
+        Rerank API based on JinaAI's rerank API; implements the same
+        API interface. Designed for compatibility with off-the-shelf
+        tooling, since this is a common standard for reranking APIs
+
+        See example client implementations at
+        https://github.com/infiniflow/ragflow/blob/main/rag/llm/rerank_model.py
+        numerous clients use this standard.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        model_name = request.model
+        request_id = f"rerank-{self._base_request_id(raw_request)}"
+        truncate_prompt_tokens = request.truncate_prompt_tokens
+        query = request.query
+        documents = request.documents
+
+        top_n = request.top_n if request.top_n > 0 else len(documents)
+
+        try:
+            final_res_batch = await self._run_scoring(
+                query,
+                documents,
+                request,
+                request_id,
+                raw_request,
+                truncate_prompt_tokens,
+            )
+            return self.request_output_to_rerank_response(
+                final_res_batch, request_id, model_name, documents, top_n)
+        except asyncio.CancelledError:
+            return self.create_error_response("Client disconnected")
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
     def request_output_to_score_response(
         self,
@@ -362,3 +425,35 @@ class OpenAIServingScores(OpenAIServing):
             data=items,
             usage=usage,
         )
+
+    def request_output_to_rerank_response(
+            self, final_res_batch: List[PoolingRequestOutput], request_id: str,
+            model_name: str, documents: List[str],
+            top_n: int) -> RerankResponse:
+        """
+        Convert the output of do_rank to a RerankResponse
+        """
+        results: List[RerankResult] = []
+        num_prompt_tokens = 0
+        for idx, final_res in enumerate(final_res_batch):
+            classify_res = ScoringRequestOutput.from_base(final_res)
+
+            result = RerankResult(
+                index=idx,
+                document=RerankDocument(text=documents[idx]),
+                relevance_score=classify_res.outputs.score,
+            )
+            results.append(result)
+            prompt_token_ids = final_res.prompt_token_ids
+            num_prompt_tokens += len(prompt_token_ids)
+
+        # sort by relevance, then return the top n if set
+        results.sort(key=lambda x: x.relevance_score, reverse=True)
+        if top_n < len(documents):
+            results = results[:top_n]
+
+        return RerankResponse(
+            id=request_id,
+            model=model_name,
+            results=results,
+            usage=RerankUsage(total_tokens=num_prompt_tokens))

@@ -22,7 +22,7 @@ MODELS = [
         "is_cross_encoder": False
     },
 ]
-DTYPE = "float16"
+DTYPE = "half"
 
 
 def run_transformers(hf_model, model, text_pairs):
