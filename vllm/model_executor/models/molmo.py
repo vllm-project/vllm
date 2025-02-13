@@ -1005,7 +1005,7 @@ class MolmoProcessorWrapper:
 
     @property
     def vocab(self) -> dict[str, int]:
-        return self.processor.tokenizer.vocab
+        return self.processor.tokenizer.vocab  # type: ignore
 
     @property
     def max_crops(self) -> int:
@@ -1073,19 +1073,19 @@ class MolmoProcessorWrapper:
 
     @property
     def image_patch_id(self) -> int:
-        return self.vocab.get(DEFAULT_IMAGE_PATCH_TOKEN)
+        return self.vocab[DEFAULT_IMAGE_PATCH_TOKEN]
 
     @property
     def im_col_id(self) -> int:
-        return self.vocab.get(DEFAULT_IM_COL_TOKEN)
+        return self.vocab[DEFAULT_IM_COL_TOKEN]
 
     @property
     def im_start_id(self) -> int:
-        return self.vocab.get(DEFAULT_IM_START_TOKEN)
+        return self.vocab[DEFAULT_IM_START_TOKEN]
 
     @property
     def im_end_id(self) -> int:
-        return self.vocab.get(DEFAULT_IM_END_TOKEN)
+        return self.vocab[DEFAULT_IM_END_TOKEN]
 
     @property
     def pooling_size(self) -> int:
@@ -1497,8 +1497,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-        self._fill_value = -10000
-
     def _parse_and_validate_image_input(
         self,
         **kwargs: object,
@@ -1592,7 +1590,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
 
         embeds_in_batch = list[torch.Tensor]()
         for feats, f_is_patch in zip(feats_per_image, f_is_patch_per_image):
-            embeds = feats.new_full((num_embeds, embed_dim), self._fill_value)
+            embeds = feats.new_full((num_embeds, embed_dim), torch.nan)
             embeds[embed_is_patch] = feats[f_is_patch]
             embeds_in_batch.append(embeds)
 
@@ -1621,9 +1619,11 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
+            assert self.img_patch_id is not None
+
             # Extract the patch tokens scattered in _get_mm_embeds
             patch_embeddings = json_map_leaves(
-                lambda x: x[x != self._fill_value].view(-1, *x.shape[1:]),
+                lambda x: x[~x.isnan()].view(-1, *x.shape[1:]),
                 cast(JSONTree[torch.Tensor], multimodal_embeddings),
             )
 
