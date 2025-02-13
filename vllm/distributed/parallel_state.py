@@ -196,8 +196,14 @@ class GroupCoordinator:
         assert self.device_group is not None
 
         from vllm.platforms import current_platform
-        self.device = torch.device(
-            f"{current_platform.device_type}:{local_rank}")
+        if current_platform.device_type in ["neuron", "openvino"]:
+            self.device = torch.device("cpu")
+        elif not current_platform.is_tpu():
+            self.device = torch.device(
+                f"{current_platform.device_type}:{local_rank}")
+        else:
+            import torch_xla.core.xla_model as xm
+            self.device = xm.xla_device(local_rank)
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
