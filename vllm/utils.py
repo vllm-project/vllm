@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import asyncio
 import concurrent
@@ -13,7 +15,6 @@ import ipaddress
 import multiprocessing
 import os
 import re
-import resource
 import signal
 import socket
 import subprocess
@@ -29,7 +30,7 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from functools import lru_cache, partial, wraps
+from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
                     NamedTuple, Optional, Tuple, Type, TypeVar, Union,
@@ -252,7 +253,7 @@ class rpd_trace:
             print(f"An error occurred while creating the filename: {e}")
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_hipScopedMarker_available():
     try:
         from hipScopedMarker import hipScopedMarker
@@ -491,7 +492,7 @@ class PyObjectCache:
         self._index = 0
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_mi250() -> bool:
     from vllm.platforms import current_platform
     if not current_platform.is_rocm() or not torch.cuda.is_available():
@@ -501,7 +502,7 @@ def is_mi250() -> bool:
         ("gfx90a" in archName)
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
@@ -710,6 +711,10 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
+
+
 def _generate_random_fp8(
     tensor: torch.Tensor,
     low: float,
@@ -846,7 +851,7 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_pin_memory_available() -> bool:
     from vllm.platforms import current_platform
     return current_platform.is_pin_memory_available()
@@ -939,6 +944,12 @@ def async_tensor_h2d(
 def get_dtype_size(dtype: torch.dtype) -> int:
     """Get the size of the data type in bytes."""
     return torch.tensor([], dtype=dtype).element_size()
+
+
+def align_to_256bytes(extent: int, dtype: torch.dtype) -> int:
+    dtype_size = get_dtype_size(dtype)
+    eles_per_256bytes = 256 // dtype_size
+    return round_up(extent, eles_per_256bytes)
 
 
 # `collections` helpers
@@ -1035,7 +1046,7 @@ def init_cached_hf_modules() -> None:
     init_hf_modules()
 
 
-@lru_cache(maxsize=None)
+@cache
 def find_library(lib_name: str) -> str:
     """
     Find the library file in the system.
@@ -1713,7 +1724,7 @@ def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.weak_ref_tensor(tensor)
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_navi() -> bool:
     from vllm.platforms import current_platform
     if not current_platform.is_rocm() or not torch.cuda.is_available():
@@ -1724,7 +1735,7 @@ def is_navi() -> bool:
     return archName is not None and "gfx1" in archName
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_navi3() -> bool:
     from vllm.platforms import current_platform
     if not current_platform.is_rocm() or not torch.cuda.is_available():
@@ -1778,7 +1789,7 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     return module
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_vllm_optional_dependencies():
     metadata = importlib.metadata.metadata("vllm")
     requirements = metadata.get_all("Requires-Dist", [])
@@ -2229,6 +2240,11 @@ def memory_profiling(
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
 def set_ulimit(target_soft_limit=65535):
+    if sys.platform.startswith('win'):
+        logger.info("Windows detected, skipping ulimit adjustment.")
+        return
+
+    import resource
     resource_type = resource.RLIMIT_NOFILE
     current_soft, current_hard = resource.getrlimit(resource_type)
 
@@ -2377,3 +2393,34 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     else:
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
+
+
+def import_pynvml():
+    """
+    Historical comments:
+
+    libnvml.so is the library behind nvidia-smi, and
+    pynvml is a Python wrapper around it. We use it to get GPU
+    status without initializing CUDA context in the current process.
+    Historically, there are two packages that provide pynvml:
+    - `nvidia-ml-py` (https://pypi.org/project/nvidia-ml-py/): The official
+        wrapper. It is a dependency of vLLM, and is installed when users
+        install vLLM. It provides a Python module named `pynvml`.
+    - `pynvml` (https://pypi.org/project/pynvml/): An unofficial wrapper.
+        Prior to version 12.0, it also provides a Python module `pynvml`,
+        and therefore conflicts with the official one. What's worse,
+        the module is a Python package, and has higher priority than
+        the official one which is a standalone Python file.
+        This causes errors when both of them are installed.
+        Starting from version 12.0, it migrates to a new module
+        named `pynvml_utils` to avoid the conflict.
+    It is so confusing that many packages in the community use the
+    unofficial one by mistake, and we have to handle this case.
+    For example, `nvcr.io/nvidia/pytorch:24.12-py3` uses the unofficial
+    one, and it will cause errors, see the issue
+    https://github.com/vllm-project/vllm/issues/12847 for example.
+    After all the troubles, we decide to copy the official `pynvml`
+    module to our codebase, and use it directly.
+    """
+    import vllm.third_party.pynvml as pynvml
+    return pynvml

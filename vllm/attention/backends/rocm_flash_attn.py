@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer ROCm GPUs."""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
@@ -11,10 +12,14 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
+
 if envs.VLLM_USE_AITER_PAGED_ATTN:
-    from vllm.attention.ops.paged_attn_ater import (PagedAttention, PagedAttentionMetadata)
+    from vllm.attention.ops.paged_attn_ater import (PagedAttention,
+                                                    PagedAttentionMetadata)
 else:
-    from vllm.attention.ops.paged_attn import (PagedAttention, PagedAttentionMetadata)
+    from vllm.attention.ops.paged_attn import (PagedAttention,
+                                               PagedAttentionMetadata)
+
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -613,19 +618,25 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             value = value.view(-1, self.num_kv_heads, self.head_size)
         else:
             assert value is None
-        
-        if (envs.VLLM_USE_AITER_PAGED_ATTN and kv_cache.dtype.itemsize == 1 and
-            self.init_kv_scales is False and kv_cache.shape != torch.Size([0])):
+
+        if (envs.VLLM_USE_AITER_PAGED_ATTN and kv_cache.dtype.itemsize == 1
+                and self.init_kv_scales is False
+                and kv_cache.shape != torch.Size([0])):
             num_blocks = kv_cache.shape[1]
-            block_size = kv_cache.shape[2] // (self.num_kv_heads * self.head_size)
-            self.k_scale = torch.empty((self.num_kv_heads, num_blocks * block_size), 
-                                      dtype=torch.float32, device=kv_cache.device)
-            self.v_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
-                                      dtype=torch.float32, device=kv_cache.device)
+            block_size = kv_cache.shape[2] // (self.num_kv_heads *
+                                               self.head_size)
+            self.k_scale = torch.empty(
+                (self.num_kv_heads, num_blocks * block_size),
+                dtype=torch.float32,
+                device=kv_cache.device)
+            self.v_scale = torch.empty(
+                (self.num_kv_heads, num_blocks * block_size),
+                dtype=torch.float32,
+                device=kv_cache.device)
             self.init_kv_scales = True
             self.k_scale.fill_(layer._k_scale_float)
             self.v_scale.fill_(layer._v_scale_float)
-        # if self.init_kv_scales:
+            # if self.init_kv_scales:
             layer._k_scale = self.k_scale
             layer._v_scale = self.v_scale
 
@@ -821,13 +832,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.alibi_slopes,
                     layer._k_scale,
                     layer._v_scale,
-                    out=out
-                )
+                    out=out)
                 return output.view(-1, self.num_heads * self.head_size)
             if use_custom:
-                max_seq_len = (decode_meta.max_decode_seq_len if
-                               self.attn_type != AttentionType.ENCODER_DECODER
-                               else decode_meta.max_encoder_seq_len)
+                max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
+                               != AttentionType.ENCODER_DECODER else
+                               decode_meta.max_encoder_seq_len)
                 assert max_seq_len is not None
                 max_num_partitions = (
                     (max_seq_len + _PARTITION_SIZE_ROCM - 1) //

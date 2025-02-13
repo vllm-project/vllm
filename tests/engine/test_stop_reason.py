@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test the different finish_reason="stop" situations during generation:
     1. One of the provided stop strings
     2. One of the provided stop tokens

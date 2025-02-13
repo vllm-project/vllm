@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
-from amdsmi import (AmdSmiException, amdsmi_get_gpu_board_info,
+from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
                     amdsmi_get_processor_handles, amdsmi_init,
                     amdsmi_shut_down, amdsmi_topo_get_link_type)
 
@@ -108,12 +110,16 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-        "fbgemm_fp8", "gguf", "quark"
+        "fbgemm_fp8", "gguf", "quark", "ptpc_fp8"
     ]
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1) -> str:
+                             kv_cache_dtype, block_size, use_v1,
+                             use_mla) -> str:
+        if use_mla:
+            logger.info("Using Triton MLA backend.")
+            return "vllm.attention.backends.triton_mla.TritonMLABackend"
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if selected_backend == _Backend.ROCM_FLASH:
@@ -161,9 +167,8 @@ class RocmPlatform(Platform):
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
-        # Note: this may not be exactly the same as the torch device name
-        # E.g. `AMD Instinct MI300X OAM` vs `AMD Instinct MI300X`
-        return amdsmi_get_gpu_board_info(handle)["product_name"]
+        # Using market_name to distinguish MI300 & MI308
+        return amdsmi_get_gpu_asic_info(handle)["market_name"]
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -230,4 +235,5 @@ class RocmPlatform(Platform):
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
-        return torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+        return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(
+            device)[0]

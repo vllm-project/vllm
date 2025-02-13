@@ -17,11 +17,11 @@ The edges of the build graph represent:
 
 - `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
-  > ```{figure} /assets/contributing/dockerfile-stages-dependency.png
+  > :::{figure} /assets/contributing/dockerfile-stages-dependency.png
   > :align: center
   > :alt: query
   > :width: 100%
-  > ```
+  > :::
   >
   > Made using: <https://github.com/patrickhoefler/dockerfilegraph>
   >

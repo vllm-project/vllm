@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import Cython.Compiler.Options
 from Cython.Build import cythonize
 from setuptools import setup

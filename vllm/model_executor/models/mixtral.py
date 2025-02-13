@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -98,7 +100,7 @@ class MixtralMoE(nn.Module):
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states, out_dtype = torch.float32)
+        router_logits, _ = self.gate(hidden_states, out_dtype=torch.float32)
         final_hidden_states = self.experts(hidden_states, router_logits)
         return final_hidden_states.view(orig_shape)
 
@@ -452,7 +454,11 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
                     continue
-
+                if name.endswith("scale"):
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)

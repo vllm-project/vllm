@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import abstractmethod
 from enum import Enum
 from typing import Callable, List, Optional, Tuple
@@ -96,11 +98,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        
+
         if envs.VLLM_USE_AITER_MOE:
-            layer.w13_weight = torch.nn.Parameter(shuffle_weight(layer.w13_weight.data),
-                                          requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(shuffle_weight(layer.w2_weight.data),
+            layer.w13_weight = torch.nn.Parameter(shuffle_weight(
+                layer.w13_weight.data),
+                                                  requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(shuffle_weight(
+                layer.w2_weight.data),
                                                  requires_grad=False)
 
         if envs.VLLM_MOE_PADDING:
@@ -179,10 +183,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         if VLLM_USE_AITER_MOE:
             return ck_moe(hidden_states=x,
-                           w1=layer.w13_weight,
-                           w2=layer.w2_weight,
-                           topk_weights=topk_weights,
-                           topk_ids=topk_ids)
+                          w1=layer.w13_weight,
+                          w2=layer.w2_weight,
+                          topk_weights=topk_weights,
+                          topk_ids=topk_ids)
 
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
@@ -331,8 +335,8 @@ class FusedMoE(torch.nn.Module):
             "weight_loader": self.weight_loader,
         }
         # need full intermediate size pre-sharding for WNA16 act order
-        if (self.quant_method.__class__.__name__ ==
-                "CompressedTensorsWNA16MoEMethod"):
+        if (self.quant_method.__class__.__name__
+                in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)

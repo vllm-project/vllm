@@ -17,4 +17,3 @@ The custom PagedAttention kernel is enabled for dtype: bf16, fp16, block-size=16
 ## NCCL Performance environment variable
 
 For MI300x, setting environment variable NCCL_MIN_NCHANNELS=112 is expected to improve performance.
-

@@ -1,11 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
 """Custom normalization layers."""
 from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.custom_op import CustomOp
 from vllm.envs import VLLM_USE_AITER_NORM
+from vllm.model_executor.custom_op import CustomOp
+
 if VLLM_USE_AITER_NORM:
     import aiter
 
@@ -115,7 +117,7 @@ class RMSNorm(CustomOp):
                     self.variance_epsilon,
                 )
             return x, residual
-        
+
         if VLLM_USE_AITER_NORM:
             out = aiter.rms_norm(x, self.weight.data, self.variance_epsilon)
         else:

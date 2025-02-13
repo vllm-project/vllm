@@ -1,18 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
 import os
-import pickle
-import re
 import weakref
-from unittest.mock import patch
 
 import pytest
 
 from vllm import LLM
 from vllm.platforms import current_platform
-from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 from ..conftest import VllmRunner
 from ..models.utils import check_outputs_equal
@@ -150,57 +147,3 @@ def test_models_distributed(
         name_0="hf",
         name_1="vllm",
     )
-
-
-@pytest.mark.skip_v1
-def test_model_with_failure(vllm_runner) -> None:
-    try:
-        with patch("vllm.model_executor.models.opt.OPTForCausalLM.forward",
-                   side_effect=ValueError()):
-            with pytest.raises(ValueError) as exc_info:
-                vllm_runner("facebook/opt-125m",
-                            dtype="half",
-                            enforce_eager=False,
-                            gpu_memory_utilization=0.7)
-            matches = re.search(r"input dumped to (.+).pkl",
-                                str(exc_info.value))
-            assert matches is not None
-            filename = f"{matches.group(1)}.pkl"
-
-        with open(filename, "rb") as filep:
-            inputs = pickle.load(filep)
-
-        if any(key not in inputs for key in ("arg_1", "arg_2", "arg_3")):
-            raise AssertionError("Missing keys in dumped inputs. Dumped keys: "
-                                 f"{list(inputs.keys())}")
-        assert isinstance(inputs["arg_1"],
-                          ModelInputForGPUWithSamplingMetadata)
-    finally:
-        os.remove(filename)
-
-
-@pytest.mark.skip_v1
-def test_failure_with_async_out_proc(vllm_runner) -> None:
-
-    filename = None
-    try:
-        with vllm_runner("facebook/opt-125m",
-                         dtype="half",
-                         enforce_eager=False,
-                         gpu_memory_utilization=0.7) as vllm_model,\
-             patch("vllm.model_executor.models.opt.OPTForCausalLM.forward",
-                       side_effect=ValueError()):
-            model_config = vllm_model.model.llm_engine.model_config
-            assert model_config.use_async_output_proc
-            with pytest.raises(ValueError) as exc_info:
-                vllm_model.generate_greedy('how to make pizza?', 250)
-            matches = re.search(r"input dumped to (.+).pkl",
-                                str(exc_info.value))
-            assert matches is not None
-
-            filename = f"{matches.group(1)}.pkl"
-    finally:
-        # Clean up
-        if filename is not None:
-            os.remove(filename)
-        pass

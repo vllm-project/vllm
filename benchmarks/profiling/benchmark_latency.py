@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Benchmark the latency of processing a single batch of requests."""
 import argparse
 import dataclasses
@@ -15,6 +16,7 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
+from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -86,37 +88,47 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_inputs: List[PromptType] = [{
+    dummy_prompts: List[PromptType] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
-    def run_to_completion(profile_result_dir: Optional[str] = None):
-        if profile_result_dir:
-            with get_profiling_context(profile_result_dir):
-                llm.generate(dummy_inputs,
-                             sampling_params=sampling_params,
-                             use_tqdm=False)
-        else:
-            start_time = time.perf_counter()
-            llm.generate(dummy_inputs,
+    def llm_generate():
+        if not args.use_beam_search:
+            llm.generate(dummy_prompts,
                          sampling_params=sampling_params,
                          use_tqdm=False)
+        else:
+            llm.beam_search(
+                dummy_prompts,
+                BeamSearchParams(
+                    beam_width=args.n,
+                    max_tokens=args.output_len,
+                    ignore_eos=True,
+                ))
+
+    def run_to_completion(profile_dir: Optional[str] = None):
+        if profile_dir:
+            with get_profiling_context(profile_dir):
+                llm_generate()
+        else:
+            start_time = time.perf_counter()
+            llm_generate()
             end_time = time.perf_counter()
             latency = end_time - start_time
             return latency
 
     print("Warming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-        run_to_completion(profile_result_dir=None)
+        run_to_completion(profile_dir=None)
 
     if args.profile_torch or args.profile_rpd:
-        run_to_completion(profile_result_dir=profile_result_dir)
+        run_to_completion(profile_dir=profile_result_dir)
         return
 
     # Benchmark.
     latencies = []
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion(profile_result_dir=None))
+        latencies.append(run_to_completion(profile_dir=None))
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -22,7 +24,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, convert_to_channelwise,
-    cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize,
+    cutlass_block_fp8_supported, cutlass_fp8_supported,
+    normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize,
     requantize_with_max_scale)
 from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            ModelWeightParameter,
@@ -159,6 +162,7 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -188,8 +192,6 @@ class Fp8LinearMethod(LinearMethodBase):
         weight_loader = extra_weight_attrs.get("weight_loader")
 
         if self.block_quant:
-            assert not envs.VLLM_FP8_PADDING, (
-                "FP8 weight padding is not supported in block quantization.")
             tp_size = get_tensor_model_parallel_world_size()
             assert self.quant_config.weight_block_size is not None
             block_n, block_k = (
@@ -273,21 +275,38 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.register_parameter("input_scale", None)
 
+    def add_padding_to_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        # Pad the weight tensor. This is an optimization on ROCm platform, which
+        # can benefit from tensors located far enough from one another in memory
+        if (current_platform.is_rocm() and envs.VLLM_FP8_PADDING
+                and weight.stride(-1) == 1
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0):
+            num_pad = 256 // weight.element_size()
+            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+            torch.cuda.empty_cache()
+        return weight
+
     def process_weights_after_loading(self, layer: Module) -> None:
-        # Block quant doesn't need to process weights after loading
+        # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
+            assert self.quant_config.activation_scheme == "dynamic"
             if current_platform.is_rocm() and not is_navi():
-                weight, weight_scale, _ = \
+                weight, weight_scale_inv, _ = \
                     normalize_e4m3fn_to_e4m3fnuz(
                         weight=layer.weight,
-                        weight_scale=layer.weight_scale_inv,
-                        input_scale=layer.input_scale)
-                layer.weight = Parameter(weight, requires_grad=False)
-                layer.weight_scale_inv = Parameter(weight_scale,
-                                                   requires_grad=False)
+                        weight_scale=layer.weight_scale_inv)
+            else:
+                weight = layer.weight.data
+                weight_scale_inv = layer.weight_scale_inv.data
+
+            weight = self.add_padding_to_weight(weight)
+
+            # Torch.compile cannot use Parameter subclasses.
+            layer.weight = Parameter(weight, requires_grad=False)
+            layer.weight_scale_inv = Parameter(weight_scale_inv,
+                                               requires_grad=False)
             return
-        layer.weight = torch.nn.Parameter(layer.weight.data,
-                                          requires_grad=False)
+
         # If checkpoint not serialized fp8, quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
@@ -349,14 +368,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     logical_widths=layer.logical_widths,
                 )
 
-            # Pad the weight
-            if envs.VLLM_FP8_PADDING and weight.stride(-1) == 1 \
-                and (weight.stride(-2) * weight.element_size()) % 512 == 0:
-                num_pad = 256 // weight.element_size()
-                weight = F.pad(weight, (0, num_pad), "constant",
-                               0)[..., :-num_pad]
-                torch.cuda.empty_cache()
-
+            weight = self.add_padding_to_weight(weight)
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -396,6 +408,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight_scale=layer.weight_scale_inv,
                 input_scale=layer.input_scale,
                 bias=bias,
+                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
             )
 
         return apply_fp8_linear(
@@ -549,8 +562,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        # Block quant doesn't need to process weights after loading
+        # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
+            assert self.quant_config.activation_scheme == "dynamic"
             if current_platform.is_rocm() and not is_navi():
                 w13_weight, w13_weight_scale_inv, w13_input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
@@ -560,22 +574,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     normalize_e4m3fn_to_e4m3fnuz(
                         layer.w2_weight, layer.w2_weight_scale_inv,
                         layer.w2_input_scale)
-                # Reset the parameter
-                layer.w13_weight = torch.nn.Parameter(w13_weight,
-                                                      requires_grad=False)
-                layer.w13_weight_scale_inv = torch.nn.Parameter(
-                    w13_weight_scale_inv, requires_grad=False)
-                if w13_input_scale is not None:
-                    layer.w13_input_scale = torch.nn.Parameter(
-                        w13_input_scale, requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(w2_weight,
-                                                     requires_grad=False)
-                layer.w2_weight_scale_inv = torch.nn.Parameter(
-                    w2_weight_scale_inv, requires_grad=False)
-                if w2_input_scale is not None:
-                    layer.w2_input_scale = torch.nn.Parameter(
-                        w2_input_scale, requires_grad=False)
+            else:
+                w13_weight = layer.w13_weight.data
+                w13_weight_scale_inv = layer.w13_weight_scale_inv.data
+                w2_weight = layer.w2_weight
+                w2_weight_scale_inv = layer.w2_weight_scale_inv
+
+            # torch.compile() cannot use Parameter subclasses.
+            layer.w13_weight = Parameter(w13_weight, requires_grad=False)
+            layer.w13_weight_scale_inv = Parameter(w13_weight_scale_inv,
+                                                   requires_grad=False)
+            layer.w2_weight = Parameter(w2_weight, requires_grad=False)
+            layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
+                                                  requires_grad=False)
             return
+
         # If checkpoint is fp16, quantize in place.
         if not self.quant_config.is_checkpoint_fp8_serialized:
             # If rocm (except Navi4x), use float8_e4m3fnuz as dtype
@@ -604,8 +617,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
             if envs.VLLM_USE_AITER_MOE:
-                w13_scales = layer.w13_weight_scale.data.unsqueeze(-1).unsqueeze(
-                    -1).expand((-1, layer.w13_weight.shape[1], -1))
+                w13_scales = layer.w13_weight_scale.data.unsqueeze(
+                    -1).unsqueeze(-1).expand(
+                        (-1, layer.w13_weight.shape[1], -1))
                 w2_scales = layer.w2_weight_scale.data.unsqueeze(-1).unsqueeze(
                     -1).expand((-1, layer.w2_weight.shape[1], -1))
                 layer.w2_weight_scale = torch.nn.Parameter(

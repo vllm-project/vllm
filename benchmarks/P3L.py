@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """
 Patch-Perplexity (P3L)
 
@@ -38,6 +39,9 @@ Running llama-2-7b model
     --patch-size=1
 )
 should result in PPL ~ PPL=3.8968611189957523
+
+Running the script with multiple batches is possible
+by specifying the --batch-size parameter.
 
 """
 
@@ -139,29 +143,47 @@ def main(args: argparse.Namespace):
 
     logger.info(MESSAGE)
     print(MESSAGE)
-    for c in range(my_n_patches):
+
+    my_batchsize = args.batch_size
+
+    for c in range(0, my_n_patches, my_batchsize):
+
         CONTEXT = []
         my_sampl_par.future_context = []
-        CONTEXT.append(
-            my_test_enc['input_ids'][c * my_n_samples:c * my_n_samples +
-                                     args.context_size])
-        upper_boundary = min((c + 1) * my_n_samples + args.context_size,
-                             len(my_test_enc['input_ids']))
-        my_sampl_par.future_context.append(
-            my_test_enc['input_ids'][c * my_n_samples +
-                                     args.context_size:upper_boundary])
-        my_sampl_par.max_tokens = len(my_sampl_par.future_context[0])
-        my_sampl_par.cntr = c
+        my_sampl_par.cntr = []
+
+        for b in range(my_batchsize):
+            if (c + b) < my_n_patches:
+                upper_boundary = min(
+                    (c + b + 1) * my_n_samples + args.context_size,
+                    len(my_test_enc['input_ids']))
+                CONTEXT.append(
+                    my_test_enc['input_ids'][(c + b) * my_n_samples:(c + b) *
+                                             my_n_samples + args.context_size])
+
+                my_sampl_par.future_context.append(
+                    my_test_enc['input_ids'][(c + b) * my_n_samples +
+                                             args.context_size:upper_boundary])
+
+                my_sampl_par.cntr.append(c + b)
+
+        my_sampl_par.max_tokens = max(
+            len(my_sampl_par.future_context[b]) for b in range(len(CONTEXT)))
+
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
-        num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
-        if (num_tokens_generated < my_n_samples):
+        for b in range(len(CONTEXT)):
+            num_tokens_generated += len(LOGPROBS[b].outputs[0].token_ids)
+            my_ppl -= LOGPROBS[b].outputs[0].cumulative_logprob
+
+        if (num_tokens_generated < my_n_samples * len(CONTEXT)):
             MESSAGE = (f"Warning: The number of generated tokens is" \
-                        f"less than requested ({num_tokens_generated}" \
-                        f" < {my_n_samples}).")
+                    f"less than requested ({num_tokens_generated}" \
+                    f" < {my_n_samples*len(CONTEXT)}).")
             logger.info(MESSAGE)
             print(MESSAGE)
-        my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
-        MESSAGE = (f"Iteration {c+1} of {my_n_patches} Intermediate" \
+
+        MESSAGE = (f"Iterations {c+1} through {c+len(CONTEXT)}" \
+            f" of {my_n_patches} Intermediate " \
             "Estimates:\n" \
             f"\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n" \
             f"\tPerplexity_intermediate=" \
@@ -169,6 +191,7 @@ def main(args: argparse.Namespace):
 
         logger.info(MESSAGE)
         print(MESSAGE)
+
     ending_time = datetime.datetime.now()
     MESSAGE = (f"Done @ {ending_time} after processing for" \
                 f" {ending_time-starting_time}" \
@@ -198,12 +221,9 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Measure the PPPL (P3L) score of a given model.')
-    parser.add_argument(
-        '--data',
-        type=str,
-        default='./wikitext/wikitext-2-v1/test-00000-of-00001.parquet')
     parser.add_argument('--context-size', type=int, default=4096)
     parser.add_argument('--sample-size', type=int, default=512)
+    parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--patch-size', type=int, default=None)
     parser.add_argument(
         '--output-json',

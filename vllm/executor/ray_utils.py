@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import time
 from collections import defaultdict
@@ -5,10 +7,10 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
+import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -52,10 +54,10 @@ try:
 
         def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
             node_id = ray.get_runtime_context().get_node_id()
-            device_key = current_platform.ray_device_key
+            device_key = vllm.platforms.current_platform.ray_device_key
             if not device_key:
                 raise RuntimeError("current platform %s does not support ray.",
-                                   current_platform.device_name)
+                                   vllm.platforms.current_platform.device_name)
             gpu_ids = ray.get_runtime_context().get_accelerator_ids(
             )[device_key]
             return node_id, gpu_ids
@@ -212,7 +214,10 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
         logger.info(
             "Waiting for creating a placement group of specs for "
             "%d seconds. specs=%s. Check "
-            "`ray status` to see if you have enough resources.",
+            "`ray status` to see if you have enough resources,"
+            " and make sure the IP addresses used by ray cluster"
+            " are the same as VLLM_HOST_IP environment variable"
+            " specified in each node if you are running on a multi-node.",
             int(time.time() - s), placement_group_specs)
 
     try:

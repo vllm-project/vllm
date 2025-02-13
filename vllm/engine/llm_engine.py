@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 import time
 from collections import Counter as collectionsCounter
@@ -230,7 +232,7 @@ class LLMEngine:
         )
 
         logger.info(
-            "Initializing an LLM engine (v%s) with config: %s, "
+            "Initializing a V0 LLM engine (v%s) with config: %s, "
             "use_cached_outputs=%s, ",
             VLLM_VERSION,
             vllm_config,
@@ -432,6 +434,7 @@ class LLMEngine:
     @classmethod
     def _get_executor_cls(cls,
                           engine_config: VllmConfig) -> Type[ExecutorBase]:
+        # distributed_executor_backend must be set in VllmConfig.__post_init__
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
         # Initialize the cluster and specify the executor class.
@@ -441,30 +444,29 @@ class LLMEngine:
                     "distributed_executor_backend must be a subclass of "
                     f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
-        elif engine_config.parallel_config.world_size > 1:
-            if distributed_executor_backend == "ray":
-                from vllm.executor.ray_distributed_executor import (
-                    RayDistributedExecutor)
-                executor_class = RayDistributedExecutor
-            elif distributed_executor_backend == "mp":
-                from vllm.executor.mp_distributed_executor import (
-                    MultiprocessingDistributedExecutor)
-                assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
-                    "multiprocessing distributed executor backend does not "
-                    "support VLLM_USE_RAY_SPMD_WORKER=1")
-                executor_class = MultiprocessingDistributedExecutor
-            elif distributed_executor_backend == "uni":
-                # JAX-style, single-process, multi-device executor.
-                from vllm.executor.uniproc_executor import UniProcExecutor
-                executor_class = UniProcExecutor
-            elif distributed_executor_backend == "external_launcher":
-                # executor with external launcher
-                from vllm.executor.uniproc_executor import (  # noqa
-                    ExecutorWithExternalLauncher)
-                executor_class = ExecutorWithExternalLauncher
-        else:
+        elif distributed_executor_backend == "ray":
+            from vllm.executor.ray_distributed_executor import (
+                RayDistributedExecutor)
+            executor_class = RayDistributedExecutor
+        elif distributed_executor_backend == "mp":
+            from vllm.executor.mp_distributed_executor import (
+                MultiprocessingDistributedExecutor)
+            assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
+                "multiprocessing distributed executor backend does not "
+                "support VLLM_USE_RAY_SPMD_WORKER=1")
+            executor_class = MultiprocessingDistributedExecutor
+        elif distributed_executor_backend == "uni":
+            # JAX-style, single-process, multi-device executor.
             from vllm.executor.uniproc_executor import UniProcExecutor
             executor_class = UniProcExecutor
+        elif distributed_executor_backend == "external_launcher":
+            # executor with external launcher
+            from vllm.executor.uniproc_executor import (  # noqa
+                ExecutorWithExternalLauncher)
+            executor_class = ExecutorWithExternalLauncher
+        else:
+            raise ValueError("unrecognized distributed_executor_backend: "
+                             f"{distributed_executor_backend}")
         return executor_class
 
     @classmethod
@@ -1010,8 +1012,23 @@ class LLMEngine:
                      self.speculative_config
             # Organize outputs by [step][sequence group] instead of
             # [sequence group][step].
-            outputs_by_sequence_group = create_output_by_sequence_group(
-                outputs, num_seq_groups=len(seq_group_metadata_list))
+            if self.scheduler_config.is_multi_step:
+                outputs_by_sequence_group = create_output_by_sequence_group(
+                    outputs, len(seq_group_metadata_list))
+            elif self.speculative_config:
+                # Decodes are multi-steps while prefills are not, outputting at
+                # most 1 token. Separate them so that we can trigger chunk
+                # processing without having to pad or copy over prompts K times
+                # to match decodes structure (costly with prompt_logprobs).
+                num_prefills = sum(sg.is_prompt
+                                   for sg in seq_group_metadata_list)
+                prefills, decodes = outputs[:num_prefills], outputs[
+                    num_prefills:]
+                outputs_by_sequence_group = create_output_by_sequence_group(
+                    decodes,
+                    num_seq_groups=len(seq_group_metadata_list) - num_prefills)
+                outputs_by_sequence_group = [p.outputs for p in prefills
+                                             ] + outputs_by_sequence_group
             # We have outputs for multiple steps submitted in a single burst,
             # so invalidate is_first_step_output.
             is_first_step_output = None

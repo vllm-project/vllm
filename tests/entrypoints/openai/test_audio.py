@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List
 
 import openai
@@ -9,7 +11,7 @@ from vllm.multimodal.utils import encode_audio_base64, fetch_audio
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "fixie-ai/ultravox-v0_3"
+MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 TEST_AUDIO_URLS = [
     AudioAsset("winning_call").url,
 ]
@@ -81,7 +83,7 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=202, total_tokens=212)
+        completion_tokens=10, prompt_tokens=201, total_tokens=211)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -138,7 +140,7 @@ async def test_single_chat_session_audio_base64encoded(
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=202, total_tokens=212)
+        completion_tokens=10, prompt_tokens=201, total_tokens=211)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -194,7 +196,7 @@ async def test_single_chat_session_input_audio(
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=202, total_tokens=212)
+        completion_tokens=10, prompt_tokens=201, total_tokens=211)
 
     message = choice.message
     message = chat_completion.choices[0].message
