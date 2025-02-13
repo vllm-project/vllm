@@ -302,7 +302,6 @@ class Scheduler:
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
-        # FIXME: This is not correct.
         num_common_prefix_blocks = 0
         if self.running:
             any_request = self.running[0]
@@ -463,7 +462,7 @@ class Scheduler:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
             if num_tokens_scheduled == 0:
-                # The request was not scheduled in this batch.
+                # The request was not scheduled in this step.
                 new_running.append(request)
                 continue
 
@@ -610,6 +609,7 @@ class Scheduler:
         return self.get_num_unfinished_requests() > 0
 
     def get_num_unscheduled_requests(self) -> int:
+        """Number of requests that are not being processed by the executor."""
         return self.get_num_unfinished_requests() - len(self.scheduled_req_ids)
 
     def reset_prefix_cache(self) -> bool:
