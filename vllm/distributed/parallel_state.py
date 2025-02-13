@@ -152,6 +152,7 @@ class GroupCoordinator:
     rank_in_group: int  # rank inside the group
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
+    use_device_communicator: bool  # whether to use device communicator
     mq_broadcaster: Optional[Any]  # shared memory broadcaster
 
     def __init__(
@@ -215,8 +216,6 @@ class GroupCoordinator:
         if use_message_queue_broadcaster and self.world_size > 1:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6)
-
-        self.supports_custom_op = supports_custom_op()
 
     @property
     def first_rank(self):
