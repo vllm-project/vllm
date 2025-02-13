@@ -1112,6 +1112,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         attn_metadata: MLACommonMetadata,
     ):
         prefill_metadata = attn_metadata.prefill_metadata
+        assert prefill_metadata is not None
+        assert prefill_metadata.chunk_iter_toks is not None
+        assert prefill_metadata.chunk_cu_seq_lens is not None
+        assert prefill_metadata.chunk_seq_starts is not None
+        assert prefill_metadata.chunk_max_seq_lens is not None
+        # assert prefill_metadata.block_tables is not None
+        assert prefill_metadata.context_lens_tensor is not None
 
         output = None
         iters = len(prefill_metadata.chunk_iter_toks)
@@ -1184,59 +1191,18 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         return output, output_lse
 
-    # Optional common flash-attn based prefill
-    def _forward_prefill_flash(
-        self,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        seq_start_loc: torch.Tensor,
-        max_query_len: int,
-        max_prefill_seq_len: int,
-    ) -> torch.Tensor:
-
-        kv_nope = self.kv_b_proj(k_c_normed)[0]\
-            .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope\
-            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
-
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
-
-        attn_output = flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v_padded,
-            cu_seqlens_q=query_start_loc,
-            cu_seqlens_k=seq_start_loc,
-            max_seqlen_q=max_query_len,
-            max_seqlen_k=max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            fa_version=self.vllm_flash_attn_version,
-        )
-        attn_output = attn_output\
-            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                .reshape(-1, self.num_heads * v.shape[-1])
-
-        return self.o_proj(attn_output)[0]
-
     def _forward_prefill(
         self,
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: T,
     ) -> torch.Tensor:
         assert isinstance(attn_metadata, MLACommonMetadata)
 
         prefill_metadata = attn_metadata.prefill_metadata
+        assert prefill_metadata is not None
 
         has_context = prefill_metadata.context_lens_tensor is not None \
             and prefill_metadata.context_lens_tensor.max() > 0
@@ -1284,8 +1250,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         output = output\
             .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
                 .reshape(-1, self.num_heads * v.shape[-1])
-
-        attn_metadata.first_layer = False
 
         return self.o_proj(output)[0]
 

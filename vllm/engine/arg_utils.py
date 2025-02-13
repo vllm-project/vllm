@@ -1141,25 +1141,9 @@ class EngineArgs:
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
-        # Default to `gpu_memory_utilization` of 0.9 if not specified
-        gpu_memory_utilization = self.gpu_memory_utilization if \
-            self.gpu_memory_utilization is not None else 0.9
-        # For models using MLA and chunked prefill, lower the default to 0.85
-        # to account for the extra memory required to up-project the MLA cache
-        if self.gpu_memory_utilization is None and \
-            (self.enable_chunked_prefill and model_config.use_mla):
-            gpu_memory_utilization = 0.85
-
-        if self.enable_chunked_prefill and model_config.use_mla:
-            # Currently chunked prefill with MLA is not supported with CUDA
-            # graphs
-            logger.warning("Chunked prefill is not supported with MLA. "
-                           "Disabling CUDA graphs.")
-            self.enforce_eager = True
-
         cache_config = CacheConfig(
             block_size=self.block_size,
-            gpu_memory_utilization=gpu_memory_utilization,
+            gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
             is_attention_free=model_config.is_attention_free,
@@ -1183,6 +1167,13 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
         )
+
+        if self.enable_chunked_prefill and model_config.use_mla:
+            # Currently chunked prefill with MLA is not supported with CUDA
+            # graphs
+            logger.warning("Chunked prefill is not supported with MLA. "
+                           "Disabling CUDA graphs.")
+            self.enforce_eager = True
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,

@@ -213,11 +213,9 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
         """
-        print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled)
-        print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
