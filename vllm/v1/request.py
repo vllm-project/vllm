@@ -215,7 +215,7 @@ class RequestStatus(enum.IntEnum):
     WAITING_FOR_FSM = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
-    # Note: anything after PREEMPTED (2) will be considered
+    # Note: anything after PREEMPTED will be considered
     # as a finished status.
     FINISHED_STOPPED = enum.auto()
     FINISHED_LENGTH_CAPPED = enum.auto()
