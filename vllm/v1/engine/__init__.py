@@ -135,7 +135,10 @@ class EngineCoreOutputs(
 
     new_token_ids: List[int]
 
+    # req_id -> LogprobsLists
     new_logprobs: Dict[str, LogprobsLists]
+
+    # req_id -> LogprobsTensors
     new_prompt_logprobs_tensors: Dict[str, LogprobsTensors]
 
     finish_reason: Dict[str, Tuple[FinishReason, Union[int, str, None]]]

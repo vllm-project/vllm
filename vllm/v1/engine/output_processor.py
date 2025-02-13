@@ -155,6 +155,7 @@ class OutputProcessor:
         reqs_to_abort: List[str] = []
         for i, req_id in enumerate(
                 engine_core_outputs.request_ids[first:last]):
+            req_idx = i + first
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
@@ -162,11 +163,11 @@ class OutputProcessor:
 
             new_token_id_offsets = engine_core_outputs.new_token_id_offsets
 
-            num_tokens = last - first
-            start = new_token_id_offsets[i]
-            end = new_token_id_offsets[i + 1]
+            start = new_token_id_offsets[req_idx]
+            end = new_token_id_offsets[req_idx + 1]
+            num_tokens = end - start
             events = engine_core_outputs.events[
-                i] if engine_core_outputs.events is not None else None
+                req_idx] if engine_core_outputs.events is not None else None
 
             # 1) Compute stats for this iteration.
 
