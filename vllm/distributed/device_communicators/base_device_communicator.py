@@ -16,8 +16,10 @@ class DeviceCommunicatorBase:
 
     def __init__(self,
                  cpu_group: ProcessGroup,
+                 device: Optional[torch.device] = None,
                  device_group: Optional[Optional] = None,
                  unique_name: str = ""):
+        self.device = device or torch.device("cpu")
         self.cpu_group = cpu_group
         self.device_group = device_group
         self.unique_name = unique_name

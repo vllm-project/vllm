@@ -22,9 +22,10 @@ class TpuCommunicator(DeviceCommunicatorBase):
 
     def __init__(self,
                  cpu_group: ProcessGroup,
+                 device: Optional[torch.device] = None,
                  device_group: Optional[Optional] = None,
                  unique_name: str = ""):
-        super().__init__(cpu_group, device_group, unique_name)
+        super().__init__(cpu_group, device, device_group, unique_name)
 
         # NOTE(woosuk): When using TP > 1 on TPUs, every TPU on the same node
         # must be used together. Therefore, the local rank and world size can
