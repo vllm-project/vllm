@@ -11,8 +11,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_CONFIGS = [
     {
-        "model": "s3://vllm-ci-model-weights/distilgpt2",
-        "load_format": "runai_streamer",
+        "model": "facebook/opt-125m",
         "enforce_eager": True,
         "gpu_memory_utilization": 0.20,
         "max_model_len": 64,
@@ -21,8 +20,7 @@ MODEL_CONFIGS = [
         "tensor_parallel_size": 1,
     },
     {
-        "model": "s3://vllm-ci-model-weights/Mistral-7B-Instruct-v0.1",
-        "load_format": "runai_streamer",
+        "model": "mistralai/Mistral-7B=B-Instruct-v0.1",
         "enforce_eager": True,
         "gpu_memory_utilization": 0.95,
         "max_model_len": 64,
@@ -32,8 +30,7 @@ MODEL_CONFIGS = [
         "tokenizer_mode": "mistral",
     },
     {
-        "model": "s3://vllm-ci-model-weights/all-MiniLM-L12-v2",
-        "load_format": "runai_streamer",
+        "model": "sentence-transformers/all-MiniLM-L12-v2",
         "enforce_eager": True,
         "gpu_memory_utilization": 0.20,
         "max_model_len": 64,

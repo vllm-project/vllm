@@ -35,7 +35,7 @@ def _generate(
 
 
 class TestOneTokenBadWord:
-    MODEL = "TheBloke/Llama-2-7B-fp16"
+    MODEL = "meta-llama/Meta-Llama-3-8B"
 
     PROMPT = "Hi! How are"
     TARGET_TOKEN = "you"
@@ -76,7 +76,7 @@ class TestOneTokenBadWord:
 
 class TestTwoTokenBadWord:
     # Another model (with a different tokenizer behaviour)
-    MODEL = "openai-community/gpt2"
+    MODEL = "distilbert/distilgpt2"
 
     PROMPT = "How old are you? I am 10"
     TARGET_TOKEN1 = "years"

@@ -55,6 +55,8 @@ MODELS_ON_S3 = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "openai-community/gpt2",
     "ArthurZ/Ilama-3.2-1B",
+    "llava-hf/llava-1.5-7b-hf",
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
 ]
 
 MODEL_WEIGHTS_S3_BUCKET = "s3://vllm-ci-model-weights"
