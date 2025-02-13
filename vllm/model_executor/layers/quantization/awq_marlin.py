@@ -137,8 +137,8 @@ class AWQMarlinConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if layer.num_experts > 32:
                 # For MoEs with many experts the moe_wna16 kernel is faster
-                MoeWNA16Config.from_config(self.full_config).get_quant_method(
-                    layer, prefix)
+                return MoeWNA16Config.from_config(
+                    self.full_config).get_quant_method(layer, prefix)
             else:
                 return AWQMoEMethod(self)
         return None

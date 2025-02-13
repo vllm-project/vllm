@@ -45,15 +45,10 @@ class GPTQMarlinConfig(QuantizationConfig):
         (8, True): scalar_types.uint8b128,
     }
 
-    def __init__(
-        self,
-        weight_bits: int,
-        group_size: int,
-        desc_act: bool,
-        is_sym: bool,
-        lm_head_quantized: bool,
-        dynamic: Dict[str, Dict[str, Union[int, bool]]],
-    ) -> None:
+    def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
+                 is_sym: bool, lm_head_quantized: bool,
+                 dynamic: Dict[str, Dict[str, Union[int, bool]]],
+                 full_config: Dict[str, Any]) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
@@ -91,6 +86,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.group_size = group_size
         self.desc_act = desc_act
         self.lm_head_quantized = lm_head_quantized
+        self.full_config = full_config
 
         if (weight_bits, is_sym) not in self.TYPE_MAP:
             raise ValueError("Unsupported quantization config: "
@@ -133,7 +129,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
         return cls(weight_bits, group_size, desc_act, is_sym,
-                   lm_head_quantized, dynamic)
+                   lm_head_quantized, dynamic, config)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -163,8 +159,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         if isinstance(layer, FusedMoE):
             if layer.num_experts > 32:
                 # For MoEs with many experts the moe_wna16 kernel is faster
-                MoeWNA16Config.from_config(self.full_config).get_quant_method(
-                    layer, prefix)
+                return MoeWNA16Config.from_config(
+                    self.full_config).get_quant_method(layer, prefix)
             else:
                 return GPTQMarlinMoEMethod(self)
         return get_linear_quant_method(self, layer, prefix,
