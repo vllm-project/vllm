@@ -68,8 +68,8 @@ class ParentRequestState:
             # Aggregate additional completion into request
             # output
             new_completion = child_req_output.outputs[0]
-            new_completion.index = self.num_completions
-            self.request_output.outputs.append(new_completion)
+            new_completion.index = index
+            self.request_output.outputs[index] = new_completion
 
     def transform_output(
         self,
