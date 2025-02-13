@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 import uuid
 
@@ -48,7 +50,8 @@ def test_engine_core(monkeypatch):
         executor_class = Executor.get_class(vllm_config)
 
         engine_core = EngineCore(vllm_config=vllm_config,
-                                 executor_class=executor_class)
+                                 executor_class=executor_class,
+                                 log_stats=True)
         """Test basic request lifecycle."""
 
         # First request.
@@ -155,7 +158,8 @@ def test_engine_core_advanced_sampling(monkeypatch):
         executor_class = Executor.get_class(vllm_config)
 
         engine_core = EngineCore(vllm_config=vllm_config,
-                                 executor_class=executor_class)
+                                 executor_class=executor_class,
+                                 log_stats=True)
         """Test basic request lifecycle."""
         # First request.
         request: EngineCoreRequest = make_request()

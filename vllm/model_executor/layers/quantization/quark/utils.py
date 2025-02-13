@@ -1,8 +1,8 @@
-import re
-from typing import Any, Iterable, Optional
+# SPDX-License-Identifier: Apache-2.0
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    FUSED_LAYER_NAME_MAPPING)
+import re
+from types import MappingProxyType
+from typing import Any, Iterable, List, Mapping, Optional
 
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:
@@ -18,8 +18,11 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
         return dict1 == dict2
 
 
-def should_ignore_layer(layer_name: Optional[str],
-                        ignore: Iterable[str]) -> bool:
+def should_ignore_layer(
+    layer_name: Optional[str],
+    ignore: Iterable[str],
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
+) -> bool:
     if layer_name is None:
         return False
 
@@ -31,8 +34,8 @@ def should_ignore_layer(layer_name: Optional[str],
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in FUSED_LAYER_NAME_MAPPING:
-        shard_proj_names = FUSED_LAYER_NAME_MAPPING[proj_name]
+    if proj_name in fused_mapping:
+        shard_proj_names = fused_mapping[proj_name]
 
         # Convert fused_name --> [shard_names]
         shard_names = [

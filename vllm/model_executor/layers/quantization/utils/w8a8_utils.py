@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -8,6 +10,13 @@ from vllm.platforms import current_platform
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
+
+# The condition to determine if it is on a platform that supports
+# torch._scaled_mm rowwise feature.
+# The condition is determined once as the operations
+# are time consuming.
+USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
+                               and current_platform.has_device_capability(94))
 
 
 def sparse_cutlass_supported() -> bool:
@@ -28,6 +37,20 @@ def cutlass_fp8_supported() -> bool:
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
     return ops.cutlass_scaled_mm_supports_fp8(capability)
+
+
+def cutlass_block_fp8_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_scaled_mm_supports_block_fp8(capability)
+
+
+CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
+CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
 
 def per_tensor_dequantize(
@@ -97,7 +120,7 @@ def apply_fp8_linear(
     input_scale: Optional[torch.Tensor] = None,
     input_scale_ub: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    cutlass_fp8_supported: bool = True,
+    cutlass_fp8_supported: bool = CUTLASS_FP8_SUPPORTED,
     use_per_token_if_dynamic: bool = False,
 ) -> torch.Tensor:
     # ops.scaled_fp8_quant supports both dynamic and static quant.
@@ -155,6 +178,26 @@ def apply_fp8_linear(
 
             return torch.narrow(output, 0, 0,
                                 input_2d.shape[0]).view(*output_shape)
+
+        elif (use_per_token_if_dynamic and not per_tensor_weights
+              and not per_tensor_activations and USE_ROWWISE_TORCH_SCALED_MM):
+            # For now validated on ROCm platform
+            # fp8 rowwise scaling in torch._scaled_mm is introduced in
+            # https://github.com/pytorch/pytorch/pull/144432 using
+            # hipBLASLt and ROCm 6.3, which only exists in torch 2.7 and above.
+            # For CUDA platform please validate if the
+            # torch._scaled_mm support rowwise scaled GEMM
+            # Fused GEMM_DQ Rowwise GEMM
+            output = torch._scaled_mm(qinput,
+                                      weight,
+                                      out_dtype=input.dtype,
+                                      scale_a=x_scale,
+                                      scale_b=weight_scale.t(),
+                                      bias=bias)
+
+            output = torch.narrow(output, 0, 0, input_2d.shape[0])
+            output = output.view(*output_shape)
+            return output
 
         else:
             # Fallback for channelwise case, where we use unfused DQ

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer."""
 from typing import Any, Dict, List, Optional
 
@@ -41,8 +42,10 @@ class Attention(nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
+        use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        **extra_impl_args,
     ) -> None:
         super().__init__()
         if per_layer_sliding_window is not None:
@@ -101,13 +104,18 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size, dtype, kv_cache_dtype,
-                                        block_size, is_attention_free,
-                                        blocksparse_params is not None)
+        attn_backend = get_attn_backend(head_size,
+                                        dtype,
+                                        kv_cache_dtype,
+                                        block_size,
+                                        is_attention_free,
+                                        blocksparse_params is not None,
+                                        use_mla=use_mla)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap, attn_type)
+                             blocksparse_params, logits_soft_cap, attn_type,
+                             **extra_impl_args)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -148,9 +156,13 @@ class Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if self.calculate_kv_scales and \
-            attn_metadata.enable_kv_scales_calculation:
-            self.calc_kv_scales(key, value)
+        # NOTE: please avoid accessing `kv_cache` and `attn_metadata` arguments
+        # directly, use `self.kv_cache` and
+        # `get_forward_context().attn_metadata` instead.
+        if self.calculate_kv_scales:
+            ctx_attn_metadata = get_forward_context().attn_metadata
+            if ctx_attn_metadata.enable_kv_scales_calculation:
+                self.calc_kv_scales(key, value)
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -164,15 +176,27 @@ class Attention(nn.Module):
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
-                unified_attention_with_output(query, key, value, output,
-                                              self.layer_name)
+                forward_context: ForwardContext = get_forward_context()
+                ctx_attn_metadata = forward_context.attn_metadata
+                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                self.impl.forward(self,
+                                  query,
+                                  key,
+                                  value,
+                                  self_kv_cache,
+                                  ctx_attn_metadata,
+                                  output=output)
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
-                return unified_attention(query, key, value, self.layer_name)
+                forward_context = get_forward_context()
+                ctx_attn_metadata = forward_context.attn_metadata
+                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                return self.impl.forward(self, query, key, value,
+                                         self_kv_cache, ctx_attn_metadata)
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
@@ -192,6 +216,10 @@ class Attention(nn.Module):
         s += f", scale={self.impl.scale}"  # type: ignore
         s += f", backend={self.impl.__class__.__name__}"
         return s
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if hasattr(self.impl, "process_weights_after_loading"):
+            self.impl.process_weights_after_loading(act_dtype)
 
 
 class MultiHeadAttention(nn.Module):

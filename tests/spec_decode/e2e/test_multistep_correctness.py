@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The tests in this file verify end-to-end speculative decoding correctness.
 
 This docstring details important information on the testing methodology.
