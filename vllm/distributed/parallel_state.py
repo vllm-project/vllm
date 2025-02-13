@@ -217,6 +217,9 @@ class GroupCoordinator:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6)
 
+        from vllm.platforms import current_platform
+        self.use_custom_op_call = current_platform.is_cuda_alike()
+
     @property
     def first_rank(self):
         """Return the global rank of the first process in the group"""
@@ -298,8 +301,7 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
-        from vllm.platforms import current_platform
-        if current_platform.is_cuda_alike():
+        if self.use_custom_op_call:
             return torch.ops.vllm.all_reduce(input_,
                                              group_name=self.unique_name)
         else:
