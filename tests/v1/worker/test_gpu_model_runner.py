@@ -1,6 +1,5 @@
 import pytest
 
-from typing import Tuple
 from vllm.config import (
     VllmConfig,
     ModelConfig,
@@ -46,7 +45,7 @@ def model_runner():
     device = "cuda"
     return GPUModelRunner(vllm_config, device)
 
-def _schedule_new_request(*req_ids: Tuple[str]) -> SchedulerOutput:
+def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
     new_reqs = []
     num_scheduled_tokens = {}
     total_num_scheduled_tokens = 0
