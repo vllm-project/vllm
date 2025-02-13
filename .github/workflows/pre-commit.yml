@@ -31,6 +31,8 @@ jobs:
             issue_number: context.issue.number,
             labels: ['pre-commit-passed']
           })
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: Remove `pre-commit-passed` otherwise
       uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
       if: steps.pre-commit.outcome != 'success'
@@ -49,3 +51,5 @@ jobs:
               throw e;
             }
           }
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
