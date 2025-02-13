@@ -73,8 +73,6 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
 }
 
 std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a) {
-  // Considering elemsPerMetaElem = 8b / 2b_per_nz = 4
-
   // Check for strides and alignment
   TORCH_CHECK(a.stride(1) == 1);      // Row-major
   TORCH_CHECK(a.stride(0) % 8 == 0);  // 8 Byte Alignment for Compression
