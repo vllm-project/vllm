@@ -23,14 +23,15 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers.models.mllama.configuration_mllama as config_mllama
-from PIL import Image
+from PIL.Image import Image
 from torch import nn
+from transformers import BatchFeature, MllamaConfig
 from transformers.modeling_outputs import (BaseModelOutput,
                                            CausalLMOutputWithPast)
 from transformers.models.mllama.image_processing_mllama import (
     get_optimal_tiled_canvas)
 from transformers.models.mllama.processing_mllama import (
-    get_cross_attention_token_mask)
+    MllamaProcessor, get_cross_attention_token_mask)
 
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
@@ -38,8 +39,6 @@ from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DummyData, EncoderDecoderInputs,
-                         InputContext, TokenInputs, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -54,8 +53,13 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import SequenceData
-from vllm.utils import is_list_of
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
+                                   MultiModalDataDict, MultiModalDataItems)
+from vllm.multimodal.processing import (BaseProcessingInfo,
+                                        EncDecMultiModalProcessor,
+                                        PromptReplacement)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal
@@ -63,8 +67,6 @@ from .llama import LlamaDecoderLayer, LlamaMLP
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
-MLLAMA_IMAGE_TOKEN_ID = 128256
-MLLAMA_IMAGE_TOKEN = "<|image|>"
 
 
 class MllamaImagePixelInputs(TypedDict):
@@ -81,158 +83,191 @@ class MllamaImagePixelInputs(TypedDict):
 # TODO: support LlamaImageEmbeddingInputs
 
 
-def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
-    num_images = 0
-    for token_id in prompt_token_ids[::-1]:
-        if token_id == MLLAMA_IMAGE_TOKEN_ID:
-            num_images += 1
-        elif num_images > 0:
-            break
-    return num_images
+def calc_token_per_chunk(image_size: int) -> int:
+    assert image_size % 14 == 0, "chunk size should be multiple of 14"
+    token_per_chunk = (image_size // 14)**2 + 1
+    return token_per_chunk
 
 
-def input_processor_for_mllama(
-    ctx: InputContext,
-    inputs: EncoderDecoderInputs,
-) -> EncoderDecoderInputs:
-    # Example input to processor:
-    # {
-    #     'encoder': {
-    #         'type': 'token',
-    #         'prompt_token_ids': [128000, 128256, 128000, 3923, 374, 279, 2262, 315, 420, 2217, 30],  # noqa: E501
-    #         'prompt': '<|image|><|begin_of_text|>What is the content of this image?',  # noqa: E501
-    #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
-    #     },
-    #     'decoder': {
-    #         'type': 'token',
-    #         'prompt_token_ids': [128000],
-    #     },
-    # }
+class MllamaProcessingInfo(BaseProcessingInfo):
 
-    # move encoder prompt to decoder
-    dec_inputs = TokenInputs(**inputs["encoder"])
+    def get_hf_config(self) -> MllamaConfig:
+        return self.ctx.get_hf_config(MllamaConfig)
 
-    multi_modal_data = dec_inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        # text-only
-        return EncoderDecoderInputs(
-            encoder=token_inputs([]),
-            decoder=dec_inputs,
+    def get_hf_processor(self) -> MllamaProcessor:
+        return self.ctx.get_hf_processor(MllamaProcessor)
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_token_per_chunk_from_config(self) -> int:
+        image_size = self.get_hf_config().vision_config.image_size
+        return calc_token_per_chunk(image_size)
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        vision_config = self.get_hf_config().vision_config
+        token_per_chunk = self.get_token_per_chunk_from_config()
+        mm_max_tokens = vision_config.max_num_tiles * token_per_chunk
+        return {"image": mm_max_tokens}
+
+    def get_num_tiles_per_image(self, image_height: int,
+                                image_width: int) -> int:
+        vision_config = self.get_hf_config().vision_config
+        max_num_tiles = vision_config.max_num_tiles
+        image_size = vision_config.image_size
+        tiled_height, tiled_width = get_optimal_tiled_canvas(
+            image_height,
+            image_width,
+            max_num_tiles,
+            tile_size=image_size,
+        )
+        num_tiles_height = tiled_height // image_size
+        num_tiles_width = tiled_width // image_size
+        return num_tiles_height * num_tiles_width
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        vision_config = self.get_hf_config().vision_config
+        image_size = vision_config.image_size
+        max_num_tiles = vision_config.max_num_tiles
+        # Result in the max possible feature size (h:w = 16:1)
+        return ImageSize(height=max_num_tiles * image_size, width=image_size)
+
+
+class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        hf_processor = self.info.get_hf_processor()
+        image_token: str = hf_processor.image_token
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data=mm_data,
         )
 
-    image_data = multi_modal_data["image"]
-    if isinstance(image_data, Image.Image):
-        image_data = [image_data]
 
-    assert is_list_of(image_data, Image.Image)
+class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
+                                ):
 
-    num_image_tokens = dec_inputs['prompt_token_ids'].count(
-        MLLAMA_IMAGE_TOKEN_ID)
-    if num_image_tokens != len(image_data):
-        raise ValueError(
-            f"The number of image tokens ({num_image_tokens}) must be"
-            f" the same as the number of images ({len(image_data)})")
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        tokenizer = self.info.get_tokenizer()
+        if mm_data:
+            num_tiles = [
+                self.info.get_num_tiles_per_image(img.height, img.width)
+                for img in mm_data["images"]
+            ]
+            processed_outputs = super()._call_hf_processor(
+                prompt, mm_data, mm_kwargs)
+            processed_outputs["num_tiles"] = torch.tensor(num_tiles)
+            for k in ('pixel_values', 'aspect_ratio_ids', "aspect_ratio_mask"):
+                processed_outputs[k] = processed_outputs[k].squeeze(0)
+            # Example input to encoder and decoder:
+            # {
+            #     'encoder': {
+            #         'type': 'token',
+            #         'prompt_token_ids': [128256, 128000, 3923, 374, 279, 2262, 315, 420, 2217, 30],  # noqa: E501
+            #         'prompt': '<|image|><|begin_of_text|>What is the content of this image?',  # noqa: E501
+            #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
+            #     },
+            #     'decoder': {
+            #         'type': 'token',
+            #         'prompt_token_ids': [128000],
+            #     },
+            # }
+            processed_token_ids = processed_outputs.pop("input_ids")
+            start_idx, end_idx = 0, processed_token_ids.size(1)
+            processed_prompt_text = tokenizer.decode(processed_token_ids[0])
 
-    # Since only the last group of consecutive images
-    # are attended by the decoded tokens, we only need to
-    # get the number of tiles for those images.
-    num_decode_images = _get_num_image_in_last_group(
-        dec_inputs["prompt_token_ids"])
+            hf_processor = self.info.get_hf_processor()
+            bos_token = hf_processor.bos_token
+            # Remove the bos_token from the start of prompt,
+            # because we all know there would be image_token.
+            if processed_prompt_text.startswith(bos_token):
+                start_idx += 1
+            # Remove the bos_token from the end of prompt,
+            # because text is empty in this case.
+            if processed_prompt_text.endswith(bos_token):
+                end_idx -= 1
+            processed_outputs[
+                "input_ids"] = processed_token_ids[:, start_idx:end_idx]
+        else:
+            processed_outputs = tokenizer(prompt,
+                                          add_special_tokens=False,
+                                          return_tensors="pt")
+        return processed_outputs
 
-    hf_config = ctx.model_config.hf_config
-    vision_config = hf_config.vision_config
-
-    num_tiles = 0
-    for image in image_data[::-1]:
-        width, height = image.size
-        tile_size = vision_config.image_size
-        canvas_height, canvas_width = get_optimal_tiled_canvas(
-            image_height=height,
-            image_width=width,
-            max_image_tiles=vision_config.max_num_tiles,
-            tile_size=tile_size,
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            aspect_ratio_ids=MultiModalFieldConfig.batched("image"),
+            aspect_ratio_mask=MultiModalFieldConfig.batched("image"),
+            num_tiles=MultiModalFieldConfig.batched("image"),
         )
-        num_tiles_height = canvas_height // tile_size
-        num_tiles_width = canvas_width // tile_size
-        num_tiles += num_tiles_height * num_tiles_width
-        num_decode_images -= 1
-        if num_decode_images == 0:
-            break
 
-    # Set encoder prompt length based on the number of tiles.
-    # This tells the block manager to allocate correct number
-    # of slots for encoder tokens.
-    assert vision_config.image_size % 14 == 0, \
-        "chunk size should be multiple of 14"
-    token_per_chunk = (vision_config.image_size // 14)**2 + 1
-    num_tokens = num_tiles * token_per_chunk
+    def create_encoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        data = mm_data.get("image", [])
+        num_images = 1 if isinstance(data, Image) else len(data)
+        image_token_id = self.info.get_hf_config().image_token_index
+        return [image_token_id] * num_images
 
-    # Example output from processor:
-    # {
-    #     'encoder': {
-    #         'type': 'token',
-    #         'prompt_token_ids': [128256, 128256, ..., 128256],
-    #         'prompt': '<|image|><|image|>...<|image|>',
-    #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
-    #     },
-    #     'decoder': {
-    #         'type': 'token',
-    #         'prompt_token_ids': [128000, 128256, 128000, 3923, 374, 279, 2262, 315, 420, 2217, 30],  # noqa: E501
-    #         'prompt': '<|image|><|begin_of_text|>What is the content of this image?',  # noqa: E501
-    #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
-    #     },
-    # }
-    return EncoderDecoderInputs(
-        encoder=token_inputs(
-            prompt_token_ids=[MLLAMA_IMAGE_TOKEN_ID] * num_tokens,
-            prompt=MLLAMA_IMAGE_TOKEN * num_tokens,
-            multi_modal_data=multi_modal_data,
-        ),
-        decoder=dec_inputs,
-    )
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        token_per_chunk = self.info.get_token_per_chunk_from_config()
+        image_token_id = self.info.get_hf_config().image_token_index
 
+        def get_replacement_mllama(item_idx):
+            images = mm_items.get_items("image", ImageProcessorItems)
+            image_size = images.get_image_size(item_idx)
+            num_tile = self.info.get_num_tiles_per_image(
+                image_height=image_size.height,
+                image_width=image_size.width,
+            )
+            num_tokens = num_tile * token_per_chunk
+            return [image_token_id] * num_tokens
 
-def get_max_mllama_image_tokens(ctx: InputContext) -> int:
-    hf_config = ctx.model_config.hf_config
-    token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
-    return hf_config.vision_config.max_num_tiles * token_per_chunk
-
-
-def dummy_decoder_seq_data(seq_len: int, num_images: int):
-    # <|image|> * num_images + 0 * (seq_len - num_images)
-    assert seq_len >= num_images, \
-        "seq_len should be greater than or equal to num_images"
-
-    return SequenceData.from_prompt_token_counts(
-        (MLLAMA_IMAGE_TOKEN_ID, num_images),
-        (0, seq_len - num_images),
-    )
-
-
-def dummy_encoder_seq_data(ctx: InputContext, num_images: int):
-    num_tokens = get_max_mllama_image_tokens(ctx) * num_images
-
-    return SequenceData.from_prompt_token_counts(
-        (MLLAMA_IMAGE_TOKEN_ID, num_tokens))
-
-
-def dummy_image(num_images: int, ):
-    width = height = 1024
-    image = Image.new("RGB", (width, height), color=0)
-    return {"image": image if num_images == 1 else [image] * num_images}
-
-
-def dummy_decoder_data_for_mllama(ctx: InputContext, seq_len: int,
-                                  mm_counts: Mapping[str, int]):
-    num_images = mm_counts["image"]
-    return DummyData(dummy_decoder_seq_data(seq_len, num_images))
-
-
-def dummy_encoder_data_for_mllama(ctx: InputContext, seq_len: int,
-                                  mm_counts: Mapping[str, int]):
-    num_images = mm_counts["image"]
-    return DummyData(dummy_encoder_seq_data(ctx, num_images),
-                     dummy_image(num_images))
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=get_replacement_mllama,
+            )
+        ]
 
 
 def _prepare_aspect_ratio_attention_mask(
@@ -1107,11 +1142,9 @@ class MllamaForCausalLM(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper()
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_mllama_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_decoder_data_for_mllama)
-@INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_mllama)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_mllama)
+@MULTIMODAL_REGISTRY.register_processor(MllamaMultiModalProcessor,
+                                        info=MllamaProcessingInfo,
+                                        dummy_inputs=MllamaDummyInputsBuilder)
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1120,7 +1153,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config: MllamaConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.quant_config = quant_config
         self.vocab_size = config.text_config.vocab_size
@@ -1130,6 +1163,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.pad_token_id = \
             config.pad_token_id if config.pad_token_id is not None else -1
         self.image_size = config.vision_config.image_size
+        self.image_token_id = config.image_token_index
 
         self.vision_model = MllamaVisionModel(config.vision_config,
                                               quant_config,
@@ -1204,48 +1238,12 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         if pixel_values is not None:
             assert aspect_ratio_ids is not None
             assert aspect_ratio_mask is not None
-            max_num_images = max([len(x[0]) for x in pixel_values])
-            if max_num_images == 0:
-                raise ValueError("No images provided.")
-            max_num_tiles = max(
-                max([len(x) for x in y[0]]) for y in pixel_values)
-            device = next(self.multi_modal_projector.parameters()).device
-            bsz = len(pixel_values)
-            out_num_tiles = []
-            out_images = torch.zeros(
-                bsz,
-                max_num_images,
-                max_num_tiles,
-                3,
-                self.image_size,
-                self.image_size,
-                dtype=torch.float32,
-                device=device,
-            )
-            out_ar_ids = torch.ones(bsz,
-                                    max_num_images,
-                                    dtype=torch.int64,
-                                    device=device)
-            out_ar_mask = torch.zeros(bsz,
-                                      max_num_images,
-                                      max_num_tiles,
-                                      dtype=torch.int64,
-                                      device=device)
-            for b in range(len(pixel_values)):
-                _num_tiles = []
-                for i in range(len(pixel_values[b][0])):
-                    img = pixel_values[b][0][i]
-                    out_images[b, i, :img.shape[0]] = img
-                    out_ar_ids[b, i] = aspect_ratio_ids[b][0][i]
-                    out_ar_mask[b, i] = aspect_ratio_mask[b][0][i]
-                    _num_tiles.append(img.shape[0])
-                out_num_tiles.append(_num_tiles)
 
             return MllamaImagePixelInputs(
                 type="pixel_values",
-                data=out_images,
-                aspect_ratio_ids=out_ar_ids,
-                aspect_ratio_mask=out_ar_mask,
+                data=pixel_values,
+                aspect_ratio_ids=aspect_ratio_ids,
+                aspect_ratio_mask=aspect_ratio_mask,
             )
 
         if image_embeds is not None:
@@ -1312,7 +1310,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             batch_token_ids.append(token_ids[start:start + seq_len])
             start += seq_len
         sparse_mask = [
-            get_cross_attention_token_mask(t, MLLAMA_IMAGE_TOKEN_ID)
+            get_cross_attention_token_mask(t, self.image_token_id)
             for t in batch_token_ids
         ]
 
@@ -1384,8 +1382,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             # block manager to allocate blocks for those images only.
             # See input_processor_for_mllama() for more details.
             num_tiles_tensor = kwargs.pop("num_tiles")
-            num_tiles = [t[0].tolist() for t in num_tiles_tensor]
-            num_tokens_per_tile = (self.image_size // 14)**2 + 1
+            num_tiles = [t.tolist() for t in num_tiles_tensor]
+            num_tokens_per_tile = calc_token_per_chunk(self.image_size)
             actual_encoder_seq_lens = [
                 sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
             ]

@@ -7,11 +7,11 @@ import torch
 from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
                           BatchEncoding)
 
+from vllm import LLM, SamplingParams
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
                                      global_force_attn_backend_context_manager)
-from vllm.model_executor.models.mllama import (MLLAMA_IMAGE_TOKEN_ID,
-                                               MllamaForConditionalGeneration)
+from vllm.model_executor.models.mllama import MllamaForConditionalGeneration
 from vllm.multimodal.image import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
@@ -21,6 +21,7 @@ from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
 _LIMIT_IMAGE_PER_PROMPT = 3
+MLLAMA_IMAGE_TOKEN_ID = 128256
 
 LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
 
@@ -400,6 +401,64 @@ def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [32])
+def test_explicit_implicit_prompt(
+    image_assets: _ImageAssets,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+):
+    stop_sign = image_assets[0].pil_image
+    # yapf: disable
+    prompts = [
+        # explicit prompt
+        {
+            "encoder_prompt": {
+                "prompt": "<|image|>",
+                "multi_modal_data": {"image": stop_sign},
+            },
+            "decoder_prompt": {
+                "prompt_token_ids": [128000, 791, 2262, 315, 279, 2217, 220, 128256, 374],  # noqa: E501
+            }
+        },
+        {
+            "encoder_prompt": "Not <|image|>",
+            "decoder_prompt": "The color of the sky is blue but sometimes it can also be",  # noqa: E501
+        },
+        # implicit prompt
+        {
+            "prompt": "<|begin_of_text|>The content of the image <|image|> is", # noqa: E501
+            "multi_modal_data": {"image": stop_sign},
+        },
+        {
+            "prompt": "The color of the sky is blue but sometimes it can also be",  # noqa: E501
+        },
+    ]
+    # yapf: enable
+    llm = LLM(
+        model=model,
+        dtype=dtype,
+        max_model_len=4096,
+        max_num_seqs=2,
+        tensor_parallel_size=1,
+        enforce_eager=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=max_tokens,
+    )
+    outputs = llm.generate(prompts, sampling_params)
+    n_prompts = len(prompts)
+    explicit_outputs = outputs[:n_prompts // 2]
+    implicit_outputs = outputs[n_prompts // 2:]
+    for exp_output, imp_output in zip(explicit_outputs, implicit_outputs):
+        assert exp_output.outputs[0].text == imp_output.outputs[0].text
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
@@ -458,6 +517,10 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
                                             images=images)
 
 
+class DummyModel:
+    image_token_id = MLLAMA_IMAGE_TOKEN_ID
+
+
 @pytest.mark.core_model
 @pytest.mark.parametrize(
     "input_indices_and_output",
@@ -499,7 +562,7 @@ def test_get_cross_attention_mask(input_indices_and_output) -> None:
         use_cuda_graph=False,
     )
 
-    dummy: dict[str, str] = {}
+    dummy = DummyModel()
 
     cross_attention_mask, kv_range_for_decode = MllamaForConditionalGeneration\
         .get_cross_attention_mask(dummy,
@@ -556,7 +619,7 @@ def test_get_full_text_row_masked_out_mask(input_indices) -> None:
         use_cuda_graph=False,
     )
 
-    dummy: dict[str, str] = {}
+    dummy = DummyModel()
 
     full_text_row_masked_out_mask = MllamaForConditionalGeneration\
         .get_full_text_row_masked_out_mask(dummy,
