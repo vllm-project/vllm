@@ -16,6 +16,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    check_marlin_supports_layer)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -87,8 +89,8 @@ class MoeWNA16Config(QuantizationConfig):
             modules_to_not_convert = []
         elif linear_quant_method == "awq":
             has_zp = cls.get_from_keys(config, ["zero_point"])
-            modules_to_not_convert = cls.get_from_keys(
-                config, ["modules_to_not_convert"])
+            modules_to_not_convert = cls.get_from_keys_or(
+                config, ["modules_to_not_convert"], None)
         else:
             raise ValueError("moe_wna16 only support gptq and awq.")
 
@@ -135,7 +137,8 @@ class MoeWNA16Config(QuantizationConfig):
                     return GPTQConfig.from_config(
                         self.full_config).get_quant_method(layer, prefix)
             elif self.linear_quant_method == "awq":
-                if self.use_marlin:
+                if self.use_marlin and check_marlin_supports_layer(
+                        layer, self.group_size):
                     return AWQMarlinConfig.from_config(
                         self.full_config).get_quant_method(layer, prefix)
                 else:
