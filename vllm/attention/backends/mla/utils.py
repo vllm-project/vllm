@@ -83,8 +83,8 @@ spda_o = scaled_dot_product_attention(
 return spda_o @ W_O
 
 NOTE: in the actual code, 
-    `kv_b_proj` is [W_UK; W_UV]
-    `q_b_proj` is [W_UQ; W_QR]
+    `kv_b_proj` is [W_UK; W_UV] concatnated per head
+    `q_b_proj` is [W_UQ; W_QR] concatnated per head
     `out_proj` is W_O
 
 
@@ -449,6 +449,7 @@ class MLACommonMetadata(AttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
+    # New for MLA (compared to FlashAttention)
     # Input positions for rotrary embeddings since for MLA the rotary
     # position embeddings are applied inside the attention backend
     input_positions: torch.Tensor
@@ -508,6 +509,7 @@ class MLACommonMetadata(AttentionMetadata):
     # The dimension of the attention heads
     head_dim: Optional[int] = None
 
+    # New for MLA (compared to FlashAttention)
     # For chunked prefill
     context_chunk_cu_seq_lens: Optional[torch.Tensor] = None
     context_chunk_starts: Optional[torch.Tensor] = None
@@ -1270,7 +1272,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         for i in range(iters):
             toks = prefill_metadata.context_chunk_seq_tot[i]
-            max_seq_len = prefill_metadata.context_chunk_max_seq_lens[i]
 
             ops.gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
@@ -1281,12 +1282,12 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 seq_starts=prefill_metadata.context_chunk_starts[i],
             )
 
-            k_c_normed = workspace[:toks]\
+            kv_c_normed = workspace[:toks]\
                 [..., :self.kv_lora_rank].unsqueeze(1)
             k_pe = workspace[:toks]\
                 [..., self.kv_lora_rank:].unsqueeze(1)
 
-            kv_nope = self.kv_b_proj(k_c_normed)[0].view( \
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view( \
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = kv_nope\
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
@@ -1307,7 +1308,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 cu_seqlens_q=prefill_metadata.query_start_loc,
                 cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
                 max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=max_seq_len,
+                max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
                 softmax_scale=self.scale,
                 causal=False,  # Context is unmasked
                 return_softmax_lse=True,
@@ -1318,8 +1319,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 output = attn_output
                 output_lse = attn_softmax_lse
             else:
-                output_tmp = torch.ones_like(output)
-                output_lse_tmp = torch.ones_like(output_lse)
+                output_tmp = torch.empty_like(output)
+                output_lse_tmp = torch.empty_like(output_lse)
                 merge_attn_states(
                     output=output_tmp,
                     output_lse=output_lse_tmp,
@@ -1389,6 +1390,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 suffix_lse=suffix_lse,
             )
 
+        # slice by `:v.shape[-1]` in order to remove v headdim padding
         output = output\
             .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
                 .reshape(-1, self.num_heads * v.shape[-1])
