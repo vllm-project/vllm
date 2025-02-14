@@ -307,13 +307,13 @@ class AsyncLLM(EngineClient):
             if seed is not None:
                 seed += 1
             child_gen = self._generate(
-                prompt,
-                c_sampling_params,
-                parent_state.get_child_request_id(idx),
-                lora_request,
-                trace_headers,
-                prompt_adapter_request,
-                priority,
+                prompt=prompt,
+                sampling_params=c_sampling_params,
+                request_id=parent_state.get_child_request_id(idx),
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
+                priority=priority,
             )
             gen = self._parallel_sampling_child_gen(child_gen,
                                                     output_processor, idx)
