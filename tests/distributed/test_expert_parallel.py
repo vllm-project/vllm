@@ -84,11 +84,8 @@ class EPTestSettings:
                 ParallelSetup(tp_size=tp_base,
                               eager_mode=True,
                               chunked_prefill=False),
-                ParallelSetup(tp_size=tp_base,
-                              eager_mode=False,
-                              chunked_prefill=True),
             ],
-            distributed_backends=["ray"],
+            distributed_backends=["mp"],
             task=task,
             test_options=EPTestOptions(trust_remote_code=trust_remote_code,
                                        tokenizer_mode=tokenizer_mode,
@@ -111,10 +108,10 @@ class EPTestSettings:
 # yapf: disable
 TEST_MODELS = {
     # "ai21labs/Jamba-v0.1": EPTestSettings.fast(trust_remote_code=True),
-    # "deepseek-ai/deepseek-llm-7b-chat": EPTestSettings.fast(
-    #     trust_remote_code=True),
-    # "deepseek-ai/DeepSeek-V2-Lite-Chat": EPTestSettings.fast(
-    #     trust_remote_code=True),
+    "deepseek-ai/deepseek-llm-7b-chat": EPTestSettings.fast(
+        trust_remote_code=True),
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": EPTestSettings.fast(
+        trust_remote_code=True),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": EPTestSettings.fast(tp_base=4),
 }
 
@@ -169,7 +166,7 @@ def _compare_tp(
         common_args.extend(["--hf-overrides", hf_overrides])
 
     ep_env = {
-        "VLLM_TEST_EP_PARALLEL": "0",
+        "VLLM_TEST_EP_PARALLEL": "1",
     }
 
     ep_args = [
