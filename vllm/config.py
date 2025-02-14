@@ -2602,7 +2602,9 @@ class DecodingConfig:
 
 @dataclass
 class ObservabilityConfig:
-    """Configuration for observability."""
+    """Configuration for observability - metrics and tracing."""
+    show_hidden_metrics: bool = False
+
     otlp_traces_endpoint: Optional[str] = None
 
     # Collecting detailed timing information for each request can be expensive.
