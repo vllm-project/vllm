@@ -1,9 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Type, Union
+from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Type,
+                    Union)
 
 import safetensors.torch
 import torch
@@ -75,8 +78,9 @@ class LoRAModel(AdapterModel):
         # Scaling factor for long context lora model. None if it is not
         # fine tuned for the long context.
         self.scaling_factor = scaling_factor
-        assert (lora_model_id >
-                0), f"a valid lora id should be greater than 0, got {self.id}"
+        assert (
+            lora_model_id
+            > 0), f"a valid lora id should be greater than 0, got {self.id}"
         self.rank = rank
         self.loras: Dict[str, LoRALayerWeights] = loras
 
@@ -273,7 +277,8 @@ class LoRAModel(AdapterModel):
                 new_embeddings_tensor_path)
         elif os.path.isfile(new_embeddings_bin_file_path):
             embeddings = torch.load(new_embeddings_bin_file_path,
-                                    map_location=device)
+                                    map_location=device,
+                                    weights_only=True)
 
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
@@ -615,12 +620,14 @@ class LoRAModelManager(AdapterModelManager):
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
             replacement_loras: List[Optional[LoRALayerWeights]] = []
+            replaced_module: Set[str] = set()
             has_replacement = False
             for r in new_module_names:
                 lora = lora_model.get_lora(r)
                 replacement_loras.append(lora)
                 if lora:
                     has_replacement = True
+                    replaced_module.add(r)
             if not has_replacement:
                 continue
             for i in range(len(replacement_loras)):
@@ -629,6 +636,9 @@ class LoRAModelManager(AdapterModelManager):
                 replacement_loras[i] = None
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
+            # Remove the modules that have been replaced.
+            for module in replaced_module:
+                lora_model.loras.pop(module, None)
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         return deactivate_adapter(adapter_id, self._active_adapters,

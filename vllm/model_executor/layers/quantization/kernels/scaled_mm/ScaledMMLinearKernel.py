@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -48,13 +50,13 @@ class ScaledMMLinearKernel(ABC):
         raise NotImplementedError
 
     def _get_weight_params(
-            self, layer: torch.nn.Module
-    ) -> Tuple[torch.Tensor,  # weight
-               torch.Tensor,  # weight_scale
-               Optional[torch.Tensor],  # input_scale, 
-               Optional[torch.Tensor],  # input_zp
-               Optional[torch.Tensor],  # azp_adj
-               ]:
+            self, layer: torch.nn.Module) -> Tuple[
+                torch.Tensor,  # weight
+                torch.Tensor,  # weight_scale
+                Optional[torch.Tensor],  # input_scale, 
+                Optional[torch.Tensor],  # input_zp
+                Optional[torch.Tensor],  # azp_adj
+            ]:
         return (
             getattr(layer, self.w_q_name),
             getattr(layer, self.w_s_name),

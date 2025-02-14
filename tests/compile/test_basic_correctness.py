@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 from typing import Dict, List, Optional
 
@@ -24,7 +26,7 @@ class TestSetting:
 test_settings = [
     # basic llama model
     TestSetting(
-        model="meta-llama/Llama-3.2-1B",
+        model="meta-llama/Llama-3.2-1B-Instruct",
         model_args=[],
         pp_size=2,
         tp_size=2,
@@ -58,7 +60,7 @@ test_settings = [
         model_args=["--task", "embed"],
         pp_size=1,
         tp_size=1,
-        attn_backend="FLASHINFER",
+        attn_backend="FLASH_ATTN",
         method="encode",
         fullgraph=True,
     ),

@@ -1,13 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import re
 import time
 from argparse import Namespace
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from typing_extensions import Annotated
+from fastapi import UploadFile
+from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
+                      ValidationInfo, field_validator, model_validator)
+from typing_extensions import Annotated, TypeAlias
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
@@ -42,24 +46,32 @@ class OpenAIBaseModel(BaseModel):
     # OpenAI API does allow extra fields
     model_config = ConfigDict(extra="allow")
 
-    @model_validator(mode="before")
+    # Cache class field names
+    field_names: ClassVar[Optional[Set[str]]] = None
+
+    @model_validator(mode="wrap")
     @classmethod
-    def __log_extra_fields__(cls, data):
-        if isinstance(data, dict):
+    def __log_extra_fields__(cls, data, handler):
+        result = handler(data)
+        if not isinstance(data, dict):
+            return result
+        field_names = cls.field_names
+        if field_names is None:
             # Get all class field names and their potential aliases
             field_names = set()
             for field_name, field in cls.model_fields.items():
                 field_names.add(field_name)
-                if hasattr(field, 'alias') and field.alias:
-                    field_names.add(field.alias)
+                if alias := getattr(field, 'alias', None):
+                    field_names.add(alias)
+            cls.field_names = field_names
 
-            # Compare against both field names and aliases
-            extra_fields = data.keys() - field_names
-            if extra_fields:
-                logger.warning(
-                    "The following fields were present in the request "
-                    "but ignored: %s", extra_fields)
-        return data
+        # Compare against both field names and aliases
+        if any(k not in field_names for k in data):
+            logger.warning(
+                "The following fields were present in the request "
+                "but ignored: %s",
+                data.keys() - field_names)
+        return result
 
 
 class ErrorResponse(OpenAIBaseModel):
@@ -372,12 +384,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
     ) -> BeamSearchParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
-        if max_tokens is None:
-            max_tokens = default_max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
         n = self.n if self.n is not None else 1
+
+        # Use minimum of context window, user request & server limit.
+        max_tokens = min(
+            val for val in (default_max_tokens, max_tokens,
+                            default_sampling_params.get("max_tokens", None))
+            if val is not None)
 
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
@@ -398,11 +414,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
             default_sampling_params: Optional[dict] = None) -> SamplingParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
-        if max_tokens is None:
-            max_tokens = default_max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
+
+        # Use minimum of context window, user request & server limit.
+        max_tokens = min(
+            val for val in (default_max_tokens, max_tokens,
+                            default_sampling_params.get("max_tokens", None))
+            if val is not None)
+
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get(
@@ -732,12 +753,16 @@ class CompletionRequest(OpenAIBaseModel):
             default_sampling_params: Optional[dict] = None
     ) -> BeamSearchParams:
         max_tokens = self.max_tokens
-        if max_tokens is None:
-            max_tokens = default_max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
         n = self.n if self.n is not None else 1
+
+        # Use minimum of context window, user request & server limit.
+        max_tokens = min(
+            val for val in (default_max_tokens, max_tokens,
+                            default_sampling_params.get("max_tokens", None))
+            if val is not None)
 
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get("temperature", 1.0)
@@ -756,11 +781,16 @@ class CompletionRequest(OpenAIBaseModel):
             logits_processor_pattern: Optional[str],
             default_sampling_params: Optional[dict] = None) -> SamplingParams:
         max_tokens = self.max_tokens
-        if max_tokens is None:
-            max_tokens = default_max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
+
+        # Use minimum of context window, user request & server limit.
+        max_tokens = min(
+            val for val in (default_max_tokens, max_tokens,
+                            default_sampling_params.get("max_tokens", None))
+            if val is not None)
+
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get(
@@ -992,6 +1022,52 @@ class ScoreRequest(OpenAIBaseModel):
         return PoolingParams(additional_data=self.additional_data)
 
 
+class RerankRequest(OpenAIBaseModel):
+    model: str
+    query: str
+    documents: List[str]
+    top_n: int = Field(default_factory=lambda: 0)
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+
+    # doc: begin-rerank-pooling-params
+    additional_data: Optional[Any] = None
+    # doc: end-rerank-pooling-params
+
+    # doc: begin-rerank-extra-params
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+
+    # doc: end-rerank-extra-params
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
+class RerankDocument(BaseModel):
+    text: str
+
+
+class RerankResult(BaseModel):
+    index: int
+    document: RerankDocument
+    relevance_score: float
+
+
+class RerankUsage(BaseModel):
+    total_tokens: int
+
+
+class RerankResponse(OpenAIBaseModel):
+    id: str
+    model: str
+    usage: RerankUsage
+    results: List[RerankResult]
+
+
 class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
@@ -1130,6 +1206,7 @@ class ExtractedToolCallInformation(BaseModel):
 
 class ChatMessage(OpenAIBaseModel):
     role: str
+    reasoning_content: Optional[str] = None
     content: Optional[str] = None
     tool_calls: List[ToolCall] = Field(default_factory=list)
 
@@ -1171,6 +1248,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
     tool_calls: List[DeltaToolCall] = Field(default_factory=list)
 
 
@@ -1211,7 +1289,21 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest]
+    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
+
+    @field_validator('body', mode='plain')
+    @classmethod
+    def check_type_for_url(cls, value: Any, info: ValidationInfo):
+        # Use url to disambiguate models
+        url = info.data['url']
+        if url == "/v1/chat/completions":
+            return ChatCompletionRequest.model_validate(value)
+        if url == "/v1/embeddings":
+            return TypeAdapter(EmbeddingRequest).validate_python(value)
+        if url == "/v1/score":
+            return ScoreRequest.model_validate(value)
+        return TypeAdapter(Union[ChatCompletionRequest, EmbeddingRequest,
+                                 ScoreRequest]).validate_python(value)
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1222,7 +1314,8 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse]] = None
+    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
+                         ScoreResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -1334,3 +1427,163 @@ class LoadLoraAdapterRequest(BaseModel):
 class UnloadLoraAdapterRequest(BaseModel):
     lora_name: str
     lora_int_id: Optional[int] = Field(default=None)
+
+
+## Protocols for Audio
+AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json",
+                                         "vtt"]
+
+
+class TranscriptionRequest(OpenAIBaseModel):
+    # Ordered by official OpenAI API documentation
+    #https://platform.openai.com/docs/api-reference/audio/createTranscription
+
+    file: UploadFile
+    """
+    The audio file object (not file name) to transcribe, in one of these
+    formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm.
+    """
+
+    model: str
+    """ID of the model to use.
+    """
+
+    language: Optional[str] = None
+    """The language of the input audio.
+
+    Supplying the input language in
+    [ISO-639-1](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) format
+    will improve accuracy and latency.
+    """
+
+    prompt: str = Field(default="")
+    """An optional text to guide the model's style or continue a previous audio
+    segment.
+
+    The [prompt](https://platform.openai.com/docs/guides/speech-to-text#prompting)
+    should match the audio language.
+    """
+
+    response_format: AudioResponseFormat = Field(default="json")
+    """
+    The format of the output, in one of these options: `json`, `text`, `srt`,
+    `verbose_json`, or `vtt`.
+    """
+
+    ## TODO (varun) : Support if set to 0, certain thresholds are met !!
+    temperature: float = Field(default=0.0)
+    """The sampling temperature, between 0 and 1.
+
+    Higher values like 0.8 will make the output more random, while lower values
+    like 0.2 will make it more focused / deterministic. If set to 0, the model
+    will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
+    to automatically increase the temperature until certain thresholds are hit.
+    """
+
+    timestamp_granularities: List[Literal["word", "segment"]] = Field(
+        alias="timestamp_granularities[]", default=[])
+    """The timestamp granularities to populate for this transcription.
+
+    `response_format` must be set `verbose_json` to use timestamp granularities.
+    Either or both of these options are supported: `word`, or `segment`. Note:
+    There is no additional latency for segment timestamps, but generating word
+    timestamps incurs additional latency.
+    """
+
+    # Default sampling parameters for transcription requests.
+    _DEFAULT_SAMPLING_PARAMS: dict = {
+        "temperature": 0,
+    }
+
+    def to_sampling_params(
+            self,
+            default_max_tokens: int,
+            default_sampling_params: Optional[dict] = None) -> SamplingParams:
+        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+        max_tokens = default_max_tokens
+
+        if default_sampling_params is None:
+            default_sampling_params = {}
+        # Default parameters
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get(
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+
+        return SamplingParams.from_optional(temperature=temperature,
+                                            max_tokens=max_tokens)
+
+
+# Transcription response objects
+class TranscriptionResponse(OpenAIBaseModel):
+    text: str
+    """The transcribed text."""
+
+
+class TranscriptionWord(OpenAIBaseModel):
+    end: float
+    """End time of the word in seconds."""
+
+    start: float
+    """Start time of the word in seconds."""
+
+    word: str
+    """The text content of the word."""
+
+
+class TranscriptionSegment(OpenAIBaseModel):
+    id: int
+    """Unique identifier of the segment."""
+
+    avg_logprob: float
+    """Average logprob of the segment.
+
+    If the value is lower than -1, consider the logprobs failed.
+    """
+
+    compression_ratio: float
+    """Compression ratio of the segment.
+
+    If the value is greater than 2.4, consider the compression failed.
+    """
+
+    end: float
+    """End time of the segment in seconds."""
+
+    no_speech_prob: float
+    """Probability of no speech in the segment.
+
+    If the value is higher than 1.0 and the `avg_logprob` is below -1, consider
+    this segment silent.
+    """
+
+    seek: int
+    """Seek offset of the segment."""
+
+    start: float
+    """Start time of the segment in seconds."""
+
+    temperature: float
+    """Temperature parameter used for generating the segment."""
+
+    text: str
+    """Text content of the segment."""
+
+    tokens: List[int]
+    """Array of token IDs for the text content."""
+
+
+class TranscriptionResponseVerbose(OpenAIBaseModel):
+    duration: str
+    """The duration of the input audio."""
+
+    language: str
+    """The language of the input audio."""
+
+    text: str
+    """The transcribed text."""
+
+    segments: Optional[List[TranscriptionSegment]] = None
+    """Segments of the transcribed text and their corresponding details."""
+
+    words: Optional[List[TranscriptionWord]] = None
+    """Extracted words and their corresponding timestamps."""

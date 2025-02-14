@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from unittest.mock import patch
 
 import pytest
@@ -16,8 +18,7 @@ def test_can_initialize(model_arch):
 
     # Avoid OOM
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
-        if hf_config.model_type == "deepseek_vl_v2":
-            hf_config.update({"architectures": ["DeepseekVLV2ForCausalLM"]})
+        hf_config.update(model_info.hf_overrides)
 
         if hasattr(hf_config, "text_config"):
             text_config: PretrainedConfig = hf_config.text_config

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Logging configuration for vLLM."""
 import datetime
 import json

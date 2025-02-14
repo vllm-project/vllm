@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pickle
 import signal
 from contextlib import contextmanager
@@ -16,8 +18,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
                                          RPCLoadAdapterRequest,
-                                         RPCProcessRequest, RPCStartupRequest,
-                                         RPCStartupResponse,
+                                         RPCProcessRequest,
+                                         RPCResetPrefixCacheRequest,
+                                         RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
 from vllm.logger import init_logger
@@ -237,6 +240,8 @@ class MQLLMEngine:
                         self.stop_profile()
                 elif isinstance(request, RPCLoadAdapterRequest):
                     self._handle_load_adapter_request(request)
+                elif isinstance(request, RPCResetPrefixCacheRequest):
+                    self.reset_prefix_cache()
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -360,6 +365,9 @@ class MQLLMEngine:
 
     def stop_profile(self) -> None:
         self.engine.stop_profile()
+
+    def reset_prefix_cache(self) -> bool:
+        return self.engine.reset_prefix_cache()
 
 
 def signal_handler(*_) -> None:

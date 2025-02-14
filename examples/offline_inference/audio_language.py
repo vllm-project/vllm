@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This example shows how to use vLLM for running offline inference 
 with the correct prompt format on audio language models.
@@ -23,9 +24,9 @@ question_per_audio_count = {
 # Unless specified, these settings have been tested to work on a single L4.
 
 
-# Ultravox 0.3
+# Ultravox 0.5-1B
 def run_ultravox(question: str, audio_count: int):
-    model_name = "fixie-ai/ultravox-v0_3"
+    model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [{
@@ -67,7 +68,37 @@ def run_qwen2_audio(question: str, audio_count: int):
     return llm, prompt, stop_token_ids
 
 
-model_example_map = {"ultravox": run_ultravox, "qwen2_audio": run_qwen2_audio}
+def run_minicpmo(question: str, audio_count: int):
+    model_name = "openbmb/MiniCPM-o-2_6"
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    llm = LLM(model=model_name,
+              trust_remote_code=True,
+              max_model_len=4096,
+              max_num_seqs=5,
+              limit_mm_per_prompt={"audio": audio_count})
+
+    stop_tokens = ['<|im_end|>', '<|endoftext|>']
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+
+    audio_placeholder = "(<audio>./</audio>)" * audio_count
+    audio_chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n<|spk_bos|><|spk|><|spk_eos|><|tts_bos|>' }}{% endif %}"  # noqa: E501
+    messages = [{
+        'role': 'user',
+        'content': f'{audio_placeholder}\n{question}'
+    }]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True,
+                                           chat_template=audio_chat_template)
+    return llm, prompt, stop_token_ids
+
+
+model_example_map = {
+    "ultravox": run_ultravox,
+    "qwen2_audio": run_qwen2_audio,
+    "minicpmo": run_minicpmo
+}
 
 
 def main(args):
