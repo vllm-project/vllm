@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
+from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -437,9 +438,15 @@ class GPUModelRunner:
 
         attn_metadata: Dict[str, FlashAttentionMetadata] = {}
 
+        if len(self.kv_cache_config.groups) == 1:
+            may_grouped_unwrapper = lambda x, _group_id: x
+        else:
+            may_grouped_unwrapper = lambda x, group_id: x[group_id]
+
         for group_id, kv_cache_group in enumerate(self.kv_cache_config.groups):
             block_size = kv_cache_group.kv_cache_spec.block_size
-            block_table = self.input_batch.block_table[group_id]
+            block_table: BlockTable = may_grouped_unwrapper(
+                self.input_batch.block_table, group_id)
 
             # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
@@ -466,9 +473,9 @@ class GPUModelRunner:
                 .to(self.device, non_blocking=True).long()
 
             # Prepare for cascade attention if needed.
-            common_prefix_len = (
-                scheduler_output.num_common_prefix_blocks[group_id] *
-                block_size)
+            common_prefix_len = (may_grouped_unwrapper(
+                scheduler_output.num_common_prefix_blocks, group_id) *
+                                 block_size)
             if common_prefix_len == 0:
                 # Common case.
                 use_cascade = False

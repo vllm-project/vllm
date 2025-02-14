@@ -12,8 +12,8 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, GroupedBlockIDs,
-                                        KVCacheConfig)
+from vllm.v1.kv_cache_interface import (BlockIDGenerator, FullAttentionSpec,
+                                        GroupedBlockIDs, KVCacheConfig)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -55,6 +55,7 @@ class Scheduler:
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching)
         self.block_size = self.cache_config.block_size
+        BlockIDGenerator.num_kv_cache_groups = len(kv_cache_config.groups)
 
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
@@ -166,8 +167,7 @@ class Scheduler:
             # Schedule the request.
             scheduled_running_reqs.append(request)
             req_to_new_block_ids[
-                request.request_id] = GroupedBlockIDs.from_kv_cache_blocks(
-                    new_blocks)
+                request.request_id] = BlockIDGenerator.generate(new_blocks)
 
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -219,7 +219,7 @@ class Scheduler:
                         block_size = kv_groups[0].kv_cache_spec.block_size
                         num_computed_tokens -= block_size
                         num_new_tokens = block_size
-                        computed_blocks[0].pop()
+                        computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
@@ -233,8 +233,7 @@ class Scheduler:
                     break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks,
-                    num_computed_tokens)
+                    request, num_new_tokens, computed_blocks)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
@@ -250,9 +249,9 @@ class Scheduler:
                         f"Invalid request status: {request.status}")
 
                 req_to_new_block_ids[
-                    request.request_id] = GroupedBlockIDs.from_kv_cache_blocks(
-                        computed_blocks
-                    ) + GroupedBlockIDs.from_kv_cache_blocks(new_blocks)
+                    request.request_id] = BlockIDGenerator.generate(
+                        computed_blocks) + BlockIDGenerator.generate(
+                            new_blocks)
 
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens

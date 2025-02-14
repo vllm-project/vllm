@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Union
 
 import torch
 
@@ -185,3 +185,21 @@ class GroupedBlockIDs:
 
     def get_group(self, group_idx: int) -> List[int]:
         return self._block_ids[group_idx]
+
+
+MayGroupedBlockIDs = Union[GroupedBlockIDs, List[int]]
+MayGroupedInt = Union[int, List[int]]
+
+
+class BlockIDGenerator:
+    num_kv_cache_groups: int
+
+    @classmethod
+    def generate(
+        cls, kv_cache_blocks: Union[List["KVCacheBlock"],
+                                    List[List["KVCacheBlock"]]]
+    ) -> MayGroupedBlockIDs:
+        if cls.num_kv_cache_groups == 1:
+            return [blk.block_id for blk in kv_cache_blocks]
+        else:
+            return GroupedBlockIDs.from_kv_cache_blocks(kv_cache_blocks)
