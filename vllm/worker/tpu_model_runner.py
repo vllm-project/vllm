@@ -917,7 +917,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
-        self.lora_manager._adapter_manager.punica_wrapper.set_no_lora(len(lora_requests) == 0) # TODO: Cleanup
+        self.lora_manager._adapter_manager.punica_wrapper.set_no_lora(
+            len(lora_requests) == 0)  # TODO: Cleanup
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:
