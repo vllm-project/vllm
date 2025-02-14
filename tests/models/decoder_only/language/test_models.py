@@ -47,7 +47,7 @@ from ...utils import check_logprobs_close
             marks=[pytest.mark.core_model],
         ),
         pytest.param(
-            "Qwen/Qwen-7B",  # qwen (text-only)
+            "Qwen/Qwen2.5-1.5B",  # qwen (text-only)
         ),
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2

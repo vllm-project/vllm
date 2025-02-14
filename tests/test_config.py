@@ -52,7 +52,7 @@ def test_incorrect_task(model_id, bad_task):
 
 
 MODEL_IDS_EXPECTED = [
-    ("Qwen/Qwen1.5-7B", 32768),
+    ("Qwen/Qwen2.5-1.5B", 131072),
     ("mistralai/Mistral-7B-v0.1", 4096),
     ("mistralai/Mistral-7B-Instruct-v0.2", 32768),
 ]
@@ -81,9 +81,9 @@ def test_get_sliding_window():
     # For Qwen1.5/Qwen2, get_sliding_window() should be None
     # when use_sliding_window is False.
     qwen2_model_config = ModelConfig(
-        "Qwen/Qwen1.5-7B",
+        "Qwen/Qwen2.5-1.5B",
         task="auto",
-        tokenizer="Qwen/Qwen1.5-7B",
+        tokenizer="Qwen/Qwen2.5-1.5B",
         tokenizer_mode="auto",
         trust_remote_code=False,
         seed=0,

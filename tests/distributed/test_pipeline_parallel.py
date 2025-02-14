@@ -178,6 +178,7 @@ TEXT_GENERATION_MODELS = {
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(),
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "microsoft/phi-2": PPTestSettings.fast(),
+    "Qwen/Qwen2.5-1.5B-Instruct": PPTestSettings.fast(),
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(multi_node_only=True, load_format="dummy"),  # noqa: E501
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),

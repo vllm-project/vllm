@@ -55,8 +55,8 @@ def test_gc():
 
 
 def test_model_from_modelscope(monkeypatch):
-    # model: https://modelscope.cn/models/qwen/Qwen1.5-0.5B-Chat/summary
-    MODELSCOPE_MODEL_NAME = "qwen/Qwen1.5-0.5B-Chat"
+    # model: https://modelscope.cn/models/qwen/Qwen2.5-1.5B-Instruct/summary
+    MODELSCOPE_MODEL_NAME = "qwen/Qwen2.5-1.5B-Instruct"
     monkeypatch.setenv("VLLM_USE_MODELSCOPE", "True")
     try:
         llm = LLM(model=MODELSCOPE_MODEL_NAME)
