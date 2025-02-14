@@ -61,8 +61,6 @@ def run_test(more_args):
             tasks=TASK,
         )
 
-        #print(results)
-
         measured_value = results["results"][TASK][FILTER]
         assert (measured_value - RTOL < EXPECTED_VALUE
                 and measured_value + RTOL > EXPECTED_VALUE
