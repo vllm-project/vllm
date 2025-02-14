@@ -206,7 +206,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   * ✅
   * ✅
   * ✅
-  * [❌](gh-pr:8199)
+  * ✅
   * ✅
   * ❌
   * ✅
@@ -254,7 +254,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
   *
 - * <abbr title="Multimodal Inputs">mm</abbr>
   * ✅
-  * ✅
+  * [❌](gh-pr:8348)
   * ✅
   * ❔
   * ❔
