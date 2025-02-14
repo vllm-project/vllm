@@ -4,7 +4,6 @@ import math
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
                     Union)
 
-import numpy as np
 import torch
 from torch import nn
 from transformers import BatchFeature, WhisperConfig, WhisperProcessor, WhisperFeatureExtractor
@@ -13,7 +12,6 @@ from transformers.models.whisper.modeling_whisper import sinusoids
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import INPUT_REGISTRY, DummyData, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -28,18 +26,14 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
-from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
-                                   MultiModalDataDict, MultiModalDataItems, MultiModalDataParser)
+from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.multimodal.audio import resample_audio
-from vllm.sequence import SequenceData
-from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import SupportsMultiModal, SupportsTranscription
-from .utils import AutoWeightsLoader, WeightsMapper, make_layers, flatten_bn
+from .utils import AutoWeightsLoader, WeightsMapper, make_layers
 
 logger = init_logger(__name__)
 
@@ -696,72 +690,6 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         ]
 
 
-# def get_max_whisper_audio_tokens(ctx: InputContext) -> int:
-#     return ctx.model_config.hf_config.max_source_positions
-
-
-# def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
-#                                    mm_counts: Mapping[str, int]):
-#     assert mm_counts["audio"] == 1
-#     num_tokens = get_max_whisper_audio_tokens(ctx)
-#     processor = cached_get_processor(ctx.model_config.model)
-#     chunk_length = processor.feature_extractor.chunk_length
-#     sampling_rate = processor.feature_extractor.sampling_rate
-#     num_samples = chunk_length * sampling_rate
-#     return DummyData(
-#         SequenceData.from_prompt_token_counts((0, num_tokens)),
-#         {"audio": [(np.zeros(num_samples), sampling_rate)]},
-#     )
-
-
-# def input_processor_for_whisper(ctx: InputContext, inputs):
-#     multi_modal_data = inputs["encoder"]["multi_modal_data"]
-#     if isinstance(multi_modal_data["audio"], list):
-#         assert len(multi_modal_data["audio"]) == 1
-#         multi_modal_data["audio"] = multi_modal_data["audio"][0]
-#     # Resample and process audio
-#     audio, orig_sr = multi_modal_data["audio"]
-#     processor = cached_get_processor(ctx.model_config.model)
-#     target_sr = processor.feature_extractor.sampling_rate
-#     audio = resample_audio(audio, orig_sr=orig_sr, target_sr=target_sr)
-#     multi_modal_data["audio"] = (audio, target_sr)
-#     # Pre-allocate placeholder tokens in encoder sequence
-#     num_tokens = get_max_whisper_audio_tokens(ctx)
-#     inputs["encoder"]["prompt_token_ids"] = [0] * num_tokens
-#     return inputs
-
-
-# def input_mapper_for_whisper(
-#     ctx: InputContext,
-#     multi_modal_data: Union[np.ndarray, List[np.ndarray]],
-# ) -> MultiModalKwargs:
-#     if not isinstance(multi_modal_data, list):
-#         multi_modal_data = [multi_modal_data]
-
-#     assert len(multi_modal_data) == 1
-
-#     if len(multi_modal_data) == 0:
-#         return MultiModalKwargs()
-
-#     processor = cached_get_processor(ctx.model_config.model)
-#     sampling_rate = processor.feature_extractor.sampling_rate
-
-#     audios = [audio for audio, _ in multi_modal_data]
-
-#     kwargs = processor(audios,
-#                        sampling_rate=sampling_rate,
-#                        return_tensors="pt")
-#     kwargs["input_features"] = kwargs["input_features"].squeeze(0).to(
-#         ctx.model_config.dtype)
-
-#     return MultiModalKwargs(kwargs)
-
-
-# @INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_whisper)
-# @INPUT_REGISTRY.register_input_processor(input_processor_for_whisper)
-# @MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_whisper)
-# @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-#     "audio", get_max_whisper_audio_tokens)
 @MULTIMODAL_REGISTRY.register_processor(WhisperMultiModalProcessor,
                                         info=WhisperProcessingInfo,
                                         dummy_inputs=WhisperDummyInputsBuilder)
