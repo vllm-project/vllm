@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import functools
 import struct
 from dataclasses import dataclass
@@ -318,6 +320,9 @@ class scalar_types:
 
     # fp6, https://github.com/usyd-fsalab/fp6_llm/tree/main
     float6_e3m2f = ScalarType.float_(3, 2, True, NanRepr.NONE)
+
+    # fp4, https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
+    float4_e2m1fn = ScalarType.float_(2, 1, True, NanRepr.NONE)
 
     # "gptq" types
     uint2b2 = ScalarType.uint(2, 2)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from vllm.platforms import current_platform
 
 if current_platform.is_neuron():

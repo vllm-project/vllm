@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/19e6e80e10118f855137b90740936c0b11ac397f/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
 # Copyright 2024 The Qwen team.
@@ -224,11 +226,15 @@ def apply_rotary_emb_torch(x: torch.Tensor,
 
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
-                                freqs: torch.Tensor) -> torch.Tensor:
+                                freqs: torch.Tensor,
+                                use_flash_attn=False) -> torch.Tensor:
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
-    output = apply_rotary_emb_torch(t_, cos, sin).type_as(t)
+    apply_rotary_emb = apply_rotary_emb_torch
+    if use_flash_attn:
+        from flash_attn.layers.rotary import apply_rotary_emb
+    output = apply_rotary_emb(t_, cos, sin).type_as(t)
     return output
 
 
@@ -334,20 +340,23 @@ class Qwen2VisionAttention(nn.Module):
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
         elif self.attn_backend == _Backend.TORCH_SDPA:
-            seq_length = q.size(1)
-            q, k, v = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-            attention_mask = torch.zeros([1, seq_length, seq_length],
-                                         device=q.device,
-                                         dtype=torch.bool)
+            # Execute attention entry by entry for speed & less VRAM.
+            outputs = []
             for i in range(1, len(cu_seqlens)):
-                attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
-                               cu_seqlens[i - 1]:cu_seqlens[i]] = True
-            output = F.scaled_dot_product_attention(q,
-                                                    k,
-                                                    v,
-                                                    attention_mask,
-                                                    dropout_p=0.0)
-            context_layer = rearrange(output, "b h s d -> b s h d ")
+                start_idx = cu_seqlens[i - 1]
+                end_idx = cu_seqlens[i]
+                q_i = q[:, start_idx:end_idx]
+                k_i = k[:, start_idx:end_idx]
+                v_i = v[:, start_idx:end_idx]
+                q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+                                 for x in [q_i, k_i, v_i])
+                output_i = F.scaled_dot_product_attention(q_i,
+                                                          k_i,
+                                                          v_i,
+                                                          dropout_p=0.0)
+                output_i = rearrange(output_i, "b h s d -> b s h d ")
+                outputs.append(output_i)
+            context_layer = torch.cat(outputs, dim=1)
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
@@ -648,8 +657,8 @@ class Qwen2VisionTransformer(nn.Module):
         return loaded_params
 
 
-class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
-                                            dict[str, torch.Tensor]]):
+class Qwen2VLEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
+                                              dict[str, torch.Tensor]]):
 
     def __init__(self, data: dict, modality: str) -> None:
         super().__init__(data, modality)
@@ -681,26 +690,26 @@ class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
         return self.data
 
 
-class Qwen2ImageEmbeddingItems(Qwen2EmbeddingItems):
+class Qwen2VLImageEmbeddingItems(Qwen2VLEmbeddingItems):
 
     def __init__(self, data: dict) -> None:
         super().__init__(data, "image")
 
 
-class Qwen2VideoEmbeddingItems(Qwen2EmbeddingItems):
+class Qwen2VLVideoEmbeddingItems(Qwen2VLEmbeddingItems):
 
     def __init__(self, data: dict) -> None:
         super().__init__(data, "video")
 
 
-class Qwen2MultiModalDataParser(MultiModalDataParser):
+class Qwen2VLMultiModalDataParser(MultiModalDataParser):
 
     def _parse_image_data(
         self,
         data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2EmbeddingItems(data, modality="image")
+            return Qwen2VLEmbeddingItems(data, modality="image")
 
         return super()._parse_image_data(data)
 
@@ -709,7 +718,7 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
         data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2EmbeddingItems(data, modality="video")
+            return Qwen2VLEmbeddingItems(data, modality="video")
 
         return super()._parse_video_data(data)
 
@@ -756,7 +765,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {
             "image": self.get_max_image_tokens(),
             "video": self.get_max_video_tokens(seq_len),
@@ -794,7 +807,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             preprocessed_size = ImageSize(width=image_width,
                                           height=image_height)
 
-        grid_t = max(num_frames // temporal_patch_size, 1)
+        # NOTE: Frames are padded to be divisible by `temporal_patch_size`
+        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
+        padded_num_frames = num_frames + num_frames % temporal_patch_size
+
+        grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
         grid_w = preprocessed_size.width // patch_size
 
@@ -879,14 +896,10 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
-        num_frames = min(max(max_total_frames // max(max_videos, 1), 1),
-                         _MAX_FRAMES_PER_VIDEO)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
 
-        # Temporary workaround for https://github.com/huggingface/transformers/issues/35412
-        if num_frames > 1 and num_frames % 2 == 1:
-            num_frames += 1
-
-        return num_frames
+        return max(max_frames_per_video, 1)
 
     def get_max_video_tokens(self, seq_len: int) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
@@ -942,7 +955,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
                                  ):
 
     def _get_data_parser(self) -> MultiModalDataParser:
-        return Qwen2MultiModalDataParser()
+        return Qwen2VLMultiModalDataParser()
 
     def _get_prompt_replacements(
         self,
@@ -987,26 +1000,21 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
-        image_slice_idxs = [0] + image_grid_thw.prod(-1).cumsum_(0).tolist()
-        image_slices = [
-            slice(image_slice_idxs[i], image_slice_idxs[i + 1])
-            for i in range(len(image_grid_thw))
-        ]
+        image_grid_sizes = image_grid_thw.prod(-1)
 
         video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        video_slice_idxs = [0] + video_grid_thw.prod(-1).cumsum_(0).tolist()
-        video_slices = [
-            slice(video_slice_idxs[i], video_slice_idxs[i + 1])
-            for i in range(len(video_grid_thw))
-        ]
+        video_grid_sizes = video_grid_thw.prod(-1)
 
         return dict(
-            pixel_values=MultiModalFieldConfig.flat("image", image_slices),
-            image_embeds=MultiModalFieldConfig.flat("image", image_slices),
+            pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_grid_sizes),
+            image_embeds=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_grid_sizes),
             image_grid_thw=MultiModalFieldConfig.batched("image"),
-            pixel_values_videos=MultiModalFieldConfig.flat(
-                "video", video_slices),
-            video_embeds=MultiModalFieldConfig.flat("video", video_slices),
+            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
+                "video", video_grid_sizes),
+            video_embeds=MultiModalFieldConfig.flat_from_sizes(
+                "video", video_grid_sizes),
             video_grid_thw=MultiModalFieldConfig.batched("video"),
         )
 

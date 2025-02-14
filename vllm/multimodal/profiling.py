@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -142,14 +144,19 @@ class MultiModalProfiler(Generic[_I]):
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         )
 
-    def get_dummy_data(self, seq_len: int) -> DummyData:
+    def get_dummy_data(
+        self,
+        seq_len: int,
+        is_encoder_data: bool = False,
+    ) -> DummyData:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
         mm_counts = self.get_mm_limits()
 
         info = self.processing_info
-        mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(seq_len)
+        mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(
+            seq_len, mm_counts)
 
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(
@@ -180,16 +187,18 @@ class MultiModalProfiler(Generic[_I]):
         total_len = len(prompt_token_ids)
 
         # V0 does not support chunked prefill.
-        if total_len > seq_len and not envs.VLLM_USE_V1:
-            logger.warning(
-                "The context length (%d) of the model is too short "
-                "to hold the multi-modal embeddings in the worst case "
-                "(%d tokens in total, out of which %s are reserved for "
-                "multi-modal embeddings). This may cause certain multi-modal "
-                "inputs to fail during inference, even when the input text is "
-                "short. To avoid this, you should increase `max_model_len`, "
-                "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
-                total_len, total_placeholders_by_modality)
+        if (total_len > seq_len and not envs.VLLM_USE_V1) or is_encoder_data:
+            if total_len > seq_len:
+                logger.warning(
+                    "The context length (%d) of the model is too short "
+                    "to hold the multi-modal embeddings in the worst case "
+                    "(%d tokens in total, out of which %s are reserved for "
+                    "multi-modal embeddings). This may cause certain "
+                    "multi-modal inputs to fail during inference, even when "
+                    "the input text is short. To avoid this, you should "
+                    "increase `max_model_len`, reduce `max_num_seqs`, "
+                    "and/or reduce `mm_counts`.", seq_len, total_len,
+                    total_placeholders_by_modality)
 
             return DummyData(
                 seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),

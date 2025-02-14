@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
                     Protocol, Type, Union, overload, runtime_checkable)
 
@@ -439,3 +441,30 @@ def supports_cross_encoding(
     model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
+
+
+@runtime_checkable
+class SupportsTranscription(Protocol):
+    """The interface required for all models that support transcription."""
+
+    supports_transcription: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_transcription(
+        model: Type[object]) -> TypeIs[Type[SupportsTranscription]]:
+    ...
+
+
+@overload
+def supports_transcription(model: object) -> TypeIs[SupportsTranscription]:
+    ...
+
+
+def supports_transcription(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsTranscription]], TypeIs[SupportsTranscription]]:
+    if isinstance(model, type):
+        return isinstance(model, SupportsTranscription)
+
+    return isinstance(model, SupportsTranscription)

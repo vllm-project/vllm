@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import functools
 from collections import UserDict
 from dataclasses import dataclass
@@ -6,6 +8,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Mapping, Optional,
 
 import torch.nn as nn
 
+from vllm.envs import VLLM_MM_INPUT_CACHE_SIZE
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -25,9 +28,6 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
-
-# TODO: Tune the MM cache size
-MM_CACHE_SIZE = 256
 
 N = TypeVar("N", bound=Type[nn.Module])
 _I = TypeVar("_I", bound=BaseProcessingInfo)
@@ -119,7 +119,7 @@ class MultiModalRegistry:
 
         self._limits_by_model = _MultiModalLimits()
 
-        self._processing_cache = ProcessingCache(MM_CACHE_SIZE)
+        self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_SIZE)
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
@@ -262,7 +262,9 @@ class MultiModalRegistry:
             )
             processor = self.create_processor(model_config, tokenizer)
             seq_len = model_config.max_model_len
-            return processor.info.get_mm_max_tokens_per_item(seq_len)
+            mm_limits = self.get_mm_limits_per_prompt(model_config)
+            return processor.info.get_mm_max_tokens_per_item(
+                seq_len, mm_limits)
 
         return {
             key: plugin.get_max_multimodal_tokens(model_config)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
 Run `pytest tests/models/test_models.py`.
@@ -26,6 +27,9 @@ from ...utils import check_logprobs_close
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
+            "THUDM/chatglm3-6b",  # chatglm (text-only)
+        ),
+        pytest.param(
             "meta-llama/Llama-3.2-1B-Instruct",  # llama
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
@@ -41,6 +45,9 @@ from ...utils import check_logprobs_close
         pytest.param(
             "microsoft/phi-2",  # phi
             marks=[pytest.mark.core_model],
+        ),
+        pytest.param(
+            "Qwen/Qwen-7B",  # qwen (text-only)
         ),
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
@@ -67,6 +74,10 @@ def test_models(
 ) -> None:
 
     with hf_runner(model, dtype=dtype) as hf_model:
+        if model.startswith("THUDM/chatglm3"):
+            hf_model.model.get_output_embeddings = lambda: \
+                hf_model.model.transformer.output_layer
+
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 

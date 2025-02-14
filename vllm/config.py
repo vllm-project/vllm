@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import ast
 import copy
 import enum
@@ -52,17 +54,18 @@ _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
-                     "score", "reward"]
+                     "score", "reward", "transcription"]
 
 _ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
-                        "draft"]
+                        "draft", "transcription"]
 
-RunnerType = Literal["generate", "pooling", "draft"]
+RunnerType = Literal["generate", "pooling", "draft", "transcription"]
 
 _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
     "generate": ["generate"],
     "pooling": ["embed", "classify", "score", "reward"],
     "draft": ["draft"],
+    "transcription": ["transcription"],
 }
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
@@ -81,6 +84,12 @@ class SupportsHash(Protocol):
         ...
 
 
+class ModelImpl(str, enum.Enum):
+    AUTO = "auto"
+    VLLM = "vllm"
+    TRANSFORMERS = "transformers"
+
+
 class ModelConfig:
     """Configuration for the model.
 
@@ -94,8 +103,9 @@ class ModelConfig:
             it; otherwise, you must specify explicitly which task to use.
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
-            available, "slow" will always use the slow tokenizer, and
-            "mistral" will always use the tokenizer from `mistral_common`.
+            available, "slow" will always use the slow tokenizer,
+            "mistral" will always use the tokenizer from `mistral_common`, and
+            "custom" will use --tokenizer to select the preregistered tokenizer.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
         allowed_local_media_path: Allowing API requests to read local images or
@@ -165,6 +175,12 @@ class ModelConfig:
             `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
+        model_impl: Which implementation of the model to use:
+            "auto" will try to use the vLLM implementation if it exists and
+                fall back to the Transformers implementation if no vLLM
+                implementation is available.
+            "vllm" will use the vLLM model implementation.
+            "transformers" will use the Transformers model implementation.
         override_generation_config: Override the generation config with the
             given config.
     """
@@ -228,6 +244,7 @@ class ModelConfig:
         generation_config: Optional[str] = None,
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[Dict[str, Any]] = None,
+        model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -239,6 +256,7 @@ class ModelConfig:
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
         self.rope_theta = rope_theta
+        self.model_impl = model_impl
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -451,10 +469,10 @@ class ModelConfig:
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
-        if tokenizer_mode not in ["auto", "slow", "mistral"]:
+        if tokenizer_mode not in ["auto", "slow", "mistral", "custom"]:
             raise ValueError(
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
-                "either 'auto', 'slow' or 'mistral'.")
+                "either 'auto', 'slow', 'mistral' or 'custom'.")
         self.tokenizer_mode = tokenizer_mode
 
     def _get_preferred_task(
@@ -467,6 +485,8 @@ class ModelConfig:
             return "embed"
         if ModelRegistry.is_cross_encoder_model(architectures):
             return "score"
+        if ModelRegistry.is_transcription_model(architectures):
+            return "transcription"
 
         suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
@@ -499,6 +519,8 @@ class ModelConfig:
         runner_support: Dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
+            "transcription":
+            ModelRegistry.is_transcription_model(architectures),
             "generate": ModelRegistry.is_text_generation_model(architectures),
             "pooling": ModelRegistry.is_pooling_model(architectures),
         }
@@ -737,17 +759,25 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 
+    @property
+    def is_deepseek_mla(self) -> bool:
+        return (hasattr(self.hf_text_config, "model_type")) \
+                and (self.hf_text_config.model_type in \
+                    ('deepseek_v2', 'deepseek_v3'))\
+                and (self.hf_text_config.kv_lora_rank is not None)
+
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config,
-                   "model_type") and (self.hf_text_config.model_type
-                                      in ('deepseek_v2', 'deepseek_v3')):
+        if self.is_deepseek_mla:
             qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
                                        0)
-            qk_nope_head_dim = getattr(self.hf_text_config, "qk_nope_head_dim",
-                                       0)
-            if qk_rope_head_dim and qk_nope_head_dim:
-                return qk_rope_head_dim + qk_nope_head_dim
+            if self.use_mla:
+                return self.hf_text_config.kv_lora_rank + qk_rope_head_dim
+            else:
+                qk_nope_head_dim = getattr(self.hf_text_config,
+                                           "qk_nope_head_dim", 0)
+                if qk_rope_head_dim and qk_nope_head_dim:
+                    return qk_rope_head_dim + qk_nope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -806,6 +836,10 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
+        if self.use_mla:
+            # When using MLA during decode it becomes MQA
+            return 1
+
         total_num_kv_heads = self.get_total_num_kv_heads()
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
@@ -955,6 +989,10 @@ class ModelConfig:
     def is_cross_encoder(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_cross_encoder_model(architectures)
+
+    @property
+    def use_mla(self) -> bool:
+        return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:
@@ -1343,6 +1381,9 @@ class ParallelConfig:
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
+
+        if self.distributed_executor_backend is None and self.world_size == 1:
+            self.distributed_executor_backend = "uni"
 
         self._verify_args()
 
@@ -3013,7 +3054,8 @@ class VllmConfig:
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
     # some opaque config, only used to provide additional information
-    # for the hash computation, mainly used for testing and debugging.
+    # for the hash computation, mainly used for testing, debugging or out of
+    # tree config registration.
     additional_config: SupportsHash = field(default=None,
                                             init=True)  # type: ignore
     instance_id: str = ""
@@ -3031,15 +3073,6 @@ class VllmConfig:
         the final hidden states.
         """
         factors: List[Any] = []
-        # summarize system state
-        from torch._inductor.codecache import CacheBase
-        system_factors = CacheBase.get_system()
-        factors.append(system_factors)
-
-        # summarize pytorch state
-        from torch._inductor.codecache import torch_key
-        torch_factors = torch_key()
-        factors.append(torch_factors)
 
         # summarize vllm config
         vllm_factors: List[Any] = []
@@ -3228,6 +3261,16 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         current_platform.check_and_update_config(self)
+
+        # If MLA is enabled, force disable chunked prefill and prefix caching
+        if self.model_config and self.model_config.use_mla:
+            logger.info("MLA is enabled; forcing chunked prefill and prefix "
+                        "caching to be disabled.")
+            self.scheduler_config.enable_chunked_prefill = False
+            self.scheduler_config.chunked_prefill_enabled = False
+
+            if self.cache_config is not None:
+                self.cache_config.enable_prefix_caching = False
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]

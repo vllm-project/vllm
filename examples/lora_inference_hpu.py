@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from huggingface_hub import snapshot_download
 
 from vllm import LLM, SamplingParams

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import gc
 import time
 from typing import List

@@ -153,6 +153,13 @@ design/automatic_prefix_caching
 design/multiprocessing
 :::
 
+:::{toctree}
+:caption: V1 Design Documents
+:maxdepth: 2
+
+design/v1/prefix_caching
+:::
+
 % How to contribute to the vLLM project
 
 :::{toctree}

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 import os
 import random
@@ -857,7 +859,6 @@ class Scheduler:
             swapped_queue.popleft()
             self._swap_in(seq_group, blocks_to_swap_in)
             self._append_slots(seq_group, blocks_to_copy, enable_chunking)
-            is_prefill = seq_group.is_prefill()
             if is_prefill:
                 prefill_seq_groups.append(
                     ScheduledSequenceGroup(

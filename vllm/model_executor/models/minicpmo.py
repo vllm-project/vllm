@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -21,7 +23,6 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from functools import partial
-from itertools import accumulate
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
@@ -136,11 +137,15 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None, "audio": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {
             "image": self.get_max_image_tokens(),
             "audio": self.get_max_audio_tokens(),
-            "video": self.get_max_video_tokens(seq_len)
+            "video": self.get_max_video_tokens(seq_len),
         }
 
     def get_default_audio_pool_step(self) -> int:
@@ -367,23 +372,18 @@ class MiniCPMOMultiModalProcessor(
         hf_inputs,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        audio_num_slices = hf_inputs.get("audio_num_slices", torch.empty(0))
 
-        def get_slices(num_slices: List[int]) -> List[int]:
-            slice_indices = [0] + list(accumulate(num_slices))
-            slices = [(slice_indices[i], slice_indices[i + 1])
-                      for i in range(len(num_slices))]
-            return [slice(*slice_item) for slice_item in slices]
-
-        audio_slices = get_slices(
-            hf_inputs.get("audio_num_slices", torch.empty(0)))
         return dict(
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
-            audio_features=MultiModalFieldConfig.flat("audio", audio_slices),
-            audio_feature_lens=MultiModalFieldConfig.flat(
-                "audio", audio_slices),
+            audio_features=MultiModalFieldConfig.flat_from_sizes(
+                "audio", audio_num_slices),
+            audio_feature_lens=MultiModalFieldConfig.flat_from_sizes(
+                "audio", audio_num_slices),
             audio_num_slices=MultiModalFieldConfig.batched("audio"),
             audio_orders_in_mm_data=MultiModalFieldConfig.batched("audio"),
-            audio_embeds=MultiModalFieldConfig.flat("audio", audio_slices))
+            audio_embeds=MultiModalFieldConfig.flat_from_sizes(
+                "audio", audio_num_slices))
 
 
 class MultiModalProjector(nn.Module):

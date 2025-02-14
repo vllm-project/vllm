@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Callable, List, Tuple, Union
 
 import torch
@@ -29,7 +31,7 @@ def get_bad_words_logits_processors(
 
             if isinstance(tokenizer, MistralTokenizer):
                 # Mistral tokenizers should not add special tokens
-                prompt_token_ids = tokenizer.encode(prompt=prompt)
+                prompt_token_ids = tokenizer.encode(text=prompt)
             else:
                 prompt_token_ids = tokenizer.encode(text=prompt,
                                                     add_special_tokens=False)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
@@ -149,6 +151,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if self.prefill_use_fusedsdpa:
             assert alibi_slopes is None, \
                 'Prefill with FusedSDPA not supported with alibi slopes!'
+            try:
+                from habana_frameworks.torch.hpex.kernels import FusedSDPA
+                self.fused_scaled_dot_product_attention = ModuleFusedSDPA(
+                    FusedSDPA)
+            except ImportError:
+                logger().warning("Could not import HPU FusedSDPA kernel. "
+                                 "vLLM will use native implementation.")
 
         suppored_head_sizes = HPUPagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
@@ -317,11 +326,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if attn_metadata.is_prompt:
             batch_size = attn_metadata.num_prefills
             batched_tokens, _ = query.shape
-            batched_kv_tokens, _, _ = key.shape
+            if key is not None:
+                batched_kv_tokens, _, _ = key.shape
             assert batch_size > 0, (
                 "In prefill stage the num_prefills should be > 0")
             assert batched_tokens % batch_size == 0
-            assert batched_kv_tokens % batch_size == 0
+            if key is not None:
+                assert batched_kv_tokens % batch_size == 0
             seq_len = batched_tokens // batch_size
 
         query = query.view(-1, self.num_heads, self.head_size)
@@ -362,6 +373,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             attn_bias = torch.zeros((batch_size, 1, 1, 1),
                                     device=query.device,
                                     dtype=torch.bool)
+
+            # NOTE(kzawora): mllama prefill fwd pass doesn't pass keys and
+            # values in profile_run. No idea why. This is a dirty workaround.
+            if key is None:
+                key = query
+            if value is None:
+                value = query
             out = ops.prompt_attention(
                 query.view(query_shape),
                 key.view(kv_shape),
@@ -372,6 +390,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 matmul_qk_op=self.matmul_qk,
                 softmax_op=self.softmax,
                 matmul_av_op=self.matmul_av,
+                fsdpa_op=self.fused_scaled_dot_product_attention,
             )
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:

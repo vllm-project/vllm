@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # noqa: UP007
 from __future__ import annotations
 
@@ -12,7 +14,9 @@ from transformers import PreTrainedTokenizerFast
 try:
     import xgrammar as xgr
     from xgrammar.base import _core as xgr_core
+    xgr_installed = True
 except ImportError:
+    xgr_installed = False
     pass
 
 from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
@@ -307,8 +311,8 @@ class XGrammarLogitsProcessor:
         # Note: In this method, if the tensors have different dimensions
         # on CPU device fails, but on GPU it runs without error. Hence the
         # unsqueeze above for scores, to match the token bitmask shape
-        xgr.apply_token_bitmask_inplace(scores,
-                                        self.token_bitmask.to(scores.device))
+        xgr.apply_token_bitmask_inplace(
+            scores, self.token_bitmask.to(scores.device, non_blocking=True))
         if device_type != "cuda":
             scores = scores.to(dtype).to(device_type).squeeze()
 
