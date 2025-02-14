@@ -405,6 +405,8 @@ class TransformersModel(nn.Module, SupportsPP):
         params_dict = dict(self.named_parameters())
         loaded_params = set[str]()
         for name, loaded_weight in weights:
+            if not name.startswith(prefix := self.model.base_model_prefix):
+                name = maybe_prefix(prefix, name)
             if is_pp_missing_parameter(name, self):
                 continue
             if name in params_dict:
