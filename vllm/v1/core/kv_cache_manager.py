@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock,
@@ -50,8 +51,9 @@ class KVCacheManager:
         self.num_preallocate_blocks = cdiv(num_preallocate_tokens, block_size)
 
         # A Block pool of all kv-cache blocks.
+        start_block_id = 0 if not current_platform.is_hpu() else 1
         self.block_pool: List[KVCacheBlock] = [
-            KVCacheBlock(idx) for idx in range(num_gpu_blocks)
+            KVCacheBlock(idx) for idx in range(start_block_id, num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is

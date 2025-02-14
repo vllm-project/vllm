@@ -1238,35 +1238,41 @@ class HPUModelRunner:
 
         # POSITIONS. [batch, 1]
         # We slice at the end, since we use the positions for gathering.
-        positions = torch.from_numpy(
-            self.input_batch.num_computed_tokens_cpu.reshape(-1, 1))
+        positions = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
+        positions[:num_decodes] = torch.from_numpy(
+            self.input_batch.num_computed_tokens_cpu.reshape(-1,
+                                                             1)[:num_decodes])
         positions = positions[:padded_batch_size]
-        index = positions.to(torch.int64)
+
+        padded_index = torch.zeros((padded_batch_size, 1), dtype=torch.int64)
+        index = positions.to(torch.int64)[:num_decodes]
+        padded_index[:num_decodes] = index
 
         # TOKEN_IDS. [batch, 1]
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
         #import pdb; pdb.set_trace()
-        token_ids[:num_decodes] = torch.gather(
-            input=torch.from_numpy(self.input_batch.token_ids_cpu),
-            dim=1,
-            index=index[:num_decodes],
-        )[:num_decodes]
+        token_ids[:num_decodes] = torch.gather(input=torch.from_numpy(
+            self.input_batch.token_ids_cpu),
+                                               dim=1,
+                                               index=index)
 
         # SLOT_MAPPING [batch, 1]
         # The "slot" is the "physical index" of a token in the KV cache.
         # Look up the block_idx in the block table (logical<>physical map)
         # to compute this.
-        block_number = torch.gather(input=block_table_cpu_tensor,
-                                    dim=1,
-                                    index=(index // self.block_size))
+        block_number = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
+        block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor,
+                                                  dim=1,
+                                                  index=(index //
+                                                         self.block_size))
         # NOTE(kzawora): the "-1" is what causes this entire thing to work
         # properly and have good accuracy - why? beats me...
-        block_offsets = (index - 1) % self.block_size
+        block_offsets = (padded_index - 1) % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
         # Set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
-        slot_mapping[num_decodes:] = _PAD_SLOT_ID
         slot_mapping = slot_mapping[:padded_batch_size]
+        slot_mapping[num_decodes:] = _PAD_SLOT_ID
 
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
         context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
