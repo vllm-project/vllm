@@ -271,6 +271,5 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self.batch_size = 1
         self._lora_indices_per_batch[:self.batch_size].copy_(
             token_lora_tensor[:self.batch_size])
-
-    def set_no_lora(self, no_lora: bool):
-        self.no_lora = no_lora
+        # TODO: .item() is extremely inefficient on TPU, so find a way around it
+        self.no_lora = torch.all(token_lora_tensor == -1).item()
