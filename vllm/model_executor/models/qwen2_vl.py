@@ -58,8 +58,9 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig, MultiModalKwargs,
                                     VideoItem)
-from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
-                                   MultiModalDataItems, MultiModalDataParser)
+from vllm.multimodal.parse import (DictEmbeddingItems, ImageSize,
+                                   ModalityDataItems, MultiModalDataItems,
+                                   MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
@@ -657,49 +658,25 @@ class Qwen2VisionTransformer(nn.Module):
         return loaded_params
 
 
-class Qwen2VLEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
-                                              dict[str, torch.Tensor]]):
+def _qwen2vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+    image_grid_sizes = image_grid_thw.prod(-1)
 
-    def __init__(self, data: dict, modality: str) -> None:
-        super().__init__(data, modality)
+    video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
+    video_grid_sizes = video_grid_thw.prod(-1)
 
-        grid_thw = data[f"{modality}_grid_thw"]
-        slice_idxs = [0] + grid_thw.prod(-1).cumsum_(0).tolist()
-        self._slices = [
-            slice(slice_idxs[i], slice_idxs[i + 1])
-            for i in range(len(grid_thw))
-        ]
-
-    def get_count(self) -> int:
-        return len(self.data[f"{self.modality}_grid_thw"])
-
-    def get(self, index: int) -> dict[str, torch.Tensor]:
-        out = {}
-        for k, v in self.data.items():
-            if v != f"{self.modality}_grid_thw":
-                v = v[self._slices[index]]
-
-            out[k] = v
-
-        return out
-
-    def get_processor_data(self) -> Mapping[str, object]:
-        return {}
-
-    def get_passthrough_data(self) -> Mapping[str, object]:
-        return self.data
-
-
-class Qwen2VLImageEmbeddingItems(Qwen2VLEmbeddingItems):
-
-    def __init__(self, data: dict) -> None:
-        super().__init__(data, "image")
-
-
-class Qwen2VLVideoEmbeddingItems(Qwen2VLEmbeddingItems):
-
-    def __init__(self, data: dict) -> None:
-        super().__init__(data, "video")
+    return dict(
+        pixel_values=MultiModalFieldConfig.flat_from_sizes(
+            "image", image_grid_sizes),
+        image_embeds=MultiModalFieldConfig.flat_from_sizes(
+            "image", image_grid_sizes),
+        image_grid_thw=MultiModalFieldConfig.batched("image"),
+        pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
+            "video", video_grid_sizes),
+        video_embeds=MultiModalFieldConfig.flat_from_sizes(
+            "video", video_grid_sizes),
+        video_grid_thw=MultiModalFieldConfig.batched("video"),
+    )
 
 
 class Qwen2VLMultiModalDataParser(MultiModalDataParser):
@@ -709,7 +686,12 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2VLEmbeddingItems(data, modality="image")
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                fields_config=_qwen2vl_field_config(data),
+                required_fields={"image_embeds", "image_grid_thw"},
+            )
 
         return super()._parse_image_data(data)
 
@@ -718,7 +700,12 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2VLEmbeddingItems(data, modality="video")
+            return DictEmbeddingItems(
+                data,
+                modality="video",
+                fields_config=_qwen2vl_field_config(data),
+                required_fields={"video_embeds", "video_grid_thw"},
+            )
 
         return super()._parse_video_data(data)
 
@@ -999,24 +986,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
-        image_grid_sizes = image_grid_thw.prod(-1)
-
-        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        video_grid_sizes = video_grid_thw.prod(-1)
-
-        return dict(
-            pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_grid_sizes),
-            image_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_grid_sizes),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
-            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes),
-            video_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
-        )
+        return _qwen2vl_field_config(hf_inputs)
 
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
