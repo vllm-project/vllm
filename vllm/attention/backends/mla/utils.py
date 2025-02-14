@@ -487,20 +487,26 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
 
-        attn_output = flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v_padded,
-            cu_seqlens_q=seq_start_loc,
-            cu_seqlens_k=seq_start_loc,
-            max_seqlen_q=max_prefill_seq_len,
-            max_seqlen_k=max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            fa_version=self.vllm_flash_attn_version,
-        )
-        attn_output = attn_output\
-            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                .reshape(-1, self.num_heads * v.shape[-1])
+        # Here we massage the flash_attn_varlen_func interface since we use this
+        # codepath via vllm-flash-attn on NVIDIA and the upstream branch
+        # on AMD .
+        fa_args = {
+            "q": q,
+            "k": k,
+            "v": v_padded,
+            "cu_seqlens_q": seq_start_loc,
+            "cu_seqlens_k": seq_start_loc,
+            "max_seqlen_q": max_prefill_seq_len,
+            "max_seqlen_k": max_prefill_seq_len,
+            "softmax_scale": self.scale,
+            "causal": True,
+        }
+
+        if self.vllm_flash_attn_version is not None:
+            fa_args["fa_version"] = self.vllm_flash_attn_version
+
+        attn_output = flash_attn_varlen_func(**fa_args).view(
+            -1, self.num_heads, q.shape[-1])[..., :v.shape[-1]].reshape(
+                -1, self.num_heads * v.shape[-1])
 
         return self.o_proj(attn_output)[0]
