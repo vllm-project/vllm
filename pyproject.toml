@@ -93,7 +93,7 @@ exclude = [
 
 [tool.codespell]
 ignore-words-list = "dout, te, indicies, subtile, ElementE"
-skip = "./tests/models/fixtures,./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
+skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build/*,vllm/third_party/*"
 
 [tool.isort]
 use_parentheses = true
