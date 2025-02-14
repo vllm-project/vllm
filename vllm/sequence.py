@@ -1305,7 +1305,7 @@ class ExecuteModelRequest(
     # The number of forward steps to run.
     num_steps: int = 1
     # The step index for spec model input.
-    spec_step_idx: int = 0
+    spec_step_idx: Optional[int] = None
     # Finished request ids since last step.
     finished_requests_ids: List[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.

@@ -182,12 +182,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             elif draft_model_config.hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
-                if draft_tp == 1:
+                if draft_tp == 1 or draft_model_config.hf_config.model_type ==\
+                        "deepseek_mtp":
                     if current_platform.is_cuda_alike():
                         draft_worker_kwargs[
                             "model_runner_cls"] = TP1DraftModelRunner
                 else:
-                    if draft_model_config.hf_config.model_type in ("eagle"):
+                    if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(
                             f"{draft_model_config.hf_config.model_type} "
                             "does not support TP > 1 yet")
@@ -697,10 +698,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             execute_model_req.previous_hidden_states = \
                 prepare_prefill_hidden_states(
                     sampler_output.prefill_hidden_states)
-            execute_model_req.spec_step_idx = 0
-            for _ in range(self._num_spec_prefill_steps):
+            for i in range(self._num_spec_prefill_steps):
+                execute_model_req.spec_step_idx = i
                 self.proposer_worker.execute_model(execute_model_req)
-                execute_model_req.spec_step_idx += 1
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)

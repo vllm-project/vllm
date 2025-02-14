@@ -280,7 +280,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             if hasattr(self.model.config, "num_nextn_predict_layers"):
                 # for DeepSeek MTP only to use the corresponding layer for
                 # each step
-                spec_step_idx = kwargs.get("spec_step_idx", 0)
+                spec_step_idx = kwargs.get("spec_step_idx", step)
                 model_execute_kwargs["spec_step_idx"] = spec_step_idx
                 compute_logits_kwargs["spec_step_idx"] = spec_step_idx
             with set_forward_context(model_input.attn_metadata,
@@ -300,7 +300,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata,
                                                **compute_logits_kwargs)
-
+            if not self.is_driver_worker:
+                return []
             # Sample the next token.
             output = self.model.sample(
                 logits=logits,
