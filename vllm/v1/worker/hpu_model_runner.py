@@ -11,9 +11,6 @@ from enum import Enum
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Tuple, Union)
 
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm_hpu_extension.flags import enabled_flags
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import numpy as np
@@ -21,6 +18,7 @@ import torch
 import torch.distributed
 import vllm_hpu_extension.environment as environment
 from vllm_hpu_extension.bucketing import HPUBucketingContext
+from vllm_hpu_extension.flags import enabled_flags
 from vllm_hpu_extension.ops import batch2block, block2batch
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
@@ -29,12 +27,15 @@ from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_fake_hpu, is_pin_memory_available)
-from vllm.v1.attention.backends.hpu_attn import (HPUAttentionBackendV1, HPUAttentionMetadataV1)
+from vllm.v1.attention.backends.hpu_attn import (HPUAttentionBackendV1,
+                                                 HPUAttentionMetadataV1)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -197,6 +198,7 @@ def ensure_decodes_first(b: InputBatch):
         # Swap
         swap_positions(b, first_prompt_index, last_decode_index)
 
+
 def get_target_layer_suffix_list(model_type) -> list[str]:
     # This sets the suffix for the hidden layer name, which is controlled by
     # VLLM_CONFIG_HIDDEN_LAYERS. The default suffix is "DecoderLayer," which is
@@ -268,7 +270,6 @@ def get_path_to_rope(model: torch.nn.Module):
 
     # Return the result if found, otherwise None
     return path_to_rope
-
 
 
 class HpuModelAdapter:
@@ -450,7 +451,7 @@ class HpuModelAdapter:
 
     def forward(self, *args, **kwargs):
         kwargs = kwargs.copy()
-#        selected_token_indices = kwargs.pop('selected_token_indices')
+        #        selected_token_indices = kwargs.pop('selected_token_indices')
         if 'warmup_mode' in kwargs:
             kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
@@ -461,6 +462,8 @@ class HpuModelAdapter:
             self._prepare_cos_sin(kwargs['positions'])
         with set_forward_context(kwargs['attn_metadata'], self.vllm_config):
             hidden_states = self.model(*args, **kwargs)
+
+
 #            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 #            hidden_states = hidden_states.index_select(0,
 #                                                       selected_token_indices)
@@ -1172,8 +1175,7 @@ class HPUModelRunner:
                     dtype=torch.int32,
                     device='cpu')
                 for i, n in enumerate(num_blocks):
-                    prefix_block_tables[
-                        i, :n] = block_table_cpu_tensor[i, :n]
+                    prefix_block_tables[i, :n] = block_table_cpu_tensor[i, :n]
                 context_lens_tensor = torch.zeros((padded_batch_size),
                                                   dtype=torch.int32,
                                                   device='cpu')
@@ -1246,7 +1248,8 @@ class HPUModelRunner:
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
         #import pdb; pdb.set_trace()
         token_ids[:num_decodes] = torch.gather(
-            input=torch.from_numpy(self.input_batch.token_ids_cpu[:num_decodes]),
+            input=torch.from_numpy(
+                self.input_batch.token_ids_cpu),
             dim=1,
             index=index[:num_decodes],
         )[:num_decodes]
@@ -1255,10 +1258,9 @@ class HPUModelRunner:
         # The "slot" is the "physical index" of a token in the KV cache.
         # Look up the block_idx in the block table (logical<>physical map)
         # to compute this.
-        block_number = torch.gather(
-            input=block_table_cpu_tensor,
-            dim=1,
-            index=(index // self.block_size))
+        block_number = torch.gather(input=block_table_cpu_tensor,
+                                    dim=1,
+                                    index=(index // self.block_size))
         # NOTE(kzawora): the "-1" is what causes this entire thing to work
         # properly and have good accuracy - why? beats me...
         block_offsets = (index - 1) % self.block_size
@@ -1274,8 +1276,7 @@ class HPUModelRunner:
             np.int32).tolist()
         block_tables_list = []
         for i, n in enumerate(num_blocks):
-            block_tables_list.append(
-                block_table_cpu_tensor[i, :n].tolist())
+            block_tables_list.append(block_table_cpu_tensor[i, :n].tolist())
 
         # CONTEXT_LENS [batch_size]
         #context_lens = (positions.reshape(-1) + 1)
@@ -1348,8 +1349,10 @@ class HPUModelRunner:
                 assert num_tokens == 1
 
         return (
-            self._prepare_prefill_inputs(num_prefills, num_decodes, num_scheduled_tokens, bucketing),
-            self._prepare_decode_inputs(num_decodes, num_scheduled_tokens, bucketing),
+            self._prepare_prefill_inputs(num_prefills, num_decodes,
+                                         num_scheduled_tokens, bucketing),
+            self._prepare_decode_inputs(num_decodes, num_scheduled_tokens,
+                                        bucketing),
         )
 
     def _seq_len(self, attn_metadata):
@@ -1501,12 +1504,15 @@ class HPUModelRunner:
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
-        
+
         prefill_data, decode_data = self._prepare_inputs(
-            scheduler_output, num_prefills, num_decodes, bucketing=self.enable_bucketing)
+            scheduler_output,
+            num_prefills,
+            num_decodes,
+            bucketing=self.enable_bucketing)
 
         num_padded_decodes = decode_data.token_ids.shape[
-                    0] if num_decodes > 0 else 0
+            0] if num_decodes > 0 else 0
 
         #FIXME(kzawora): Currently there's no handling of logprobs. Fix that
         # later.
@@ -1533,10 +1539,12 @@ class HPUModelRunner:
             #    pad_to=num_padded_decodes)
             htorch.core.mark_step()
             #sampler_output = self.model.sample(
-             #   logits=logits_device, sampling_metadata=sampling_metadata)
+            #   logits=logits_device, sampling_metadata=sampling_metadata)
             # sampler now returns cpu list instead of device tensor -
             # and i don't like it
-            argmax_token_ids = torch.argmax(logits_device, dim=-1, keepdim=True)
+            argmax_token_ids = torch.argmax(logits_device,
+                                            dim=-1,
+                                            keepdim=True)
             argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
             decode_output_device = argmax_token_ids
             htorch.core.mark_step()
@@ -1569,13 +1577,15 @@ class HPUModelRunner:
                 #sampler_output = self.model.sample(
                 #    logits=logits_device, sampling_metadata=sampling_metadata)
                 #sampled_token_ids_device = sampler_output.sampled_token_ids
-                argmax_token_ids = torch.argmax(logits_device, dim=-1, keepdim=True)
+                argmax_token_ids = torch.argmax(logits_device,
+                                                dim=-1,
+                                                keepdim=True)
                 argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
                 htorch.core.mark_step()
                 prefill_seq_offset_end = prefill_seq_offset_start
                 #prefill_output_tokens.extend(sampled_token_ids_device)
                 prefill_output_tokens.extend(argmax_token_ids)
-            
+
             # sampler now returns cpu list instead of device tensor -
             # and i don't like it
             prefill_output_device = torch.cat(prefill_output_tokens, dim=0)
@@ -1593,11 +1603,11 @@ class HPUModelRunner:
         if prefill_output_cpu is not None and decode_output_cpu is not None:
             sampled_token_ids_cpu = torch.cat(
                 (decode_output_cpu[:num_decodes],
-                    prefill_output_cpu[:num_prefills]),
+                 prefill_output_cpu[:num_prefills]),
                 dim=0)
         else:
             sampled_token_ids_cpu = decode_output_cpu[:
-                                                        num_decodes] if decode_output_cpu is not None else prefill_output_cpu[:
+                                                      num_decodes] if decode_output_cpu is not None else prefill_output_cpu[:
                                                                                                                             num_prefills]
 
         sampled_token_ids_list = sampled_token_ids_cpu.tolist()
@@ -1622,7 +1632,7 @@ class HPUModelRunner:
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids_list,
-            logprobs=None, 
+            logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
 
@@ -1660,16 +1670,14 @@ class HPUModelRunner:
         modify_model_layers(
             self.model,
             get_target_layer_suffix_list(
-                model_config.
-                model_type if model_config is not None else None),
+                model_config.model_type if model_config is not None else None),
             hidden_layer_markstep_interval)
         path_to_rope = get_path_to_rope(self.model)
         torch.hpu.synchronize()
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
-            self.model = _maybe_wrap_in_hpu_graph(
-                self.model,
-                vllm_config=self.vllm_config,
-                layer_names=path_to_rope)
+            self.model = _maybe_wrap_in_hpu_graph(self.model,
+                                                  vllm_config=self.vllm_config,
+                                                  layer_names=path_to_rope)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Wrapping in HPUGraph took %.4f GB",
                     self.model_memory_usage / float(2**30))
