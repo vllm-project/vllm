@@ -17,6 +17,8 @@ class SamplingMetadata:
     top_k: torch.Tensor
     no_top_p: bool
     no_top_k: bool
+    min_p: torch.Tensor
+    no_min_p: bool
 
     generators: Dict[int, torch.Generator]
 
