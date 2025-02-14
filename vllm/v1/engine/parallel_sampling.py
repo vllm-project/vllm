@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import copy
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -34,7 +34,7 @@ class ParentRequestState:
         sampling_params.seed = seed
         return sampling_params
 
-    def add_output(
+    def _add_output(
         self,
         child_req_output: RequestOutput,
         index: int,
@@ -67,7 +67,7 @@ class ParentRequestState:
             # Note: will be sorted by index later
             self.request_output.outputs.append(new_completion)
 
-    def get_parent_request_output(self) -> RequestOutput:
+    def _get_parent_request_output(self) -> RequestOutput:
         """Invariant: parent completion outputs sorted by index"""
         assert self.request_output is not None
         self.request_output.outputs = sorted(self.request_output.outputs,
@@ -80,33 +80,7 @@ class ParentRequestState:
     ) -> str:
         return str(index) + "_" + self.request_id
 
-    @property
-    def num_completions(self) -> int:
-        assert self.request_output is not None
-        return len(self.request_output.outputs)
-
-    @property
-    def n(self) -> int:
-        return self.sampling_params.n
-
-    @property
-    def output_kind(self) -> RequestOutputKind:
-        return self.sampling_params.output_kind
-
-
-class ParallelSamplingOutputProcessor:
-    """For parallel sampling requests,
-    filter and transform child request
-    outputs."""
-
-    def __init__(
-        self,
-        parent_state: ParentRequestState,
-    ) -> None:
-        """Store parent request state."""
-        self.parent_state = parent_state
-
-    def process_output(
+    def _process_output(
         self,
         child_req_output: RequestOutput,
         index: int,
@@ -134,16 +108,56 @@ class ParallelSamplingOutputProcessor:
           `None`, unless a processed request output is ready to
           send back to the caller.
         """
-        if self.parent_state.output_kind != RequestOutputKind.FINAL_ONLY:
+        if self.output_kind != RequestOutputKind.FINAL_ONLY:
             # stream=true: return child completions immediately
-            child_req_output.request_id = self.parent_state.request_id
+            child_req_output.request_id = self.request_id
             child_req_output.outputs[0].index = index
             return child_req_output
 
         # stream=false: aggregate child completions
-        self.parent_state.add_output(child_req_output, index)
-        if self.parent_state.num_completions == self.parent_state.n:
+        self._add_output(child_req_output, index)
+        if self.num_completions == self.n:
             # Return aggregated request output after obtaining
             # all completions
-            return self.parent_state.get_parent_request_output()
+            return self._get_parent_request_output()
         return None
+
+    async def parallel_sampling_child_gen(
+        self,
+        child_gen: AsyncGenerator[RequestOutput, None],
+        index: int,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        """Output generator for a single parallel sampling
+        child request.
+
+        Each parallel sampling request triggers at
+        least two child requests. This generator
+        yields zero or more request outputs to
+        return to the caller, as they become
+        available.
+
+        Args:
+          child_gen: generator for child request
+                     outputs.
+          index: index within the `n` child requests
+
+        Returns:
+          Yields zero or more request outputs to return
+          to the caller.
+        """
+        async for out in child_gen:
+            if req_out := self._process_output(out, index):
+                yield req_out
+
+    @property
+    def num_completions(self) -> int:
+        assert self.request_output is not None
+        return len(self.request_output.outputs)
+
+    @property
+    def n(self) -> int:
+        return self.sampling_params.n
+
+    @property
+    def output_kind(self) -> RequestOutputKind:
+        return self.sampling_params.output_kind

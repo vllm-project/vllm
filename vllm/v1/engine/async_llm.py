@@ -24,8 +24,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
-from vllm.v1.engine.parallel_sampling import (ParallelSamplingOutputProcessor,
-                                              ParentRequestState)
+from vllm.v1.engine.parallel_sampling import ParentRequestState
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
@@ -245,37 +244,6 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
-    async def _parallel_sampling_child_gen(
-        self,
-        child_gen: AsyncGenerator[RequestOutput, None],
-        output_processor: ParallelSamplingOutputProcessor,
-        index: int,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        """A single parallel sampling child request
-        output generator.
-
-        Each parallel sampling request triggers at
-        least two child requests. This generator
-        yields zero or more request outputs to
-        return to the caller, as they become
-        available.
-
-        Args:
-          child_gen: generator for child request
-                     outputs.
-          output_processor: transform child request
-                            outputs into parent
-                            request outputs
-          index: index within the `n` child requests
-
-        Returns:
-          Yields zero or more request outputs to return
-          to the caller.
-        """
-        async for out in child_gen:
-            if req_out := output_processor.process_output(out, index):
-                yield req_out
-
     async def _generate_parallel_sampling(
         self,
         prompt: PromptType,
@@ -289,7 +257,6 @@ class AsyncLLM(EngineClient):
         """Generation completes for parallel sampling requests."""
 
         parent_state = ParentRequestState(request_id, sampling_params)
-        output_processor = ParallelSamplingOutputProcessor(parent_state)
         n = parent_state.n
 
         # Adapted from sglang:
@@ -315,8 +282,7 @@ class AsyncLLM(EngineClient):
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
             )
-            gen = self._parallel_sampling_child_gen(child_gen,
-                                                    output_processor, idx)
+            gen = parent_state.parallel_sampling_child_gen(child_gen, idx)
             gens.append(gen)
             active[asyncio.create_task(gen.__anext__())] = idx  # type: ignore
 
