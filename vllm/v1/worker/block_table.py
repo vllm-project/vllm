@@ -61,6 +61,14 @@ class BlockTable:
             src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
 
+    def swap_row(self, src: int, tgt: int) -> None:
+        num_blocks_src = self.num_blocks_per_row[src]
+        num_blocks_tgt = self.num_blocks_per_row[tgt]
+        self.num_blocks_per_row[src] = num_blocks_tgt
+        self.num_blocks_per_row[tgt] = num_blocks_src
+
+        self.block_table_np[[src, tgt]] = self.block_table_np[[tgt, src]]
+
     def commit(self, num_reqs: int) -> None:
         self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
                                           non_blocking=True)
