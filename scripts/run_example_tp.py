@@ -164,9 +164,13 @@ if __name__ == "__main__":
             "The capital of France is",
             "The future of AI is",
         ]
+        if args.nprompts > 4:
+            prompts += random.choices(prompts, k=args.nprompts - 4)
+        elif args.nprompts < 4:
+            prompts = prompts[: args.nprompts]
         gt = None
     # Create a sampling params object.
-    sampling_params = SamplingParams(temperature=0, max_tokens=args.osl)
+    sampling_params = SamplingParams(temperature=0, max_tokens=args.osl, ignore_eos=True)
     model = args.model
     if args.tp_size == 1:
         llm = LLM(
@@ -206,3 +210,4 @@ if __name__ == "__main__":
         print(f"Generated text: {generated_text!r}")
         print(f"Ground truth: {gt_i!r}")
         print("====================================")
+    del llm

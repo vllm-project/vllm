@@ -136,8 +136,8 @@ def pad_weight(weight, block_size):
 
 def unpad_weight(weight, original_M, original_N, keep_first_dim=False):
     """Removes padding from the matrix to restore its original shape."""
-    # if weight.shape[-2] == original_M and weight.shape[-1] == original_N:
-    #     return weight
+    if (weight.shape[-2] == original_M) and (weight.shape[-1] == original_N):
+        return weight
     if keep_first_dim:
         return weight[:, :original_M, :original_N]
     else:
@@ -160,7 +160,8 @@ def pad_block_fp8_weight_naive(weight, weight_scale, block_size):
 
 
 def dequant_block_fp8_weight_naive(weight, weight_scale, block_size, dtype, original_M, original_N, do_unpad=False):
-
+    if weight_scale is None:
+        return weight
     assert len(block_size) == 2
     
     weight_shape_len = len(weight.shape)
@@ -205,8 +206,8 @@ def apply_block_fp8_linear_hpu(
     assert input_scale is None
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
-    original_M = original_M.data
-    original_N = original_N.data
+    original_M = original_M.data.item()
+    original_N = original_N.data.item()
     output_shape = [*input.shape[:-1], original_M]
     dequant_weight = dequant_block_fp8_weight_naive(weight, weight_scale, block_size, input_2d.dtype, original_M, original_N, do_unpad)
     output = torch.nn.functional.linear(input_2d, dequant_weight, bias=None)

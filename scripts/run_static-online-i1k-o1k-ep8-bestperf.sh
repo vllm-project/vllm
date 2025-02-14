@@ -25,6 +25,7 @@ model="/data/models/DeepSeek-R1/"
 tokenizer="/data/models/DeepSeek-R1/"
 model_name="DeepSeek-R1"
 
+#VLLM_USE_STATIC_MOE=1 \
 HABANA_VISIBLE_DEVICES="ALL" \
 VLLM_MOE_N_SLICE=${moe_n_slice} \
 VLLM_EP_SIZE=${ep_size} \
