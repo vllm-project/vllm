@@ -16,6 +16,7 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -81,6 +82,9 @@ class EngineCoreClient(ABC):
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        raise NotImplementedError
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
@@ -94,6 +98,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
+        raise NotImplementedError
+
+    async def add_lora_async(self, lora_request: LoRARequest) -> None:
         raise NotImplementedError
 
 
@@ -128,6 +135,9 @@ class InprocClient(EngineCoreClient):
 
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
+
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        self.engine_core.add_lora(lora_request)
 
 
 class MPClient(EngineCoreClient):
@@ -292,6 +302,9 @@ class SyncMPClient(MPClient):
     def reset_prefix_cache(self) -> None:
         self._call_utility("reset_prefix_cache")
 
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        self._call_utility("add_lora", lora_request)
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -366,3 +379,6 @@ class AsyncMPClient(MPClient):
 
     async def reset_prefix_cache_async(self) -> None:
         await self._call_utility_async("reset_prefix_cache")
+
+    async def add_lora_async(self, lora_request: LoRARequest) -> None:
+        await self._call_utility_async("add_lora", lora_request)

@@ -13,6 +13,7 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
@@ -145,6 +146,9 @@ class EngineCore:
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
+
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        self.model_executor.add_lora(lora_request)
 
 
 class EngineCoreProc(EngineCore):
