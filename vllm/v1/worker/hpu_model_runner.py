@@ -592,7 +592,6 @@ class HPUModelRunner:
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
-        parallel_config = self.parallel_config
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
@@ -1248,8 +1247,7 @@ class HPUModelRunner:
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
         #import pdb; pdb.set_trace()
         token_ids[:num_decodes] = torch.gather(
-            input=torch.from_numpy(
-                self.input_batch.token_ids_cpu),
+            input=torch.from_numpy(self.input_batch.token_ids_cpu),
             dim=1,
             index=index[:num_decodes],
         )[:num_decodes]
@@ -1511,15 +1509,12 @@ class HPUModelRunner:
             num_decodes,
             bucketing=self.enable_bucketing)
 
-        num_padded_decodes = decode_data.token_ids.shape[
-            0] if num_decodes > 0 else 0
+        #num_padded_decodes = decode_data.token_ids.shape[
+        #    0] if num_decodes > 0 else 0
 
         #FIXME(kzawora): Currently there's no handling of logprobs. Fix that
         # later.
-        logprob_token_ids = None
-        logprobs = None
         prefill_output_tokens = []
-        decode_output_tokens = []
         prefill_output_device = None
         decode_output_device = None
 
@@ -1592,7 +1587,8 @@ class HPUModelRunner:
             htorch.core.mark_step()
 
         # From this point onward, all operations are done on CPU.
-        # If sampler was split, we already have tokens. Let's copy the data to CPU as is, and then discard padded tokens.
+        # If sampler was split, we already have tokens. Let's copy the data to
+        # CPU as is, and then discard padded tokens.
         prefill_output_cpu = prefill_output_device.cpu(
         ) if prefill_output_device is not None else None
         decode_output_cpu = decode_output_device.cpu(
@@ -1606,9 +1602,9 @@ class HPUModelRunner:
                  prefill_output_cpu[:num_prefills]),
                 dim=0)
         else:
-            sampled_token_ids_cpu = decode_output_cpu[:
-                                                      num_decodes] if decode_output_cpu is not None else prefill_output_cpu[:
-                                                                                                                            num_prefills]
+            sampled_token_ids_cpu = decode_output_cpu[:num_decodes] \
+                if decode_output_cpu is not None \
+                    else prefill_output_cpu[:num_prefills]
 
         sampled_token_ids_list = sampled_token_ids_cpu.tolist()
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
