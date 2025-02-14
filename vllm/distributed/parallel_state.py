@@ -901,8 +901,6 @@ get_tensor_model_parallel_group = get_tp_group
 
 _PP: Optional[GroupCoordinator] = None
 
-_EP_SIZE: Optional[int] = None
-
 
 def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, (
