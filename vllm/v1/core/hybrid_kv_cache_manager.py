@@ -178,7 +178,7 @@ class HybridKVCacheManager:
         # the number of evicted blocks.
         self._free_useless_blocks(req_blocks, request.num_computed_tokens)
 
-        new_computed_blocks = new_computed_blocks if new_computed_blocks is not None else [
+        new_computed_blocks = new_computed_blocks or [
             [] for _ in range(self.num_kv_cache_groups)
         ]
 
@@ -267,26 +267,16 @@ class HybridKVCacheManager:
             # TODO(rickyx): When supporting speculative decoding, we will need to
             # differentiate between them so that we can know how many blocks are
             # full after appending the actual tokens.
-            num_full_blocks = (num_computed_tokens +
-                               num_tokens) // manager.block_size
-            num_computed_full_blocks = num_computed_tokens // manager.block_size
-
-            new_full_blocks = req_blocks[i][
-                num_computed_full_blocks:num_full_blocks]
-            if new_full_blocks:
-                block_hashes = self.req_to_block_hashes[request.request_id][i]
-                self.block_pool.cache_full_blocks(
-                    request=request,
-                    block_hashes=block_hashes,
-                    block_size=manager.block_size,
-                    blk_start_idx=num_computed_full_blocks,
-                    # The new full blocks are the full blocks that are not
-                    # computed.
-                    full_blocks=new_full_blocks,
-                    prev_block=(req_blocks[i][num_computed_full_blocks - 1]
-                                if num_computed_full_blocks > 0 else None),
-                    kv_cache_group_id=i,
-                )
+            block_hashes = self.req_to_block_hashes[request.request_id][i]
+            self.block_pool.cache_full_blocks(
+                request=request,
+                blocks=req_blocks[i],
+                block_hashes=block_hashes,
+                old_num_computed_tokens=num_computed_tokens,
+                new_num_computed_tokens=num_computed_tokens + num_tokens,
+                block_size=manager.block_size,
+                kv_cache_group_id=i,
+            )
 
         return new_blocks
 

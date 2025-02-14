@@ -152,7 +152,6 @@ class KVCacheManager:
         num_computed_tokens = (request.num_computed_tokens +
                                num_new_computed_tokens)
 
-        req_blocks = self.req_to_blocks[request.request_id]
         num_new_blocks = self.manager.get_num_new_blocks(
             num_computed_tokens, num_tokens,
             len(req_blocks) + len(new_computed_blocks))
@@ -185,11 +184,13 @@ class KVCacheManager:
             # No new block is needed.
             new_blocks = []
         else:
+            num_preallocate_blocks = min(
+                self.num_preallocate_blocks,
+                self.block_pool.get_num_free_blocks() - num_new_blocks)
             # Get new blocks from the free block pool considering
             # preallocated blocks.
             num_new_blocks = min(
                 num_new_blocks + self.num_preallocate_blocks,
-                self.block_pool.get_num_free_blocks(),
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
                 # [..., max_num_blocks_per_req].
@@ -198,6 +199,7 @@ class KVCacheManager:
                 self.max_num_blocks_per_req - len(req_blocks),
             )
             assert num_new_blocks > 0
+            assert num_new_blocks <= self.block_pool.get_num_free_blocks()
 
             # Concatenate the computed block IDs and the new block IDs.
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
@@ -206,25 +208,21 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
+        block_hashes = self.req_to_block_hashes[request.request_id]
+
         # NOTE(rickyx): We are assuming the `num_tokens` are actual
         # tokens rather than lookahead slots (e.g. for speculative decoding).
         # TODO(rickyx): When supporting speculative decoding, we will need to
         # differentiate between them so that we can know how many blocks are
         # full after appending the actual tokens.
-        num_full_blocks = (num_computed_tokens + num_tokens) // self.block_size
-        num_computed_full_blocks = num_computed_tokens // self.block_size
-        new_full_blocks = req_blocks[num_computed_full_blocks:num_full_blocks]
-        if new_full_blocks:
-            block_hashes = self.req_to_block_hashes[request.request_id]
-            self.block_pool.cache_full_blocks(
-                request=request,
-                block_hashes=block_hashes,
-                block_size=self.block_size,
-                blk_start_idx=num_computed_full_blocks,
-                # The new full blocks are the full blocks that are not computed.
-                full_blocks=new_full_blocks,
-                prev_block=(req_blocks[num_computed_full_blocks - 1]
-                            if num_computed_full_blocks > 0 else None))
+        self.block_pool.cache_full_blocks(
+            request=request,
+            blocks=req_blocks,
+            block_hashes=block_hashes,
+            old_num_computed_tokens=num_computed_tokens,
+            new_num_computed_tokens=num_computed_tokens + num_tokens,
+            block_size=self.block_size,
+        )
 
         return new_blocks
 

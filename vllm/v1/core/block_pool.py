@@ -55,11 +55,11 @@ class BlockPool:
 
     def cache_full_blocks(self,
                           request: Request,
+                          blocks: List[KVCacheBlock],
                           block_hashes: List[BlockHashType],
+                          old_num_computed_tokens: int,
+                          new_num_computed_tokens: int,
                           block_size: int,
-                          blk_start_idx: int,
-                          full_blocks: List[KVCacheBlock],
-                          prev_block: Optional[KVCacheBlock],
                           kv_cache_group_id: int = 0) -> None:
         """Cache a list of full blocks for prefix caching.
 
@@ -76,20 +76,26 @@ class BlockPool:
             full_blocks: The list of blocks to update hash metadata.
             prev_block: The previous block in the chain.
         """
+        num_full_blocks = new_num_computed_tokens // block_size
+        num_computed_full_blocks = old_num_computed_tokens // block_size
+        new_full_blocks = blocks[num_computed_full_blocks:num_full_blocks]
+        if not new_full_blocks:
+            return
         num_cached_block_hashes = len(block_hashes)
 
-        # Update the new blocks with the block hashes through the chain.
-        prev_block_hash_value = None
-        if prev_block is not None:
-            # Previous block must have a block hash because it must be
-            # a full, cached block.
+        if num_computed_full_blocks == 0:
+            prev_block_hash_value = None
+        else:
+
+            prev_block = blocks[num_computed_full_blocks - 1],
             assert prev_block.block_hash is not None
             prev_block_hash_value = prev_block.block_hash.hash_value
+        # Update the new blocks with the block hashes through the chain.
 
         # Find the first uncached block. This case should only happen when
         # speculative decoding is used.
         offset = 0
-        for blk in full_blocks:
+        for blk in new_full_blocks:
             if blk.block_hash is None:
                 break
             else:
@@ -99,8 +105,8 @@ class BlockPool:
             # All blocks are cached.
             return
 
-        for i, blk in enumerate(full_blocks[offset:]):
-            blk_idx = blk_start_idx + offset + i
+        for i, blk in enumerate(new_full_blocks[offset:]):
+            blk_idx = num_computed_full_blocks + offset + i
             assert blk.block_hash is None
 
             if blk_idx < num_cached_block_hashes:
