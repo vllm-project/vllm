@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 
-from vllm.lora.ops.xla_ops import (bgmv_expand, bgmv_expand_slice, bgmv_shrink)
+from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 
 from .punica_base import PunicaWrapperBase
 
@@ -44,7 +44,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         if self.no_lora:
             return y
         return bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
-
 
     def expand_slice(
         self,
@@ -270,7 +269,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
         self.batch_size = 1
-        self._lora_indices_per_batch[:self.batch_size].copy_(token_lora_tensor[:self.batch_size])
-    
+        self._lora_indices_per_batch[:self.batch_size].copy_(
+            token_lora_tensor[:self.batch_size])
+
     def set_no_lora(self, no_lora: bool):
         self.no_lora = no_lora
