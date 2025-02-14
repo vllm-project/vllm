@@ -35,7 +35,7 @@ def _generate(
 
 
 class TestOneTokenBadWord:
-    MODEL = "meta-llama/Meta-Llama-3-8B"
+    MODEL = "TheBloke/Llama-2-7B-fp16"
 
     PROMPT = "Hi! How are"
     TARGET_TOKEN = "you"
