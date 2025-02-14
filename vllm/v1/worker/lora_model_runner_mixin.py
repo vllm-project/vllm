@@ -127,3 +127,8 @@ class LoRAModelRunnerMixin:
 
             # __exit__ code
             self.lora_manager.remove_all_adapters()
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.add_adapter(lora_request)
