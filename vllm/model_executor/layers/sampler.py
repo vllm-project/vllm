@@ -958,7 +958,9 @@ def get_logprobs(
     if len(query_indices) == 0:
         empty_sampled_logprob: SampleLogprobs = []
         empty_prompt_logprob: Optional[PromptLogprobs] = None
-        return [empty_prompt_logprob], [empty_sampled_logprob]
+        num_seq_groups = len(sampling_metadata.seq_groups)
+        return [empty_prompt_logprob
+                ] * num_seq_groups, [empty_sampled_logprob] * num_seq_groups
 
     selected_logprobs, ranks = None, None
     top_logprobs, top_token_ids = None, None
@@ -1225,6 +1227,10 @@ def _build_sampler_output(
         assert sample_logprobs is not None
         assert not isinstance(maybe_deferred_sample_results,
                               SampleResultArgsType)
+        assert len(sampling_metadata.seq_groups) \
+            == len(maybe_deferred_sample_results) \
+            == len(prompt_logprobs) \
+            == len(sample_logprobs)
         deferred_sample_results_args = None
 
         for (seq_group, sample_result, group_prompt_logprobs,
