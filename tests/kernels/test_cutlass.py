@@ -535,11 +535,11 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
                                       device=device,
                                       dtype=out_dtype)
 
-    ab_strides = torch.full((num_groups),
+    ab_strides = torch.full((num_groups, ),
                             a_tensors_stacked.stride(0),
                             device="cuda",
                             dtype=torch.int64)
-    c_strides = torch.full((num_groups),
+    c_strides = torch.full((num_groups, ),
                            out_tensors_stacked.stride(0),
                            device="cuda",
                            dtype=torch.int64)
