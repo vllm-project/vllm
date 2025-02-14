@@ -334,7 +334,7 @@ __global__ void __launch_bounds__(64)
   }
 
   // TODO: Shang: Hoist loop invariance.
-  for (int ax1_0_1 = 0; ax1_0_1 < 4; ++ax1_0_1) {
+  for (int ax1_0_1 = 0; ax1_0_1 < (N / 32); ++ax1_0_1) {
     for (int local_id = 0; local_id < 8; ++local_id) {
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 +
                        ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;
