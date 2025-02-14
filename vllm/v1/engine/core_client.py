@@ -3,7 +3,6 @@
 import asyncio
 import os
 import signal
-import weakref
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Type
 
@@ -179,11 +178,6 @@ class MPClient(EngineCoreClient):
             zmq.asyncio.Context()  # type: ignore[attr-defined]
             if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
 
-        # Note(rob): shutdown function cannot be a bound method,
-        # else the gc cannot collect the object.
-        self._finalizer = weakref.finalize(self, lambda x: x.destroy(linger=0),
-                                           self.ctx)
-
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
@@ -204,12 +198,17 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
+    def __del__(self):
+        self.shutdown()
+
     def shutdown(self):
         """Clean up background resources."""
-        if hasattr(self, "proc_handle"):
-            self.proc_handle.shutdown()
 
-        self._finalizer()
+        if ctx := getattr(self, "ctx", None):
+            ctx.destroy(linger=0)
+
+        if proc_handle := getattr(self, "proc_handle", None):
+            proc_handle.shutdown()
 
 
 class SyncMPClient(MPClient):
@@ -273,15 +272,17 @@ class AsyncMPClient(MPClient):
 
     async def get_output_async(self) -> EngineCoreOutputs:
         if self.outputs_queue is None:
-            # Perform IO in separate task to parallelize as much as possible
-            self.outputs_queue = asyncio.Queue()
+            # Perform IO in separate task to parallelize as much as possible.
+            # Avoid ref cycle from task reference back to the client,
+            # to ensure the client is garbage collected cleanly.
+            outputs_queue: asyncio.Queue[bytes] = asyncio.Queue()
+            output_socket = self.output_socket
+            self.outputs_queue = outputs_queue
 
             async def process_outputs_socket():
-                assert self.outputs_queue is not None
                 while True:
-                    (frame, ) = await self.output_socket.recv_multipart(
-                        copy=False)
-                    self.outputs_queue.put_nowait(frame.buffer)
+                    (frame, ) = await output_socket.recv_multipart(copy=False)
+                    outputs_queue.put_nowait(frame.buffer)
 
             self.queue_task = asyncio.create_task(process_outputs_socket())
 
