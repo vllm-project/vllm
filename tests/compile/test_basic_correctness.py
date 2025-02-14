@@ -26,7 +26,7 @@ class TestSetting:
 test_settings = [
     # basic llama model
     TestSetting(
-        model="meta-llama/Llama-3.2-1B",
+        model="meta-llama/Llama-3.2-1B-Instruct",
         model_args=[],
         pp_size=2,
         tp_size=2,

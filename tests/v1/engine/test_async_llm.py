@@ -17,7 +17,7 @@ if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
                 allow_module_level=True)
 
-ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B",
+ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B-Instruct",
                               enforce_eager=True,
                               disable_log_requests=True)
 
