@@ -363,7 +363,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
-        return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+        return (len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+                or len(scheduler_output.finished_req_ids) > 0)
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
