@@ -95,7 +95,6 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        #m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo", echo, raising=False)
