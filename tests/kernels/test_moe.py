@@ -49,27 +49,38 @@ def test_fused_moe(
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-    
+
     score = torch.randn((m, e), device="cuda", dtype=dtype)
-    
+
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.randint(0, e, (local_e, ), device="cuda", 
+        e_ids = torch.randint(0,
+                              e, (local_e, ),
+                              device="cuda",
                               dtype=torch.int32)
-        e_map = torch.full((e,), -1, device="cuda", dtype=torch.int32)
+        e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
         e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
         w1 = w1[e_map]
         w2 = w2[e_map]
     else:
         e_map = None
-    
-    triton_output = fused_moe(a, w1, w2, score, topk, 
+
+    triton_output = fused_moe(a,
+                              w1,
+                              w2,
+                              score,
+                              topk,
                               global_num_experts=e,
                               expert_map=e_map,
                               renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk, e_map)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
-    iterative_output = iterative_moe(a, w1, w2, score, topk, e_map,
+    iterative_output = iterative_moe(a,
+                                     w1,
+                                     w2,
+                                     score,
+                                     topk,
+                                     e_map,
                                      renormalize=False)
     torch.testing.assert_close(iterative_output,
                                torch_output,
@@ -87,9 +98,9 @@ def test_fused_moe(
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("has_zp", [True, False])
 @pytest.mark.parametrize("weight_bits", [4, 8])
-def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int, ep_size: int,
-                        dtype: torch.dtype, group_size: int, has_zp: bool,
-                        weight_bits: int):
+def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
+                        ep_size: int, dtype: torch.dtype, group_size: int,
+                        has_zp: bool, weight_bits: int):
     print(m, n, k, e, topk, dtype, group_size, has_zp, weight_bits)
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -149,12 +160,14 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int, ep_size: int,
         w_scales[expert_id] = scales
         if has_zp:
             w_qzeros[expert_id] = qzeros
-    
+
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.randint(0, e, (local_e, ), device="cuda", 
+        e_ids = torch.randint(0,
+                              e, (local_e, ),
+                              device="cuda",
                               dtype=torch.int32)
-        e_map = torch.full((e,), -1, device="cuda", dtype=torch.int32)
+        e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
         e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
         w1_ref = w1_ref[e_map]
         w2_ref = w2_ref[e_map]
