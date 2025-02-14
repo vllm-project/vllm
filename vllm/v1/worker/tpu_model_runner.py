@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from copy import deepcopy
 import enum
 import time
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -70,7 +72,7 @@ class DecodeData:
     attn_metadata: Optional[PallasMetadata] = None
 
 
-class TPUModelRunner:
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -394,6 +396,17 @@ class TPUModelRunner:
 
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids,
                                 prompt_scheduled_tokens)
+    
+    def _get_input_batch_subset(self, req_idxs: List[int]) -> InputBatch:
+        req_idxs = set(req_idxs)
+        all_req_idxs = set(self.input_batch.req_id_to_index.values())
+        
+        req_idxs_to_remove = all_req_idxs.difference(req_idxs)
+        
+        subset_batch = deepcopy(self.input_batch)
+        subset_batch.condense(list(req_idxs_to_remove))
+        return subset_batch
+        
 
     def _prepare_prompt(self, req_index: int,
                         num_scheduled_tokens: int) -> PromptData:
@@ -469,6 +482,10 @@ class TPUModelRunner:
             self.device)
         effective_query_lens = self.prompt_effective_query_lens_cpu[
             self.cur_swap_id].to(self.device)
+        
+        if self.lora_config:
+            prompt_input_batch = self._get_input_batch_subset(req_idxs=[req_index])
+            self.set_active_loras(prompt_input_batch, np.array([padded_prompt_len], dtype=np.int32))
 
         self.swap_step()
 
@@ -559,6 +576,11 @@ class TPUModelRunner:
         block_table = block_table_cpu.to(self.device)
         context_lens = self.decode_context_lens_cpu[
             self.cur_swap_id][:padded_batch_size].to(self.device)
+        
+        if self.lora_config:
+            req_idxs = list(map(self.input_batch.req_id_to_index.get, decode_req_ids))
+            decode_input_batch = self._get_input_batch_subset(req_idxs)
+            self.set_active_loras(decode_input_batch, np.array([padded_batch_size], dtype=np.int32))
 
         self.swap_step()
 
@@ -720,6 +742,12 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
+        if self.lora_config:
+            model = self.load_lora_model(model,
+                                         self.model_config,
+                                         self.scheduler_config,
+                                         self.lora_config,
+                                         self.device)
         model = model.eval()
         xm.mark_step()
         xm.wait_device_ops()
@@ -825,13 +853,19 @@ class TPUModelRunner:
         # graphs in the disk (VLLM_XLA_CACHE_PATH).
         if exec_mode.is_prefill():
             # Prefll
-            torch._dynamo.mark_dynamic(token_ids, 1)
-            torch._dynamo.mark_dynamic(position_ids, 1)
+            if self.lora_config is not None: # TODO: Remove this condition
+                torch._dynamo.config.capture_dynamic_output_shape_ops = True
+            else:
+                torch._dynamo.mark_dynamic(token_ids, 1)
+                torch._dynamo.mark_dynamic(position_ids, 1)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
         else:
             # Decode
-            torch._dynamo.mark_dynamic(token_ids, 0)
-            torch._dynamo.mark_dynamic(position_ids, 0)
+            if self.lora_config is not None: # TODO: Remove this condition
+                torch._dynamo.config.capture_dynamic_output_shape_ops = True
+            else:
+                torch._dynamo.mark_dynamic(token_ids, 0)
+                torch._dynamo.mark_dynamic(position_ids, 0)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
             torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
             torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
@@ -850,11 +884,12 @@ class TPUModelRunner:
         for batch_size in [1]:
             seq_len = 16
             while seq_len <= self.model_config.max_model_len:
-                self.dummy_run(self.kv_caches,
-                               batch_size,
-                               seq_len,
-                               exec_mode=ExecutionMode.PREFILL)
-                xm.wait_device_ops()
+                with self.maybe_profile_with_lora(self.lora_config, np.array([seq_len] * batch_size, dtype=np.int32)):
+                    self.dummy_run(self.kv_caches,
+                                batch_size,
+                                seq_len,
+                                exec_mode=ExecutionMode.PREFILL)
+                    xm.wait_device_ops()
                 logger.info("  batch_size: %d, seq_len: %d", batch_size,
                             seq_len)
                 num_tokens = batch_size * seq_len
@@ -874,11 +909,12 @@ class TPUModelRunner:
             for batch_size in [1]:
                 seq_len = 16
                 while seq_len <= self.model_config.max_model_len:
-                    self.dummy_run(self.kv_caches,
-                                   batch_size,
-                                   seq_len,
-                                   exec_mode=ExecutionMode.PREFIX_PREFILL)
-                    xm.wait_device_ops()
+                    with self.maybe_profile_with_lora(self.lora_config, np.array([seq_len] * batch_size, dtype=np.int32)):
+                        self.dummy_run(self.kv_caches,
+                                    batch_size,
+                                    seq_len,
+                                    exec_mode=ExecutionMode.PREFIX_PREFILL)
+                        xm.wait_device_ops()
                     logger.info("  batch_size: %d, seq_len: %d", batch_size,
                                 seq_len)
                     num_tokens = batch_size * seq_len
@@ -898,11 +934,12 @@ class TPUModelRunner:
         seq_len = 1
         batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
-            self.dummy_run(self.kv_caches,
-                           batch_size,
-                           seq_len,
-                           exec_mode=ExecutionMode.DECODE)
-            xm.wait_device_ops()
+            with self.maybe_profile_with_lora(self.lora_config, np.array([seq_len] * batch_size, dtype=np.int32)):
+                self.dummy_run(self.kv_caches,
+                            batch_size,
+                            seq_len,
+                            exec_mode=ExecutionMode.DECODE)
+                xm.wait_device_ops()
             logger.info("  batch_size: %d, seq_len: %d", batch_size, seq_len)
 
             if batch_size >= self.scheduler_config.max_num_seqs:
