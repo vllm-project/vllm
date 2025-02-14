@@ -1708,10 +1708,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
-        previous_hidden_states = kwargs.get("previous_hidden_states", None)
+        previous_hidden_states = kwargs.get("previous_hidden_states")
         model_kwargs = {}
         if previous_hidden_states is not None:
-            model_kwargs["previous_hidden_states"]  = previous_hidden_states
+            model_kwargs["previous_hidden_states"] = previous_hidden_states
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start = torch.cuda.Event(enable_timing=True)
@@ -1731,7 +1731,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                                  device=self.device),
                     **seqlen_agnostic_kwargs,
                     **model_kwargs,
-                    )
+                )
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):

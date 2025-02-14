@@ -63,7 +63,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
                                  bias=False)
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
         self.mtp_block = DeepseekV2DecoderLayer(config, prefix, model_config,
-                                            cache_config, quant_config)
+                                                cache_config, quant_config)
 
     def forward(
         self,
@@ -87,10 +87,10 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
         hidden_states, residual = self.mtp_block(positions=positions,
-                                             hidden_states=hidden_states,
-                                             kv_cache=kv_cache,
-                                             attn_metadata=attn_metadata,
-                                             residual=None)
+                                                 hidden_states=hidden_states,
+                                                 kv_cache=kv_cache,
+                                                 attn_metadata=attn_metadata,
+                                                 residual=None)
         hidden_states = residual + hidden_states
         return self.shared_head(hidden_states)
 

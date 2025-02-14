@@ -1982,9 +1982,9 @@ class SpeculativeConfig:
                 speculative_draft_tensor_parallel_size = 1
                 if target_parallel_config.tensor_parallel_size > 1:
                     logger.warning(
-                        f"{draft_hf_config.model_type} cannot currently "
-                        "be run with tp>1; "
-                        "setting speculative_draft_tensor_parallel_size=1")
+                        "%s cannot currently be run with tp>1; "
+                        "setting speculative_draft_tensor_parallel_size=1",
+                        draft_hf_config.model_type)
             else:
                 speculative_draft_tensor_parallel_size = \
                     target_parallel_config.tensor_parallel_size
