@@ -3,12 +3,12 @@
 
 * @shajrawi @gshtras @maleksan85
 
-/csrc/ @charlifu @mawong-amd
-/vllm/ @charlifu @mawong-amd
+/csrc/ @charlifu @mawong-amd @shajrawi @gshtras @maleksan85
+/vllm/ @charlifu @mawong-amd @shajrawi @gshtras @maleksan85
 
-fused_moe @divakar-amd
+fused_moe @divakar-amd @shajrawi @gshtras @maleksan85
 
-/tests/ @Alexei-V-Ivanov-AMD
-/.buildkite/ @Alexei-V-Ivanov-AMD
+/tests/ @Alexei-V-Ivanov-AMD @shajrawi @gshtras @maleksan85
+/.buildkite/ @Alexei-V-Ivanov-AMD @shajrawi @gshtras @maleksan85
 
-/benchmarks/profiling @AdrianAbeyta @dllehr-amd
+/benchmarks/profiling @AdrianAbeyta @dllehr-amd @shajrawi @gshtras @maleksan85
