@@ -346,8 +346,8 @@ class OpenAIServingTranscription(OpenAIServing):
                     # NOTE(NickLucche) user can't pass encoder prompts directly
                     # at least not to Whisper. One indicator of the encoder
                     # amount of processing is the log-mel spectogram length.
-                    num_prompt_tokens = ceil(audio_duration_s * self.model_sr /
-                                             self.hop_length)
+                    num_prompt_tokens += ceil(audio_duration_s *
+                                              self.model_sr / self.hop_length)
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST

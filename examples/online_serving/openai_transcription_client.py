@@ -3,7 +3,7 @@ import asyncio
 import json
 
 import httpx
-from openai import AsyncOpenAI
+from openai import OpenAI
 
 from vllm.assets.audio import AudioAsset
 
@@ -13,15 +13,15 @@ winning_call = AudioAsset('winning_call').get_local_path()
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8000/v1"
-client = AsyncOpenAI(
+client = OpenAI(
     api_key=openai_api_key,
     base_url=openai_api_base,
 )
 
 
-async def main():
+def sync_openai():
     with open(str(mary_had_lamb), "rb") as f:
-        transcription = await client.audio.transcriptions.create(
+        transcription = client.audio.transcriptions.create(
             file=f,
             model="openai/whisper-small",
             language="en",
@@ -30,7 +30,7 @@ async def main():
         print("transcription result:", transcription.text)
 
 
-asyncio.run(main())
+sync_openai()
 
 
 # OpenAI Transcription API client does not support streaming.
