@@ -151,7 +151,6 @@ class TransformersModel(nn.Module):
             attn_implementation="vllm",
             torch_dtype=vllm_config.model_config.dtype,
             trust_remote_code=vllm_config.model_config.trust_remote_code,
-            torch_dtype=model_config.dtype,
         )
         prefix = self.model.base_model_prefix
 
@@ -169,7 +168,7 @@ class TransformersModel(nn.Module):
                 scale=config.head_dim**-0.5,
                 num_kv_heads=divide(config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{i}.attn") for i in range(config.num_hidden_layers)
         ]
 
@@ -179,7 +178,7 @@ class TransformersModel(nn.Module):
         # ForCausalLM modifications
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=None,
+                                      quant_config=quant_config,
                                       prefix=maybe_prefix(prefix, "lm_head"))
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.get_input_embeddings().weight
