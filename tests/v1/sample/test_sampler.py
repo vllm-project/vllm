@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pytest
@@ -45,6 +45,18 @@ def _create_prompt_tokens_tensor(
     )
 
 
+def _create_logit_bias(
+    batch_size: int,
+    vocab_size: int,
+    bias_value: float,
+) -> List[Optional[Dict[int, float]]]:
+    res: List[Optional[Dict[int, float]]] = []
+    for i in range(batch_size):
+        logit_bias = {min(i, vocab_size - 1): bias_value}
+        res.append(logit_bias)
+    return res
+
+
 def _create_default_sampling_metadata(
     num_output_tokens: int,
     batch_size: int,
@@ -80,6 +92,7 @@ def _create_default_sampling_metadata(
         no_penalties=True,
         min_tokens=[],
         stop_token_ids=[],
+        logit_bias=[None] * batch_size,
     )
     return fake_sampling_metadata
 
@@ -89,14 +102,14 @@ def _generate_min_token_penalties_and_stop_tokens(
     batch_indices_for_min_token_penalty: List[int]
 ) -> Tuple[List[int], List[Set[int]]]:
     """
-    Generates and returns a list of minimum token penalties (`min_tokens`) 
-    and a corresponding list of stop token IDs (`stop_token_ids`) for each 
+    Generates and returns a list of minimum token penalties (`min_tokens`)
+    and a corresponding list of stop token IDs (`stop_token_ids`) for each
     batch.
 
-    If a batch index is included in `batch_indices_for_min_token_penalty`, 
-    a higher `min_tokens` value is assigned (within a randomized range), 
-    and a random set of stop token IDs is created. Otherwise, a lower 
-    `min_tokens` value is assigned, and the stop token IDs set is empty.   
+    If a batch index is included in `batch_indices_for_min_token_penalty`,
+    a higher `min_tokens` value is assigned (within a randomized range),
+    and a random set of stop token IDs is created. Otherwise, a lower
+    `min_tokens` value is assigned, and the stop token IDs set is empty.
     """
     stop_token_ids: List[Set[int]] = []
     min_tokens: List[int] = []
@@ -120,7 +133,7 @@ def _create_weighted_output_token_list(
         batch_size: int,
         vocab_size: int) -> Tuple[List[List[int]], List[List[int]]]:
     """
-    Creates an output token list where each token occurs a distinct 
+    Creates an output token list where each token occurs a distinct
     number of times.
 
     For each batch, a random subset of token IDs is selected from the
@@ -129,8 +142,8 @@ def _create_weighted_output_token_list(
 
     Returns:
         Tuple[List[List[int]], List[List[int]]]:
-            - The first element is the output token list, where each sublist 
-              corresponds to a batch and contains tokens with weighted 
+            - The first element is the output token list, where each sublist
+              corresponds to a batch and contains tokens with weighted
               frequencies.
             - The second element is a list of distinct token IDs for each
               batch, ordered by their frequency in the corresponding output
@@ -155,7 +168,7 @@ def _create_weighted_output_token_list(
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 def test_sampler_min_tokens_penalty(device: str, batch_size: int):
     """
-    Tests that if the number of output tokens is less than 
+    Tests that if the number of output tokens is less than
     SamplingParams.min_tokens then we will set the logits for
     the stop token ids to -inf.
     """
@@ -283,7 +296,7 @@ def test_sampler_frequency_penalty(device: str, batch_size: int,
 def test_sampler_repetition_penalty(device: str, batch_size: int,
                                     repetition_penalty: float):
     """
-    Test to verify that when the repetition penalty is enabled, tokens 
+    Test to verify that when the repetition penalty is enabled, tokens
     are penalized based on their presence in the prompt or the existing
     output.
     """
@@ -321,3 +334,37 @@ def test_sampler_repetition_penalty(device: str, batch_size: int,
                 penalized_token_id not in output_tokens)
             assert (non_penalized_token_id  in prompt_tokens or \
                 non_penalized_token_id in output_tokens)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("batch_size", [1, 2, 32])
+@pytest.mark.parametrize("bias_value", [-0.1, 1.2])
+def test_sampler_logit_bias(device: str, batch_size: int, bias_value: float):
+    """
+    Test to verify that when the repetition penalty is enabled, tokens
+    are penalized based on their presence in the prompt or the existing
+    output.
+    """
+    torch.set_default_device(device)
+    # Create fake logits where each token is assigned the same
+    # logit value.
+    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
+    sampling_metadata.logit_bias = _create_logit_bias(
+        batch_size=batch_size,
+        vocab_size=VOCAB_SIZE,
+        bias_value=bias_value,
+    )
+    sampler = Sampler()
+    logits = sampler.apply_logits_bias(fake_logits, sampling_metadata)
+    logits = logits.cpu()
+    for batch_idx in range(batch_size):
+        logits_for_req = logits[batch_idx]
+        biased_index = min(batch_idx, VOCAB_SIZE - 1)
+        for token_id in range(VOCAB_SIZE):
+            if biased_index == token_id:
+                assert logits_for_req[token_id] == pytest.approx(bias_value +
+                                                                 1e-2)
+            else:
+                assert logits_for_req[token_id] == pytest.approx(1e-2)
