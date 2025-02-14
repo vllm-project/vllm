@@ -6,6 +6,8 @@ import triton
 import triton.language as tl
 
 
+# Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+# can be used to combine partial attention results (in the split-KV case)
 def merge_attn_states(
     output: torch.Tensor,
     prefix_output: torch.Tensor,
