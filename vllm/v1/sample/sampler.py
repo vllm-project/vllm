@@ -93,6 +93,10 @@ class Sampler(nn.Module):
             sampling_metadata.no_top_p,
             sampling_metadata.top_p,
         )
+
+        if not sampling_metadata.no_min_p:
+            logits = self.apply_min_p(logits, sampling_metadata.min_p)
+
         if sampling_metadata.all_random:
             return random_sampled
 
@@ -167,6 +171,28 @@ class Sampler(nn.Module):
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
                 sampling_metadata.output_token_ids)
+        return logits
+
+    def apply_min_p(
+        self,
+        logits: torch.Tensor,
+        min_p: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Filters logits using adaptive probability thresholding.
+        """
+        # Convert logits to probability distribution
+        probability_values = torch.nn.functional.softmax(logits, dim=-1)
+        # Calculate maximum probabilities per sequence
+        max_probabilities = torch.amax(probability_values,
+                                       dim=-1,
+                                       keepdim=True)
+        # Reshape min_p for broadcasting
+        adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
+        # Identify valid tokens using threshold comparison
+        valid_token_mask = probability_values >= adjusted_min_p
+        # Apply mask using boolean indexing
+        logits[~valid_token_mask] = -float('inf')
         return logits
 
     def apply_logits_bias(
