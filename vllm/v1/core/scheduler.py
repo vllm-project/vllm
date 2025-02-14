@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheManager, init_kv_cache_manager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (BlockIDGenerator, FullAttentionSpec,
                                         GroupedBlockIDs, KVCacheConfig)
@@ -50,7 +50,7 @@ class Scheduler:
         num_gpu_blocks = cache_config.num_gpu_blocks
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         # Create the KV cache manager.
-        self.kv_cache_manager = KVCacheManager(
+        self.kv_cache_manager = init_kv_cache_manager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching)
@@ -233,7 +233,8 @@ class Scheduler:
                     break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks)
+                    request, num_new_tokens, computed_blocks,
+                    num_computed_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
