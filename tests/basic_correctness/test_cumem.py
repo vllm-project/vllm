@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import time
+
 import pytest
 import torch
 
@@ -116,12 +118,14 @@ def test_cumem_with_cudagraph():
 
 @fork_new_process_for_each_test
 @pytest.mark.parametrize(
-    "model",
+    "model, use_v1",
     [
-        "meta-llama/Llama-3.2-1B",  # sleep mode with safetensors
-        "facebook/opt-125m"  # sleep mode with pytorch checkpoint
+        ("meta-llama/Llama-3.2-1B", True),  # sleep mode with safetensors
+        ("facebook/opt-125m", False)  # sleep mode with pytorch checkpoint
     ])
-def test_end_to_end(model):
+def test_end_to_end(model: str, use_v1: bool):
+    import os
+    os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM(model, enable_sleep_mode=True)
@@ -133,6 +137,9 @@ def test_end_to_end(model):
     # which is difficult to measure in the test. therefore, we only
     # test sleep level 1 here.
     llm.sleep(level=1)
+    if use_v1:
+        # v1 returns before sleep finishes
+        time.sleep(30)
 
     free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
     used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
@@ -141,6 +148,10 @@ def test_end_to_end(model):
     assert used_bytes < 2 * GiB_bytes
 
     llm.wake_up()
+    if use_v1:
+        # v1 returns before wake_up finishes
+        time.sleep(30)
+
     output2 = llm.generate(prompt, sampling_params)
 
     # cmp output

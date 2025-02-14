@@ -146,6 +146,12 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
+    def sleep(self, level: int = 1):
+        self.model_executor.sleep(level)
+
+    def wake_up(self):
+        self.model_executor.wake_up()
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -262,6 +268,12 @@ class EngineCoreProc(EngineCore):
             self.reset_prefix_cache()
         elif request_type == EngineCoreRequestType.PROFILE:
             self.model_executor.profile(request)
+        elif request_type == EngineCoreRequestType.SLEEP:
+            self.sleep(request)
+        elif request_type == EngineCoreRequestType.WAKE_UP:
+            self.wake_up()
+        else:
+            self.abort_requests(request)
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
