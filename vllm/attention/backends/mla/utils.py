@@ -309,8 +309,8 @@ class MLACommonState(AttentionState):
                 # For long-context models try not to over-allocate limiting
                 # kv-cache space, limiting it to 64k tokens
                 64 * 1024)
-            assert scheduler_config.max_num_seqs * cache_config.block_size \
-                > 64 * 1024
+            assert workspace_size > \
+                scheduler_config.max_num_seqs * cache_config.block_size
 
             self.chunked_prefill_workspace = torch.empty(
                 (workspace_size, model_config.get_head_size()),
