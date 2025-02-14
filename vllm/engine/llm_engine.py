@@ -430,6 +430,17 @@ class LLMEngine:
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
+        if self.device_config.device_type == "cuda":
+            model_gpu_load_time = (
+                self.model_executor.driver_worker.model_runner.model_load_time)
+            profile_time = self.model_executor.driver_worker.profile_time
+            cuda_graph_time = (
+                self.model_executor.driver_worker.model_runner.cuda_graph_capture_time)
+            total_gpu_load_time = (
+                elapsed + model_gpu_load_time + profile_time + cuda_graph_time)
+            logger.info(("GPU model loading (loading model weights, "
+                         "memory profiling, capturing graphs, init engine) "
+                         " %.2f seconds"), total_gpu_load_time)
 
     @classmethod
     def _get_executor_cls(cls,
@@ -1614,6 +1625,7 @@ class LLMEngine:
         time_prefill_requests: List[float] = []
         time_decode_requests: List[float] = []
         time_in_queue_requests: List[float] = []
+        time_per_prefill_token_requests: List[float] = []
         model_forward_time_requests: List[float] = []
         model_execute_time_requests: List[float] = []
         #   Metadata
@@ -1622,6 +1634,14 @@ class LLMEngine:
         n_requests: List[int] = []
         max_num_generation_tokens_requests: List[int] = []
         max_tokens_requests: List[int] = []
+        max_token_capacity_per_batch: int = min(
+            self.model_config.max_model_len *
+            self.scheduler_config.max_num_seqs,
+            self.scheduler_config.max_num_batched_tokens)
+        total_tokens_in_current_batch_requests: List[int] = []
+        total_tokens_in_queue: int = 0
+        request_with_evicted_tokens_requests: List[bool] = []
+        total_evicted_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
         # Lora requests
@@ -1643,9 +1663,25 @@ class LLMEngine:
         if self.lora_config:
             max_lora_stat = str(self.lora_config.max_loras)
 
+        # Calculate total tokens in queue
+        total_tokens_in_queue = 0
+        for scheduler in self.scheduler:
+            waiting_queue = scheduler.waiting
+            for waiting_seq_group in waiting_queue:
+                # Add prompt tokens
+                prompt_length = len(waiting_seq_group.prompt_token_ids)
+                total_tokens_in_queue += prompt_length
+                # Add expected generation tokens
+                if waiting_seq_group.sampling_params:
+                    total_tokens_in_queue += (
+                        waiting_seq_group.sampling_params.max_tokens)
+
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
+            # Track total tokens in current batch
+            total_tokens_in_current_batch = 0
+
             # For async postprocessor, already finished sequences need to be
             # not counted (to avoid double counting)
             actual_num_batched_tokens = scheduler_outputs.num_batched_tokens  # type: ignore
@@ -1674,6 +1710,7 @@ class LLMEngine:
                 # NOTE: a seq_group that completed all of its prefill tokens
                 # in the last iteration will have seq_group.is_prefill() = False
                 # with group_was_prefill = True
+                # Add token counting for current batch
                 if group_was_prefill:
                     # Number of prompt tokens.
                     num_prompt_tokens_iter += (
@@ -1688,6 +1725,10 @@ class LLMEngine:
                         # One generation token per finished prefill.
                         num_generation_tokens_from_prefill_groups += (
                             seq_group.num_seqs())
+
+                    total_tokens_in_current_batch +=\
+                        scheduled_seq_group.token_chunk_size
+
                 else:
                     # TPOTs.
                     latency = seq_group.get_last_token_latency()
@@ -1701,6 +1742,10 @@ class LLMEngine:
                     else:
                         actual_num_batched_tokens +=\
                             seq_group.state.current_step - 1
+
+                    total_tokens_in_current_batch += (
+                        1 if seq_group.state.current_step == 0 else
+                        seq_group.state.current_step)
 
                 # Because of chunked prefill, we can have a single sequence
                 # group that does multiple prompt_runs. To prevent logging
@@ -1723,6 +1768,10 @@ class LLMEngine:
                             now - seq_group.metrics.first_token_time)
                         time_inference_requests.append(
                             now - seq_group.metrics.first_scheduled_time)
+                        time_per_prefill_token_requests.append(
+                            (seq_group.metrics.first_token_time -
+                             seq_group.metrics.first_scheduled_time) /
+                            seq_group.num_seqs())
                     if seq_group.metrics.time_in_queue is not None:
                         time_in_queue_requests.append(
                             seq_group.metrics.time_in_queue)
@@ -1732,6 +1781,9 @@ class LLMEngine:
                     if seq_group.metrics.model_execute_time is not None:
                         model_execute_time_requests.append(
                             seq_group.metrics.model_execute_time * 1000)
+                    if seq_group.metrics.time_per_prefill_token is not None:
+                        time_per_prefill_token_requests.append(
+                            seq_group.metrics.time_per_prefill_token * 1000)
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
@@ -1742,6 +1794,8 @@ class LLMEngine:
                     max_num_generation_tokens_requests.append(
                         max(seq.get_output_len()
                             for seq in seq_group.get_seqs()))
+                    total_tokens_in_current_batch_requests.append(
+                        total_tokens_in_current_batch)
                     if seq_group.sampling_params is not None:
                         n_requests.append(seq_group.sampling_params.n)
                         max_tokens_requests.append(
@@ -1750,6 +1804,18 @@ class LLMEngine:
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
                     ])
+                    # Track if this request had any token evictions
+                    if self.device_config.device_type == "cuda":
+                        had_evicted_tokens = seq_group.metrics.num_evicted_tokens > 0
+                        total_evicted = seq_group.metrics.num_evicted_tokens
+                    else:
+                        # For CPU mode, no token evictions
+                        had_evicted_tokens = False
+                        total_evicted = 0
+
+                    request_with_evicted_tokens_requests.append(
+                        had_evicted_tokens)
+                    total_evicted_tokens_requests.append(total_evicted)
 
             # Number of generation tokens.
             #   num_batched_tokens equals the number of prompt_tokens plus the
@@ -1801,6 +1867,7 @@ class LLMEngine:
             time_prefill_requests=time_prefill_requests,
             time_decode_requests=time_decode_requests,
             time_in_queue_requests=time_in_queue_requests,
+            time_per_prefill_token_requests=time_per_prefill_token_requests,
             model_forward_time_requests=model_forward_time_requests,
             model_execute_time_requests=model_execute_time_requests,
             #   Metadata
@@ -1810,10 +1877,18 @@ class LLMEngine:
             max_num_generation_tokens_requests,
             n_requests=n_requests,
             max_tokens_requests=max_tokens_requests,
+            max_token_capacity_per_batch=max_token_capacity_per_batch,
+            total_tokens_in_current_batch_requests=
+            total_tokens_in_current_batch_requests,
+            total_tokens_in_queue=total_tokens_in_queue,
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
             waiting_lora_adapters=list(waiting_lora_adapters.keys()),
-            running_lora_adapters=list(running_lora_adapters.keys()))
+            running_lora_adapters=list(running_lora_adapters.keys()),
+            request_with_evicted_tokens_requests=
+            request_with_evicted_tokens_requests,
+            total_evicted_tokens_requests=total_evicted_tokens_requests,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
