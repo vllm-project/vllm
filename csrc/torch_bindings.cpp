@@ -348,10 +348,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("cutlass_scaled_sparse_mm", torch::kCUDA, &cutlass_scaled_sparse_mm);
 
   // CUTLASS sparse matrix compressor
-  ops.def(
-      "cutlass_sparse_compress_entry(Tensor! a_nzs, Tensor! a_meta,"
-      "                              Tensor a) -> bool");
-  ops.impl("cutlass_sparse_compress_entry", &cutlass_sparse_compress_entry);
+  ops.def("cutlass_sparse_compress(Tensor a) -> Tensor[]");
+  ops.impl("cutlass_sparse_compress", &cutlass_sparse_compress);
 
   // Mamba selective scan kernel
   ops.def(

@@ -408,13 +408,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
                                     sparsity_scheme=sparsity_scheme):
-            # FIXME(tlrmchlsmth): layers using W16A16 CUTLASS 2:4 sparse kernels
-            # currently produce bad output in some cases
-            if weight_quant is None:
-                logger.warning_once(
-                    "CompressedTensors24 scheme is disabled for the w16a16 "
-                    "case. Falling back to UnquantizedLinearMethod")
-                return None
             # Have a valid sparsity scheme
             # Validate layer is supported by Cutlass 2:4 Kernel
             model_compression_config = (None if sparsity_scheme is None

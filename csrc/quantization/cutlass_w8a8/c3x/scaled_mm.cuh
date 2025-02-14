@@ -53,12 +53,17 @@ struct cutlass_3x_gemm {
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
+  // These are the minimum alignments needed for the kernels to compile
+  static constexpr int AlignmentAB =
+      128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentCD = 4;
+
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAcc, float, ElementC, StrideC, 4, ElementD, StrideD, 4,
-          EpilogueSchedule, EVTCompute>::CollectiveOp;
+          ElementAcc, float, ElementC, StrideC, AlignmentCD, ElementD, StrideD,
+          AlignmentCD, EpilogueSchedule, EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
       sizeof(typename CollectiveEpilogue::SharedStorage);
@@ -69,8 +74,8 @@ struct cutlass_3x_gemm {
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, 
-          ElementAB, cutlass::layout::RowMajor, 16, 
-          ElementAB, cutlass::layout::ColumnMajor, 16, 
+          ElementAB, cutlass::layout::RowMajor, AlignmentAB, 
+          ElementAB, cutlass::layout::ColumnMajor, AlignmentAB, 
           ElementAcc, TileShape, ClusterShape,
           Stages,
           KernelSchedule>::CollectiveOp;

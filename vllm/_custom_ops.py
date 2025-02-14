@@ -564,22 +564,9 @@ def cutlass_sparse_compress(a: torch.Tensor) \
 
     # a_meta.dtype: torch.uint8 so elemsPerMetaElem = 8b / 2b_per_nz = 4
     elemsPerMetaElem = 4
+    assert (a.shape[1] % (2 * elemsPerMetaElem) == 0)
 
-    m = a.shape[0]
-    k = a.shape[1]
-    assert (k % 2 == 0)
-    a_nzs = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
-    a_meta = torch.empty((m, k // 2 // elemsPerMetaElem),
-                         dtype=torch.uint8,
-                         device=a.device)
-
-    if not (torch.ops._C.cutlass_sparse_compress_entry(a_nzs, a_meta, a)):
-        raise ValueError
-
-    assert (a_nzs.is_contiguous())
-    assert (a_meta.is_contiguous())
-
-    return a_nzs, a_meta
+    return torch.ops._C.cutlass_sparse_compress(a)
 
 
 def cutlass_scaled_sparse_mm(

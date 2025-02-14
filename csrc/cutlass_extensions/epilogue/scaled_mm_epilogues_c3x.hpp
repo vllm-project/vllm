@@ -16,6 +16,30 @@ namespace vllm::c3x {
 
 using namespace cute;
 
+template <typename T>
+struct identity {
+  CUTLASS_HOST_DEVICE
+  T operator()(T lhs) const { return lhs; }
+};
+
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct TrivialEpilogue {
+ private:
+  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
+  using Compute = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::epilogue::thread::Identity, ElementD, ElementAcc,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute = cutlass::epilogue::fusion::Sm90EVT<Compute, Accum>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  template <typename... Args>
+  static ArgumentType prepare_args(Args... args) {
+    return {};
+  }
+};
+
 /*
  * This class provides the common load descriptors for the
  * ScaledEpilogue[...] classes
@@ -145,6 +169,49 @@ struct ScaledEpilogueBias
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
   using Bias = typename SUPER::template RowLoad<ElementD>;
+
+  using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTCompute0 =
+      cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
+
+  using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiply_add, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0, Bias>;
+
+  using ArgumentType = typename EVTCompute::Arguments;
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales,
+                                   torch::Tensor const& bias) {
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
+
+    typename EVTCompute0::Arguments evt0_args{b_args};
+    return ArgumentType{a_args, evt0_args, bias_args};
+  }
+};
+
+/*
+ * This epilogue performs the same operation as ScaledEpilogueBias, but the
+ * bias is a column vector instead of a row vector. Useful e.g. if we are
+ * computing a GEMM via C^T += B^T A^T. This happens in the 2:4 sparse kernels.
+ */
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueColumnBias
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+  using Bias = typename SUPER::template ColLoad<ElementD>;
 
   using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
       cutlass::multiplies, float, float,
