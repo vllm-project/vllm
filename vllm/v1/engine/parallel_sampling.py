@@ -7,13 +7,14 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 
-class ParentRequestState:
-    """Info and state for parallel sampling request.
+class ParallelSamplingRequestManager:
+    """Info, state & processing for parallel sampling request.
     
     Store parent request ID and sampling params.
     Facilitate generating child request sampling params.
     When stream mode is disabled, then `self.request_output`
-    aggregates completions.
+    aggregates child request completions & transforms them
+    into a parent request completion.
     """
 
     request_id: str

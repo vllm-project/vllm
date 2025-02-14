@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
+from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
 
 import numpy as np
 
@@ -21,10 +21,10 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import cdiv, kill_process_tree
+from vllm.utils import cdiv, kill_process_tree, merge_async_iterators
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
-from vllm.v1.engine.parallel_sampling import ParentRequestState
+from vllm.v1.engine.parallel_sampling import ParallelSamplingRequestManager
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
@@ -244,7 +244,7 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
-    async def _generate_parallel_sampling(
+    def _generate_parallel_sampling(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -254,54 +254,29 @@ class AsyncLLM(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
-        """Generation completes for parallel sampling requests."""
-
-        parent_state = ParentRequestState(request_id, sampling_params)
-        n = parent_state.n
-
-        # Adapted from sglang:
-        # https://github.com/sgl-project/sglang/blob/
-        # 4fe92bfca5517f3cf5ca967fc5fcfdb7cf335f30/
-        # python/sglang/srt/managers/
-        # tokenizer_manager.py#L456-L532
+        """Generate completions for parallel sampling requests."""
+        req_mgr = ParallelSamplingRequestManager(request_id, sampling_params)
+        n = req_mgr.n
 
         # Aggregate generators for n child requests
         gens: List[AsyncGenerator[RequestOutput, None]] = []
-        active: Dict[asyncio.Task, int] = {}
         for idx in range(n):
-            c_sampling_params = parent_state.get_child_sampling_params(idx)
+            c_sampling_params = req_mgr.get_child_sampling_params(idx)
             child_gen = self._generate(
                 prompt=prompt,
                 sampling_params=c_sampling_params,
-                request_id=parent_state.get_child_request_id(idx),
+                request_id=req_mgr.get_child_request_id(idx),
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
             )
-            gen = parent_state.parallel_sampling_child_gen(child_gen, idx)
+            gen = req_mgr.parallel_sampling_child_gen(child_gen, idx)
             gens.append(gen)
-            active[asyncio.create_task(gen.__anext__())] = idx  # type: ignore
 
-        try:
-            while active:
-                done, _ = await asyncio.wait(
-                    active.keys(), return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    idx = active.pop(task)
-                    try:
-                        result = task.result()
-                        yield result
-                        # Schedule the next result
-                        active[asyncio.create_task(
-                            gens[idx].__anext__())] = idx  # type: ignore
-                    except StopAsyncIteration:
-                        continue
-        finally:
-            for task in active:
-                task.cancel()
+        return merge_async_iterators(*gens)
 
-    def generate(
+    async def generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
