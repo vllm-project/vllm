@@ -520,10 +520,7 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
         return _get_tokenizer_without_image_pad(tokenizer)
 
     def get_hf_processor(self) -> QwenVLProcessor:
-        tokenizer = self.ctx.tokenizer
-        assert isinstance(tokenizer, PreTrainedTokenizer)
-
-        return QwenVLProcessor(self.get_hf_config(), tokenizer)
+        return QwenVLProcessor(self.get_hf_config(), self.get_tokenizer())
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -604,6 +601,14 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
+
+    def _hf_processor_applies_repl(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
 
     def _get_mm_fields_config(
         self,
