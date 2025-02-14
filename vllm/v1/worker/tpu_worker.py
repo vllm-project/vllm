@@ -15,6 +15,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.scheduler import SchedulerOutput
@@ -170,6 +171,9 @@ class TPUWorker:
                 xp.start_trace(self.profile_dir)
             else:
                 xp.stop_trace()
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_runner.add_lora(lora_request)
 
     def load_model(self) -> None:
         self.model_runner.load_model()
