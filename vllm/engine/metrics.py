@@ -53,6 +53,8 @@ class Metrics:
 
         max_model_len = vllm_config.model_config.max_model_len
 
+        lora_labelnames = labelnames + ["lora_name"]
+
         # System stats
         #   Scheduler State
         self.gauge_scheduler_running = self._gauge_cls(
@@ -65,6 +67,17 @@ class Metrics:
             documentation="Number of requests waiting to be processed.",
             labelnames=labelnames,
             multiprocess_mode="sum")
+        self.gauge_lora_requests_running = self._gauge_cls(
+            name="vllm:num_lora_requests_running",
+            documentation="Number of requests currently, per LoRA.",
+            labelnames=lora_labelnames,
+            multiprocess_mode="sum")
+        self.gauge_lora_requests_waiting = self._gauge_cls(
+            name="vllm:num_lora_requests_waiting",
+            documentation="Number of requests waiting, per LoRA.",
+            labelnames=lora_labelnames,
+            multiprocess_mode="sum")
+        # Deprecated
         self.gauge_lora_info = self._gauge_cls(
             name="vllm:lora_requests_info",
             documentation="Running stats on lora requests.",
@@ -517,9 +530,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
                                          vllm_config=vllm_config)
 
-    def _log_gauge(self, gauge, data: Union[int, float]) -> None:
+    def _log_gauge(self, gauge, data: Union[int, float],
+                   **extra_labels) -> None:
         # Convenience function for logging to gauge.
-        gauge.labels(**self.labels).set(data)
+        combined_labels = {**self.labels, **extra_labels}
+        gauge.labels(**combined_labels).set(data)
 
     def _log_counter(self, counter, data: Union[int, float]) -> None:
         # Convenience function for logging to counter.
@@ -561,6 +576,14 @@ class PrometheusStatLogger(StatLoggerBase):
                         stats.cpu_prefix_cache_hit_rate)
         self._log_gauge(self.metrics.gauge_gpu_prefix_cache_hit_rate,
                         stats.gpu_prefix_cache_hit_rate)
+        for lora_name, lora_running in stats.running_lora_adapters.items():
+            self._log_gauge(self.metrics.gauge_lora_requests_running,
+                            lora_running,
+                            lora_name=lora_name)
+        for lora_name, lora_waiting in stats.waiting_lora_adapters.items():
+            self._log_gauge(self.metrics.gauge_lora_requests_waiting,
+                            lora_waiting,
+                            lora_name=lora_name)
         # Including max-lora in metric, in future this property of lora
         # config maybe extended to be dynamic.
         lora_info = {
