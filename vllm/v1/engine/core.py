@@ -149,7 +149,7 @@ class EngineCore:
         if not self.scheduler.has_unfinished_requests():
             return EngineCoreOutputs(
                 request_ids=[],
-                new_token_id_offsets=[],
+                new_token_id_offsets=None,
                 new_token_ids=[],
                 new_logprobs={},
                 new_prompt_logprobs_tensors={},
