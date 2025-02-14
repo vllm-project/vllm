@@ -1,18 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
 import pytest
 
-from vllm.config import (
-    VllmConfig,
-    ModelConfig,
-    CacheConfig,
-    SchedulerConfig,
-)
-from vllm.v1.core.scheduler_output import (
-    SchedulerOutput,
-    NewRequestData,
-    CachedRequestData,
-)
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
+                                           SchedulerOutput)
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
 
 @pytest.fixture
 def model_runner():
@@ -45,23 +39,25 @@ def model_runner():
     device = "cuda"
     return GPUModelRunner(vllm_config, device)
 
+
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
     new_reqs = []
     num_scheduled_tokens = {}
     total_num_scheduled_tokens = 0
     for req_id in req_ids:
-        new_reqs.append(NewRequestData(
-            req_id=req_id,
-            prompt_token_ids=[1, 2, 3],
-            prompt="test",
-            mm_inputs=[],
-            mm_hashes=[],
-            mm_positions=[],
-            sampling_params=SamplingParams(),
-            block_ids=[0],
-            num_computed_tokens=0,
-            lora_request=None,
-        ))
+        new_reqs.append(
+            NewRequestData(
+                req_id=req_id,
+                prompt_token_ids=[1, 2, 3],
+                prompt="test",
+                mm_inputs=[],
+                mm_hashes=[],
+                mm_positions=[],
+                sampling_params=SamplingParams(),
+                block_ids=[0],
+                num_computed_tokens=0,
+                lora_request=None,
+            ))
         num_scheduled_tokens[req_id] = 3
         total_num_scheduled_tokens += num_scheduled_tokens[req_id]
 
@@ -76,11 +72,14 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         free_encoder_input_ids=[],
     )
 
+
 def _is_req_scheduled(model_runner, req_id: str) -> bool:
     return req_id in model_runner.input_batch.req_id_to_index
 
+
 def _is_req_added(model_runner, req_id: str) -> bool:
     return req_id in model_runner.requests
+
 
 def test_update_states_new_request(model_runner):
     req_id = "req_0"
@@ -92,6 +91,7 @@ def test_update_states_new_request(model_runner):
     assert batch_changed is True
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
+
 
 def test_update_states_request_finished(model_runner):
     req_id = "req_0"
@@ -114,12 +114,13 @@ def test_update_states_request_finished(model_runner):
         finished_req_ids={req_id},
         free_encoder_input_ids=[],
     )
-    
+
     batch_changed = model_runner._update_states(scheduler_output)
     assert batch_changed is True
     assert not _is_req_added(model_runner, req_id)
     assert not _is_req_scheduled(model_runner, req_id)
-    
+
+
 def test_update_states_request_resumed(model_runner):
     req_id = "req_0"
 
@@ -141,11 +142,11 @@ def test_update_states_request_resumed(model_runner):
         finished_req_ids={},
         free_encoder_input_ids=[],
     )
-    
+
     model_runner._update_states(scheduler_output)
     assert _is_req_added(model_runner, req_id)
     assert not _is_req_scheduled(model_runner, req_id)
-    
+
     # resume req
     cached_req_data = CachedRequestData(
         req_id=req_id,
@@ -170,6 +171,7 @@ def test_update_states_request_resumed(model_runner):
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
 
+
 def test_update_states_no_changes(model_runner):
     req_id = "req_0"
 
@@ -179,7 +181,7 @@ def test_update_states_no_changes(model_runner):
     model_runner._update_states(scheduler_output)
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
-    
+
     # schedule req
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -191,15 +193,16 @@ def test_update_states_no_changes(model_runner):
         finished_req_ids=set(),
         free_encoder_input_ids=[],
     )
-    
+
     batch_changed = model_runner._update_states(scheduler_output)
     assert batch_changed is False
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
 
+
 def test_update_states_request_unscheduled(model_runner):
     req_ids = ("req_0", "req_1")
-    
+
     # new reqs
     scheduler_output = _schedule_new_request(*req_ids)
 
@@ -207,7 +210,7 @@ def test_update_states_request_unscheduled(model_runner):
 
     assert _is_req_added(model_runner, req_ids[0])
     assert _is_req_scheduled(model_runner, req_ids[0])
-    
+
     assert _is_req_added(model_runner, req_ids[1])
     assert _is_req_scheduled(model_runner, req_ids[1])
 
