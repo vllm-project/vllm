@@ -109,15 +109,21 @@ async def test_async_llm_refuses_prompt_logprobs_with_apc(
 
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+@pytest.mark.parametrize("engine_args_and_prompt",
+                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
+                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
-async def test_load(monkeypatch, output_kind: RequestOutputKind):
+async def test_load(monkeypatch, output_kind: RequestOutputKind,
+                    engine_args_and_prompt: Tuple[AsyncEngineArgs,
+                                                  PromptType]):
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
     # so that in the future when we switch, we don't have to change all the
     # tests.
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
+        engine_args, prompt = engine_args_and_prompt
 
-        engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 10000
@@ -130,7 +136,7 @@ async def test_load(monkeypatch, output_kind: RequestOutputKind):
         for request_id in request_ids:
             tasks.append(
                 asyncio.create_task(
-                    generate(engine, request_id, TEXT_PROMPT, output_kind,
+                    generate(engine, request_id, prompt, output_kind,
                              NUM_EXPECTED_TOKENS)))
 
         # Confirm that we got all the EXPECTED tokens from the requests.
