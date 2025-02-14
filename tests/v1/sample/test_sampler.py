@@ -378,6 +378,8 @@ def test_sampler_min_p(device: str, batch_size: int, min_p: float):
                     assert logits[batch_idx][token_id] != -float("inf")
 
 
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("bias_value", [-0.1, 1.2])
 def test_sampler_logit_bias(device: str, batch_size: int, bias_value: float):
     """

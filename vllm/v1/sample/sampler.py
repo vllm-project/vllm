@@ -193,6 +193,7 @@ class Sampler(nn.Module):
         valid_token_mask = probability_values >= adjusted_min_p
         # Apply mask using boolean indexing
         logits[~valid_token_mask] = -float('inf')
+        return logits
 
     def apply_logits_bias(
         self,
