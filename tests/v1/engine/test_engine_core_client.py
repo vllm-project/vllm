@@ -94,6 +94,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
+            log_stats=False,
         )
 
         MAX_TOKENS = 20
@@ -163,6 +164,7 @@ async def test_engine_core_client_asyncio(monkeypatch):
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
+            log_stats=True,
         )
 
         MAX_TOKENS = 20

@@ -85,6 +85,14 @@ def _test_processing_correctness(
         partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
     }
 
+    tokenizer_encode_kwargs = {}
+    if model_config.hf_config.model_type == "mllama":
+        # For Mllama, tokenizer will always add bos_token at the beginning of
+        # prompt by default, causing hf_processor outputs incorrect token ids.
+        # So we need use `add_special_tokens=False` here to leave bos_token
+        # to be added by the processor.
+        tokenizer_encode_kwargs = {"add_special_tokens": False}
+
     for batch_idx in range(num_batches):
         mm_data = {
             k:
@@ -122,7 +130,7 @@ def _test_processing_correctness(
             f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
         baseline_tokenized_result = baseline_processor.apply(
-            tokenizer.encode(prompt),
+            tokenizer.encode(prompt, **tokenizer_encode_kwargs),
             mm_data=mm_data,
             hf_processor_mm_kwargs={},
         )
@@ -131,7 +139,7 @@ def _test_processing_correctness(
             f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
         cached_tokenized_result = cached_processor.apply(
-            tokenizer.encode(prompt),
+            tokenizer.encode(prompt, **tokenizer_encode_kwargs),
             mm_data=mm_data,
             hf_processor_mm_kwargs={},
         )
@@ -155,10 +163,13 @@ def _test_processing_correctness(
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+    "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
     "mistral-community/pixtral-12b",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
+    "allenai/Molmo-7B-D-0924",
+    "allenai/Molmo-7B-O-0924",
     "nvidia/NVLM-D-72B",
     "Qwen/Qwen-VL-Chat",
     "Qwen/Qwen2-VL-2B-Instruct",

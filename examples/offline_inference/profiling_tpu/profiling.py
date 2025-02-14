@@ -24,7 +24,7 @@ def main(args: argparse.Namespace):
 
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**dataclasses.asdict(engine_args))
-    _ = xp.start_server(9012)
+    server = xp.start_server(9012)  # noqa: F841
 
     sampling_params = SamplingParams(
         temperature=0.0,

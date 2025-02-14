@@ -66,6 +66,7 @@ charset-normalizer==3.4.0
 click==8.1.7
     # via
     #   black
+    #   jiwer
     #   nltk
     #   ray
 colorama==0.4.6
@@ -187,6 +188,8 @@ jinja2==3.1.4
     # via
     #   datamodel-code-generator
     #   torch
+jiwer==3.0.5
+    # via -r requirements-test.in
 jmespath==1.0.1
     # via
     #   boto3
@@ -470,6 +473,8 @@ pyyaml==6.0.2
     #   timm
     #   transformers
     #   vocos
+rapidfuzz==3.12.1
+    # via jiwer
 ray[adag]==2.40.0
     # via -r requirements-test.in
 redis==5.2.0

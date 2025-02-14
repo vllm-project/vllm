@@ -59,7 +59,7 @@ class MyLLM(LLM):
         # a hack to make the script work.
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
         # at the top-level
-        del os.environ["CUDA_VISIBLE_DEVICES"]
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         # every worker will use 0.4 GPU, so that we can schedule
         # 2 instances on the same GPUs.
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = "0.4"

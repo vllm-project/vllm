@@ -17,7 +17,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 
 
 class Processor:
@@ -46,7 +46,7 @@ class Processor:
             model_config)
 
         # Multi-modal (huggingface) input mapper
-        self.mm_input_mapper_client = MMInputMapperClient(model_config)
+        self.mm_input_cache_client = MMInputCacheClient(model_config)
 
         # Multi-modal hasher (for images)
         self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
@@ -106,16 +106,24 @@ class Processor:
         assert priority == 0, "vLLM V1 does not support priority at the moment."
         assert trace_headers is None, "vLLM V1 does not support tracing yet."
 
-        # Process inputs.
+        # Process inputs, which includes:
+        # 1. Tokenize text prompt, with LoRA request if one exists.
+        # 2. For multimodal models with a merged preprocessor, preprocess
+        #   multimodal data and expand prompt token ids accordingly.
+        # 3. Apply prompt adapter to prompt token ids if one exists.
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        processed_inputs = self.input_processor(preprocessed_inputs)
-        self._validate_model_inputs(processed_inputs)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
+
+        # Process prompt and prompt token ids.
+        # Only applicable to multimodal models with legacy input processor.
+        processed_inputs = self.input_processor(preprocessed_inputs)
+
+        self._validate_model_inputs(processed_inputs)
 
         if is_encoder_decoder_inputs(processed_inputs):
             decoder_inputs = SingletonInputsAdapter(
@@ -200,8 +208,8 @@ class Processor:
                     key=lambda mm_input: modality_order_dict[list(
                         mm_input.modalities)[0]])
 
-            # Apply mm input cache update (and input mapper if necessary).
-            sorted_mm_inputs = self.mm_input_mapper_client.process_inputs(
+            # Apply mm input cache update and legacy input mapper if one exists.
+            sorted_mm_inputs = self.mm_input_cache_client.process_inputs(
                 mm_data=decoder_mm_data,
                 mm_hashes=sorted_mm_hashes,
                 mm_processor_kwargs=decoder_inputs.mm_processor_kwargs,

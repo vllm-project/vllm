@@ -12,6 +12,7 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -41,6 +42,7 @@ class EngineCoreClient(ABC):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
+        log_stats: bool,
     ) -> "EngineCoreClient":
 
         # TODO: support this for debugging purposes.
@@ -50,12 +52,12 @@ class EngineCoreClient(ABC):
                 "is not currently supported.")
 
         if multiprocess_mode and asyncio_mode:
-            return AsyncMPClient(vllm_config, executor_class)
+            return AsyncMPClient(vllm_config, executor_class, log_stats)
 
         if multiprocess_mode and not asyncio_mode:
-            return SyncMPClient(vllm_config, executor_class)
+            return SyncMPClient(vllm_config, executor_class, log_stats)
 
-        return InprocClient(vllm_config, executor_class)
+        return InprocClient(vllm_config, executor_class, log_stats)
 
     @abstractmethod
     def shutdown(self):
@@ -76,6 +78,9 @@ class EngineCoreClient(ABC):
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        raise NotImplementedError
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
@@ -89,6 +94,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
+        raise NotImplementedError
+
+    async def add_lora_async(self, lora_request: LoRARequest) -> None:
         raise NotImplementedError
 
 
@@ -123,6 +131,9 @@ class InprocClient(EngineCoreClient):
 
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
+
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        self.engine_core.add_lora(lora_request)
 
 
 class MPClient(EngineCoreClient):
@@ -204,13 +215,13 @@ class MPClient(EngineCoreClient):
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig,
-                 executor_class: Type[Executor]):
+    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor],
+                 log_stats: bool):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,
+            log_stats=log_stats,
         )
 
     def get_output(self) -> EngineCoreOutputs:
@@ -241,17 +252,20 @@ class SyncMPClient(MPClient):
     def reset_prefix_cache(self) -> None:
         self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
 
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        self._send_input(EngineCoreRequestType.ADD_LORA, lora_request)
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig,
-                 executor_class: Type[Executor]):
+    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor],
+                 log_stats: bool):
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=True,
+            log_stats=log_stats,
         )
 
         self.outputs_queue: Optional[asyncio.Queue[bytes]] = None
@@ -294,3 +308,6 @@ class AsyncMPClient(MPClient):
 
     async def reset_prefix_cache_async(self) -> None:
         await self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
+
+    async def add_lora_async(self, lora_request: LoRARequest) -> None:
+        await self._send_input(EngineCoreRequestType.ADD_LORA, lora_request)

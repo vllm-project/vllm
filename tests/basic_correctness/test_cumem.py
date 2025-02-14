@@ -118,7 +118,7 @@ def test_cumem_with_cudagraph():
 @pytest.mark.parametrize(
     "model",
     [
-        "meta-llama/Llama-3.2-1B",  # sleep mode with safetensors
+        "meta-llama/Llama-3.2-1B-Instruct",  # sleep mode with safetensors
         "facebook/opt-125m"  # sleep mode with pytorch checkpoint
     ])
 def test_end_to_end(model):

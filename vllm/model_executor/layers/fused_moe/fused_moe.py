@@ -596,7 +596,7 @@ def moe_align_block_size(
                                       dtype=torch.int32,
                                       device=topk_ids.device)
     if num_experts >= 224:
-        if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON:
+        if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts != 256:
             moe_align_block_size_triton(
                 topk_ids,
                 num_experts,
@@ -606,6 +606,7 @@ def moe_align_block_size(
                 num_tokens_post_pad,
             )
         else:
+            # Currently requires num_experts=256
             ops.sgl_moe_align_block_size(
                 topk_ids,
                 num_experts,

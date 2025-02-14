@@ -155,10 +155,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
-        marks=[pytest.mark.skipif(
-                TRANSFORMERS_VERSION < "4.49.0",
-                reason="HF model requires transformers>=4.49.0",
-            ), pytest.mark.core_model, pytest.mark.cpu_model],
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
@@ -215,7 +212,6 @@ VLM_TEST_SETTINGS = {
             "cherry_blossom": "<image>\nPlease infer the season with reason in details.",   # noqa: E501
         }),
         multi_image_prompt="image_1:<image>\nimage_2:<image>\nWhich image can we see the car and the tower?",    # noqa: E501
-        vllm_runner_kwargs={"hf_overrides": {"architectures": ["DeepseekVLV2ForCausalLM"]}},  # noqa: E501
         patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
         postprocess_inputs=model_utils.cast_dtype_post_processor("images"),
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
@@ -240,7 +236,7 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
-    "glm4": VLMTestInfo(
+    "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=identity,
@@ -351,7 +347,6 @@ VLM_TEST_SETTINGS = {
         postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
-        vllm_runner_kwargs={"hf_overrides": {"architectures": ["MantisForConditionalGeneration"]}},  # noqa: E501
         get_stop_token_ids=lambda tok: [128009],
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
@@ -404,11 +399,10 @@ VLM_TEST_SETTINGS = {
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
         test_type=(VLMTestType.IMAGE),
-        prompt_formatter=lambda img_prompt:"User: " + img_prompt + " Assistant:", # noqa: E501
+        prompt_formatter=identity,
         max_model_len=4096,
         max_num_seqs=2,
-        image_size_factors=[(),(1.0, 1.0, 1.0)],
-        patch_hf_runner=model_utils.mlomo_patch_hf_runner,
+        patch_hf_runner=model_utils.molmo_patch_hf_runner,
         postprocess_inputs=model_utils.molmo_post_processor,
     ),
     # Tests for phi3v currently live in another file because of a bug in
@@ -438,7 +432,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         marks=[large_gpu_mark(min_gb=48)],
     ),
-    "qwen": VLMTestInfo(
+    "qwen_vl": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=identity,

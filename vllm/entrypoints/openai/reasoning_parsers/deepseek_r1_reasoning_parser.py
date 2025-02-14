@@ -128,7 +128,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         # Thus we assume the reasoning content is always at the start.
         # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f
         if self.think_end_token not in model_output:
-            return None, model_output
+            return model_output, None
         else:
             # Add a start token if it's missing to keep compatibility.
             if self.think_start_token not in model_output:
