@@ -54,17 +54,18 @@ _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
-                     "score", "reward"]
+                     "score", "reward", "transcription"]
 
 _ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
-                        "draft"]
+                        "draft", "transcription"]
 
-RunnerType = Literal["generate", "pooling", "draft"]
+RunnerType = Literal["generate", "pooling", "draft", "transcription"]
 
 _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
     "generate": ["generate"],
     "pooling": ["embed", "classify", "score", "reward"],
     "draft": ["draft"],
+    "transcription": ["transcription"],
 }
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
@@ -485,6 +486,8 @@ class ModelConfig:
             return "embed"
         if ModelRegistry.is_cross_encoder_model(architectures):
             return "score"
+        if ModelRegistry.is_transcription_model(architectures):
+            return "transcription"
 
         suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
@@ -517,6 +520,8 @@ class ModelConfig:
         runner_support: Dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
+            "transcription":
+            ModelRegistry.is_transcription_model(architectures),
             "generate": ModelRegistry.is_text_generation_model(architectures),
             "pooling": ModelRegistry.is_pooling_model(architectures),
         }
@@ -987,37 +992,7 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
-        if not self.is_deepseek_mla or envs.VLLM_MLA_DISABLE:
-            return False
-
-        if self.quantization is not None and self.quantization not in [\
-            "fp8", "compressed-tensors"]:
-            logger.warning(
-                "MLA is not supported with %s quantization. "
-                "Disabling MLA.", self.quantization)
-            return False
-
-        # If using a "compressed-tensors" checkpoint, check that all groups
-        # have fp8 for both weights and activations.
-        if self.quantization == "compressed-tensors":
-            quant_config = self._parse_quant_hf_config()
-            for group_name, cfg in quant_config.get("config_groups", {
-                    "": {}
-            }).items():
-                act_cfg = cfg.get("input_activations", {})
-                act_type = None if act_cfg is None else act_cfg.get("type", "")
-                w_cfg = cfg.get("weights", {})
-                w_type = None if w_cfg is None else w_cfg.get("type", "")
-                if act_type != "fp8" or w_type != "fp8":
-                    logger.warning(
-                        "compressed-tensors MLA support requires fp8 "
-                        "activations and weights in group '%s', but got "
-                        "activations type '%s' and weights type '%s'.\n "
-                        "Full config: %s", group_name, act_type, w_type,
-                        quant_config)
-                    return False
-
-        return True
+        return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:

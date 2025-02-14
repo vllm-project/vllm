@@ -8,12 +8,12 @@ from typing import (Any, Callable, Dict, Iterable, List, NamedTuple, Optional,
 import torch
 from PIL.Image import Image
 from pytest import MarkDecorator
-from transformers import (AutoModelForCausalLM, BatchEncoding,
-                          PreTrainedTokenizerBase)
+from transformers import AutoModelForCausalLM, BatchEncoding
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config import TaskOption
 from vllm.sequence import SampleLogprobs
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import identity
 
 from .....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, _ImageAssets
@@ -100,8 +100,7 @@ class VLMTestInfo(NamedTuple):
     vllm_runner_kwargs: Optional[Dict[str, Any]] = None
 
     # Optional callable which gets a list of token IDs from the model tokenizer
-    get_stop_token_ids: Optional[Callable[[PreTrainedTokenizerBase],
-                                          List[int]]] = None
+    get_stop_token_ids: Optional[Callable[[AnyTokenizer], list[int]]] = None
     # Optional list of strings to stop generation, useful when stop tokens are
     # not special tokens in the tokenizer
     stop_str: Optional[List[str]] = None
@@ -156,8 +155,6 @@ class VLMTestInfo(NamedTuple):
 
     marks: Optional[List[MarkDecorator]] = None
 
-    tokenizer_mode: str = "auto"
-
     def get_non_parametrized_runner_kwargs(self):
         """Returns a dictionary of expandable kwargs for items that are used
         in all test types, which are NOT used when creating the parametrized
@@ -180,7 +177,6 @@ class VLMTestInfo(NamedTuple):
             "hf_model_kwargs": self.hf_model_kwargs,
             "stop_str": self.stop_str,
             "patch_hf_runner": self.patch_hf_runner,
-            "tokenizer_mode": self.tokenizer_mode
         }
 
 
