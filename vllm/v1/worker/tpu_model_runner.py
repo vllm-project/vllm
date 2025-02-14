@@ -39,30 +39,6 @@ _ENABLE_TOP_P = False
 _MAX_NUM_SAMPLES = 128
 
 
-@dataclass
-class PromptInputData:
-
-    # xw32: what are those?
-    req_ids: List
-    prompt_lens: List
-    input_tokens: List
-    input_positions: List
-    attn_metadata: List
-
-    def zipped(self):
-        return zip(self.req_ids, self.prompt_lens, self.input_tokens,
-                   self.input_positions, self.attn_metadata)
-
-
-@dataclass
-class DecodeInputData:
-    # xw32: similar to PromptInputData, what are those?
-    req_ids: List
-    input_tokens: Optional[torch.Tensor] = None
-    input_positions: Optional[torch.Tensor] = None
-    attn_metadata: Optional[PallasMetadata] = None
-
-
 class TPUModelRunner(ModelRunnerBase):
 
     def __init__(
@@ -92,258 +68,65 @@ class TPUModelRunner(ModelRunnerBase):
         # KV caches for forward pass
         self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
+        # xw32: Don't need the `prefill_input_positions` because prefill_input_positions was used in _prepare_prompt_inputs previously and we don't need it with the new kernel.
         # Used to initialize positions for the individual prefills
         # self.prefill_input_positions = torch.tensor(range(self.max_model_len),
         #                                             device="cpu",
         #                                             dtype=torch.int32).reshape(
         #                                                 1, -1)
 
-        # migrate from GPUModelRunner begins
-        # self.kv_caches already exists
-        # What else values do I need?
-
-    def _prepare_prompt_inputs(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> PromptInputData:
-        # xw32 note, to be deleted later. Cannot use pdb in this file. Will run into an error
-        # "Got fatal signal from worker processes, shutting down. See stack trace above for root cause issue." if doing so.
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        assert total_num_scheduled_tokens > 0
-        num_reqs = self.input_batch.num_reqs
-        assert num_reqs > 0
-
-        req_ids = []
-        prompt_lens = []
-        input_tokens_list = []
-        input_positions_list = []
-        attn_metadata_list = []
-        for req_id in self.input_batch.req_ids[:num_reqs]:
-            assert req_id is not None
-            req_index = self.input_batch.req_id_to_index[req_id]
-            req_state = self.requests[req_id]
-
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
-                req_id]
-            num_computed_tokens = req_state.num_computed_tokens
-            num_prompt_tokens = len(req_state.prompt_token_ids)
-
-            # Detect whether this is a prompt (can be full or chunked)
-            if num_computed_tokens >= num_prompt_tokens:
-                # This is a decode => Skip
-                continue
-
-            # This is a prompt
-            req_ids.append(req_id)
-
-            # Prompt len
-            prompt_len = num_scheduled_tokens
-            prompt_lens.append(prompt_len)
-            padded_prompt_len = _get_padded_prefill_len(prompt_len)
-            assert padded_prompt_len <= self.max_model_len
-
-            # Seq len
-            seq_len = num_computed_tokens + prompt_len
-
-            # Input tokens
-            input_tokens = torch.zeros((1, padded_prompt_len),
-                                       dtype=torch.int32,
-                                       device="cpu")
-            input_tokens[:, :prompt_len] = torch.from_numpy(
-                self.input_batch.token_ids_cpu[req_index,
-                                               num_computed_tokens:seq_len])
-            # input_tokens = torch.from_numpy(self.input_batch.token_ids_cpu[
-            #     req_index, num_computed_tokens:padded_seq_len].reshape(1, -1))
-            # input_tokens[:, prompt_len:] = 0
-            input_tokens_list.append(input_tokens.to(self.device))
-
-            # Input positions
-            input_positions = torch.zeros((1, padded_prompt_len),
-                                          dtype=torch.int32,
-                                          device="cpu")
-            input_positions[:, :
-                            prompt_len] = self.prefill_input_positions[:,
-                                                                       num_computed_tokens:
-                                                                       seq_len]
-            # input_positions[:, prompt_len:] = 0
-            input_positions_list.append(input_positions.to(self.device))
-
-            # Slot mapping
-            block_table_cpu_tensor = \
-                self.input_batch.block_table.get_cpu_tensor()
-            block_numbers = block_table_cpu_tensor[req_index,
-                                                   input_positions //
-                                                   self.block_size].reshape(
-                                                       1, -1)
-
-            block_offsets = input_positions % self.block_size
-            slot_mapping = block_numbers * self.block_size + block_offsets
-            slot_mapping[:, prompt_len:] = _PAD_SLOT_ID
-            slot_mapping = slot_mapping.long()
-
-            # Block table
-            block_table = None
-            if num_computed_tokens > 0:
-                block_table = block_table_cpu_tensor[req_index].unsqueeze(0)
-                block_table = block_table.to(self.device)
-
-            # Context len
-            context_len = 0
-            if num_computed_tokens > 0:
-                context_len = seq_len
-            context_lens = torch.tensor([context_len],
+        # xw32: below are copied from the gpu_model_runner.py. Can be used for
+        # capture the graph, etc.
+        # Persistent buffers for XLA graphs.
+        self.input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.device)
+        self.positions = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int64,
+                                     device=self.device)
+        
+        # In gpu_model_runner.py, inputs_embeds is only used for multimodal. So we don't need it for now.
+        # self.inputs_embeds = torch.zeros(
+        #     (self.max_num_tokens, self.hidden_size),
+        #     dtype=self.dtype,
+        #     device=self.device)
+        
+        # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        self.arange_np = np.arange(max(self.max_num_reqs + 1,
+                                       self.max_model_len),
+                                   dtype=np.int32)
+        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
+        # a faster version of creating a new tensor every time. Thus, we should
+        # not make any assumptions about the values in these tensors.
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int32,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.input_ids_np = self.input_ids_cpu.numpy()
+        self.positions_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.positions_np = self.positions_cpu.numpy()
+        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
+                                            dtype=torch.int64,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
+        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=self.pin_memory)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+        self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
                                         dtype=torch.int32,
-                                        device="cpu")
-
-            # Effective query len
-            effective_query_lens = torch.tensor([prompt_len],
-                                                dtype=torch.int32,
-                                                device="cpu")
-
-            # Attn metadata
-            attn_metadata_list.append(
-                PallasMetadata(
-                    num_prefills=1,
-                    num_prefill_tokens=0,  # NOTE: This is not used.
-                    num_decode_tokens=0,
-                    slot_mapping=slot_mapping.to(self.device),
-                    multi_modal_placeholder_index_maps=None,
-                    enable_kv_scales_calculation=True,
-                    block_tables=block_table,
-                    context_lens=context_lens.to(self.device),
-                    effective_query_lens=effective_query_lens.to(self.device),
-                ))
-
-            # TODO: Remove this
-            # if num_computed_tokens > 0:
-            #     print("-------------------")
-            #     print("input_tokens.shape = {}".format(input_tokens.shape))
-            #     print("input_positions.shape = {}".format(
-            #         input_positions.shape))
-            #     print("slot_mapping.shape = {}".format(slot_mapping.shape))
-            #     print("block_table.shape = {}".format(block_table.shape))
-            #     print("context_lens.shape = {} data = {}".format(
-            #         context_lens.shape, context_lens))
-            #     print("effective_query_lens.shape = {} data = {}".format(
-            #         effective_query_lens.shape, effective_query_lens))
-
-        return PromptInputData(
-            req_ids=req_ids,
-            prompt_lens=prompt_lens,
-            input_tokens=input_tokens_list,
-            input_positions=input_positions_list,
-            attn_metadata=attn_metadata_list,
-        )
-
-    def _prepare_decode_inputs(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> DecodeInputData:
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        assert total_num_scheduled_tokens > 0
-        num_reqs = self.input_batch.num_reqs
-        assert num_reqs > 0
-
-        block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
-
-        req_ids = []
-        req_indices = []
-        input_tokens = []
-        input_positions = []
-        slot_mapping = []
-        context_lens = []
-        for req_id in self.input_batch.req_ids[:num_reqs]:
-            assert req_id is not None
-            req_index = self.input_batch.req_id_to_index[req_id]
-            req_state = self.requests[req_id]
-
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
-                req_id]
-            num_computed_tokens = req_state.num_computed_tokens
-            num_prompt_tokens = len(req_state.prompt_token_ids)
-
-            # Detect whether this is a decode
-            if num_computed_tokens < num_prompt_tokens:
-                # This is a prompt => Skip
-                continue
-
-            # This is a decode
-            req_ids.append(req_id)
-            req_indices.append(req_index)
-
-            # Seq len
-            seq_len = num_computed_tokens + num_scheduled_tokens
-
-            # Sanity check decode
-            assert num_scheduled_tokens == 1
-            assert seq_len == req_state.num_tokens
-
-            # Input token
-            input_tokens.append([
-                self.input_batch.token_ids_cpu[req_index, num_computed_tokens]
-            ])
-
-            # Position
-            input_positions.append([num_computed_tokens])
-
-            # Slot mapping
-            block_number = block_table_cpu_tensor[req_index,
-                                                  num_computed_tokens //
-                                                  self.block_size]
-            block_offset = num_computed_tokens % self.block_size
-            slot_id = block_number * self.block_size + block_offset
-            slot_mapping.append([slot_id])
-
-            # Context len
-            context_lens.append(seq_len)
-
-        # Compute padding
-        batch_size = len(input_tokens)
-        padded_batch_size = _get_padded_batch_size(batch_size)
-        num_padding = padded_batch_size - batch_size
-
-        # Add padding
-        input_tokens.extend([[0]] * num_padding)
-        input_positions.extend([[0]] * num_padding)
-        slot_mapping.extend([[_PAD_SLOT_ID]] * num_padding)
-        context_lens.extend([0] * num_padding)
-        req_indices.extend([0] * num_padding)
-
-        # Create tensors
-        input_tokens_tensor = torch.tensor(input_tokens,
-                                           dtype=torch.int32,
-                                           device="cpu")
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.int32,
-                                              device="cpu")
-        slot_mapping_tensor = torch.tensor(slot_mapping,
-                                           dtype=torch.int64,
-                                           device="cpu")
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int32,
-                                           device="cpu")
-        block_tables_tensor = block_table_cpu_tensor[req_indices]
-
-        # Attn metadata
-        attn_metadata = PallasMetadata(
-            num_prefills=0,
-            num_prefill_tokens=0,
-            num_decode_tokens=padded_batch_size,
-            slot_mapping=slot_mapping_tensor.to(self.device),
-            multi_modal_placeholder_index_maps=None,
-            enable_kv_scales_calculation=True,
-            block_tables=block_tables_tensor.to(self.device),
-            context_lens=context_lens_tensor.to(self.device),
-            effective_query_lens=None,
-        )
-
-        return DecodeInputData(
-            req_ids=req_ids,
-            input_tokens=input_tokens_tensor.to(self.device),
-            input_positions=input_positions_tensor.to(self.device),
-            attn_metadata=attn_metadata)
+                                        device="cpu",
+                                        pin_memory=self.pin_memory)
+        self.seq_lens_np = self.seq_lens_cpu.numpy()
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+
+        
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -440,14 +223,10 @@ class TPUModelRunner(ModelRunnerBase):
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
+            num_seqs=num_reqs,
             block_table=(
                 self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=slot_mapping,
-            use_cascade=False,
-            common_prefix_len=0,
-            cu_prefix_query_lens=None,
-            prefix_kv_lens=None,
-            suffix_kv_lens=None,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -483,11 +262,10 @@ class TPUModelRunner(ModelRunnerBase):
         with set_forward_context(attn_metadata, self.vllm_config): 
             positions = self.positions[:num_input_tokens]
             selected_token_ids = self.model(
-                input_ids=input_ids,
-                positions=positions,
+                token_ids=input_ids,
+                position_ids=positions,
                 kv_caches=self.kv_caches,
                 attn_metadata=None,
-                inputs_embeds=inputs_embeds,
             )
 
         num_reqs = self.input_batch.num_reqs
@@ -606,7 +384,7 @@ class TPUModelRunner(ModelRunnerBase):
         # old code ends
 
     def load_model(self) -> None:
-        logger.info("xw32 TPUModelRunner.load_model.")
+        logger.info("xw32 TPUModelRunner.load_model begins.")
         self.device = self.device_config.device
 
         # NOTE(woosuk): While the executor assigns the TP ranks to the worker
@@ -634,8 +412,11 @@ class TPUModelRunner(ModelRunnerBase):
         #                            backend="openxla",
         #                            fullgraph=True,
         #                            dynamic=False)
+        logger.info("xw32 TPUModelRunner.load_model ends.")
 
-    @torch.inference_mode()
+    # @torch.inference_mode() fails so I disabled it.
+    # It's also not in the original v1 tpu_model_runner.py
+    # @torch.inference_mode()
     def dummy_run(
         self,
         kv_caches,
@@ -643,10 +424,26 @@ class TPUModelRunner(ModelRunnerBase):
         seq_len: Optional[int] = None,
         exec_mode: Optional[ExecutionMode] = None,
     ) -> None:
-        logger.info(f"xw32 TPUModelRunner.dummy_run. {self.input_ids.shape=}, {self.positions.shape=}, {slot_mapping.shape=}")
-        # xw32 qq: what are input_ids and positions and slot_mapping? What are their shapes?
+        logger.info(f"xw32 TPUModelRunner.dummy_run. {self.input_ids.shape=}, {self.positions.shape=}, {num_tokens=}, {self.input_ids.device=}")
+        # xw32 qq: what are input_ids and positions and slot_mapping? What are their shapes? Here is the answer:
+        # xw32 TPUModelRunner.dummy_run. self.input_ids.shape=torch.Size([8192]), self.positions.shape=torch.Size([8192]), num_tokens=16, 32, ..., self.input_ids.device=device(type='xla', index=0)
         input_ids = self.input_ids[:num_tokens]
         position_ids = self.positions[:num_tokens]
+        slot_mapping = torch.zeros(num_tokens,
+                                   dtype=torch.int64,
+                                   device=self.device)
+        block_tables = torch.zeros(
+            (num_tokens, self.max_num_blocks_per_req),
+            dtype=torch.int32,
+            device=self.device)
+        context_lens = torch.ones((num_tokens, ),
+                                  dtype=torch.int32,
+                                  device=self.device)
+        block_tables = torch.zeros(
+            (num_tokens, self.max_num_blocks_per_req),
+            dtype=torch.int32,
+            device=self.device)
+        query_start_loc = torch.zeros(num_tokens+1, dtype=torch.int32, device=self.device)
         # how do I set torch._dynamo.mark_dynamic?
         # The attn_metadata is used in torch._dynamo.mark_dynamic.
         # attn_metadata = PallasMetadata(
@@ -660,9 +457,18 @@ class TPUModelRunner(ModelRunnerBase):
         #    context_lens=None,
         #    effective_query_lens=None,
         #)
+        attn_metadata = PallasMetadata(
+            slot_mapping=slot_mapping,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            query_start_loc=query_start_loc,
+            num_seqs=num_tokens,  # xw32: is it correct?
+        )
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
+            logger.info(f"xw32 TPUModelRunner.dummy_run. before calling self.model, {input_ids.shape=}, {position_ids.shape=}")
             self.model(input_ids, position_ids, None, kv_caches)
+            logger.info(f"xw32 TPUModelRunner.dummy_run. after calling self.model")
 
         # old code begins. TODO(xw32): delete
         # exec_mode = ExecutionMode(exec_mode)
@@ -856,7 +662,8 @@ class ModelWrapperV1(nn.Module):
                 memory profiling at initialization.
         """
         # Skip this in memory profiling at initialization.
-        # logger.info("xw32 ModelWrapperV1.forward.")
+        logger.info("xw32 ModelWrapperV1.forward.")
+        print(f'xw32 ModelWrapperV1.forward', flush=True)
         print(f'xw32 ModelWrapperV1.forward {token_ids=}')
         print(f'xw32 ModelWrapperV1.forward {position_ids=}')
         print(f'xw32 ModelWrapperV1.forward {attn_metadata=}')
@@ -882,19 +689,26 @@ class ModelWrapperV1(nn.Module):
             attn_metadata.slot_mapping = slot_mapping
 
         assert self.model is not None
+        print(f'xw32 ModelWrapperV1.forward, right before calling self.model, {token_ids=}', flush=True)
         hidden_states = self.model(
             token_ids,
             position_ids,
             kv_caches,
             attn_metadata,
         )
+        print(f'xw32 ModelWrapperV1.forward, right after calling self.model, {hidden_states.shape=}', flush=True)
 
-        hidden_states = hidden_states.flatten(0, 1)
+        # hidden_states = hidden_states.flatten(0, 1) is not needed because previously hidden_states has shape [bs, T, C] and we need to combine the first 2 dimensions.
+        # hidden_states = hidden_states.flatten(0, 1)
+        print(f'xw32 ModelWrapperV1.forward, right after calling hidden_states.flatten, {hidden_states.shape=}', flush=True)
         logits = self.model.compute_logits(hidden_states, None)
+        print(f'xw32 ModelWrapperV1.forward, right after calling self.model.compute_logits', flush=True)
 
         # Greedy sampling.
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        print(f'xw32 ModelWrapperV1.forward, right after calling torch.argmax', flush=True)
         argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+        print(f'xw32 ModelWrapperV1.forward, right after calling argmax_token_ids.squeeze', flush=True)
         return argmax_token_ids
 
 

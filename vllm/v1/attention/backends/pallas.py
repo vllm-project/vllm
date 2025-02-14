@@ -62,8 +62,10 @@ class PallasAttentionBackend(AttentionBackend):
             v_cache[:, dst_indices] = v_cache[:, src_indices]
 
 
+# Why remove the base class AttentionMetadata. Because the base requires
+# to set num_prefills, num_prefill_tokens, and num_decode_tokens.
 @dataclass
-class PallasMetadata(AttentionMetadata):
+class PallasMetadata():
 
     # old begins
     # Currently, input sequences can only contain all prefills
@@ -99,17 +101,13 @@ class PallasMetadata(AttentionMetadata):
     # |---------- context_len ----------|
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
-    num_actual_tokens: int  # Number of tokens excluding padding.
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    num_seqs: int
-    seq_lens: torch.Tensor
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
 
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
+    # Used in the PallasAttentionBackendImpl
+    slot_mapping: torch.Tensor
+    block_tables: torch.Tensor
+    context_lens: torch.Tensor
+    query_start_loc: torch.Tensor
+    num_seqs: int
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
@@ -170,15 +168,15 @@ class PallasAttentionBackendImpl(AttentionImpl):
         """Forward pass with Pallas attention.
 
         Args:
-            query: shape = [num_tokens, num_heads, head_size]
-            key: shape = [num_tokens, num_kv_heads, head_size]
-            value: shape = [num_tokens, num_kv_heads, head_size]
+            query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size]
+            value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        print(f'xw32 PallasAttentionBackendImpl.forward  begins {query.shape=}')
+        print(f'xw32 PallasAttentionBackendImpl.forward  begins {query.shape=}, {key.shape=}')
 
         if attn_metadata is None:
             if output is None:
@@ -186,7 +184,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
             return output
 
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
-        num_tokens, num_heads, head_size = query.shape
+        num_tokens, hidden_size = query.shape
+        query = query.view(num_tokens, self.num_heads, self.head_size)
+        key = key.view(num_tokens, self.num_kv_heads, self.head_size)
+        value = value.view(num_tokens, self.num_kv_heads, self.head_size)
 
         if kv_cache[0].numel() > 0:
             print('xw32 write to kv cache')
