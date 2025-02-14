@@ -445,7 +445,7 @@ class Scheduler:
         new_running: List[Request] = []
         output = EngineCoreOutputs(
             request_ids=[],
-            new_token_id_offsets=[],
+            new_token_id_offsets=None,
             new_token_ids=[],
             new_logprobs={},
             new_prompt_logprobs_tensors={},
@@ -458,8 +458,7 @@ class Scheduler:
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
         offset = 0
-        count = 0
-        for request in self.running:
+        for i, request in enumerate(self.running):
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
             if num_tokens_scheduled == 0:
@@ -521,7 +520,12 @@ class Scheduler:
             if new_token_ids or prompt_logprobs_tensors is not None:
                 # Update EngineCoreOutputs for this Request.
                 output.request_ids.append(req_id)
-                output.new_token_id_offsets.append(offset)
+
+                if num_new_tokens > 1 or output.new_token_id_offsets is not None:
+                    if output.new_token_id_offsets is None:
+                        output.new_token_id_offsets = [1] * i
+                    output.new_token_id_offsets.append(offset)
+
                 new_ids = request.output_token_ids[-num_new_tokens:]
                 output.new_token_ids += new_ids
 
@@ -535,17 +539,16 @@ class Scheduler:
                 events = request.take_events()
                 if events is not None:
                     if output.events is None:
-                        output.events = [None] * count
+                        output.events = [None] * i
                     output.events.append(events)
-                offset = offset + len(new_ids)
-                count = count + 1
+                offset = offset + num_new_tokens
 
             if not stopped:
                 new_running.append(request)
 
         # Add sentinel to make output processing simpler.
         num_new_tokens = len(output.new_token_ids)
-        if num_new_tokens > 0:
+        if num_new_tokens > 0 and output.new_token_id_offsets is not None:
             output.new_token_id_offsets.append(num_new_tokens)
 
         self.running = new_running
