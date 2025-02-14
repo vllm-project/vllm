@@ -3,6 +3,7 @@
 import asyncio
 import time
 import uuid
+from contextlib import ExitStack
 from typing import Dict, List, Optional
 
 import pytest
@@ -172,14 +173,13 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
             with pytest.raises(Exception) as e_info:
                 core_client._call_utility("echo", None, "help!")
 
-            assert str(e_info.value) == "Failed: help!"
+            assert str(e_info.value) == "Call to echo method failed: help!"
 
 
-@pytest.mark.skip("there is currently an async client shutdown hang")
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_asyncio(monkeypatch):
 
-    with monkeypatch.context() as m:
+    with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
         # Monkey-patch core engine utility function to test.
@@ -196,6 +196,7 @@ async def test_engine_core_client_asyncio(monkeypatch):
             executor_class=executor_class,
             log_stats=True,
         )
+        after.callback(client.shutdown)
 
         MAX_TOKENS = 20
         params = SamplingParams(max_tokens=MAX_TOKENS)
@@ -244,4 +245,4 @@ async def test_engine_core_client_asyncio(monkeypatch):
         with pytest.raises(Exception) as e_info:
             await core_client._call_utility_async("echo", None, "help!")
 
-        assert str(e_info.value) == "Failed: help!"
+        assert str(e_info.value) == "Call to echo method failed: help!"

@@ -4,9 +4,11 @@ import queue
 import signal
 import threading
 import time
+from inspect import isclass, signature
 from multiprocessing.connection import Connection
 from typing import Any, List, Tuple, Type
 
+import msgspec
 import psutil
 import zmq
 import zmq.asyncio
@@ -263,16 +265,32 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
-            call_id, method, args, unary = request
+            call_id, method_name, args, unary = request
             output = UtilityOutput(call_id)
             try:
-                output.result = getattr(self, method)(*args)
+                method = getattr(self, method_name)
+                output.result = method(
+                    *self._convert_msgspec_args(method, args))
             except BaseException as e:
-                logger.exception("Invocation of %s method failed", method)
-                output.failure_message = str(e)
+                logger.exception("Invocation of %s method failed", method_name)
+                output.failure_message = (f"Call to {method_name} method"
+                                          f" failed: {str(e)}")
             if not unary:
                 self.output_queue.put_nowait(
                     EngineCoreOutputs(utility_output=output))
+
+    @staticmethod
+    def _convert_msgspec_args(method, args):
+        """If a provided arg type doesn't match corresponding target method
+         arg type, try converting to msgspec object."""
+        if not args:
+            return args
+        arg_types = signature(method).parameters.values()
+        return tuple(
+            msgspec.convert(v, type=p.annotation) if isclass(p.annotation)
+            and issubclass(p.annotation, msgspec.Struct)
+            and not isinstance(v, p.annotation) else v
+            for v, p in zip(args, arg_types))
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
