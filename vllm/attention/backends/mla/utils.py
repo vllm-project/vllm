@@ -505,8 +505,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         if self.vllm_flash_attn_version is not None:
             fa_args["fa_version"] = self.vllm_flash_attn_version
 
-        attn_output = flash_attn_varlen_func(**fa_args).view(
-            -1, self.num_heads, q.shape[-1])[..., :v.shape[-1]].reshape(
-                -1, self.num_heads * v.shape[-1])
+        attn_output = flash_attn_varlen_func(**fa_args)\
+                .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
+                    .reshape(-1, self.num_heads * v.shape[-1])
 
         return self.o_proj(attn_output)[0]
