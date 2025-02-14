@@ -50,9 +50,16 @@ def resolve_transformers_fallback(model_config: ModelConfig,
         custom_module = None
         auto_map = getattr(model_config.hf_config, "auto_map", None)
         if auto_map is not None and "AutoModel" in auto_map:
-            custom_module = get_class_from_dynamic_module(
-                model_config.hf_config.auto_map["AutoModel"],
-                model_config.model)
+            try:
+                custom_module = get_class_from_dynamic_module(
+                    model_config.hf_config.auto_map["AutoModel"],
+                    model_config.model)
+            except ModuleNotFoundError as e:
+                raise ValueError(
+                    f"'{model_config.model}' might be a custom model defined "
+                    "on the Hub. If you trust the author and have read the "
+                    "code, try using `--trust-remote-code` or "
+                    "`trust_remote_code`.") from e
         # TODO(Isotr0py): Further clean up these raises.
         # perhaps handled them in _ModelRegistry._raise_for_unsupported?
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
