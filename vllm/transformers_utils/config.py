@@ -99,8 +99,6 @@ def with_retry(func: Callable[[], Any],
             if attempt == max_retries - 1:
                 logger.error("%s: %s", log_msg, e)
                 raise
-            logger.error("%s: %s, retrying %d of %d", log_msg, e, attempt + 1,
-                         max_retries)
             time.sleep(retry_delay)
             retry_delay *= 2
 
