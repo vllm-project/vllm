@@ -1977,8 +1977,7 @@ class SpeculativeConfig:
         # If speculative_draft_tensor_parallel_size is unset then set it
         # appropriately else verify that it is set correctly.
         if speculative_draft_tensor_parallel_size is None:
-            if draft_hf_config.model_type in ("mlp_speculator",
-                                              "deepseek_mtp"):
+            if draft_hf_config.model_type == "mlp_speculator":
                 speculative_draft_tensor_parallel_size = 1
                 if target_parallel_config.tensor_parallel_size > 1:
                     logger.warning(

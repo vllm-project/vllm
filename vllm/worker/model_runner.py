@@ -1823,7 +1823,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             1. current vLLM instance is KV cache consumer/decode vLLM instance
             2. this batch is not a profiling run
             3. this batch is a prefill run
-            
+
         Args:
             model_input: input to the model executable
             kv_caches: vLLM's paged memory
@@ -1848,7 +1848,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             1. current vLLM instance is KV cache producer/prefill vLLM instance
             2. this batch is not a profiling run
             3. this batch is a prefill run
-            
+
         Args:
             model_input: input to the model executable
             kv_caches: vLLM's paged memory
@@ -1984,7 +1984,11 @@ class CUDAGraphRunner(nn.Module):
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         if positions is not None:
-            self.input_buffers["positions"].copy_(positions, non_blocking=True)
+            # in some case like MLA, it will reuse positions in metadata
+            # but truncate them to the original size
+            # so the shape is not padded, we need to copy partial only
+            self.input_buffers["positions"][:positions.shape[0]].copy_(
+                positions, non_blocking=True)
 
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(
