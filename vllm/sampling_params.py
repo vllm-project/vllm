@@ -243,8 +243,10 @@ class SamplingParams(
         allowed_token_ids: Optional[List[int]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
+            # Convert token_id to integer
+            # Clamp the bias between -100 and 100 per OpenAI API spec
             logit_bias = {
-                int(token): bias
+                int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
 
