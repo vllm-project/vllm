@@ -111,6 +111,14 @@ class EmbeddingItems(ModalityDataItems[Union[torch.Tensor, list[torch.Tensor]],
         return len(self.get(item_idx))
 
 
+class DictEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
+                                           dict[str, torch.Tensor]]):
+    """
+    Base class for data items that are expressed as a dictionary of tensors.
+    """
+    pass
+
+
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
     def __init__(self, data: Sequence[HfAudioItem]) -> None:

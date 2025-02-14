@@ -23,7 +23,8 @@ from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs, MultiModalKwargs,
                      MultiModalKwargsItem, PlaceholderRange)
-from .parse import MultiModalDataItems, MultiModalDataParser
+from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
+                    MultiModalDataParser)
 
 if TYPE_CHECKING:
     from .profiling import BaseDummyInputsBuilder
@@ -839,9 +840,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         Return whether the HF processor applies prompt replacements.
 
-        For most HF processors, this should be :code:`True`.
+        For most HF processors, this should be :code:`True` when multi-modal
+        data items are passed, but :code:`False` when multi-modal embeddings
+        are passed.
         """
-        return True
+        return not any(
+            isinstance(items, (EmbeddingItems, DictEmbeddingItems))
+            for items in mm_items.values())
 
     def _apply_hf_processor_text_mm(
         self,

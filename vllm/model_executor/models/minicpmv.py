@@ -51,9 +51,10 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, PlaceholderRange)
-from vllm.multimodal.parse import (ImageItem, ImageSize, ModalityData,
-                                   ModalityDataItems, MultiModalDataItems,
-                                   MultiModalDataParser, VideoItem)
+from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem, ImageSize,
+                                   ModalityData, ModalityDataItems,
+                                   MultiModalDataItems, MultiModalDataParser,
+                                   VideoItem)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
@@ -116,10 +117,9 @@ MiniCPMVImageInputs = Union[MiniCPMVImagePixelInputs,
                             MiniCPMVImageEmbeddingInputs]
 
 
-class MiniCPMVEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
-                                               dict[str, torch.Tensor]]):
+class MiniCPMVEmbeddingItems(DictEmbeddingItems):
 
-    def __init__(self, data: Dict, modality: str) -> None:
+    def __init__(self, data: dict[str, torch.Tensor], modality: str) -> None:
         super().__init__(data, modality)
 
     def get_processor_data(self) -> Mapping[str, object]:

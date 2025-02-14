@@ -354,7 +354,13 @@ class LlavaOnevisionMultiModalProcessor(
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> bool:
-        return mm_items.get_count("video", strict=False) == 0
+        base_result = super()._hf_processor_applies_repl(
+            prompt_text=prompt_text,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return base_result and mm_items.get_count("video", strict=False) == 0
 
     def _get_prompt_replacements(
         self,

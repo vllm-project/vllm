@@ -58,8 +58,9 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig, MultiModalKwargs,
                                     VideoItem)
-from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
-                                   MultiModalDataItems, MultiModalDataParser)
+from vllm.multimodal.parse import (DictEmbeddingItems, ImageSize,
+                                   ModalityDataItems, MultiModalDataItems,
+                                   MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
@@ -657,10 +658,9 @@ class Qwen2VisionTransformer(nn.Module):
         return loaded_params
 
 
-class Qwen2VLEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
-                                              dict[str, torch.Tensor]]):
+class Qwen2VLEmbeddingItems(DictEmbeddingItems):
 
-    def __init__(self, data: dict, modality: str) -> None:
+    def __init__(self, data: dict[str, torch.Tensor], modality: str) -> None:
         super().__init__(data, modality)
 
         grid_thw = data[f"{modality}_grid_thw"]
