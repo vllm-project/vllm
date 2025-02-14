@@ -190,7 +190,7 @@ class KVCacheManager:
             # Get new blocks from the free block pool considering
             # preallocated blocks.
             num_new_blocks = min(
-                num_new_blocks + self.num_preallocate_blocks,
+                num_new_blocks + num_preallocate_blocks,
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
                 # [..., max_num_blocks_per_req].

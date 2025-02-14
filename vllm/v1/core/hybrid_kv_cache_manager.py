@@ -280,44 +280,8 @@ class HybridKVCacheManager:
 
         return new_blocks
 
-    def _merge_blocks_by_eviction_order(
-            self, blocks: ReqKVCacheBlocks) -> List[KVCacheBlock]:
-        """
-        Merge the blocks of different groups to one list. The returned blocks 
-        are sorted by eviction order, with the first block having the highest 
-        eviction priority.
-
-        Args:
-            blocks: the blocks of each kv cache group, ordered by eviction 
-            priority.
-
-        Returns:
-            A list of KVCacheBlocks sorted by eviction order.
-        """
-
-        if self.enable_caching:
-            # NOTE (Chen): A simple strategy that interleaves the blocks of
-            # different KV cache groups. We can investigate more advanced
-            # strategies in the future.
-            ordered_blocks = []
-            max_len = max(len(blocks_of_group) for blocks_of_group in blocks)
-            for i in range(max_len):
-                for blocks_of_group in blocks:
-                    if i < len(blocks_of_group):
-                        ordered_blocks.append(blocks_of_group[i])
-        else:
-            ordered_blocks = []
-            for blocks_of_group in blocks:
-                ordered_blocks.extend(blocks_of_group)
-
-        return ordered_blocks
-
     def _free_blocks(self, blocks: ReqKVCacheBlocks) -> None:
-        if len(self.kv_cache_config.groups) == 1:
-            # Fast path for single kv cache group models.
-            ordered_blocks = blocks[0]
-        else:
-            ordered_blocks = self._merge_blocks_by_eviction_order(blocks)
+        ordered_blocks = self._merge_blocks_by_eviction_order(blocks)
         self.block_pool.free_blocks(ordered_blocks)
 
     def free(self, request: Request) -> None:
@@ -402,6 +366,25 @@ class HybridKVCacheManager:
         """
         self.req_to_block_hashes.pop(request.request_id, None)
 
+    def _free_useless_blocks(self, req_blocks: ReqKVCacheBlocks,
+                             num_computed_tokens: int) -> None:
+        """
+        Frees memory blocks that are not needed. E.g., sliding window 
+        layer with window size 2 and block size 1, we have req_blocks as 
+        [[1, 2, 3]], this function will free block 1 and change the req_blocks
+        to [[-1, 2, 3]] (-1 refers to null block)
+
+        Args:
+            req_blocks: The KV cache blocks of one request.
+            num_computed_tokens: The number of computed tokens.
+        """
+        removed_blocks = []
+        for manager, req_blocks_of_group in zip(self.managers, req_blocks):
+            removed_blocks.append(
+                manager.remove_useless_blocks(req_blocks_of_group,
+                                              num_computed_tokens))
+        self._free_blocks(removed_blocks)
+
     def _get_common_computed_tokens(self,
                                     prefix_length: List[PrefixLength]) -> int:
         """
@@ -433,21 +416,34 @@ class HybridKVCacheManager:
 
         return num_computed_tokens
 
-    def _free_useless_blocks(self, req_blocks: ReqKVCacheBlocks,
-                             num_computed_tokens: int) -> None:
+    def _merge_blocks_by_eviction_order(
+            self, blocks: ReqKVCacheBlocks) -> List[KVCacheBlock]:
         """
-        Frees memory blocks that are not needed. E.g., sliding window 
-        layer with window size 2 and block size 1, we have req_blocks as 
-        [[1, 2, 3]], this function will free block 1 and change the req_blocks
-        to [[-1, 2, 3]] (-1 refers to null block)
+        Merge the blocks of different groups to one list. The returned blocks 
+        are sorted by eviction order, with the first block having the highest 
+        eviction priority.
 
         Args:
-            req_blocks: The KV cache blocks of one request.
-            num_computed_tokens: The number of computed tokens.
+            blocks: the blocks of each kv cache group, ordered by eviction 
+            priority.
+
+        Returns:
+            A list of KVCacheBlocks sorted by eviction order.
         """
-        removed_blocks = []
-        for manager, req_blocks_of_group in zip(self.managers, req_blocks):
-            removed_blocks.append(
-                manager.remove_useless_blocks(req_blocks_of_group,
-                                              num_computed_tokens))
-        self._free_blocks(removed_blocks)
+
+        if self.enable_caching:
+            # NOTE (Chen): A simple strategy that interleaves the blocks of
+            # different KV cache groups. We can investigate more advanced
+            # strategies in the future.
+            ordered_blocks = []
+            max_len = max(len(blocks_of_group) for blocks_of_group in blocks)
+            for i in range(max_len):
+                for blocks_of_group in blocks:
+                    if i < len(blocks_of_group):
+                        ordered_blocks.append(blocks_of_group[i])
+        else:
+            ordered_blocks = []
+            for blocks_of_group in blocks:
+                ordered_blocks.extend(blocks_of_group)
+
+        return ordered_blocks
