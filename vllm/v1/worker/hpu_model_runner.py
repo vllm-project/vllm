@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import collections
 import contextlib
 import functools
@@ -10,37 +11,39 @@ from enum import Enum
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Tuple, Union)
 
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm_hpu_extension.flags import enabled_flags
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import numpy as np
 import torch
 import torch.distributed
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
-from vllm.v1.utils import bind_kv_cache
+import vllm_hpu_extension.environment as environment
 from vllm_hpu_extension.bucketing import HPUBucketingContext
 from vllm_hpu_extension.ops import batch2block, block2batch
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
-import vllm_hpu_extension.environment as environment
 
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv, is_fake_hpu,
-                        is_pin_memory_available)
-from vllm.v1.attention.backends.hpu_attn import (HPUAttentionBackendV1,
-                                                 HPUAttentionMetadata)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
+                        is_fake_hpu, is_pin_memory_available)
+from vllm.v1.attention.backends.hpu_attn import (HPUAttentionBackendV1, HPUAttentionMetadataV1)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
-
 
 logger = init_logger(__name__)
 
@@ -57,7 +60,6 @@ class PhaseType(Enum):
     DECODE = 'decode'
 
 
-
 @dataclass
 class PromptDecodeInfo:
     prompt_req_ids: List[str]
@@ -69,14 +71,15 @@ class PromptDecodeInfo:
 class PromptData:
     input_tokens: torch.Tensor
     input_positions: torch.Tensor
-    attn_metadata: HPUAttentionMetadata
+    attn_metadata: HPUAttentionMetadataV1
 
 
 @dataclass
 class DecodeData:
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
-    attn_metadata: Optional[HPUAttentionMetadata] = None
+    attn_metadata: Optional[HPUAttentionMetadataV1] = None
+
 
 #TODO(kzawora): remove this
 @dataclass
@@ -93,6 +96,7 @@ class PrefillInputData:
         return zip(self.request_ids, self.prompt_lens, self.token_ids,
                    self.position_ids, self.attn_metadata, self.logits_indices)
 
+
 #TODO(kzawora): remove this
 @dataclass
 class DecodeInputData:
@@ -100,7 +104,7 @@ class DecodeInputData:
     num_decodes: int
     token_ids: Optional[torch.Tensor] = None
     position_ids: Optional[torch.Tensor] = None
-    attn_metadata: HPUAttentionMetadata = None
+    attn_metadata: HPUAttentionMetadataV1 = None
     logits_indices: Optional[torch.Tensor] = None
 
 
@@ -118,6 +122,7 @@ def _async_h2d_tensor_copy(source, device='hpu'):
     target = torch.empty(source.shape, dtype=source.dtype, device=device)
     target.copy_(source, non_blocking=True)
     return target
+
 
 def swap_positions(b: InputBatch, id_1, id_2):
     assert id_1 != id_2
@@ -192,35 +197,136 @@ def ensure_decodes_first(b: InputBatch):
         # Swap
         swap_positions(b, first_prompt_index, last_decode_index)
 
+def get_target_layer_suffix_list(model_type) -> list[str]:
+    # This sets the suffix for the hidden layer name, which is controlled by
+    # VLLM_CONFIG_HIDDEN_LAYERS. The default suffix is "DecoderLayer," which is
+    # applicable for most language models such as LLaMA, Qwen, and BART. If the
+    # model's decoder layer name differs from the default, it will need to
+    # be specified here.
+    decoder_layer_table = {
+        "gpt_bigcode": "BigCodeBlock",
+    }
+
+    return [
+        decoder_layer_table.get(model_type, "DecoderLayer"), "EncoderLayer"
+    ]
+
+
+def modify_model_layers(module: torch.nn.Module,
+                        suffix_list: list[str],
+                        n=1,
+                        counter=None):
+    """Currently add mark_step at the end of specified layers.
+    """
+
+    def forward_hook(module, args, output):
+        htorch.core.mark_step()
+        return output
+
+    if counter is None:
+        counter = [0]
+
+    for child_name, child_module in module.named_children():
+        if any(
+                child_module.__class__.__name__.endswith(layer)
+                for layer in suffix_list):
+            counter[0] += 1
+            if counter[0] % n == 0:
+                child_module.register_forward_hook(forward_hook)
+        else:
+            modify_model_layers(child_module, suffix_list, n, counter)
+
+
+def get_path_to_rope(model: torch.nn.Module):
+    """Dynamically get the path to the RotaryEmbedding layer in the model.
+    This function will recursively search through the module hierarchy to find
+    a RotaryEmbedding layer and return the full path to that layer as a list
+    of names.
+    If no such layer is found, it returns None.
+    """
+
+    def find_rope_layer(parent, path):
+        # Base case: check if this parent is None
+        if parent is None:
+            return None
+
+        # Check if the current layer is a RotaryEmbedding
+        if hasattr(parent, 'named_children'):
+            for child_name, child_module in parent.named_children():
+                # If the current child is of type RotaryEmbedding,
+                # return the full path
+                if child_module.__class__.__name__.endswith("RotaryEmbedding"):
+                    return path + [child_name]
+                # Otherwise, recurse into this child to check its children
+                result = find_rope_layer(child_module, path + [child_name])
+                if result is not None:
+                    return result
+        return None
+
+    # Start the search from the top level model
+    path_to_rope = find_rope_layer(model, [])
+
+    # Return the result if found, otherwise None
+    return path_to_rope
+
+
 
 class HpuModelAdapter:
 
-    def __init__(self, model, block_size, dtype, enforce_eager):
+    def __init__(self, model, vllm_config, layer_names):
         self.model = model
-        self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
-                                               '1').lower() in ['1', 'true'] \
-                                                and not is_fake_hpu()
-        self.block_size = block_size
-        self.dtype = dtype
+        self.prefill_use_fusedsdpa = "fsdpa" in enabled_flags()
+        self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE',
+                                           'false').lower() in ['1', 'true']
+        self.vllm_config = vllm_config
+        self.block_size = vllm_config.cache_config.block_size
+        self.dtype = vllm_config.model_config.dtype
+        self.layer_names = layer_names
+        enforce_eager = vllm_config.model_config.enforce_eager
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not enforce_eager:
-            self.model = torch.compile(self.model,
-                                       backend='hpu_backend',
-                                       dynamic=False)
+            if os.getenv('VLLM_REGIONAL_COMPILATION',
+                         'true').lower() == 'true':
+                self.regional_compilation_layers_list = [
+                    RMSNorm, VocabParallelEmbedding
+                ]
+                self._regional_compilation(self.model)
+            else:
+                self.model = torch.compile(self.model,
+                                           backend='hpu_backend',
+                                           dynamic=False)
+
+    def _regional_compilation(self,
+                              module,
+                              parent_module=None,
+                              module_name=None):
+        if isinstance(module, torch.nn.ModuleList):
+            for children_name, children_module in module.named_children():
+                self._compile_region(module, children_name, children_module)
+        elif any(
+                isinstance(module, layer)
+                for layer in self.regional_compilation_layers_list):
+            self._compile_region(parent_module, module_name, module)
+        else:
+            for children_name, children_module in module.named_children():
+                self._regional_compilation(children_module, module,
+                                           children_name)
+
+    def _compile_region(self, model, name, module):
+        module = torch.compile(module, backend='hpu_backend', dynamic=False)
+        setattr(model, name, module)
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
-        prefix_caching_enabled = attn_metadata.is_prompt and \
-            attn_metadata.block_list is not None
-        if (attn_metadata is None
-                or (self.prefill_use_fusedsdpa and not prefix_caching_enabled)
+        if (attn_metadata is None or self.prefill_use_fusedsdpa
                 or not attn_metadata.is_prompt):
             return attn_metadata
 
         prefill_metadata = attn_metadata
 
+        seq_lens_t = prefill_metadata.seq_lens_tensor
         context_lens_t = prefill_metadata.context_lens_tensor
-        query_lens_t = prefill_metadata.seq_lens_tensor
+        query_lens_t = seq_lens_t - context_lens_t
 
         block_list = attn_metadata.block_list
         max_context_len = (block_list.size(-1) //
@@ -258,11 +364,11 @@ class HpuModelAdapter:
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
 
-        if not is_fake_hpu() and htorch.utils.internal.is_lazy():
+        if not is_fake_hpu():
             block_mapping = torch.nn.functional.one_hot(metadata.block_groups,
                                                         num_classes=batch_size)
         else:
-            # Unfortunately one_hot on CPU/torch.compile mode/eager mode
+            # Unfortunately one_hot on CPU
             # doesn't handle out of bounds classes so we need to convert
             # all negative values to 0 (block_mapping) or bs (block_groups)
             block_groups = metadata.block_groups.to(torch.long)
@@ -314,14 +420,50 @@ class HpuModelAdapter:
                                                       attn_metadata.is_prompt)
         return attn_metadata
 
+    def _prepare_cos_sin(self, positions):
+        """Navigate through the model using the provided path and call
+        the prepare_cos_sin method on the 'RotaryEmbedding' layer."""
+
+        current_module = self.model  # Start from the top level of the model
+
+        for layer in self.layer_names:
+            if layer.isdigit():  # Check if the layer is an index
+                layer = int(layer)
+
+            # Check if the current layer is a name in a module
+            if isinstance(
+                    layer,
+                    str) and not isinstance(layer, int):  # Name-based access
+                current_module = getattr(current_module, layer)
+            elif isinstance(layer,
+                            int):  # Indexed-based access (like ModuleList)
+                current_module = list(current_module._modules.values())[layer]
+
+        # At the end, we should be at the RotaryEmbedding layer.
+        if hasattr(current_module, 'prepare_cos_sin'):
+            current_module.prepare_cos_sin(
+                positions, recompute_cos_sin=self.recompute_cos_sin)
+        else:
+            raise AttributeError(
+                "The module at the end of the path does not have \
+                a 'prepare_cos_sin' method.")
+
     def forward(self, *args, **kwargs):
         kwargs = kwargs.copy()
+#        selected_token_indices = kwargs.pop('selected_token_indices')
+        if 'warmup_mode' in kwargs:
+            kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
         kwargs['attn_metadata'] = self._update_metadata(
             kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
             input_ids.device, self.dtype)
-        hidden_states = self.model(*args, **kwargs)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+        if self.layer_names is not None:
+            self._prepare_cos_sin(kwargs['positions'])
+        with set_forward_context(kwargs['attn_metadata'], self.vllm_config):
+            hidden_states = self.model(*args, **kwargs)
+#            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+#            hidden_states = hidden_states.index_select(0,
+#                                                       selected_token_indices)
         return hidden_states
 
     def compute_logits(self, *args, **kwargs):
@@ -365,7 +507,7 @@ def subtuple(obj: object,
     return _TYPE_CACHE[typename](**values)
 
 
-def trim_attn_metadata(metadata: HPUAttentionMetadata) -> object:
+def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     # NOTE(kzawora): To anyone working on this in the future:
     # Trimming metadata is required when using HPUGraphs.
     # Attention metadata is going to be hashed by PT bridge, and
@@ -468,10 +610,11 @@ class HPUModelRunner:
             self.parallel_config, LayerBlockType.attention)
         self.num_query_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
-        self.num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
+        self.num_kv_heads = self.model_config.get_num_kv_heads(
+            self.parallel_config)
         self.head_size = self.model_config.get_head_size()
         self.hidden_size = self.model_config.get_hidden_size()
-        
+
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: List[torch.Tensor] = []
@@ -687,8 +830,6 @@ class HPUModelRunner:
         assert self.model is not None
         return self.model
 
-
-
     def _get_prompts_and_decodes(
         self,
         scheduler_output: "SchedulerOutput",
@@ -859,6 +1000,8 @@ class HPUModelRunner:
         return padded_batch_size, padded_prompt_len
 
     def _prepare_prefill_inputs(self,
+                                num_prefills,
+                                num_decodes,
                                 num_scheduled_tokens: List[int],
                                 bucketing=True) -> PrefillInputData:
         # Each prefill run separately with shape [1, padded_prompt_len].
@@ -870,11 +1013,11 @@ class HPUModelRunner:
         prefill_position_ids = []
         prefill_attn_metadata = []
         prefill_logits_indices = []
+        block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
 
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
-        num_reqs = self.input_batch.num_reqs
-        num_decodes = self.input_batch.num_decodes
+        num_reqs = num_prefills + num_decodes
         # NOTE(kzawora): This loop was initially implemented as
         # for batch_idx in range(num_decodes, num_reqs, max_prefill_batch_size)
         # but was changed to accommodate variable loop step size for
@@ -967,7 +1110,7 @@ class HPUModelRunner:
 
                 # Prepare and sanitize slot_mapping (cpu)
                 flat_prefill_positions = positions[i, :prompt_len].flatten()
-                block_numbers = self.input_batch.block_table_cpu_tensor[
+                block_numbers = block_table_cpu_tensor[
                     batch_offset, flat_prefill_positions // self.block_size]
                 block_offsets = flat_prefill_positions % self.block_size
                 slot_mapping[
@@ -1030,7 +1173,7 @@ class HPUModelRunner:
                     device='cpu')
                 for i, n in enumerate(num_blocks):
                     prefix_block_tables[
-                        i, :n] = self.input_batch.block_table_cpu_tensor[i, :n]
+                        i, :n] = block_table_cpu_tensor[i, :n]
                 context_lens_tensor = torch.zeros((padded_batch_size),
                                                   dtype=torch.int32,
                                                   device='cpu')
@@ -1042,7 +1185,7 @@ class HPUModelRunner:
                 context_lens_tensor_device = _async_h2d_tensor_copy(
                     context_lens_tensor, self.device)
                 attn_metadata = \
-                    HPUAttentionMetadata.make_cached_prefill_metadata(
+                    HPUAttentionMetadataV1.make_cached_prefill_metadata(
                     seq_lens_tensor=seq_lens_tensor_device,
                     context_lens_tensor=context_lens_tensor_device,
                     num_prefills=num_prefills,
@@ -1050,7 +1193,7 @@ class HPUModelRunner:
                     slot_mapping=slot_mapping_device,
                     block_list=block_list_device)
             else:
-                attn_metadata = HPUAttentionMetadata.make_prefill_metadata(
+                attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
                     seq_lens_tensor=seq_lens_tensor_device,
                     num_prefills=num_prefills,
                     num_prefill_tokens=sum(prompt_lens),
@@ -1069,6 +1212,7 @@ class HPUModelRunner:
                                 logits_indices=prefill_logits_indices)
 
     def _prepare_decode_inputs(self,
+                               num_decodes,
                                num_scheduled_tokens,
                                bucketing=True) -> DecodeInputData:
         # Decodes run as one single padded batch with shape [batch, 1]
@@ -1078,8 +1222,8 @@ class HPUModelRunner:
         # logic knows to ignore those indicies. Otherwise, the
         # padding data can be dummy since we have a causal mask.
 
+        block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
         # num_reqs = self.input_batch.num_reqs
-        num_decodes = self.input_batch.num_decodes
         if num_decodes == 0:
             return DecodeInputData(num_decodes=0)
 
@@ -1111,7 +1255,7 @@ class HPUModelRunner:
         # Look up the block_idx in the block table (logical<>physical map)
         # to compute this.
         block_number = torch.gather(
-            input=self.input_batch.block_table_cpu_tensor,
+            input=block_table_cpu_tensor,
             dim=1,
             index=(index // self.block_size))
         # NOTE(kzawora): the "-1" is what causes this entire thing to work
@@ -1130,7 +1274,7 @@ class HPUModelRunner:
         block_tables_list = []
         for i, n in enumerate(num_blocks):
             block_tables_list.append(
-                self.input_batch.block_table_cpu_tensor[i, :n].tolist())
+                block_table_cpu_tensor[i, :n].tolist())
 
         # CONTEXT_LENS [batch_size]
         #context_lens = (positions.reshape(-1) + 1)
@@ -1170,7 +1314,7 @@ class HPUModelRunner:
             token_ids=token_ids_device,
             position_ids=positions_device,
             logits_indices=logits_indices_device,
-            attn_metadata=HPUAttentionMetadata.make_decode_metadata(
+            attn_metadata=HPUAttentionMetadataV1.make_decode_metadata(
                 block_list=block_list_device,
                 block_usage=block_usage_device,
                 block_groups=block_groups_device,
@@ -1181,14 +1325,15 @@ class HPUModelRunner:
     def _prepare_inputs(
             self,
             scheduler_output: "SchedulerOutput",
+            num_prefills,
+            num_decodes,
             bucketing=True
     ) -> Tuple[PrefillInputData, Optional[DecodeInputData]]:
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
 
-        num_reqs = self.input_batch.num_reqs
-        num_decodes = self.input_batch.num_decodes
+        num_reqs = num_prefills + num_decodes
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -1202,8 +1347,8 @@ class HPUModelRunner:
                 assert num_tokens == 1
 
         return (
-            self._prepare_prefill_inputs(num_scheduled_tokens, bucketing),
-            self._prepare_decode_inputs(num_scheduled_tokens, bucketing),
+            self._prepare_prefill_inputs(num_prefills, num_decodes, num_scheduled_tokens, bucketing),
+            self._prepare_decode_inputs(num_decodes, num_scheduled_tokens, bucketing),
         )
 
     def _seq_len(self, attn_metadata):
@@ -1351,14 +1496,14 @@ class HPUModelRunner:
         ensure_decodes_first(self.input_batch)
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
-
-        prefill_data, decode_data = self._prepare_inputs(
-            scheduler_output, bucketing=self.enable_bucketing)
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
         num_padded_decodes = decode_data.token_ids.shape[
             0] if num_decodes > 0 else 0
+
+        prefill_data, decode_data = self._prepare_inputs(
+            scheduler_output, num_prefills, num_decodes, bucketing=self.enable_bucketing)
 
         #FIXME(kzawora): Currently there's no handling of logprobs. Fix that
         # later.
@@ -1376,17 +1521,19 @@ class HPUModelRunner:
                 decode_data.attn_metadata, decode_data.logits_indices,
                 self.kv_caches)
             htorch.core.mark_step()
-            sampling_metadata = self._prepare_sampling(
-                scheduler_output,
-                start_idx=0,
-                end_idx=num_decodes,
-                pad_to=num_padded_decodes)
+            #sampling_metadata = self._prepare_sampling(
+            #    scheduler_output,
+            #    start_idx=0,
+            #    end_idx=num_decodes,
+            #    pad_to=num_padded_decodes)
             htorch.core.mark_step()
-            sampler_output = self.model.sample(
-                logits=logits_device, sampling_metadata=sampling_metadata)
+            #sampler_output = self.model.sample(
+             #   logits=logits_device, sampling_metadata=sampling_metadata)
             # sampler now returns cpu list instead of device tensor -
             # and i don't like it
-            decode_output_tokens = sampler_output.sampled_token_ids
+            argmax_token_ids = torch.argmax(logits_device, dim=-1, keepdim=True)
+            argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+            decode_output_tokens = argmax_token_ids
             htorch.core.mark_step()
 
         ######################### PREFILLS #########################
@@ -1408,18 +1555,22 @@ class HPUModelRunner:
                 if prefill_seq_offset_start == prefill_seq_offset_end:
                     import pdb
                     pdb.set_trace()
-                sampling_metadata = self._prepare_sampling(
-                    scheduler_output,
-                    start_idx=prefill_seq_offset_start,
-                    end_idx=prefill_seq_offset_end,
-                    pad_to=num_curr_prefills)
-                htorch.core.mark_step()
-                sampler_output = self.model.sample(
-                    logits=logits_device, sampling_metadata=sampling_metadata)
-                sampled_token_ids_device = sampler_output.sampled_token_ids
+                #sampling_metadata = self._prepare_sampling(
+                #    scheduler_output,
+                #    start_idx=prefill_seq_offset_start,
+                #    end_idx=prefill_seq_offset_end,
+                #    pad_to=num_curr_prefills)
+                #htorch.core.mark_step()
+                #sampler_output = self.model.sample(
+                #    logits=logits_device, sampling_metadata=sampling_metadata)
+                #sampled_token_ids_device = sampler_output.sampled_token_ids
+                argmax_token_ids = torch.argmax(logits_device, dim=-1, keepdim=True)
+                argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
                 htorch.core.mark_step()
                 prefill_seq_offset_end = prefill_seq_offset_start
-                prefill_output_tokens.extend(sampled_token_ids_device)
+                #prefill_output_tokens.extend(sampled_token_ids_device)
+                prefill_output_tokens.extend(argmax_token_ids)
+            
             # sampler now returns cpu list instead of device tensor -
             # and i don't like it
             # prefill_output_device = torch.cat(prefill_output_list, dim=0)
@@ -1472,13 +1623,27 @@ class HPUModelRunner:
         logger.info("Starting to load model %s...", self.model_config.model)
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
-            self.model = _maybe_wrap_in_hpu_graph(
-                self.model,
-                self.block_size,
-                dtype=self.model_config.dtype,
-                enforce_eager=self.model_config.enforce_eager)
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Loading model weights took %.4f GB",
+                    self.model_memory_usage / float(2**30))
+        hidden_layer_markstep_interval = int(
+            os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
+        model_config = getattr(self.model, "config", None)
+        modify_model_layers(
+            self.model,
+            get_target_layer_suffix_list(
+                model_config.
+                model_type if model_config is not None else None),
+            hidden_layer_markstep_interval)
+        path_to_rope = get_path_to_rope(self.model)
+        torch.hpu.synchronize()
+        with HabanaMemoryProfiler() as m:  # noqa: SIM117
+            self.model = _maybe_wrap_in_hpu_graph(
+                self.model,
+                vllm_config=self.vllm_config,
+                layer_names=path_to_rope)
+        self.model_memory_usage = m.consumed_device_memory
+        logger.info("Wrapping in HPUGraph took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
     def _use_graphs(self, batch_size, seq_len, num_blocks, phase):
@@ -1526,7 +1691,7 @@ class HPUModelRunner:
                                    device='cpu')
             seq_lens.fill_(seq_or_block)
             seq_lens_device = _async_h2d_tensor_copy(seq_lens, self.device)
-            attn_metadata = HPUAttentionMetadata.make_prefill_metadata(
+            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
                 seq_lens_tensor=seq_lens_device,
                 num_prefills=batch_size,
                 num_prefill_tokens=batch_size * seq_or_block,
@@ -1546,7 +1711,7 @@ class HPUModelRunner:
                 block_usage, self.device)
             block_groups_device = _async_h2d_tensor_copy(
                 block_groups, self.device)
-            attn_metadata = HPUAttentionMetadata.make_decode_metadata(
+            attn_metadata = HPUAttentionMetadataV1.make_decode_metadata(
                 block_list=block_list_device,
                 block_usage=block_usage_device,
                 block_groups=block_groups_device,
@@ -1571,9 +1736,10 @@ class HPUModelRunner:
         temperature_device = _async_h2d_tensor_copy(temperature, self.device)
         top_p_device = _async_h2d_tensor_copy(top_p, self.device)
         top_k_device = _async_h2d_tensor_copy(top_k, self.device)
-        generators = {i: None
-                      for i in range(batch_size)
-                      }  # NOTE(kzawora): idk what to set here
+        generators = {
+            i: None
+            for i in range(batch_size)
+        }  # NOTE(kzawora): idk what to set here
         max_num_logprobs = 0  # NOTE(kzawora): idk what to set here
         # NOTE(kzawora: do this in a smarter way)
         return None
@@ -1889,8 +2055,8 @@ class HPUModelRunner:
                 if dtype == torch.float8_e4m3fn:
                     dtype = torch.uint8
                 key_cache = torch.zeros(kv_cache_shape,
-                                          dtype=dtype,
-                                          device=self.device)
+                                        dtype=dtype,
+                                        device=self.device)
                 value_cache = torch.zeros_like(key_cache)
 
                 kv_caches[layer_name] = (key_cache, value_cache)
@@ -1901,385 +2067,7 @@ class HPUModelRunner:
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
-            
+
         if self.enable_bucketing:
             self.bucketing_ctx.num_hpu_blocks = num_blocks
         htorch.hpu.synchronize()
-
-
-@dataclass
-class CachedRequestState1:
-
-    req_id: str
-    prompt_token_ids: List[int]
-    prompt: Optional[str]
-    mm_inputs: List[MultiModalKwargs]
-    mm_positions: List["PlaceholderRange"]
-    sampling_params: SamplingParams
-    generator: Optional[torch.Generator]
-
-    block_ids: List[int]
-    num_computed_tokens: int
-    output_token_ids: List[int]
-
-    @property
-    def num_tokens(self) -> int:
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
-
-
-class InputBatch1:
-
-    def __init__(
-        self,
-        max_num_reqs: int,
-        max_model_len: int,
-        max_num_blocks_per_req: int,
-        device: torch.device,
-        pin_memory: bool,
-    ):
-        self.max_num_reqs = max_num_reqs
-        self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = max_num_blocks_per_req
-        self.device = device
-        self.pin_memory = pin_memory
-
-        self.req_ids: List[Optional[str]] = [None] * max_num_reqs
-        self.req_id_to_index: Dict[str, int] = {}
-
-        self.token_ids_cpu = np.empty((max_num_reqs, max_model_len),
-                                      dtype=np.int32)
-        self.num_computed_tokens_cpu = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_output_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
-        self.num_prompt_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
-
-        # Attention-related.
-
-        # NOTE(kzawora): "+1" here prevents us from going OoB in block table
-        # when max model length is reached.
-        # Sometimes scheduler allocates two blocks ahead which can go out of
-        # valid seq len bounds, so e.g. if we have 16 blocks available, and
-        # we've just filled entirety of 15th block, sometimes scheduler assigns
-        # 16th and 17th block to the sequence, even though it can never
-        # reach block 17. I have no idea why that happens, but
-        # it smells like a bug.
-        self.block_table = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req + 1),
-            device=self.device,
-            dtype=torch.int32)
-        self.block_table_cpu_tensor = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req + 1),
-            device="cpu",
-            dtype=torch.int32,
-            pin_memory=pin_memory,
-        )
-        self.block_table_cpu = self.block_table_cpu_tensor.numpy()
-
-        # Sampling-related.
-        self.temperature = torch.empty((max_num_reqs, ),
-                                       dtype=torch.float32,
-                                       device=device)
-        self.temperature_cpu_tensor = torch.empty((max_num_reqs, ),
-                                                  dtype=torch.float32,
-                                                  device="cpu",
-                                                  pin_memory=pin_memory)
-        self.temperature_cpu = self.temperature_cpu_tensor.numpy()
-        self.greedy_reqs: Set[str] = set()
-        self.random_reqs: Set[str] = set()
-
-        self.top_p = torch.empty((max_num_reqs, ),
-                                 dtype=torch.float32,
-                                 device=device)
-        self.top_p_cpu_tensor = torch.empty((max_num_reqs, ),
-                                            dtype=torch.float32,
-                                            device="cpu",
-                                            pin_memory=pin_memory)
-        self.top_p_cpu = self.top_p_cpu_tensor.numpy()
-        self.top_p_reqs: Set[str] = set()
-
-        self.top_k = torch.empty((max_num_reqs, ),
-                                 dtype=torch.int32,
-                                 device=device)
-        self.top_k_cpu_tensor = torch.empty((max_num_reqs, ),
-                                            dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=pin_memory)
-        self.top_k_cpu = self.top_k_cpu_tensor.numpy()
-        self.top_k_reqs: Set[str] = set()
-
-        # req_index -> generator
-        self.generators: Dict[int, torch.Generator] = {}
-
-        self.num_logprobs: Dict[str, int] = {}
-        self.prompt_logprob_reqs: Set[str] = set()
-
-        self.num_prefills = 0
-
-    def add_request(
-        self,
-        request: "CachedRequestState",
-        req_index: Optional[int] = None,
-    ) -> None:
-        if req_index is None:
-            req_index = self.num_reqs
-        assert req_index < self.max_num_reqs
-
-        req_id = request.req_id
-        self.req_ids[req_index] = req_id
-        self.req_id_to_index[req_id] = req_index
-
-        # Copy the prompt token ids and output token ids.
-        num_prompt_tokens = len(request.prompt_token_ids)
-        self.token_ids_cpu[
-            req_index, :num_prompt_tokens] = request.prompt_token_ids
-        start_idx = num_prompt_tokens
-        end_idx = start_idx + len(request.output_token_ids)
-        self.token_ids_cpu[req_index,
-                           start_idx:end_idx] = request.output_token_ids
-
-        self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
-        #self.num_output_tokens_cpu[req_index] = request.num_output_tokens
-        self.num_prompt_tokens_cpu[req_index] = len(request.prompt_token_ids)
-        num_blocks = len(request.block_ids)
-        self.block_table_cpu[req_index, :num_blocks] = request.block_ids
-
-        sampling_params = request.sampling_params
-        self.temperature_cpu[req_index] = sampling_params.temperature
-        if sampling_params.sampling_type == SamplingType.GREEDY:
-            self.greedy_reqs.add(req_id)
-        else:
-            self.random_reqs.add(req_id)
-
-        self.top_p_cpu[req_index] = sampling_params.top_p
-        if sampling_params.top_p < 1:
-            self.top_p_reqs.add(req_id)
-        self.top_k_cpu[req_index] = sampling_params.top_k
-        if sampling_params.top_k > 0:
-            self.top_k_reqs.add(req_id)
-
-        self.generators[req_index] = request.generator
-
-        num_logprobs = sampling_params.logprobs
-        if num_logprobs is not None and num_logprobs > 0:
-            self.num_logprobs[req_id] = num_logprobs
-        if sampling_params.prompt_logprobs:
-            self.prompt_logprob_reqs.add(req_id)
-
-    def remove_request(self, req_id: str) -> Optional[int]:
-        req_index = self.req_id_to_index.pop(req_id, None)
-        if req_index is None:
-            return None
-        self.req_ids[req_index] = None
-
-        self.greedy_reqs.discard(req_id)
-        self.random_reqs.discard(req_id)
-        self.top_p_reqs.discard(req_id)
-        self.top_k_reqs.discard(req_id)
-        self.generators.pop(req_index, None)
-        self.num_logprobs.pop(req_id, None)
-        self.prompt_logprob_reqs.discard(req_id)
-        return req_index
-
-    def clear(self) -> None:
-        self.req_ids = [None] * self.max_num_reqs
-        self.req_id_to_index.clear()
-        self.greedy_reqs.clear()
-        self.random_reqs.clear()
-        self.top_p_reqs.clear()
-        self.top_k_reqs.clear()
-        self.generators.clear()
-        self.num_logprobs.clear()
-        self.prompt_logprob_reqs.clear()
-
-    def condense(self, empty_req_indices: List[int]) -> None:
-        if self.num_reqs == 0:
-            # The batched states are empty.
-            return
-
-        # NOTE(woosuk): This function assumes that the empty_req_indices
-        # is sorted in descending order.
-        last_req_index = self.num_reqs + len(empty_req_indices) - 1
-        while empty_req_indices:
-            # Find the largest non-empty index.
-            while last_req_index in empty_req_indices:
-                last_req_index -= 1
-
-            # Find the smallest empty index.
-            empty_index = empty_req_indices.pop()
-            if empty_index >= last_req_index:
-                break
-
-            # Swap the states.
-            req_id = self.req_ids[last_req_index]
-            self.req_ids[empty_index] = req_id
-            self.req_ids[last_req_index] = None
-            self.req_id_to_index[req_id] = empty_index
-
-            # TODO(woosuk): Optimize the copy of token_ids_cpu and
-            # block_table_cpu.
-            self.token_ids_cpu[empty_index] = self.token_ids_cpu[
-                last_req_index]
-            self.num_computed_tokens_cpu[
-                empty_index] = self.num_computed_tokens_cpu[last_req_index]
-            self.block_table_cpu[empty_index] = self.block_table_cpu[
-                last_req_index]
-            self.temperature_cpu[empty_index] = self.temperature_cpu[
-                last_req_index]
-            self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
-            self.top_k_cpu[empty_index] = self.top_k_cpu[last_req_index]
-            generator = self.generators.pop(last_req_index, None)
-            if generator is not None:
-                self.generators[empty_index] = generator
-
-            # Decrement last_req_index since it is now empty.
-            last_req_index -= 1
-
-    def make_sampling_metadata(self,
-                               skip_copy,
-                               start_idx: Optional[int] = None,
-                               end_idx: Optional[int] = None,
-                               pad_to: Optional[int] = None):
-        if start_idx is None and end_idx is None and pad_to is None:
-            return self._make_sampling_metadata_all(skip_copy=skip_copy)
-        return self._make_sampling_metadata_range(skip_copy,
-                                                  start_idx,
-                                                  end_idx,
-                                                  pad_to=pad_to)
-
-    def _make_sampling_metadata_range(
-            self,
-            skip_copy: bool = False,
-            start_idx: Optional[int] = None,
-            end_idx: Optional[int] = None,
-            pad_to: Optional[int] = None) -> SamplingMetadata:
-        if start_idx is None:
-            start_idx = 0
-        if end_idx is None:
-            end_idx = self.num_reqs
-        max_num_reqs = len(self.req_ids)
-        end_idx = min(end_idx, max_num_reqs)
-        num_seqs = end_idx - start_idx
-        padding_needed = max(0, pad_to - num_seqs)
-        req_ids = self.req_ids[start_idx:end_idx]
-        if not skip_copy:
-            self.temperature[start_idx:end_idx].copy_(
-                self.temperature_cpu_tensor[start_idx:end_idx],
-                non_blocking=True)
-            self.top_p[start_idx:end_idx].copy_(
-                self.top_p_cpu_tensor[start_idx:end_idx], non_blocking=True)
-            self.top_k[start_idx:end_idx].copy_(
-                self.top_k_cpu_tensor[start_idx:end_idx], non_blocking=True)
-
-        all_greedy = all([req_id in self.greedy_reqs for req_id in req_ids])
-        all_random = all([req_id in self.random_reqs for req_id in req_ids])
-        if all_greedy and all_random:
-            import pdb
-            pdb.set_trace()  #WTF?!
-        no_top_p = not any([req_id in self.top_p_reqs for req_id in req_ids])
-        no_top_k = not any([req_id in self.top_k_reqs for req_id in req_ids])
-        # NOTE(kzawora): Generators are used by sampler row-wise. If we got a
-        # generator for element 5, but it's first row in a batch,
-        # we need to assign that generator to index 0 - hence the
-        # i:generators.get(req_id) rather than req_id:generators.get(req_id)
-        generators = {
-            i: self.generators.get(req_id, None)
-            for i, req_id in enumerate(
-                range(start_idx, end_idx + padding_needed))
-        }
-        temperature_device = self.temperature[start_idx:end_idx +
-                                              padding_needed]
-        top_p_device = self.top_p[start_idx:end_idx + padding_needed]
-        tok_k_device = self.top_k[start_idx:end_idx + padding_needed]
-        if end_idx + padding_needed >= max_num_reqs:
-            # NOTE(kzawora): it's janky, but [start_idx:end_idx+padding_needed]
-            # falls apart once your padding exceeds max_num_reqs (and it
-            # happens pretty often, you could increase the
-            # temperature/topp/topk allocation, but you cannot really make
-            # any guarantees ahead of time on the amount of padding you'll use)
-            # this is kind of a temporary fix, no idea on its performance impact
-            temperature_device = torch.empty(pad_to,
-                                             device=self.temperature.device,
-                                             dtype=self.temperature.dtype)
-            top_p_device = torch.empty(pad_to,
-                                       device=self.top_p.device,
-                                       dtype=self.top_p.dtype)
-            top_k_device = torch.empty(pad_to,
-                                       device=self.top_k.device,
-                                       dtype=self.top_k.dtype)
-            # D2D copy
-            temperature_device[:num_seqs].copy_(
-                self.temperature[start_idx:end_idx], non_blocking=True)
-            top_p_device[:num_seqs].copy_(self.top_p[start_idx:end_idx],
-                                          non_blocking=True)
-            top_k_device[:num_seqs].copy_(self.top_k[start_idx:end_idx],
-                                          non_blocking=True)
-
-        return SamplingMetadata(
-            temperature=temperature_device,
-            all_greedy=all_greedy,
-            all_random=all_random,
-            top_p=top_p_device,
-            top_k=tok_k_device,
-            no_top_p=no_top_p,
-            no_top_k=no_top_k,
-            generators=generators,
-            max_num_logprobs=self.max_num_logprobs,
-        )
-
-    def _make_sampling_metadata_all(
-        self,
-        skip_copy: bool = False,
-    ) -> SamplingMetadata:
-        if not skip_copy:
-            self.temperature[:self.num_reqs].copy_(
-                self.temperature_cpu_tensor[:self.num_reqs], non_blocking=True)
-            self.top_p[:self.num_reqs].copy_(
-                self.top_p_cpu_tensor[:self.num_reqs], non_blocking=True)
-            self.top_k[:self.num_reqs].copy_(
-                self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
-        return SamplingMetadata(
-            temperature=self.temperature[:self.num_reqs],
-            all_greedy=self.all_greedy,
-            all_random=self.all_random,
-            top_p=self.top_p[:self.num_reqs],
-            top_k=self.top_k[:self.num_reqs],
-            no_top_p=self.no_top_p,
-            no_top_k=self.no_top_k,
-            generators=self.generators,
-            max_num_logprobs=self.max_num_logprobs,
-        )
-
-    @property
-    def num_reqs(self) -> int:
-        return len(self.req_id_to_index)
-
-    @property
-    def num_decodes(self) -> int:
-        return self.num_reqs - self.num_prefills
-
-    @property
-    def all_greedy(self) -> bool:
-        return len(self.random_reqs) == 0
-
-    @property
-    def all_random(self) -> bool:
-        return len(self.greedy_reqs) == 0
-
-    @property
-    def no_top_p(self) -> bool:
-        return len(self.top_p_reqs) == 0
-
-    @property
-    def no_top_k(self) -> bool:
-        return len(self.top_k_reqs) == 0
-
-    @property
-    def max_num_logprobs(self) -> int:
-        return max(self.num_logprobs.values()) if self.num_logprobs else 0
-
-    @property
-    def no_logprob(self) -> bool:
-        return len(self.num_logprobs) == 0
-
-    @property
-    def no_prompt_logprob(self) -> bool:
-        return len(self.prompt_logprob_reqs) == 0

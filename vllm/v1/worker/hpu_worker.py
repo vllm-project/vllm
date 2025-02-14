@@ -1,15 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
 """A GPU worker class."""
 import gc
 import os
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Optional, Tuple, List
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 import torch.distributed
 import torch.nn as nn
-
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
-from vllm.v1.utils import bind_kv_cache
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
@@ -18,8 +16,12 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size, is_fake_hpu
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
+                        get_dtype_size, is_fake_hpu)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.hpu_model_runner import HPUModelRunner
 
 logger = init_logger(__name__)
@@ -94,7 +96,7 @@ class HPUWorker:
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         return self.model_runner.get_kv_cache_spec()
-    
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
@@ -140,7 +142,6 @@ class HPUWorker:
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
 
-
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
@@ -175,7 +176,6 @@ class HPUWorker:
         logger.info(msg)
         gc.collect()
         return cache_size_bytes
-
 
     def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
@@ -237,7 +237,7 @@ def _get_cache_block_size(
     head_size = model_config.get_head_size()
     num_heads = model_config.get_num_kv_heads(parallel_config)
     num_attention_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention)
+        parallel_config, LayerBlockType.attention)
 
     key_cache_block = cache_config.block_size * num_heads * head_size
     value_cache_block = key_cache_block
