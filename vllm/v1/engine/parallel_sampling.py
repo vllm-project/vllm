@@ -18,21 +18,45 @@ class ParentRequestState:
 
     request_id: str
     sampling_params: SamplingParams
+    cached_child_sampling_params: Optional[SamplingParams]
     request_output: Optional[RequestOutput] = None
 
     def __init__(self, request_id: str,
                  sampling_params: SamplingParams) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
+        self.cached_child_sampling_params = None
 
     def get_child_sampling_params(
         self,
-        seed: Optional[int],
+        index: int,
     ) -> SamplingParams:
-        sampling_params = copy(self.sampling_params)
-        sampling_params.n = 1
-        sampling_params.seed = seed
-        return sampling_params
+        """Efficiently obtain child `sampling_params`
+
+        If `sampling_params.seed` is not `None` then 
+        each child request requires a unique clone of
+        parent `sampling_params` with a unique seed.
+
+        Args:
+          index: index within `n` child requests
+
+        Returns:
+          Child `sampling_params` instance.
+        """
+        seed = self.sampling_params.seed
+        if seed is None and self.cached_child_sampling_params:
+            # Reuse child sampling_params data structure
+            return self.cached_child_sampling_params
+        # Build child sampling_params
+        c_sampling_params = copy(self.sampling_params)
+        c_sampling_params.n = 1
+        if seed is None:
+            # Cache child sampling_params for later reuse
+            self.cached_child_sampling_params = c_sampling_params
+        else:
+            # Each child gets a clone with a unique seed
+            c_sampling_params.seed = seed + index
+        return c_sampling_params
 
     def _add_output(
         self,

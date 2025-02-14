@@ -268,11 +268,8 @@ class AsyncLLM(EngineClient):
         # Aggregate generators for n child requests
         gens: List[AsyncGenerator[RequestOutput, None]] = []
         active: Dict[asyncio.Task, int] = {}
-        seed = sampling_params.seed
         for idx in range(n):
-            c_sampling_params = parent_state.get_child_sampling_params(seed)
-            if seed is not None:
-                seed += 1
+            c_sampling_params = parent_state.get_child_sampling_params(idx)
             child_gen = self._generate(
                 prompt=prompt,
                 sampling_params=c_sampling_params,
