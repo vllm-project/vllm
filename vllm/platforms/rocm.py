@@ -166,7 +166,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def empty_cache(cls) -> None:
-        return torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     @classmethod
     def get_current_memory_usage(cls,
