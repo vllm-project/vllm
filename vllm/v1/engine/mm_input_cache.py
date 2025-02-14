@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional
 
 from vllm.config import ModelConfig
+from vllm.envs import VLLM_MM_INPUT_CACHE_SIZE
 from vllm.logger import init_logger
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalKwargs, MultiModalRegistry)
@@ -28,9 +29,8 @@ logger = init_logger(__name__)
 # client (=P0) and server (=P1) processes.
 
 # Both Client and Server must use the same cache size
-# (to perform mirrored caching)
-# TODO: Tune the MM cache size
-MM_CACHE_SIZE = 256
+# (to perform mirrored caching). This cache size is set by the environment
+# variable VLLM_MM_INPUT_CACHE_SIZE.
 
 
 # TODO(ywang96): Deprecate this class once all multimodal models migrate to use
@@ -50,7 +50,8 @@ class MMInputCacheClient:
 
         # Init cache
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.mm_cache = LRUCache[str,
+                                 MultiModalKwargs](VLLM_MM_INPUT_CACHE_SIZE)
 
         # DEBUG: Set to None to disable
         self.mm_debug_cache_hit_ratio_steps = None
@@ -127,7 +128,8 @@ class MMInputCacheServer:
 
     def __init__(self, model_config):
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.mm_cache = LRUCache[str,
+                                 MultiModalKwargs](VLLM_MM_INPUT_CACHE_SIZE)
 
     def get_and_update(
         self,
