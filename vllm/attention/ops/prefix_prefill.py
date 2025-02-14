@@ -718,7 +718,8 @@ if triton.__version__ >= "2.1.0":
                               k_scale: torch.Tensor,
                               v_scale: torch.Tensor,
                               alibi_slopes=None,
-                              sliding_window=None):
+                              sliding_window=None,
+                              sm_scale=None):
 
         q_dtype_is_f32 = q.dtype is torch.float32
         # need to reduce num. blocks when using fp32
@@ -759,7 +760,8 @@ if triton.__version__ >= "2.1.0":
         # round up Lk to a power of 2 - this is required for Triton block size
         Lk_padded = triton.next_power_of_2(Lk)
 
-        sm_scale = 1.0 / (Lq**0.5)
+        if sm_scale is None:
+            sm_scale = 1.0 / (Lq**0.5)
         batch, head = b_seq_len.shape[0], q.shape[1]
         num_queries_per_kv = q.shape[1] // k.shape[1]
 

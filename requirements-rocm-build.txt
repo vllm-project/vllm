@@ -1,0 +1,16 @@
+# Common dependencies
+-r requirements-common.txt
+
+--extra-index-url https://download.pytorch.org/whl/rocm6.2
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+
+cmake>=3.26
+ninja
+packaging
+setuptools>=61
+setuptools-scm>=8
+wheel
+jinja2
+amdsmi==6.2.4
