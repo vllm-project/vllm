@@ -1,0 +1,37 @@
+# If the current branch does not yet exist in Brazil, you can create and push
+# it simultaneously using the following command:
+# 'git push -u origin BRANCH_NAME_HERE'
+
+package.Vllm = {
+    # Please read https://tiny.amazon.com/qeroiywk/BrazilMajorVersionScheme before
+    # changing the suggested major version.
+    interfaces = (0.x);
+
+    third-party-configuration = {
+        # This is important, please do not remove it.
+        thirdPartyName       = "vllm";
+        thirdPartyVersion    = "0.7.2";
+        licenseType          = (Apache-2.0);
+        licenseFile          = (LICENSE);
+        repository           = "raw";
+        downloadType         = "unknown";
+        sourceUrl            = "https://github.com/vllm-project/vllm.git";
+    };
+
+    build-system = custom-build;
+
+    build-tools = {
+        0.x = {
+            BrazilPath = 1.1;
+            CFlags = 1.0;
+            Chrpath = 1.0;
+            GnuMake = 4.x;
+            Python3PBuildTool = 2.0;
+            Python-wheel = 0.x;
+            BrazilPython = 3.0;
+        };
+    };
+
+    targets = {
+    };
+};

@@ -1,0 +1,42 @@
+#!/bin/bash -xe
+
+#------------------------------------------------------------------------------
+# Environment Setup
+#------------------------------------------------------------------------------
+BUILD_PATH="$(brazil-path package-build-root)"
+export NEURON_VERSION="2.22"
+
+#------------------------------------------------------------------------------
+# Version Configuration
+#------------------------------------------------------------------------------
+# Extract version information
+VERSION="$(brazil-path pkg.namefullversion)"
+VERSION="${VERSION#*-}"
+VERSION="${VERSION%.*}"
+export VLLM_VERSION="${VERSION#*-}"
+
+#------------------------------------------------------------------------------
+# Path Configuration
+#------------------------------------------------------------------------------
+DEFAULT_PATH="${BUILD_PATH}/private/dist"
+DIST_PATH="${BUILD_PATH}/pip/public/vllm-neuronx"
+
+# Create distribution directory
+mkdir -p "$DIST_PATH"
+
+#------------------------------------------------------------------------------
+# Build Process
+#------------------------------------------------------------------------------
+# Run build commands
+brazilpython brazil_build
+brazilpython brazil_wheel
+
+#------------------------------------------------------------------------------
+# Package Distribution
+#------------------------------------------------------------------------------
+# Find and copy wheel file
+WHEEL="$(ls "$DEFAULT_PATH" | grep -E "*.whl")"
+cp "$DEFAULT_PATH/$WHEEL" "$DIST_PATH"
+
+# Print success message
+echo "Successfully generated ${DIST_PATH}/${WHEEL}"
