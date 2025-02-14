@@ -59,7 +59,8 @@ ignore = [
     "UP032",
     # Python 3.8 typing
     "UP006", "UP035",
-
+    # Can remove once 3.10+ is the minimum Python version
+    "UP007",
 ]
 
 [tool.mypy]
@@ -111,6 +112,7 @@ markers = [
 ]
 
 [tool.pymarkdown]
+plugins.md004.style = "sublist" # ul-style
 plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html

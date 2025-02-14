@@ -1,11 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
 
+from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -32,6 +35,8 @@ class CachedRequestState:
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
+
+    lora_request: Optional[LoRARequest] = None
 
     @property
     def num_tokens(self) -> int:
@@ -159,13 +164,21 @@ class InputBatch:
         ]
         self.prompt_token_ids: Optional[torch.Tensor] = None
 
+        # lora related
+        self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
+                                             dtype=np.int32)
+        self.lora_id_to_request_ids: Dict[int, Set[str]] = {}
+        self.lora_id_to_lora_request: Dict[int, LoRARequest] = {}
+
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
-        self.prompt_logprob_reqs: Set[str] = set()
+        # NOTE(rob): num_prompt_logprobs only includes reqs
+        # that are currently in the prefill phase.
+        self.num_prompt_logprobs: Dict[str, int] = {}
 
     def add_request(
         self,
@@ -227,11 +240,23 @@ class InputBatch:
         if request.generator is not None:
             self.generators[req_index] = request.generator
 
-        num_logprobs = sampling_params.logprobs
-        if num_logprobs is not None and num_logprobs > 0:
-            self.num_logprobs[req_id] = num_logprobs
-        if sampling_params.prompt_logprobs:
-            self.prompt_logprob_reqs.add(req_id)
+        if sampling_params.logprobs is not None:
+            self.num_logprobs[req_id] = sampling_params.logprobs
+        if sampling_params.prompt_logprobs is not None:
+            self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
+
+        # Add request lora ID
+        if request.lora_request:
+            lora_id = request.lora_request.lora_int_id
+            if lora_id not in self.lora_id_to_request_ids:
+                self.lora_id_to_request_ids[lora_id] = set()
+
+            self.request_lora_mapping[req_index] = lora_id
+            self.lora_id_to_request_ids[lora_id].add(request.req_id)
+            self.lora_id_to_lora_request[lora_id] = request.lora_request
+        else:
+            # No LoRA
+            self.request_lora_mapping[req_index] = 0
 
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -248,7 +273,17 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
-        self.prompt_logprob_reqs.discard(req_id)
+        self.num_prompt_logprobs.pop(req_id, None)
+
+        # LoRA
+        lora_id = self.request_lora_mapping[req_index]
+        if lora_id != 0:
+            self.lora_id_to_request_ids[lora_id].discard(req_id)
+            if len(self.lora_id_to_request_ids[lora_id]) == 0:
+                self.lora_id_to_request_ids.pop(lora_id)
+                self.lora_id_to_lora_request.pop(lora_id)
+            self.request_lora_mapping[req_index] = 0
+
         return req_index
 
     def clear(self) -> None:
@@ -263,7 +298,10 @@ class InputBatch:
         self.repetition_penalties_reqs.clear()
         self.generators.clear()
         self.num_logprobs.clear()
-        self.prompt_logprob_reqs.clear()
+        self.num_prompt_logprobs.clear()
+        self.request_lora_mapping.fill(0)
+        self.lora_id_to_lora_request.clear()
+        self.lora_id_to_request_ids.clear()
 
     def condense(self, empty_req_indices: List[int]) -> None:
         if self.num_reqs == 0:
@@ -315,6 +353,9 @@ class InputBatch:
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
+
+            self.request_lora_mapping[empty_index] = self.request_lora_mapping[
+                last_req_index]
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
@@ -399,6 +440,29 @@ class InputBatch:
         return prompt_token_ids_cpu_tensor.to(device=self.device,
                                               non_blocking=True)
 
+    def make_lora_inputs(
+        self, num_scheduled_tokens: np.ndarray
+    ) -> Tuple[Tuple[int, ...], Tuple[int, ...], Set[LoRARequest]]:
+        """
+        Given the num_scheduled_tokens for each request in the batch, return
+        datastructures used to activate the current LoRAs.
+        Returns:
+            1. prompt_lora_mapping: A tuple of size self.num_reqs where,
+               prompt_lora_mapping[i] is the LoRA id to use for the ith prompt.
+            2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
+               where, token_lora_mapping[i] is the LoRA id to use for ith token.
+            3. lora_requests: Set of relevant LoRA requests.
+        """
+
+        req_lora_mapping = self.request_lora_mapping[:self.num_reqs]
+        prompt_lora_mapping = tuple(req_lora_mapping)
+        token_lora_mapping = tuple(
+            req_lora_mapping.repeat(num_scheduled_tokens))
+        active_lora_requests: Set[LoRARequest] = set(
+            self.lora_id_to_lora_request.values())
+
+        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
@@ -426,13 +490,9 @@ class InputBatch:
                 and len(self.repetition_penalties_reqs) == 0)
 
     @property
-    def max_num_logprobs(self) -> int:
-        return max(self.num_logprobs.values()) if self.num_logprobs else 0
-
-    @property
-    def no_logprob(self) -> bool:
-        return len(self.num_logprobs) == 0
+    def max_num_logprobs(self) -> Optional[int]:
+        return max(self.num_logprobs.values()) if self.num_logprobs else None
 
     @property
     def no_prompt_logprob(self) -> bool:
-        return len(self.prompt_logprob_reqs) == 0
+        return not self.num_prompt_logprobs

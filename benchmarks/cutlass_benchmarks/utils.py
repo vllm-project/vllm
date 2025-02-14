@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Cutlass bench utils
 from typing import Iterable, Tuple
 

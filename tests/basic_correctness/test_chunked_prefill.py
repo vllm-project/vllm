@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
 It tests chunked prefill. Chunked prefill can be enabled by

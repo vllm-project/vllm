@@ -2,6 +2,10 @@
 
 vLLM initially supports basic model inferencing and serving on Intel GPU platform.
 
+:::{attention}
+There are no pre-built wheels or images for this device, so you must build vLLM from source.
+:::
+
 ## Requirements
 
 - Supported Hardware: Intel Data Center GPU, Intel ARC GPU
@@ -30,10 +34,10 @@ pip install -v -r requirements-xpu.txt
 VLLM_TARGET_DEVICE=xpu python setup.py install
 ```
 
-```{note}
+:::{note}
 - FP16 is the default data type in the current XPU backend. The BF16 data
-  type will be supported in the future.
-```
+  type is supported on Intel Data Center GPU, not supported on Intel Arc GPU yet.
+:::
 
 ## Set up using Docker
 

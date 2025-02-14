@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import gc
 import inspect
@@ -55,7 +57,7 @@ from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
-    _init_sampling_metadata_from_tensor_dict, dump_input_when_exception)
+    _init_sampling_metadata_from_tensor_dict)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -96,7 +98,6 @@ class ModelInputForGPU(ModelRunnerInputBase):
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
-    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
@@ -700,6 +701,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 "mrope embedding type requires multi-modal input mapper "
                 "returns 'image_grid_thw' or 'video_grid_thw'.")
 
+            second_per_grid_ts = mm_kwargs.get("second_per_grid_ts", None)
             hf_config = self.runner.model_config.hf_config
 
             inter_data.mrope_input_positions = [None] * inter_data.n_seqs
@@ -711,14 +713,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 mrope_input_positions, mrope_position_delta = \
                     MRotaryEmbedding.get_input_positions(
                         token_ids,
+                        hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
-                        image_token_id=hf_config.image_token_id,
-                        video_token_id=hf_config.video_token_id,
-                        vision_start_token_id=hf_config.vision_start_token_id,
-                        vision_end_token_id=hf_config.vision_end_token_id,
-                        spatial_merge_size=hf_config.vision_config.
-                        spatial_merge_size,
+                        second_per_grid_ts=second_per_grid_ts,
                         context_len=inter_data.context_lens[seq_idx],
                         seq_len=inter_data.seq_lens[seq_idx],
                     )
@@ -1066,6 +1064,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
         ) if needs_attn_backend else None
         if self.attn_backend:
             self.attn_state = self.attn_backend.get_state_cls()(
@@ -1345,6 +1344,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
             self.execute_model(model_input, kv_caches, intermediate_tensors)
             torch.cuda.synchronize()
+            if self.lora_config:
+                # Remove dummy loras.
+                assert self.lora_manager is not None
+                self.remove_all_loras()
             return
 
     def remove_all_loras(self):
@@ -1640,7 +1643,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    virtual_engine=virtual_engine)
 
     @torch.inference_mode()
-    @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
     def execute_model(
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
@@ -1973,7 +1975,8 @@ class CUDAGraphRunner(nn.Module):
 
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
-        self.input_buffers["positions"].copy_(positions, non_blocking=True)
+        if positions is not None:
+            self.input_buffers["positions"].copy_(positions, non_blocking=True)
 
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(

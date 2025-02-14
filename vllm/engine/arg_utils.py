@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import dataclasses
 import json
@@ -11,13 +13,14 @@ import vllm.envs as envs
 from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          DecodingConfig, DeviceConfig, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig)
+                         ModelConfig, ModelImpl, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
+                         SchedulerConfig, SpeculativeConfig, TaskOption,
+                         TokenizerPoolConfig, VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.plugins import load_general_plugins
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
@@ -195,9 +198,13 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
+    model_impl: str = "auto"
 
     calculate_kv_scales: Optional[bool] = None
+
+    additional_config: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -277,11 +284,13 @@ class EngineArgs:
             '--tokenizer-mode',
             type=str,
             default=EngineArgs.tokenizer_mode,
-            choices=['auto', 'slow', 'mistral'],
+            choices=['auto', 'slow', 'mistral', 'custom'],
             help='The tokenizer mode.\n\n* "auto" will use the '
             'fast tokenizer if available.\n* "slow" will '
             'always use the slow tokenizer. \n* '
-            '"mistral" will always use the `mistral_common` tokenizer.')
+            '"mistral" will always use the `mistral_common` tokenizer. \n* '
+            '"custom" will use --tokenizer to select the '
+            'preregistered tokenizer.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
@@ -375,6 +384,18 @@ class EngineArgs:
             'qualified names that can be passed with the `logits_processors` '
             'extra completion argument. Defaults to None, which allows no '
             'processors.')
+        parser.add_argument(
+            '--model-impl',
+            type=str,
+            default=EngineArgs.model_impl,
+            choices=[f.value for f in ModelImpl],
+            help='Which implementation of the model to use.\n\n'
+            '* "auto" will try to use the vLLM implementation if it exists '
+            'and fall back to the Transformers implementation if no vLLM '
+            'implementation is available.\n'
+            '* "vllm" will use the vLLM model implementation.\n'
+            '* "transformers" will use the Transformers model '
+            'implementation.\n')
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',
@@ -930,18 +951,28 @@ class EngineArgs:
             type=str,
             default="auto",
             help='The worker class to use for distributed execution.')
-
         parser.add_argument(
             "--generation-config",
             type=nullable_str,
             default=None,
             help="The folder path to the generation config. "
-            "Defaults to None, will use the default generation config in vLLM. "
-            "If set to 'auto', the generation config will be automatically "
-            "loaded from model. If set to a folder path, the generation config "
-            "will be loaded from the specified folder path. If "
-            "`max_new_tokens` is specified, then it sets a server-wide limit "
-            "on the number of output tokens for all requests.")
+            "Defaults to None, no generation config is loaded, vLLM defaults "
+            "will be used. If set to 'auto', the generation config will be "
+            "loaded from model path. If set to a folder path, the generation "
+            "config will be loaded from the specified folder path. If "
+            "`max_new_tokens` is specified in generation config, then "
+            "it sets a server-wide limit on the number of output tokens "
+            "for all requests.")
+
+        parser.add_argument(
+            "--override-generation-config",
+            type=json.loads,
+            default=None,
+            help="Overrides or sets generation config in JSON format. "
+            "e.g. ``{\"temperature\": 0.5}``. If used with "
+            "--generation-config=auto, the override parameters will be merged "
+            "with the default config from the model. If generation-config is "
+            "None, only the override parameters are used.")
 
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",
@@ -958,6 +989,14 @@ class EngineArgs:
             'be loaded from the model checkpoint if available. '
             'Otherwise, the scales will default to 1.0.')
 
+        parser.add_argument(
+            "--additional-config",
+            type=json.loads,
+            default=None,
+            help="Additional config for specified platform in JSON format. "
+            "Different platforms may support different configs. Make sure the "
+            "configs are valid for the platform you are using. The input format"
+            " is like '{\"config_key\":\"config_value\"}'")
         return parser
 
     @classmethod
@@ -1002,7 +1041,9 @@ class EngineArgs:
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
+            override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            model_impl=self.model_impl,
         )
 
     def create_load_config(self) -> LoadConfig:
@@ -1016,6 +1057,9 @@ class EngineArgs:
     def create_engine_config(self,
                              usage_context: Optional[UsageContext] = None
                              ) -> VllmConfig:
+        from vllm.platforms import current_platform
+        current_platform.pre_register_and_update()
+
         if envs.VLLM_USE_V1:
             self._override_v1_engine_args(usage_context)
 
@@ -1259,6 +1303,7 @@ class EngineArgs:
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
+            additional_config=self.additional_config,
         )
 
         if envs.VLLM_USE_V1:
@@ -1319,6 +1364,12 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
+        # Initialize plugin to update the parser, for example, The plugin may
+        # adding a new kind of quantization method to --quantization argument or
+        # a new device to --device argument.
+        load_general_plugins()
+        from vllm.platforms import current_platform
+        current_platform.pre_register_and_update(parser)
         return parser
 
 

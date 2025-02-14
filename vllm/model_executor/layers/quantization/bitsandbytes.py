@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -131,8 +133,16 @@ def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
     components = prefix.split('.')
 
     # Check if any of the skip modules exactly matches any component
-    return any(module_name in components
-               for module_name in llm_int8_skip_modules)
+    substr_check = any(module_name in components
+                       for module_name in llm_int8_skip_modules)
+
+    # Allow certain layers to not be quantized
+    set_components = set(".".join(components[:i + 1])
+                         for i in range(len(components)))
+    set_llm_int8_skip_modules = set(llm_int8_skip_modules)
+    prefix_check = len(set_llm_int8_skip_modules & set_components) != 0
+
+    return substr_check or prefix_check
 
 
 class BitsAndBytesLinearMethod(LinearMethodBase):

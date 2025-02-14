@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
@@ -136,9 +137,8 @@ def _sgmv_expand_kernel(
     c_ptr = (out_ptr + offset_cm[:, None] * output_d0_stride +
              offset_cn[None, :] * output_d1_stride)
     M = tl.load(seq_lens + cur_batch)
-    c_mask = (offset_cm[:, None] <
-              (cur_seq_start + M)) & (offset_cn[None, :] <
-                                      (cur_slice_start + curr_N))
+    c_mask = (offset_cm[:, None] < (cur_seq_start + M)) & (
+        offset_cn[None, :] < (cur_slice_start + curr_N))
     if ADD_INPUTS:
         tiled_out = tl.load(c_ptr, mask=c_mask)
         tiled_c += tiled_out

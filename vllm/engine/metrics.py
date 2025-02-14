@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
@@ -235,7 +237,7 @@ class Metrics:
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + [Metrics.labelname_finish_reason])
 
-        # Speculatie decoding stats
+        # Speculative decoding stats
         self.gauge_spec_decode_draft_acceptance_rate = self._gauge_cls(
             name="vllm:spec_decode_draft_acceptance_rate",
             documentation="Speulative token acceptance rate.",

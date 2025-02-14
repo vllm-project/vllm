@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
 import warnings
@@ -716,9 +717,10 @@ def _sample_with_torch(
       tensors required for Pythonization
     '''
 
-    categorized_seq_group_ids: Dict[SamplingType,
-                                    List[int]] = {t: []
-                                                  for t in SamplingType}
+    categorized_seq_group_ids: Dict[SamplingType, List[int]] = {
+        t: []
+        for t in SamplingType
+    }
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         sampling_params = seq_group.sampling_params

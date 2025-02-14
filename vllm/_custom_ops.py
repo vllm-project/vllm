@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import contextlib
 import importlib
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -435,12 +437,39 @@ def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
 
 
+def cutlass_scaled_mm_supports_block_fp8(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(
+        cuda_device_capability)
+
+
 def cutlass_scaled_mm(a: torch.Tensor,
                       b: torch.Tensor,
                       scale_a: torch.Tensor,
                       scale_b: torch.Tensor,
                       out_dtype: torch.dtype,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    `cutlass_scaled_mm` implements a fused version of 
+        `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
+    where scale_a * a and scale_b * b are implemented using numpy-style 
+    broadcasting. 
+    
+    In order to support blockwise scaling like found in DeepSeek V3 we also 
+    support extended "group" broadcast rules. We extend the numpy-style 
+    broadcasting rules with the following rule: 
+        "if the extent of a dimension in the source shape is between 1 and 
+        corresponding extent in the target shape we repeat each element along 
+        that dimension  src_shape[dim] // target_shape[dim] times consecutively"
+    example if we have:
+          a = [[1, 2], and target_shape = (2, 4)
+               [3, 4]]
+    then we would expand a to:
+          a = [[1, 1, 2, 2],
+               [3, 3, 4, 4]]
+    currently we only support the case:
+        scale_a.shape * [1, 128] == a.shape
+        scale_b.shape * [128, 128] == b.shape
+    """
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.shape[0] == b.shape[
@@ -535,22 +564,9 @@ def cutlass_sparse_compress(a: torch.Tensor) \
 
     # a_meta.dtype: torch.uint8 so elemsPerMetaElem = 8b / 2b_per_nz = 4
     elemsPerMetaElem = 4
+    assert (a.shape[1] % (2 * elemsPerMetaElem) == 0)
 
-    m = a.shape[0]
-    k = a.shape[1]
-    assert (k % 2 == 0)
-    a_nzs = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
-    a_meta = torch.empty((m, k // 2 // elemsPerMetaElem),
-                         dtype=torch.uint8,
-                         device=a.device)
-
-    if not (torch.ops._C.cutlass_sparse_compress_entry(a_nzs, a_meta, a)):
-        raise ValueError
-
-    assert (a_nzs.is_contiguous())
-    assert (a_meta.is_contiguous())
-
-    return a_nzs, a_meta
+    return torch.ops._C.cutlass_sparse_compress(a)
 
 
 def cutlass_scaled_sparse_mm(
@@ -736,6 +752,63 @@ def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.permute_cols(a, perm)
 
 
+# fp4
+def scaled_fp4_quant(
+        input: torch.Tensor,
+        input_global_scale: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize input tensor to FP4 and return quantized tensor and scale.
+
+    This function quantizes the last dimension of the given tensor `input`. For
+    every 16 consecutive elements, a single dynamically computed scaling factor
+    is shared. This scaling factor is quantized using the `input_global_scale`
+    and is stored in a swizzled layout (see
+    https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x).
+
+    Args:
+        input: The input tensor to be quantized to FP4
+        input_global_scale: A scalar scaling factor for the entire tensor.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
+            two values are packed into a uint8 and float8_e4m3 scaling factors
+            in the sizzled layout.
+    """
+    assert input.ndim >= 1, (
+        f'input.ndim needs to be >= 1, but got {input.ndim}.')
+    other_dims = 1 if input.ndim == 1 else -1
+    input = input.reshape(other_dims, input.shape[-1])
+    m, n = input.shape
+    block_size = 16
+    device = input.device
+
+    assert n % block_size == 0, (
+        f'last dim has to be multiple of 16, but got {n}.')
+    assert input.dtype in (torch.float16, torch.bfloat16), (
+        f'input.dtype needs to be fp16 or bf16 but got {input.dtype}.')
+
+    # Two fp4 values will be packed into an uint8.
+    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+
+    # We use the rounded values to store the swizzled values. Due to the
+    # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
+    # So, we first pad the scales to multiples of 128 and 4. Then, the scales
+    # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
+    # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+    round_up = lambda x, y: (x + y - 1) // y * y
+    rounded_m = round_up(m, 128)
+    scale_n = n // block_size
+    rounded_n = round_up(scale_n, 4)
+    output_scale = torch.empty((rounded_m, rounded_n // 4),
+                               device=device,
+                               dtype=torch.int32)
+
+    torch.ops._C.scaled_fp4_quant(output, input, output_scale,
+                                  input_global_scale)
+    output_scale = output_scale.view(torch.float8_e4m3fn)
+    return output, output_scale
+
+
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,
@@ -820,8 +893,8 @@ def scaled_int8_quant(
     if scale is not None:
         # static-per-tensor quantization.
         assert symmetric == (
-            azp is
-            None), "azp must only be provided for asymmetric quantization."
+            azp
+            is None), "azp must only be provided for asymmetric quantization."
         torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
         return output, scale, azp
 
@@ -923,6 +996,15 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                                           num_tokens_post_pad)
 
 
+def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
+                             block_size: int, sorted_token_ids: torch.Tensor,
+                             experts_ids: torch.Tensor,
+                             num_tokens_post_pad: torch.Tensor) -> None:
+    torch.ops._moe_C.sgl_moe_align_block_size(topk_ids, num_experts,
+                                              block_size, sorted_token_ids,
+                                              experts_ids, num_tokens_post_pad)
+
+
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indicies: torch.Tensor,
                  gating_output: float) -> None:
@@ -980,10 +1062,28 @@ def reshape_and_cache_flash(
                                                    v_scale)
 
 
+def concat_and_cache_mla(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    scale: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.concat_and_cache_mla(kv_c, k_pe, kv_cache,
+                                                slot_mapping, kv_cache_dtype,
+                                                scale)
+
+
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+
+
+def copy_blocks_mla(kv_caches: List[torch.Tensor],
+                    block_mapping: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.copy_blocks_mla(kv_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import copy
 import functools
@@ -44,8 +46,9 @@ if current_platform.is_rocm():
         finally:
             amdsmi_shut_down()
 elif current_platform.is_cuda():
-    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
-                        nvmlInit, nvmlShutdown)
+    from vllm.third_party.pynvml import (nvmlDeviceGetHandleByIndex,
+                                         nvmlDeviceGetMemoryInfo, nvmlInit,
+                                         nvmlShutdown)
 
     @contextmanager
     def _nvml():

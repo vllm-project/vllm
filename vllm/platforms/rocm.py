@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from functools import lru_cache
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -70,12 +72,16 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-        "fbgemm_fp8", "gguf", "quark"
+        "fbgemm_fp8", "gguf", "quark", "ptpc_fp8"
     ]
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1) -> str:
+                             kv_cache_dtype, block_size, use_v1,
+                             use_mla) -> str:
+        if use_mla:
+            logger.info("Using Triton MLA backend.")
+            return "vllm.attention.backends.triton_mla.TritonMLABackend"
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if selected_backend == _Backend.ROCM_FLASH:
@@ -163,4 +169,5 @@ class RocmPlatform(Platform):
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
-        return torch.cuda.max_memory_allocated(device)
+        return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(
+            device)[0]
