@@ -74,35 +74,6 @@ class ParentRequestState:
                                              key=lambda x: x.index)
         return self.request_output
 
-    def transform_output(
-        self,
-        child_req_output: RequestOutput,
-        index: int,
-    ) -> RequestOutput:
-        """Transform a parallel sampling child 
-        request output into a parent request output.
-        
-        Stream-mode (`output_kind == DELTA`) only.
-        Inject correct parent request ID and completion
-        index.
-
-        Args:
-          child_req_output: a single request output
-                            from a parallel sampling
-                            child request.
-          index: index within `n` parallel sampling
-                 child requests
-
-        Returns:
-          Stream-mode parent request output.
-        """
-        child_req_output.request_id = self.request_id
-        child_req_output.outputs[0].index = index
-        return child_req_output
-
-    def get_warmup_request_id(self) -> str:
-        return "w_" + self.request_id
-
     def get_child_request_id(
         self,
         index: int,
@@ -165,7 +136,9 @@ class ParallelSamplingOutputProcessor:
         """
         if self.parent_state.output_kind != RequestOutputKind.FINAL_ONLY:
             # stream=true: return child completions immediately
-            return self.parent_state.transform_output(child_req_output, index)
+            child_req_output.request_id = self.parent_state.request_id
+            child_req_output.outputs[0].index = index
+            return child_req_output
 
         # stream=false: aggregate child completions
         self.parent_state.add_output(child_req_output, index)
