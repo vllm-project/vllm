@@ -7,7 +7,7 @@ from typing import Dict, List
 import numpy as np
 import prometheus_client
 
-from vllm.config import VllmConfig
+from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
@@ -227,6 +227,26 @@ class PrometheusStatLogger(StatLoggerBase):
                 "Histogram of time spent in DECODE phase for request.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
+
+        self.log_metrics_info("cache_config", vllm_config.cache_config)
+
+    def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
+        metrics_info = config_obj.metrics_info()
+
+        name, documentation = None, None
+        if type == "cache_config":
+            name = "vllm:cache_config_info"
+            documentation = "Information of the LLMEngine CacheConfig"
+        assert name is not None, f"Unknown metrics info type {type}"
+
+        # Info type metrics are syntactic sugar for a gauge permanently set to 1
+        # Since prometheus multiprocessing mode does not support Info, emulate
+        # info here with a gauge.
+        info_gauge = prometheus_client.Gauge(
+            name=name,
+            documentation=documentation,
+            labelnames=metrics_info.keys()).labels(**metrics_info)
+        info_gauge.set(1)
 
     def log(self, scheduler_stats: SchedulerStats,
             iteration_stats: IterationStats):
