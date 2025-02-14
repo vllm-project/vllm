@@ -37,7 +37,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
 from vllm.v1.attention.backends.hpu_attn import (HPUAttentionBackendV1, HPUAttentionMetadataV1)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -1239,15 +1239,16 @@ class HPUModelRunner:
         # We slice at the end, since we use the positions for gathering.
         positions = torch.from_numpy(
             self.input_batch.num_computed_tokens_cpu.reshape(-1, 1))
-        index = positions.to(torch.int64)
         positions = positions[:padded_batch_size]
+        index = positions.to(torch.int64)
 
         # TOKEN_IDS. [batch, 1]
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
+        #import pdb; pdb.set_trace()
         token_ids[:num_decodes] = torch.gather(
-            input=torch.from_numpy(self.input_batch.token_ids_cpu),
+            input=torch.from_numpy(self.input_batch.token_ids_cpu[:num_decodes]),
             dim=1,
-            index=index,
+            index=index[:num_decodes],
         )[:num_decodes]
 
         # SLOT_MAPPING [batch, 1]
@@ -1414,6 +1415,7 @@ class HPUModelRunner:
                                            attn_metadata=trimmed_attn_metadata,
                                            kv_caches=kv_caches)
         #hidden_states = hidden_states[:num_scheduled_tokens]
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, None)
         return logits
@@ -1499,11 +1501,12 @@ class HPUModelRunner:
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
-        num_padded_decodes = decode_data.token_ids.shape[
-            0] if num_decodes > 0 else 0
-
+        
         prefill_data, decode_data = self._prepare_inputs(
             scheduler_output, num_prefills, num_decodes, bucketing=self.enable_bucketing)
+
+        num_padded_decodes = decode_data.token_ids.shape[
+                    0] if num_decodes > 0 else 0
 
         #FIXME(kzawora): Currently there's no handling of logprobs. Fix that
         # later.
@@ -1511,6 +1514,8 @@ class HPUModelRunner:
         logprobs = None
         prefill_output_tokens = []
         decode_output_tokens = []
+        prefill_output_device = None
+        decode_output_device = None
 
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
@@ -1533,7 +1538,7 @@ class HPUModelRunner:
             # and i don't like it
             argmax_token_ids = torch.argmax(logits_device, dim=-1, keepdim=True)
             argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
-            decode_output_tokens = argmax_token_ids
+            decode_output_device = argmax_token_ids
             htorch.core.mark_step()
 
         ######################### PREFILLS #########################
@@ -1573,12 +1578,29 @@ class HPUModelRunner:
             
             # sampler now returns cpu list instead of device tensor -
             # and i don't like it
-            # prefill_output_device = torch.cat(prefill_output_list, dim=0)
+            prefill_output_device = torch.cat(prefill_output_tokens, dim=0)
             htorch.core.mark_step()
 
-        sampled_token_ids_list = [
-            *decode_output_tokens, *prefill_output_tokens
-        ]
+        # From this point onward, all operations are done on CPU.
+        # If sampler was split, we already have tokens. Let's copy the data to CPU as is, and then discard padded tokens.
+        prefill_output_cpu = prefill_output_device.cpu(
+        ) if prefill_output_device is not None else None
+        decode_output_cpu = decode_output_device.cpu(
+        ) if decode_output_device is not None else None
+        # From this point onward, all operations are done on CPU.
+
+        # Discard garbage tokens from prefills and/or decodes
+        if prefill_output_cpu is not None and decode_output_cpu is not None:
+            sampled_token_ids_cpu = torch.cat(
+                (decode_output_cpu[:num_decodes],
+                    prefill_output_cpu[:num_prefills]),
+                dim=0)
+        else:
+            sampled_token_ids_cpu = decode_output_cpu[:
+                                                        num_decodes] if decode_output_cpu is not None else prefill_output_cpu[:
+                                                                                                                            num_prefills]
+
+        sampled_token_ids_list = sampled_token_ids_cpu.tolist()
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             req_state = self.requests[req_id]
@@ -1590,12 +1612,18 @@ class HPUModelRunner:
             req_state.output_token_ids.append(token_id)
 
         ################## RETURN ##################
+        # Create output.
+        all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
+        prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]] = {}
+        for req_id in all_req_ids:
+            prompt_logprobs_dict[req_id] = None
+        #import pdb; pdb.set_trace()
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids_list,
-            logprob_token_ids_cpu=logprob_token_ids,
-            logprobs_cpu=logprobs,
+            logprobs=None, 
+            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
 
         if False:
