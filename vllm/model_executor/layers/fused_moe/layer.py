@@ -305,8 +305,6 @@ class FusedMoE(torch.nn.Module):
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
 
-        print(f"self.ep_size: {self.ep_size}, self.tp_size: {self.tp_size}")
-
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1
             self.expert_map = torch.full((self.global_num_experts, ),
