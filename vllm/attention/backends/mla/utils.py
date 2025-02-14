@@ -26,7 +26,7 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     apply_fp8_linear_generic, current_platform_fp8_dtype, is_fp8)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    scaled_dequantize, scaled_quantize)
+    scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
@@ -220,16 +220,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 .view(-1, self.num_heads, self.kv_lora_rank)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-
-        def is_layer_fp8(layer: LinearBase) -> bool:
-            return isinstance(layer.quant_method, Fp8LinearMethod) or\
-                (isinstance(layer.quant_method, CompressedTensorsLinearMethod)\
-                and isinstance(layer.scheme, CompressedTensorsW8A8Fp8))
-
-        def quantization_scheme_supported(layer: LinearBase) -> bool:
-            return isinstance(layer.quant_method, UnquantizedLinearMethod) or \
-                is_layer_fp8(layer)
-
         # TODO(lucas) This is very gross, we need a more wide scale refactor of
         # all the FP8 code with a more standard way of
         # defining schemes/group-shapes, we should also potentially force
@@ -239,7 +229,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         def get_scale_group_shapes_for_fp8(layer: LinearBase) -> \
             Tuple[Tuple[int, int], Tuple[int, int]]:
             if isinstance(layer.quant_method, Fp8LinearMethod):
-                if layer.quant_method.block_quant is not None:
+                if layer.quant_method.block_quant:
                     weight_block_size = \
                         layer.quant_method.quant_config.weight_block_size
                     # per-token-group (1, X), block-quantized (X, Y)
@@ -267,41 +257,32 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     f"{layer.quant_method}, please run with VLLM_MLA_DISABLE=1"
                 )
 
-        def get_scales(layer: LinearBase) -> torch.Tensor:
-            if hasattr(layer, "weight_scale_inv"):
-                return layer.weight_scale_inv
-            return layer.weight_scale
+        def get_layer_weight(layer):
+            if hasattr(layer, "weight"):
+                return layer.weight
+            elif hasattr(layer, "qweight"):
+                return layer.qweight
+            else:
+                raise AttributeError(
+                    f"Layer '{layer}' has neither weight nor qweight")
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
-            if is_layer_fp8(layer):
-                if isinstance(layer.quant_method, \
-                    CompressedTensorsLinearMethod) and \
-                    isinstance(layer.scheme, CompressedTensorsW8A8Fp8):
-                    # NOTE(lucas): note sure why but `CompressedTensorsW8A8Fp8`
-                    # seems to store weights as (input, output) instead of
-                    # (output, input) so we need to transpose
-                    weight = layer.weight.T  # standardize to (output, input)
-                else:
-                    weight = layer.weight
-                _, weight_scale_group_shape = \
-                    get_scale_group_shapes_for_fp8(layer)
-                scales = get_scales(layer)
+            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+                # NOTE: This should only be used offline, since it's O(N^3)
+                eye = torch.eye(layer.input_size_per_partition,
+                                dtype=act_dtype,
+                                device=get_layer_weight(layer).device)
+                dequant_weights = layer.quant_method.apply(layer,
+                                                           eye,
+                                                           bias=None)
+                del eye
+                # standardize to (output, input)
+                return dequant_weights.T
+            return layer.weight
 
-                return scaled_dequantize(weight, scales,
-                                         weight_scale_group_shape)
-            else:
-                return layer.weight
-
-        if not (quantization_scheme_supported(self.kv_b_proj) and\
-            quantization_scheme_supported(self.q_proj) and\
-                quantization_scheme_supported(self.o_proj)):
-            raise NotImplementedError(
-                "Only FP8 and UnquantizedLinearMethod are supported for MLA"
-                ", please run with VLLM_MLA_DISABLE=1")
-
-        weight_dtype = self.kv_b_proj.weight.dtype
-        assert self.o_proj.weight.dtype == weight_dtype
-        assert self.q_proj.weight.dtype == weight_dtype
+        weight_dtype = get_layer_weight(self.kv_b_proj).dtype
+        assert get_layer_weight(self.o_proj).dtype == weight_dtype
+        assert get_layer_weight(self.q_proj).dtype == weight_dtype
 
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
         assert kv_b_proj_weight.shape == (
