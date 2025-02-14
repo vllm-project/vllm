@@ -216,7 +216,7 @@ def _process_utility_output(output: UtilityOutput,
     """Set the result from a utility method in the waiting future"""
     future = utility_results.pop(output.call_id)
     if output.failure_message is not None:
-        future.set_exception(ValueError(f"Failed: {output.failure_message}"))
+        future.set_exception(Exception(f"Failed: {output.failure_message}"))
     else:
         future.set_result(output.result)
 
@@ -305,30 +305,32 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        self.outputs_queue: Optional[asyncio.Queue[bytes]] = None
+        self.outputs_queue: Optional[asyncio.Queue[EngineCoreOutputs]] = None
         self.queue_task: Optional[asyncio.Task] = None
 
     async def get_output_async(self) -> EngineCoreOutputs:
         if self.outputs_queue is None:
-            # Perform IO in separate task to parallelize as much as possible
+            # Perform IO in separate task to parallelize as much as possible.
+            # Avoid task having direct reference back to the client.
             self.outputs_queue = asyncio.Queue()
+            output_socket = self.output_socket
+            decoder = self.decoder
+            utility_results = self.utility_results
+            outputs_queue = self.outputs_queue
 
             async def process_outputs_socket():
-                assert self.outputs_queue is not None
                 while True:
-                    (frame, ) = await self.output_socket.recv_multipart(
-                        copy=False)
-                    self.outputs_queue.put_nowait(frame.buffer)
+                    (frame, ) = await output_socket.recv_multipart(copy=False)
+                    outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
+                    if outputs.utility_output:
+                        _process_utility_output(outputs.utility_output,
+                                                utility_results)
+                    else:
+                        outputs_queue.put_nowait(outputs)
 
             self.queue_task = asyncio.create_task(process_outputs_socket())
 
-        while True:
-            outputs = self.decoder.decode(await self.outputs_queue.get())
-            if not outputs.utility_output:
-                return outputs
-
-            _process_utility_output(outputs.utility_output,
-                                    self.utility_results)
+        return await self.outputs_queue.get()
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
