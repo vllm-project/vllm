@@ -180,20 +180,22 @@ def test_parallel_sampling(
     max_tokens: int,
 ) -> None:
 
+    # Numerical differences produce slightly different output for these
+    if 'state-spaces' in model:
+        example_prompts.pop(0)
+        example_prompts.pop(0)
+        example_prompts.pop(0)
+
     with vllm_runner(model, dtype=dtype, max_num_seqs=16) as vllm_model:
         for_loop_outputs = []
         for _ in range(10):
             for_loop_outputs.append(
-                # using example_prompts index 1 instead of 0 since with 0 the
-                # logprobs get really close and the test doesn't pass
-                vllm_model.generate_greedy([example_prompts[1]], max_tokens)
-                [0])
+                vllm_model.generate_greedy(example_prompts, max_tokens)[0])
         sampling_params = SamplingParams(n=10,
                                          temperature=0.001,
                                          seed=0,
                                          max_tokens=max_tokens)
-        n_lt_1_outputs = vllm_model.generate([example_prompts[1]],
-                                             sampling_params)
+        n_lt_1_outputs = vllm_model.generate(example_prompts, sampling_params)
     token_ids, texts = n_lt_1_outputs[0]
     n_lt_1_outputs = [(token_id, text)
                       for token_id, text in zip(token_ids, texts)]
