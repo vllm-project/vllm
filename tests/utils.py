@@ -500,19 +500,15 @@ def compare_all_settings(model: str,
             })
 
             if method == "generate":
-                print(f"Testing generate {model=} {prompt=} {token_ids=}")
                 results += _test_completion(client, model, prompt, token_ids)
             elif method == "generate_close":
-                print(f"Testing generate_close {model=} {prompt=}")
                 results += _test_completion_close(client, model, prompt)
             elif method == "generate_with_image":
-                print(f"Testing generate_with_image {model=} {prompt=}")
                 results += _test_image_text(
                     client, model,
                     "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png"
                 )
             elif method == "encode":
-                print(f"Testing encode {model=} {prompt=}")
                 results += _test_embeddings(client, model, prompt)
             else:
                 raise ValueError(f"Unknown method: {method}")

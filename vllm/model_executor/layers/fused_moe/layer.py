@@ -637,7 +637,7 @@ class FusedMoE(torch.nn.Module):
         return topk_weights, topk_ids
 
     def forward(self, hidden_states: torch.Tensor,
-                router_logits: torch.Tensor) -> torch.Tensor:
+                router_logits: torch.Tensor):
         assert self.quant_method is not None
 
         # Matrix multiply.

@@ -1379,7 +1379,6 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
-
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
