@@ -62,7 +62,7 @@ class QuantizationConfig(ABC):
 
     def __init__(self):
         super().__init__()
-        self.packed_modules_mapping = dict()
+        self.packed_modules_mapping: Dict[str, List[str]] = dict()
 
     @abstractmethod
     def get_name(self) -> str:
