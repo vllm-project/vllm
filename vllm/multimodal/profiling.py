@@ -200,6 +200,9 @@ class MultiModalProfiler(Generic[_I]):
                     "and/or reduce `mm_counts`.", seq_len, total_len,
                     total_placeholders_by_modality)
 
+            # FIXME(Isotr0py): Fix the hardcoded max tokens.
+            seq_len = 1500
+
             return DummyData(
                 seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),
                 multi_modal_data=None,

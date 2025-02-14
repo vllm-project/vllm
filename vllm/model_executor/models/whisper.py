@@ -641,8 +641,7 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
-        num_tokens = self.info.get_max_audio_tokens()
-        return [0] * num_tokens
+        return [0]
     
     def _call_hf_processor(
         self,
@@ -650,6 +649,7 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        # TODO(Isotr0py): clean up this method
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
             mm_data = dict(audio=mm_data.pop("audios"))
@@ -678,7 +678,6 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
-            feature_attention_mask=MultiModalFieldConfig.batched("audio"),
         )
     
     def _get_prompt_replacements(
@@ -691,7 +690,7 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         return [
             PromptReplacement(
                 modality="audio",
-                target=[0] * num_tokens,
+                target=[0],
                 replacement=[0] * num_tokens,
             )
         ]
@@ -853,9 +852,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             if not isinstance(input_features, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of audio features. "
                                  f"Got type: {type(input_features)}")
-            input_features = [feat.to(self.dtype) for feat in input_features]
+            input_features = torch.cat([feat.to(self.dtype) for feat in input_features])
 
-        return WhisperAudioInputs(input_features=flatten_bn(input_features))
+        return WhisperAudioInputs(input_features=input_features)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
