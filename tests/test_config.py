@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
+        ("openai/whisper-small", "transcription", "transcription"),
     ],
 )
 def test_auto_task(model_id, expected_runner_type, expected_task):
@@ -250,7 +251,7 @@ def test_rope_customization():
 @pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [
     ("facebook/opt-125m", False),
     ("facebook/bart-base", True),
-    ("meta-llama/Llama-3.2-1B", False),
+    ("meta-llama/Llama-3.2-1B-Instruct", False),
     ("meta-llama/Llama-3.2-11B-Vision", True),
 ])
 def test_is_encoder_decoder(model_id, is_encoder_decoder):
