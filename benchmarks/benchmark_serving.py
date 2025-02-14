@@ -794,10 +794,14 @@ def parse_goodput(slo_pairs):
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                                      results: Dict[str, Any],
                                      file_name: str) -> None:
-    metrics = ["median_ttft_ms", "median_itl_ms"]
+    metrics = [
+        "median_ttft_ms", "mean_ttft_ms", "std_ttft_ms", "p99_ttft_ms",
+        "mean_tpot_ms", "median_tpot_ms", "std_tpot_ms", "p99_tpot_ms",
+        "median_itl_ms", "mean_itl_ms", "std_itl_ms", "p99_itl_ms"
+    ]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
-    ignored_metrics = ["ttfts", "itls", "generated_texts"]
+    ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={k: [results[k]]
