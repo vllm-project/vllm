@@ -34,7 +34,6 @@ class ParallelSetup(NamedTuple):
 class PPTestOptions(NamedTuple):
     multi_node_only: bool
     load_format: Optional[str] = None
-    model_impl: Optional[str] = None
 
 
 @dataclass
@@ -65,7 +64,6 @@ class PPTestSettings:
         multi_node_only: bool = False,
         task: TaskOption = "auto",
         load_format: Optional[str] = None,
-        model_impl: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -95,8 +93,7 @@ class PPTestSettings:
             vllm_major_versions=["0", "0", "1"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format,
-                                       model_impl=model_impl),
+                                       load_format=load_format),
         )
 
     @staticmethod
@@ -107,7 +104,6 @@ class PPTestSettings:
         task: TaskOption = "auto",
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
-        model_impl: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -120,8 +116,7 @@ class PPTestSettings:
             vllm_major_versions=["0"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format,
-                                       model_impl=model_impl),
+                                       load_format=load_format),
         )
 
     def iter_params(self, model_id: str):
@@ -168,7 +163,7 @@ TEXT_GENERATION_MODELS = {
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
-    "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.fast(model_impl="transformers"),  # noqa: E501
+    "ArthurZ/Ilama-3.2-1B": PPTestSettings.fast(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
@@ -237,7 +232,7 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Meta-Llama-3-8B",
-    "meta-llama/Llama-3.2-1B-Instruct",
+    "ArthurZ/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
@@ -270,7 +265,7 @@ def _compare_tp(
         chunked_prefill,
     ) = parallel_setup
 
-    multi_node_only, load_format, model_impl = test_options
+    multi_node_only, load_format = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -327,8 +322,6 @@ def _compare_tp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
-    if model_impl:
-        common_args.extend(["--model-impl", model_impl])
 
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
     if distributed_backend == "ray" and (vllm_major_version == "1"
