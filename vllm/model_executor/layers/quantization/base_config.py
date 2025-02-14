@@ -59,7 +59,10 @@ def method_has_implemented_embedding(
 
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
-    packed_modules_mapping: Dict[str, List[str]] = dict()
+
+    def __init__(self):
+        super().__init__()
+        self.packed_modules_mapping = dict()
 
     @abstractmethod
     def get_name(self) -> str:
