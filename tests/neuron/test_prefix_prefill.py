@@ -312,7 +312,13 @@ def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
         (8, 1, 32),
     ],
 )
-@pytest.mark.parametrize("mixed_precision", [True, False])
+@pytest.mark.parametrize(
+    "reorder_mask_outside,mixed_precision",
+    [
+        (True, True),
+        (False, False),
+    ],
+)
 @torch.inference_mode()
 def test_flash_paged_attention_numerical(
     prefill_batch_size: int,
@@ -323,12 +329,14 @@ def test_flash_paged_attention_numerical(
     block_size: int,
     large_tile_size,
     mixed_precision: bool,
+    reorder_mask_outside: bool,
 ) -> None:
     import os
 
     import torch_xla.core.xla_model as xm
 
-    from vllm.attention.ops.nki_flash_attn import flash_attn_varlen_nkifunc
+    from vllm.attention.ops.nki_flash_attn import (context_mask_reorder_helper,
+                                                   flash_attn_varlen_nkifunc)
 
     assert large_tile_size % block_size == 0
 
@@ -460,20 +468,6 @@ def test_flash_paged_attention_numerical(
         "constant",
         0,
     ).bool()
-    # assuming LARGE_TILE_SIZE >= B_P_SIZE
-    num_tiled_blocks = max(B_P_SIZE, LARGE_TILE_SZ // block_size)
-    tiled_block_size = LARGE_TILE_SZ // num_tiled_blocks
-    if tiled_block_size > 1:
-        # reorder mask is needed as long as tiled_block_size > 1
-        prior_mask_padded = prior_mask_padded.view(
-            max_num_queries,
-            context_kv_len // LARGE_TILE_SZ,
-            num_tiled_blocks // B_P_SIZE,
-            B_P_SIZE,
-            tiled_block_size,
-        )
-        prior_mask_padded = prior_mask_padded.transpose(3, 4).reshape(
-            max_num_queries, context_kv_len)
     active_mask_padded = F.pad(
         active_mask,
         (
@@ -486,6 +480,12 @@ def test_flash_paged_attention_numerical(
         0,
     ).bool()
     attn_mask = torch.concat([prior_mask_padded, active_mask_padded], dim=1)
+
+    # reorder_mask_outside = True
+    if reorder_mask_outside:
+        # Due to vectorized DMA read, we need to reorder mask to match KV layout
+        attn_mask = context_mask_reorder_helper(attn_mask, LARGE_TILE_SZ,
+                                                block_size)
 
     input_args = (
         query.to(device=device),
@@ -501,6 +501,7 @@ def test_flash_paged_attention_numerical(
         head_size=head_size,
         mixed_precision=mixed_precision,
         LARGE_TILE_SZ=LARGE_TILE_SZ,
+        mask_reordered=reorder_mask_outside,
         return_debug_tensors=return_debug_tensors,
     )
 

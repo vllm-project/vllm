@@ -3,6 +3,7 @@
 import neuronxcc.nki.isa as nisa
 import neuronxcc.nki.language as nl
 import numpy as np
+import torch
 from neuronxcc import nki
 from neuronxcc.nki.language import par_dim
 
@@ -772,6 +773,48 @@ def flash_paged_attention(
     return o
 
 
+def context_mask_reorder_helper(mask, LARGE_TILE_SZ, block_size):
+    """
+    Reorder the mask to make it compatible with the flash attention kernel.
+
+    We vectorize KV cache read to improve DMA utilization. However, the layout
+    that maximizes DMA bandwidth changes the order tokens are consumed.
+    
+    The token layout (inner 2 dimensions) after vectorized load is (B_P_SIZE,
+    tiled_block_size) in a tile of `B_P_SIZE * tiled_block_size` tokens. And
+    each step the engine consumes a column (rather than a row) of B_P_SIZE
+    tokens. Therefore, the tokens are visited in a strided way.
+
+    To make sure mask matches the order tokens are consumed, we need to properly
+    transpose mask.
+    """
+    total_query_len, total_seq_len = mask.shape
+    context_kv_len = total_seq_len - total_query_len
+
+    B_P_SIZE = 128
+    # assuming LARGE_TILE_SIZE >= B_P_SIZE
+    num_tiled_blocks = max(B_P_SIZE, LARGE_TILE_SZ // block_size)
+    tiled_block_size = LARGE_TILE_SZ // num_tiled_blocks
+    if tiled_block_size > 1:
+        # Mask reordering is needed when tiled_block_size > 1
+        device = mask.device
+        mask = mask.cpu()
+        context_mask = mask[:, :context_kv_len]
+        context_mask = context_mask.view(
+            total_query_len,
+            context_kv_len // LARGE_TILE_SZ,
+            num_tiled_blocks // B_P_SIZE,
+            B_P_SIZE,
+            tiled_block_size,
+        )
+        context_mask = context_mask.transpose(3, 4).contiguous().reshape(
+            total_query_len, context_kv_len)
+        new_mask = mask[:, context_kv_len:]
+        return torch.concat([context_mask, new_mask], dim=1).to(device)
+    else:
+        return mask
+
+
 def flash_attn_varlen_nkifunc(
     query,
     key,
@@ -784,6 +827,7 @@ def flash_attn_varlen_nkifunc(
     head_size=None,
     LARGE_TILE_SZ=2048,
     mixed_precision=True,
+    mask_reordered=True,
     return_debug_tensors=False,
 ):
     if n_kv_head is None:
@@ -791,6 +835,10 @@ def flash_attn_varlen_nkifunc(
     assert key_cache.shape[1] == n_kv_head
     if head_size is None:
         head_size = key_cache.shape[-1]
+    if not mask_reordered:
+        block_size = key_cache.shape[-2]
+        attn_mask = context_mask_reorder_helper(attn_mask, LARGE_TILE_SZ,
+                                                block_size)
     kwargs = dict(
         query=query,
         key=key,
