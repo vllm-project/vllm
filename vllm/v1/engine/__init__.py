@@ -124,9 +124,6 @@ class EngineCoreOutputs(
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
-    #NOTE(Nick): We could consider ways to make this more compact,
-    # e.g. columnwise layout
-
     # [num_reqs]
     request_ids: List[str]
     new_token_id_offsets: Optional[List[int]]

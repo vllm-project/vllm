@@ -253,34 +253,31 @@ class AsyncLLM(EngineClient):
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
                 num_requests = len(outputs.request_ids)
-
                 if num_requests <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
-                    slices = [(0, num_requests)]
+                    num_chunks = 1
+                    chunk_size = num_requests
+                    rem = 0
                 else:
-                    slices = []
                     num_chunks = cdiv(num_requests,
                                       VLLM_V1_OUTPUT_PROC_CHUNK_SIZE)
                     chunk_size = num_requests // num_chunks
                     rem = num_requests % num_chunks
-                    start = 0
-                    for i in range(num_chunks):
-                        adj = 1 if rem > 0 else 0
-                        rem = rem - 1
-                        end = start + chunk_size + adj
-                        slices.append((start, end))
-                        start = end
 
-                for i, slice in enumerate(slices):
-                    slice_start, slice_end = slice
+                slice_start = 0
+                for i in range(num_chunks):
+                    adj = 1 if i < rem else 0
+                    slice_end = slice_start + chunk_size + adj
+
                     # 2) Process EngineCoreOutputs.
                     processed_outputs = self.output_processor.process_outputs(
                         outputs, slice_start, slice_end, outputs.timestamp,
                         iteration_stats)
+                    slice_start = slice_end
                     # NOTE: RequestOutputs are pushed to their queues.
                     assert not processed_outputs.request_outputs
 
                     # Allow other asyncio tasks to run between chunks
-                    if i + 1 < len(slices):
+                    if i + 1 < num_chunks:
                         await asyncio.sleep(0)
 
                     # 3) Abort any reqs that finished due to stop strings.
