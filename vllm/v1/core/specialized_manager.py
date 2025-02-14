@@ -4,17 +4,12 @@ from itertools import chain
 from typing import Callable, Dict, List, Optional, Tuple, Type
 
 from vllm.utils import cdiv
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          PrefixLength, PrefixLengthRange)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, SlidingWindowSpec)
 from vllm.v1.utils import ConstantList
-
-
-@dataclass
-class BlockPoolOperations:
-    get_cached_block: Callable[[BlockHashType], Optional[KVCacheBlock]]
-    get_null_block: Callable[[], KVCacheBlock]
 
 
 class SpecializedManager(ABC):
@@ -28,14 +23,14 @@ class SpecializedManager(ABC):
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
-        block_pool_operations: BlockPoolOperations,
+        block_pool: BlockPool,
     ) -> None:
         """
         Initializes the SpecializedManager.
 
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
-            block_pool_operations: Operations to interact with the block pool.
+            block_pool_operations: Operations to interact with the block pool. TODO update
 
         Returns:
             None
@@ -43,7 +38,7 @@ class SpecializedManager(ABC):
 
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.block_pool_operations = block_pool_operations
+        self.block_pool = block_pool
 
     @abstractmethod
     def get_possible_cached_prefix(
@@ -114,8 +109,7 @@ class FullAttentionManager(SpecializedManager):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
-            if cached_block := self.block_pool_operations.get_cached_block(
-                    block_hash):
+            if cached_block := self.block_pool.get_cached_block(block_hash):
                 computed_blocks.append(cached_block)
             else:
                 break
@@ -139,10 +133,10 @@ class FullAttentionManager(SpecializedManager):
 class SlidingWindowManager(FullAttentionManager):
 
     def __init__(self, kv_cache_spec: SlidingWindowSpec,
-                 block_pool_operations: BlockPoolOperations):
-        super().__init__(kv_cache_spec, block_pool_operations)
+                 block_pool: BlockPool):
+        super().__init__(kv_cache_spec, block_pool)
         self.sliding_window = kv_cache_spec.sliding_window
-        self._null_block = block_pool_operations.get_null_block()
+        self._null_block = block_pool.get_null_block()
 
     def get_possible_cached_prefix(
         self, block_hashes: ConstantList[BlockHashType]
@@ -160,8 +154,7 @@ class SlidingWindowManager(FullAttentionManager):
         # cached.
         for i, block_hash in enumerate(chain(block_hashes,
                                              [dummy_block_hash])):
-            if cached_block := self.block_pool_operations.get_cached_block(
-                    block_hash):
+            if cached_block := self.block_pool.get_cached_block(block_hash):
                 computed_blocks.append(cached_block)
             else:
                 if start == 0:
@@ -209,13 +202,11 @@ spec_manager_map: Dict[Type[KVCacheSpec], Type[SpecializedManager]] = {
 }
 
 
-def get_managers(
-        kv_cache_config: KVCacheConfig,
-        block_pool_operations: BlockPoolOperations
-) -> List[SpecializedManager]:
+def get_managers(kv_cache_config: KVCacheConfig,
+                 block_pool: BlockPool) -> List[SpecializedManager]:
     managers: List[SpecializedManager] = []
     for g in kv_cache_config.groups:
         manager_class = spec_manager_map[type(g.kv_cache_spec)]
-        manager = manager_class(g.kv_cache_spec, block_pool_operations)
+        manager = manager_class(g.kv_cache_spec, block_pool)
         managers.append(manager)
     return managers

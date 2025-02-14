@@ -6,13 +6,14 @@ from typing import DefaultDict, Dict, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock, PrefixLength,
                                          ReqKVCacheBlocks,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens, intersect_ranges)
-from vllm.v1.core.specialized_manager import BlockPoolOperations, get_managers
+from vllm.v1.core.specialized_manager import get_managers
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 
@@ -59,38 +60,15 @@ class HybridKVCacheManager:
         self.num_preallocate_blocks = cdiv(
             num_preallocate_tokens,
             max(g.kv_cache_spec.block_size for g in kv_cache_config.groups))
-
-        self._null_block: KVCacheBlock = KVCacheBlock(-1)
+        self.block_pool = BlockPool(self.num_gpu_blocks, self.enable_caching)
 
         # Specialized managers for each kv cache group, which handle the
         # different kv cache management logic of different attention layers.
         self.managers = get_managers(
             kv_cache_config,
-            BlockPoolOperations(get_cached_block=self._get_cached_block,
-                                get_null_block=self.get_null_block),
+            block_pool=self.block_pool,
         )
         self.num_kv_cache_groups = len(self.kv_cache_config.groups)
-
-        # A Block pool of all kv-cache blocks.
-        self.block_pool: List[KVCacheBlock] = [
-            KVCacheBlock(idx) for idx in range(self.num_gpu_blocks)
-        ]
-        # Free block queue that constructs and manipulates a doubly linked
-        # list of free blocks (including eviction candidates when caching is
-        # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.block_pool)
-
-        # {block_hash: {block ID: block}}. A cached block is
-        # a full block with a block hash that can be used for prefix caching.
-        # The cached block may be used by running requests or in the
-        # free_block_queue that could potentially be evicted.
-        # NOTE: We currently don't de-duplicate the blocks in the cache,
-        # meaning that if a block becomes full and is cached, we don't check
-        # if there is already an identical block in the cache. This is because
-        # we want to make sure the allocated block IDs won't change so that
-        # block tables are append-only.
-        self.cached_block_hash_to_block: Dict[BlockHashType, Dict[
-            int, KVCacheBlock]] = defaultdict(dict)
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -107,7 +85,7 @@ class HybridKVCacheManager:
 
     @property
     def usage(self) -> float:
-        return 1.0 - (self.free_block_queue.num_free_blocks /
+        return 1.0 - (self.block_pool.get_num_free_blocks() /
                       self.num_gpu_blocks)
 
     def get_computed_blocks(self,
@@ -231,14 +209,15 @@ class HybridKVCacheManager:
             1 for blk_group in new_computed_blocks for blk in blk_group
             if blk.ref_cnt == 0)
 
-        if (total_new_blocks > self.free_block_queue.num_free_blocks -
+        if (total_new_blocks > self.block_pool.get_num_free_blocks() -
                 num_evictable_computed_blocks):
             # Cannot allocate new blocks.
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self._touch(new_computed_blocks)
+            for blocks in new_computed_blocks:
+                self.block_pool.touch(blocks)
         else:
             assert all(len(blks) == 0 for blks in new_computed_blocks), (
                 "Computed blocks should be empty when "
@@ -256,7 +235,7 @@ class HybridKVCacheManager:
         # have at least `num_new_blocks` free blocks for each group.
         num_preallocate_blocks = min(
             self.num_preallocate_blocks,
-            (self.free_block_queue.num_free_blocks - total_new_blocks) //
+            (self.block_pool.get_num_free_blocks() - total_new_blocks) //
             len(self.managers))
 
         for i in range(self.num_kv_cache_groups):
@@ -278,9 +257,9 @@ class HybridKVCacheManager:
 
                 assert num_block_to_allocate >= 0
                 assert num_block_to_allocate <= \
-                    self.free_block_queue.num_free_blocks
+                    self.block_pool.get_num_free_blocks()
 
-                new_blocks_of_group = self._get_new_blocks(
+                new_blocks_of_group = self.block_pool.get_new_blocks(
                     num_block_to_allocate)
                 new_blocks.append(new_blocks_of_group)
                 req_blocks[i].extend(new_blocks_of_group)
@@ -301,8 +280,11 @@ class HybridKVCacheManager:
             new_full_blocks = req_blocks[i][
                 num_computed_full_blocks:num_full_blocks]
             if new_full_blocks:
-                self._cache_full_blocks(
+                block_hashes = self.req_to_block_hashes[request.request_id][i]
+                self.block_pool.cache_full_blocks(
                     request=request,
+                    block_hashes=block_hashes,
+                    block_size=manager.block_size,
                     blk_start_idx=num_computed_full_blocks,
                     # The new full blocks are the full blocks that are not
                     # computed.
@@ -352,12 +334,7 @@ class HybridKVCacheManager:
             ordered_blocks = blocks[0]
         else:
             ordered_blocks = self._merge_blocks_by_eviction_order(blocks)
-        for block in ordered_blocks:
-            if block == self._null_block:
-                continue
-            block.decr_ref()
-            if block.ref_cnt == 0:
-                self.free_block_queue.append(block)
+        self.block_pool.free_blocks(ordered_blocks)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -378,31 +355,7 @@ class HybridKVCacheManager:
             self._free_blocks([list(reversed(blks)) for blks in blocks])
 
     def reset_prefix_cache(self) -> bool:
-        """Reset prefix cache. This function may be used in RLHF
-        flows to invalid prefix caching after the weights are updated,
-        or used for resetting prefix caching status for benchmarking.
-
-        Returns:
-            bool: True if the prefix cache is successfully reset,
-            False otherwise.
-        """
-        num_used_blocks = (self.num_gpu_blocks -
-                           self.free_block_queue.num_free_blocks)
-        if num_used_blocks > 0:
-            logger.warning(
-                "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks)
-            return False
-
-        # Remove all hashes so that no new blocks will hit.
-        self.cached_block_hash_to_block = defaultdict(dict)
-
-        # Remove all hashes from all blocks.
-        for block in self.block_pool:
-            block.reset_hash()
-
-        logger.info("Successfully reset prefix cache")
-        return True
+        return self.block_pool.reset_prefix_cache()
 
     def get_num_common_prefix_blocks(
         self,
@@ -457,183 +410,6 @@ class HybridKVCacheManager:
             num_common_blocks_per_group.append(num_common_blocks)
         return num_common_blocks_per_group
 
-    def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
-        """Get new blocks from the free block pool.
-
-        Note that we do not check block cache in this function.
-
-        Args:
-            num_blocks: The number of blocks to allocate.
-
-        Returns:
-            A list of new block.
-        """
-        if num_blocks > self.free_block_queue.num_free_blocks:
-            raise ValueError(
-                f"Cannot get {num_blocks} free blocks from the pool")
-
-        ret: List[KVCacheBlock] = []
-        idx = 0
-        while idx < num_blocks:
-            # First allocate blocks.
-            curr_block = self.free_block_queue.popleft()
-            assert curr_block.ref_cnt == 0
-
-            # If the block is cached, evict it.
-            if self.enable_caching:
-                self._maybe_evict_cached_block(curr_block)
-
-            curr_block.incr_ref()
-            ret.append(curr_block)
-            idx += 1
-
-        return ret
-
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
-        """
-        If a block is cached in `cached_block_hash_to_block`, we reset its hash
-        metadata and evict it from the cache.
-
-        Args:
-            block: The block to evict.
-
-        Returns:
-            True if the block is evicted, False otherwise.
-        """
-        block_hash = block.block_hash
-        if block_hash and block_hash in self.cached_block_hash_to_block:
-            block.reset_hash()
-            del self.cached_block_hash_to_block[block_hash][block.block_id]
-
-            if len(self.cached_block_hash_to_block[block_hash]) == 0:
-                del self.cached_block_hash_to_block[block_hash]
-
-            return True
-        return False
-
-    def _get_cached_block(self,
-                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:
-        """Get a cached block by the block hash, or None if cache miss.
-        If there are duplicated blocks, we return the first block in the cache.
-
-        Args:
-            block_hash: The hash value of the block.
-
-        Returns:
-            The cached block if it exists, or None.
-        """
-        if block_hash in self.cached_block_hash_to_block:
-            first_block_id = list(
-                self.cached_block_hash_to_block[block_hash].keys())[0]
-            return self.cached_block_hash_to_block[block_hash][first_block_id]
-        return None
-
-    def _touch(self, blocks: ReqKVCacheBlocks) -> None:
-        """Touch a block increases its reference count by 1, and may remove
-        the block from the free queue. This is used when a block is hit by
-        another request with the same prefix.
-
-        Args:
-            blocks: A list of blocks to touch.
-        """
-        for blocks_of_group in blocks:
-            for block in blocks_of_group:
-                # ref_cnt=0 means this block is in the free list (i.e. eviction
-                # candidate), so remove it.
-                if block.ref_cnt == 0 and block != self._null_block:
-                    self.free_block_queue.remove(block)
-                block.incr_ref()
-
-    def _cache_full_blocks(
-        self,
-        request: Request,
-        blk_start_idx: int,
-        full_blocks: List[KVCacheBlock],
-        prev_block: Optional[KVCacheBlock],
-        kv_cache_group_id: int,
-    ) -> None:
-        """Cache a list of full blocks for prefix caching.
-
-        This function takes a list of blocks that will have their block hash
-        metadata to be updated and cached. Given a request, it computes the
-        block hashes for the blocks starting from `blk_start_idx` to the end
-        of the request's full blocks, updating the metadata for each block
-        and caching them in the `cached_block_hash_to_block`.
-
-        Args:
-            request: The request to cache the blocks.
-            blk_start_idx: The index of the first block in the request's blocks
-                to cache.
-            full_blocks: The list of blocks to update hash metadata.
-            prev_block: The previous block in the chain.
-            kv_cache_group_id: The KV cache group that the blocks belong to
-        """
-        block_hashes = self.req_to_block_hashes[request.request_id]
-        num_cached_block_hashes = len(block_hashes[kv_cache_group_id])
-
-        # Update the new blocks with the block hashes through the chain.
-        prev_block_hash_value = None
-        if prev_block is not None:
-            # Previous block must have a block hash because it must be
-            # a full, cached block.
-            assert prev_block.block_hash is not None
-            prev_block_hash_value = prev_block.block_hash.hash_value
-
-        block_size = self.kv_cache_config.groups[
-            kv_cache_group_id].kv_cache_spec.block_size
-        # Find the first uncached block. This case should only happen when
-        # speculative decoding is used.
-        offset = 0
-        for blk in full_blocks:
-            if blk.block_hash is None:
-                break
-            else:
-                prev_block_hash_value = blk.block_hash.hash_value
-                offset += 1
-        else:
-            # All blocks are cached.
-            return
-
-        for i, blk in enumerate(full_blocks[offset:]):
-            blk_idx = blk_start_idx + offset + i
-            assert blk.block_hash is None
-
-            if blk_idx < num_cached_block_hashes:
-                # The block hash may already be computed in
-                # "get_computed_blocks" if the tokens are not generated by
-                # this request (either the prompt tokens or the previously
-                # generated tokens with preemption). In this case we simply
-                # reuse the block hash.
-                block_hash = block_hashes[kv_cache_group_id][blk_idx]
-            else:
-                # Otherwise compute the block hash and cache it in the request
-                # in case it will be preempted in the future.
-                start_token_idx = blk_idx * block_size
-                end_token_idx = (blk_idx + 1) * block_size
-                block_tokens = request.all_token_ids[
-                    start_token_idx:end_token_idx]
-                assert len(block_tokens) == block_size, (
-                    f"Expected {block_size} tokens, got "
-                    f"{len(block_tokens)} at {blk_idx}th block for request "
-                    f"{request.request_id}({request})")
-
-                # Generate extra keys for multi-modal inputs. Note that since
-                # we reach to this branch only when the block is completed with
-                # generated tokens, we only need to consider the last mm input.
-                extra_keys, _ = generate_block_hash_extra_keys(
-                    request, start_token_idx, end_token_idx, -1)
-
-                # Compute the hash of the current block.
-                block_hash = hash_block_tokens(prev_block_hash_value,
-                                               block_tokens, kv_cache_group_id,
-                                               extra_keys)
-                block_hashes[kv_cache_group_id].append(block_hash)
-
-            # Update and added the full block to the cache.
-            blk.block_hash = block_hash
-            self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
-            prev_block_hash_value = block_hash.hash_value
-
     def free_block_hashes(self, request: Request) -> None:
         """Discard the block hashes for the request.
 
@@ -641,9 +417,6 @@ class HybridKVCacheManager:
         is finished, not when it is preempted.
         """
         self.req_to_block_hashes.pop(request.request_id, None)
-
-    def get_null_block(self) -> KVCacheBlock:
-        return self._null_block
 
     def _get_common_computed_tokens(self,
                                     prefix_length: List[PrefixLength]) -> int:
