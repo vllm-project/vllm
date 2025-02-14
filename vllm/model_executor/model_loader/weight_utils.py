@@ -265,10 +265,10 @@ def download_weights_from_hf(
             revision=revision,
             local_files_only=local_only,
         )
-        end_time = time.perf_counter()
-        if not local_only:
+        time_taken = time.perf_counter() - start_time
+        if time_taken > 0.5:
             logger.info("Time spent downloading weights for %s: %.6f seconds",
-                        model_name_or_path, end_time - start_time)
+                        model_name_or_path, time_taken)
     return hf_folder
 
 
