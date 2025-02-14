@@ -825,6 +825,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         return self.model
 
     def _use_graphs(self, batch_size, seq_len, is_prompt):
+        if is_prompt:
+            return False
         if self.enforce_eager:
             return False
         if self.skip_warmup:
