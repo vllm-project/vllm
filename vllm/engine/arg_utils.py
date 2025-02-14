@@ -1168,15 +1168,6 @@ class EngineArgs:
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
-        if self.enable_chunked_prefill and model_config.use_mla:
-            # Currently chunked prefill with MLA is not supported with CUDA
-            # graphs
-            logger.warning(
-                "Chunked prefill + CUDA Graphs is not supported with"
-                " MLA in V0. Disabling CUDA graphs.")
-            self.enforce_eager = True
-            model_config.enforce_eager = True
-
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,

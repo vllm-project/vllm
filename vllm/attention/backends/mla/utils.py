@@ -294,29 +294,29 @@ class MLACommonState(AttentionState):
         self._is_graph_capturing = False
 
         scheduler_config = runner.scheduler_config
-        model_config = runner.model_config
+        self.model_config = runner.model_config
         cache_config = runner.cache_config
 
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
 
         if self.chunked_prefill_enabled:
-            workspace_size = min(
-                # Max sure there is enough for 1 full length request or at least
-                # 2 pages of cache per request
+            self.chunked_prefill_workspace_size = min(
+                # Max sure there is enough for 8 full length request or at least
+                # 4 pages of cache per request
                 max(
-                    model_config.max_model_len, 2 *
+                    8 * self.model_config.max_model_len, 4 *
                     scheduler_config.max_num_seqs * cache_config.block_size),
                 # For long-context models try not to over-allocate limiting
-                # kv-cache space, limiting it to 64k tokens
-                64 * 1024)
-            assert workspace_size > \
+                # kv-cache space, limiting it to 64k tokens,
+                # which would result in the workspace being:
+                #   2*(576)*(64*1024) = 144mb
+                # (assuming 576 MLA head dim, and fp16)
+                # which would result in up-projected context being
+                #   2*(192*128)*(64*1024) = 3gb
+                # (assuming 192 QK head dim, 128 heads, and fp16)
+                128 * 1024)
+            assert self.chunked_prefill_workspace_size >= \
                 scheduler_config.max_num_seqs * cache_config.block_size
-
-            self.chunked_prefill_workspace = torch.empty(
-                (workspace_size, model_config.get_head_size()),
-                dtype=model_config.dtype,
-                device=runner.device,
-            )
 
     @contextmanager
     def graph_capture(self, max_batch_size: int):
@@ -414,6 +414,20 @@ class MLACommonState(AttentionState):
 
     def begin_forward(self, model_input):
         if self.chunked_prefill_enabled:
+            if not hasattr(self, "chunked_prefill_workspace"):
+                # not self.runner.device does not return the correct device
+                # for this process, (init_device sets the correct device but
+                # only on the Worker). The only way Ive figured out to get the
+                # correct device is to allocate the workspace on the first call
+                # to begin_forward and use the device of the input tokens
+                assert model_input.input_tokens is not None
+                self.chunked_prefill_workspace = torch.empty(
+                    (self.chunked_prefill_workspace_size,
+                     self.model_config.get_head_size()),
+                    dtype=self.model_config.dtype,
+                    device=model_input.input_tokens.device,
+                )
+
             model_input.attn_metadata.chunked_prefill_workspace = \
                 self.chunked_prefill_workspace
 
@@ -710,7 +724,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
         if self.chunked_prefill_enabled:
             attn_state = self.input_builder.runner.attn_state
             self.chunked_prefill_workspace_size = \
-                attn_state.chunked_prefill_workspace.shape[0]
+                attn_state.chunked_prefill_workspace_size
             self.page_size = self.runner.block_size
 
     def prepare(self):
@@ -923,6 +937,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
             context_chunk_max_seq_lens = \
                 chunk_seq_lens.max(dim=1).values.tolist()
             context_chunk_seq_tot = chunk_seq_lens.sum(dim=1).tolist()
+            assert max(context_chunk_seq_tot) <= \
+                self.chunked_prefill_workspace_size
 
         return MLACommonMetadata(
             # Required by ModelRunner
