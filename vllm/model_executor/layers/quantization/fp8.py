@@ -771,8 +771,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ep_rank=0,
     ):
         batch_size, seq_len, hidden_dim = x.shape
-        bt = batch_size * seq_len
+        num_experts = layer.w13_weight.shape[0]
+        n_expert_slice = layer.w13_weight.shape[0] // self.moe_n_slice
+        assert n_expert_slice * self.moe_n_slice == num_experts
+
         x = x.view(-1, hidden_dim)
+        if seq_len == 1 and (num_experts == router_logits.size(-1)) and (batch_size * top_k <= 64):
+            # num_tokens * topk(num_experts per token) is
+            # less than total number of experts,
+            # we can safely load less experts weight
+            use_partial_experts = True
+        else:
+            use_partial_experts = False
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -785,10 +795,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-        final_hidden_states = torch.zeros_like(x)
-        num_experts = layer.w13_weight.shape[0]
-        n_expert_slice = layer.w13_weight.shape[0] // self.moe_n_slice
-        assert n_expert_slice * self.moe_n_slice == num_experts
 
         orig_M_w13 = layer.orig_M_w13.data
         orig_N_w13 = layer.orig_N_w13.data
@@ -796,36 +802,64 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         orig_N_w2 = layer.orig_N_w2.data
         ep_shift = ep_rank * num_experts
 
-        w13_weight = dequant_block_fp8_weight_naive(layer.w13_weight,
-                                                    layer.w13_weight_scale_inv,
+        if use_partial_experts:
+            w13_weight_fp8 = layer.w13_weight.index_select(0, topk_ids.view(-1))
+            w13_weight_scale_inv_fp8 = layer.w13_weight_scale_inv.index_select(0, topk_ids.view(-1))
+            w2_weight_fp8 = layer.w2_weight.index_select(0, topk_ids.view(-1))
+            w2_weight_scale_inv_fp8 = layer.w2_weight_scale_inv.index_select(0, topk_ids.view(-1))
+        else:
+            w13_weight_fp8 = layer.w13_weight
+            w13_weight_scale_inv_fp8 = layer.w13_weight_scale_inv
+            w2_weight_fp8 = layer.w2_weight
+            w2_weight_scale_inv_fp8 = layer.w2_weight_scale_inv
+
+        w13_weight = dequant_block_fp8_weight_naive(w13_weight_fp8,
+                                                    w13_weight_scale_inv_fp8,
                                                     block_size=self.quant_config.weight_block_size,
                                                     dtype=x.dtype,
                                                     original_M=orig_M_w13,
                                                     original_N=orig_N_w13)
-        w2_weight = dequant_block_fp8_weight_naive(layer.w2_weight,
-                                                    layer.w2_weight_scale_inv,
+        w2_weight = dequant_block_fp8_weight_naive(w2_weight_fp8,
+                                                    w2_weight_scale_inv_fp8,
                                                     block_size=self.quant_config.weight_block_size,
                                                     dtype=x.dtype,
                                                     original_M=orig_M_w2,
                                                     original_N=orig_N_w2)
-        for i in range(self.moe_n_slice):
-            min_expert = i * n_expert_slice
-            max_expert = (i + 1) * n_expert_slice
+        def do_moe(x, topk_ids, topk_weights, w13_weight, w2_weight, moe_n_slice, n_expert_slice):
+            final_hidden_states = torch.zeros_like(x)
+            for i in range(moe_n_slice):
+                min_expert = i * n_expert_slice
+                max_expert = (i + 1) * n_expert_slice
 
-            w13_list_slice = [w13_weight[j] for j in range(min_expert, max_expert)]
-            w2_list_slice = [w2_weight[j] for j in range(min_expert, max_expert)]
+                w13_list_slice = [w13_weight[j] for j in range(min_expert, max_expert)]
+                w2_list_slice = [w2_weight[j] for j in range(min_expert, max_expert)]
 
-            final_hidden_states += torch.ops.hpu.mixture_of_experts(
-                                         hidden_states=x,
-                                         expert_routing_table=topk_ids.to(torch.int64),
-                                         router_weights=topk_weights.to(x.dtype),
-                                         w12=w13_list_slice,
-                                         w3=w2_list_slice,
-                                         permuted_weights=True,
-                                         activation="silu",
-                                         experts_min=min_expert + ep_shift,
-                                         experts_max=max_expert - 1 + ep_shift)
-            htorch.core.mark_step()
+                final_hidden_states += torch.ops.hpu.mixture_of_experts(
+                                            hidden_states=x,
+                                            expert_routing_table=topk_ids.to(torch.int64),
+                                            router_weights=topk_weights.to(x.dtype),
+                                            w12=w13_list_slice,
+                                            w3=w2_list_slice,
+                                            permuted_weights=True,
+                                            activation="silu",
+                                            experts_min=min_expert + ep_shift,
+                                            experts_max=max_expert - 1 + ep_shift)
+                htorch.core.mark_step()
+            return final_hidden_states
+
+        if use_partial_experts:
+            if w13_weight.size(0) >= 64:
+                moe_n_slice = 4
+            else:
+                moe_n_slice = 1
+            n_expert_slice = w13_weight.size(0) // moe_n_slice
+            topk_ids_dummy = torch.arange(topk_ids.size(1) * topk_ids.size(0), device=topk_ids.device).view(topk_ids.size(0), topk_ids.size(1))
+            final_hidden_states = do_moe(x, topk_ids_dummy, topk_weights, w13_weight, w2_weight, moe_n_slice, n_expert_slice)
+
+        else:
+            final_hidden_states = do_moe(x, topk_ids, topk_weights, w13_weight, w2_weight, self.moe_n_slice, n_expert_slice)
+
+
         return final_hidden_states.view(-1, x.shape[1])
 
 

@@ -6,6 +6,7 @@ from typing import Any, List, Tuple
 from transformers import (PreTrainedTokenizerBase, AutoTokenizer)
 import random
 import datasets
+import time
 # get file location
 file_path = os.path.abspath(__file__)
 dataset_path = os.path.join(os.path.dirname(file_path), "../benchmarks")
@@ -18,7 +19,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default=model_path, help="The model path.")
 parser.add_argument("--tokenizer", type=str, default=model_path, help="The model path.")
 parser.add_argument("--tp_size", type=int, default=8, help="The number of threads.")
-parser.add_argument("--ep_size", type=int, default=4, help="The number of threads.")
+parser.add_argument("--ep_size", type=int, default=1, help="The number of threads.")
 parser.add_argument("--dataset", type=str, default=None, help="The dataset.")
 parser.add_argument("--isl", type=int, default=1024, help="input sequence length.")
 parser.add_argument("--osl", type=int, default=1024, help="output sequence length.")
@@ -174,6 +175,7 @@ if __name__ == "__main__":
             trust_remote_code=True,
             dtype="bfloat16",
             max_model_len=16384,
+            gpu_memory_utilization=0.8,
         )
     else:
         llm = LLM(
@@ -184,12 +186,16 @@ if __name__ == "__main__":
             trust_remote_code=True,
             max_model_len=16384,
             dtype="bfloat16",
+            gpu_memory_utilization=0.8,
         )
 
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
+    start = time.perf_counter()
     outputs = llm.generate(prompts, sampling_params)
+    end = time.perf_counter()
     # Print the outputs.
+    print(f"e2e took {end - start} seconds")
     for output_i in range(len(outputs)):
         output = outputs[output_i]
         gt_i = None if gt is None else gt[output_i]
