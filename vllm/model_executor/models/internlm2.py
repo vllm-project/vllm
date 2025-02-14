@@ -330,12 +330,6 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "wqkv",
-        "wo",
-        "gate_up_proj",
-        "w2",
-    ]
     embedding_modules = {}
     embedding_padding_modules = []
 

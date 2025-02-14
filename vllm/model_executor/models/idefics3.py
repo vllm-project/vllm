@@ -596,18 +596,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         ],
     }
     # LoRA specific attributes
-    supported_lora_modules = [
-        # vision_model
-        "fc1",
-        "fc2",
-        "out_proj",
-        # text_model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-
     embedding_modules = {}
     embedding_padding_modules = []
 

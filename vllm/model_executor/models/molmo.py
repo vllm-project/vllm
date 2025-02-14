@@ -1439,22 +1439,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        # language model
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",  # same name with image_projector
-        # vision tower
-        "wq",
-        "wk",
-        "wv",
-        "wo",
-        "w1",
-        "w2",
-        # image_projector
-        "merged_linear",
-    ]
     embedding_modules = {}
     embedding_padding_modules = []
 

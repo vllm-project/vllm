@@ -274,13 +274,6 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "dense",
-        "fc1",
-        "fc2",
-    ]
-
     embedding_modules = {}
     embedding_padding_modules = []
 

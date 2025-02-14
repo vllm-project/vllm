@@ -228,18 +228,6 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "kv_a_proj_with_mqa",
-        "q_a_proj",
-        "q_b_proj",
-        "kv_b_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        "embed_tokens",
-        "lm_head",
-    ]
-
     # `embedding_modules` and `embedding_padding_modules`
     # are inherited from MiniCPMForCausalLM
 

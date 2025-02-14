@@ -658,18 +658,6 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
         ],
     }
     # LoRA specific attributes
-    supported_lora_modules = [
-        "c_attn",
-        "gate_up_proj",
-        "c_proj",
-        # visual module
-        "out_proj",
-        "in_proj",
-        "c_fc",
-        # resampler
-        "kv_proj",
-    ]
-
     embedding_modules = {}
     embedding_padding_modules = []
 

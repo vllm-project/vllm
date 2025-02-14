@@ -355,12 +355,6 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
         ],
     }
     # LoRA specific attributes
-    supported_lora_modules = [
-        "c_attn",
-        "gate_up_proj",
-        "c_proj",
-    ]
-
     embedding_modules = {}
     embedding_padding_modules = []
 

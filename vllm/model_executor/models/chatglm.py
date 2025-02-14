@@ -478,13 +478,6 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP):
         "dense_h_to_4h": ["dense_h_to_4h"]
     }
     # LoRA specific attributes
-    supported_lora_modules = [
-        "query_key_value",
-        "dense",
-        "dense_h_to_4h",
-        "dense_4h_to_h",
-    ]
-
     embedding_modules = {}
     embedding_padding_modules = []
 
