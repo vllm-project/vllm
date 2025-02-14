@@ -12,6 +12,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
+from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 
@@ -27,7 +28,8 @@ class KVCacheManager:
         enable_caching: bool = True,
         num_preallocate_tokens: int = 64,
     ) -> None:
-        self.block_size = kv_cache_config.groups[0].kv_cache_spec.block_size
+        kv_cache_spec = kv_cache_config.groups[0].kv_cache_spec
+        self.block_size = kv_cache_spec.block_size
         self.num_gpu_blocks = kv_cache_config.num_blocks
         self.max_model_len = max_model_len
         self.max_num_blocks_per_req = cdiv(max_model_len, self.block_size)
@@ -49,6 +51,11 @@ class KVCacheManager:
 
         self.block_pool = BlockPool(self.num_gpu_blocks, self.enable_caching)
 
+        self.manager = get_specialized_manager(
+            kv_cache_spec=kv_cache_spec,
+            block_pool=self.block_pool,
+        )
+
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
@@ -63,8 +70,7 @@ class KVCacheManager:
 
     @property
     def usage(self) -> float:
-        return 1.0 - (self.block_pool.get_num_free_blocks() /
-                      self.num_gpu_blocks)
+        return self.block_pool.get_usage()
 
     def get_computed_blocks(
             self, request: Request) -> Tuple[List[KVCacheBlock], int]:
@@ -83,8 +89,6 @@ class KVCacheManager:
             # Prefix caching is disabled.
             return [], 0
 
-        computed_blocks = []
-
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
@@ -92,19 +96,12 @@ class KVCacheManager:
             block_hashes = hash_request_tokens(self.block_size, request, 0)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
-        for block_hash in block_hashes:
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
-            if cached_block := self.block_pool.get_cached_block(block_hash):
-                computed_blocks.append(cached_block)
-            else:
-                break
+        prefix_length, computed_blocks = self.manager.get_possible_cached_prefix(
+            block_hashes)
+        num_computed_tokens = prefix_length[-1].end
+        computed_blocks = computed_blocks[:num_computed_tokens //
+                                          self.block_size]
 
-        # NOTE(woosuk): Since incomplete blocks are not eligible for
-        # sharing, `num_computed_tokens` is always a multiple of
-        # `block_size`.
-        num_computed_tokens = len(computed_blocks) * self.block_size
         return computed_blocks, num_computed_tokens
 
     def allocate_slots(
@@ -141,17 +138,24 @@ class KVCacheManager:
         if num_tokens == 0:
             raise ValueError("num_tokens must be greater than 0")
 
+        req_blocks = self.req_to_blocks[request.request_id]
+        # We can free blocks that are no longer needed even if we cannot
+        # schedule this request due to the limit of free blocks.
+        # Should call this function before allocating new blocks to reduce
+        # the number of evicted blocks.
+        self._free_useless_blocks(req_blocks, request.num_computed_tokens)
+
         new_computed_blocks = new_computed_blocks or []
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                num_new_computed_tokens)
-        num_required_blocks = cdiv(num_computed_tokens + num_tokens,
-                                   self.block_size)
+
         req_blocks = self.req_to_blocks[request.request_id]
-        num_new_blocks = (num_required_blocks - len(req_blocks) -
-                          len(new_computed_blocks))
+        num_new_blocks = self.manager.get_num_new_blocks(
+            num_computed_tokens, num_tokens,
+            len(req_blocks) + len(new_computed_blocks))
 
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it cannot be counted as a free block
@@ -302,6 +306,22 @@ class KVCacheManager:
         is finished, not when it is preempted.
         """
         self.req_to_block_hashes.pop(request.request_id, None)
+
+    def _free_useless_blocks(self, req_blocks: List[KVCacheBlock],
+                             num_computed_tokens: int) -> None:
+        """
+        Frees memory blocks that are not needed. E.g., sliding window 
+        layer with window size 2 and block size 1, we have req_blocks as 
+        [[1, 2, 3]], this function will free block 1 and change the req_blocks
+        to [[-1, 2, 3]] (-1 refers to null block)
+
+        Args:
+            req_blocks: The KV cache blocks of one request.
+            num_computed_tokens: The number of computed tokens.
+        """
+        removed_blocks = self.manager.remove_useless_blocks(
+            req_blocks, num_computed_tokens)
+        self.block_pool.free_blocks(removed_blocks)
 
 
 def init_kv_cache_manager(kv_cache_config: KVCacheConfig,

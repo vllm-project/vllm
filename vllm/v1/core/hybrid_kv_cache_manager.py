@@ -13,7 +13,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens, intersect_ranges)
-from vllm.v1.core.specialized_manager import get_managers
+from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 
@@ -64,10 +64,12 @@ class HybridKVCacheManager:
 
         # Specialized managers for each kv cache group, which handle the
         # different kv cache management logic of different attention layers.
-        self.managers = get_managers(
-            kv_cache_config,
-            block_pool=self.block_pool,
-        )
+        self.managers = [
+            get_specialized_manager(
+                g.kv_cache_spec,
+                block_pool=self.block_pool,
+            ) for g in kv_cache_config.groups
+        ]
         self.num_kv_cache_groups = len(self.kv_cache_config.groups)
 
         # Mapping from request ID to blocks to track the blocks allocated
@@ -85,8 +87,7 @@ class HybridKVCacheManager:
 
     @property
     def usage(self) -> float:
-        return 1.0 - (self.block_pool.get_num_free_blocks() /
-                      self.num_gpu_blocks)
+        return self.block_pool.get_usage()
 
     def get_computed_blocks(self,
                             request: Request) -> Tuple[ReqKVCacheBlocks, int]:
@@ -125,15 +126,8 @@ class HybridKVCacheManager:
             computed_blocks.append(computed_blocks_i)
             prefix_length.append(prefix_length_i)
 
-        if len(self.kv_cache_config.groups) == 1:
-            # If there is only one group, we return the computed blocks and
-            # tokens directly.
-            num_computed_tokens = prefix_length[0][-1].end
-        else:
-            # Find the common cached prefix of all groups. This path also works
-            # for the single group case, but it is less efficient.
-            num_computed_tokens = self._get_common_computed_tokens(
-                prefix_length)
+        # Find the common cached prefix of all groups.
+        num_computed_tokens = self._get_common_computed_tokens(prefix_length)
 
         # Truncate the computed blocks to the number of computed tokens.
         # E.g., group 0 has 3 computed blocks, and group 1 has 4 computed

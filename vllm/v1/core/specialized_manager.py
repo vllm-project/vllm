@@ -202,11 +202,8 @@ spec_manager_map: Dict[Type[KVCacheSpec], Type[SpecializedManager]] = {
 }
 
 
-def get_managers(kv_cache_config: KVCacheConfig,
-                 block_pool: BlockPool) -> List[SpecializedManager]:
-    managers: List[SpecializedManager] = []
-    for g in kv_cache_config.groups:
-        manager_class = spec_manager_map[type(g.kv_cache_spec)]
-        manager = manager_class(g.kv_cache_spec, block_pool)
-        managers.append(manager)
-    return managers
+def get_specialized_manager(kv_cache_spec: KVCacheSpec,
+                            block_pool: BlockPool) -> SpecializedManager:
+    manager_class = spec_manager_map[type(kv_cache_spec)]
+    manager = manager_class(kv_cache_spec, block_pool)
+    return manager

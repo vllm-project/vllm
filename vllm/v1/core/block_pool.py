@@ -252,3 +252,6 @@ class BlockPool:
 
     def get_null_block(self) -> KVCacheBlock:
         return self._null_block
+
+    def get_usage(self) -> float:
+        return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
