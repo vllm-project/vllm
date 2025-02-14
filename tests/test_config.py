@@ -251,7 +251,7 @@ def test_rope_customization():
 @pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [
     ("facebook/opt-125m", False),
     ("facebook/bart-base", True),
-    ("meta-llama/Llama-3.2-1B", False),
+    ("meta-llama/Llama-3.2-1B-Instruct", False),
     ("meta-llama/Llama-3.2-11B-Vision", True),
 ])
 def test_is_encoder_decoder(model_id, is_encoder_decoder):

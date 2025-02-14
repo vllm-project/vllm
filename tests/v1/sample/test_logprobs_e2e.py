@@ -11,7 +11,7 @@ RTOL = 0.03
 EXPECTED_VALUE = 0.62
 
 # FIXME(rob): enable prefix caching once supported.
-MODEL = "meta-llama/Llama-3.2-1B"
+MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 MODEL_ARGS = f"pretrained={MODEL},enforce_eager=True,enable_prefix_caching=False"  # noqa: E501
 SERVER_ARGS = [
     "--enforce_eager", "--no_enable_prefix_caching", "--disable-log-requests"
