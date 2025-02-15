@@ -676,6 +676,32 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         assert B_scale is not None and B_scale.ndim == 3
         assert B_zp is None or B_zp.ndim == 3
 
+        use_moe_wna16_cuda = should_moe_wna16_use_cuda(
+            num_valid_tokens=topk_ids.numel(),
+            group_size=block_shape[1],
+            num_experts=B.shape[0],
+            bit=4 if use_int4_w4a16 else 8)
+        config = config.copy()
+        config.update(
+            get_moe_wna16_block_config(config=config,
+                                       use_moe_wna16_cuda=use_moe_wna16_cuda,
+                                       num_valid_tokens=topk_ids.numel(),
+                                       size_k=A.shape[1],
+                                       size_n=B.shape[1],
+                                       num_experts=B.shape[1],
+                                       group_size=block_shape[1],
+                                       real_top_k=topk_ids.shape[1],
+                                       block_size_m=config["BLOCK_SIZE_M"]))
+
+        if use_moe_wna16_cuda:
+            ops.moe_wna16_gemm(
+                A, C, B, B_scale, B_zp,
+                topk_weights if mul_routed_weight else None, sorted_token_ids,
+                expert_ids, num_tokens_post_padded, top_k,
+                config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"],
+                config["BLOCK_SIZE_K"], 4)
+            return
+
         fused_moe_kernel_gptq_awq[grid](
             A,
             B,
@@ -809,6 +835,60 @@ def get_moe_configs(
     return None
 
 
+def get_moe_wna16_block_config(config: Dict[str, int],
+                               use_moe_wna16_cuda: bool, num_valid_tokens: int,
+                               size_k: int, size_n: int, num_experts: int,
+                               group_size: int, real_top_k: int,
+                               block_size_m: int):
+    if "BLOCK_SIZE_N" in config and "BLOCK_SIZE_K" in config:
+        return {}
+    if not use_moe_wna16_cuda:
+        if num_valid_tokens // real_top_k == 1:
+            return {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64}
+        else:
+            return {"BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32}
+    else:
+        block_size_n = 128
+        block_size_k = 128
+        if block_size_k <= group_size:
+            block_size_k = group_size
+
+        num_n_blocks = size_k // block_size_k
+        num_k_blocks = size_n // block_size_k
+        num_m_blocks = (num_valid_tokens + block_size_m - 1) / block_size_m + \
+            num_experts
+        if num_valid_tokens // real_top_k <= block_size_m:
+            num_m_blocks = min(num_m_blocks, num_valid_tokens)
+        num_blocks = num_m_blocks * num_n_blocks * num_k_blocks
+
+        if size_k % 256 == 0 and num_blocks >= 256 and \
+                block_size_k < 256:
+            block_size_k = 256
+            num_blocks = num_blocks / (256 / block_size_k)
+
+        if num_m_blocks <= 16 and size_k % (block_size_k * 2) == 0 and \
+                size_k % (block_size_k * 2) == 0 and block_size_k <= 512 and \
+                num_blocks >= 512:
+            block_size_k = block_size_k * 2
+            num_blocks /= 2
+
+        if num_blocks > 1024:
+            block_size_n = 256
+            num_n_blocks = num_n_blocks / 2
+            num_blocks /= 2
+
+        if size_n <= 1024 and num_blocks >= 1024:
+            block_size_n = 1024
+
+        return {"BLOCK_SIZE_N": block_size_n, "BLOCK_SIZE_K": block_size_k}
+
+
+def should_moe_wna16_use_cuda(num_valid_tokens: int, group_size: int,
+                              num_experts: int, bit: int):
+    return bit == 4 and group_size in [32, 64, 128] and \
+        num_valid_tokens / num_experts <= 8
+
+
 def get_default_config(
     M: int,
     E: int,
@@ -830,6 +910,21 @@ def get_default_config(
             "num_warps": 4,
             "num_stages": 3,
         }
+    elif dtype in ["int4_w8a16", "int8_w8a16"] and block_shape is not None:
+        # moe wna16 kernels
+        # only set BLOCK_SIZE_M
+        # BLOCK_SIZE_N and BLOCK_SIZE_K would be set later
+        bit = 4 if dtype == "int4_w8a16" else 8
+        use_moe_wna16_cuda = should_moe_wna16_use_cuda(M * topk,
+                                                       block_shape[1], E, bit)
+        if use_moe_wna16_cuda:
+            config = {"BLOCK_SIZE_M": min(16, M)}
+        elif M <= 20:
+            config = {"BLOCK_SIZE_M": 16, "GROUP_SIZE_M": 1}
+        elif M <= 40:
+            config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1}
+        else:
+            config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
     else:
         config = {
             "BLOCK_SIZE_M": 64,
@@ -864,6 +959,8 @@ def try_get_optimal_moe_config(
     else:
         # First try to load optimal config from the file
         E, _, N = w2_shape
+        if dtype == "int4_w8a8":
+            N = N * 2
         block_n = block_shape[0] if block_shape else 0
         block_k = block_shape[1] if block_shape else 0
         configs = get_moe_configs(E, N, dtype, block_n, block_k)
@@ -1209,7 +1306,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             # so the cache size and config are already set correctly and
             # do not need to be adjusted.
             intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
-            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk]
+            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk *
+                                                      topk_ids.shape[1]]
             intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
             config = get_config_func(tokens_in_chunk)
 
