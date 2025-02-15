@@ -592,18 +592,16 @@ class FusedMoE(torch.nn.Module):
             return
 
     @staticmethod
-    def select_experts(
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        use_grouped_topk: bool,
-        renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def select_experts(hidden_states: torch.Tensor,
+                       router_logits: torch.Tensor,
+                       top_k: int,
+                       use_grouped_topk: bool,
+                       renormalize: bool,
+                       topk_group: Optional[int] = None,
+                       num_expert_group: Optional[int] = None,
+                       custom_routing_function: Optional[Callable] = None,
+                       scoring_func: str = "softmax",
+                       e_score_correction_bias: Optional[torch.Tensor] = None):
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_topk, grouped_topk)
 

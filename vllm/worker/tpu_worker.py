@@ -68,8 +68,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         )
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size,
-        )
+            self.parallel_config.pipeline_parallel_size)
 
         # Device initialization should happen after initializing the distributed
         # runtime.
