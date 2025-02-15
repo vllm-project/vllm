@@ -5,6 +5,7 @@ import collections
 import copy
 import dataclasses
 import fnmatch
+import gc
 import glob
 import inspect
 import itertools
@@ -169,7 +170,6 @@ def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             # cleared, leading to "cuda out of memory" errors.
             # TODO: Investigate the cause of the memory leak. It may be
             # related to specific Python versions.
-            import gc
             gc.collect()
 
     # Currently only used by MLA.
@@ -177,7 +177,7 @@ def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
     # decompress the weights for MLA.
     for _, module in model.named_modules():
         if isinstance(module, Attention) and \
-            hasattr(module, "process_weights_after_loading"):
+            hasattr(module.impl, "process_weights_after_loading"):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             # At this point, we assume that the tensor is located on the
@@ -186,12 +186,11 @@ def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             # in use, we transfer the parameters to the device for
             # processing and then move them back to the CPU afterwards.
             with device_loading_context(module.impl, target_device):
-                module.process_weights_after_loading(model_config.dtype)
+                module.impl.process_weights_after_loading(model_config.dtype)
             # There are cases of excess memory allocation that are not
             # cleared, leading to "cuda out of memory" errors.
             # TODO: Investigate the cause of the memory leak. It may be
             # related to specific Python versions.
-            import gc
             gc.collect()
 
 
