@@ -11,8 +11,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 
-MIN_PREFILL_SEQ_LEN = 16
-
 
 class PallasAttentionBackend(AttentionBackend):
 
@@ -303,30 +301,25 @@ def write_to_kv_cache(
 ) -> None:
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
-
     if is_prefill:
+        _, _, block_size, _ = key_cache.shape
         batch_size, _, head_num, head_size = key.shape
         key = key.permute(0, 2, 1, 3)
         value = value.permute(0, 2, 1, 3)
-        key = key.view(batch_size, head_num, -1, MIN_PREFILL_SEQ_LEN,
-                       head_size)
-        value = value.view(batch_size, head_num, -1, MIN_PREFILL_SEQ_LEN,
-                           head_size)
+        key = key.view(batch_size, head_num, -1, block_size, head_size)
+        value = value.view(batch_size, head_num, -1, block_size, head_size)
         key = key.flatten(0, 2)
         value = value.flatten(0, 2)
-        key_cache = key_cache.flatten(0, 2)
-        key_cache = key_cache.view(-1, MIN_PREFILL_SEQ_LEN, head_size)
-        value_cache = value_cache.flatten(0, 2)
-        value_cache = value_cache.view(-1, MIN_PREFILL_SEQ_LEN, head_size)
-        key_cache.index_copy_(0, slot_mapping, key)
-        value_cache.index_copy_(0, slot_mapping, value)
+        key_cache = key_cache.view(-1, block_size, head_size)
+        value_cache = value_cache.view(-1, block_size, head_size)
     else:
         key = key.flatten(0, 2)
         value = value.flatten(0, 2)
         key_cache = key_cache.flatten(0, 2)
         value_cache = value_cache.flatten(0, 2)
-        key_cache.index_copy_(0, slot_mapping, key)
-        value_cache.index_copy_(0, slot_mapping, value)
+
+    key_cache.index_copy_(0, slot_mapping, key)
+    value_cache.index_copy_(0, slot_mapping, value)
 
 
 def paged_attention(
