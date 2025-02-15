@@ -528,10 +528,15 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
                 k: v.to(device, non_blocking=True)
                 for k, v in module.state_dict().items()
             }
+            # Add tie_weights=False here to avoid tie weight problem in
+            # in current MLA attention. eg: e_score_correction_bias in both
+            # mlp.experts and mlp.gate; qk_weight in both mla_attn.impl and
+            # mla_attn.impl
             output = functional_call(module,
                                      device_state,
                                      args=args,
-                                     kwargs=kwargs)
+                                     kwargs=kwargs,
+                                     tie_weights=False)
             module.forward = forward
             return output
 
