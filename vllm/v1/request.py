@@ -114,7 +114,7 @@ class Request:
             self.spec_token_ids.extend(token_ids)
 
     def clear_spec_tokens(self) -> None:
-        self.spec_token_ids = []
+        self.spec_token_ids.clear()
 
     @property
     def num_tokens(self) -> int:

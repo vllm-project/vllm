@@ -116,9 +116,7 @@ class Scheduler:
         # Encoder-related.
         scheduled_encoder_inputs: Dict[str, List[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
-
-        # Spec Decode-related. spec_decode: if any request in
-        # the scheduled batch uses speculative decoding.
+        # Spec decode-related.
         scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
         scheduled_timestamp = time.monotonic()
 
@@ -480,23 +478,17 @@ class Scheduler:
                 request.num_computed_tokens += num_tokens_scheduled
                 assert request.num_computed_tokens <= request.num_tokens
             else:
-                # num_computed_tokens_step is the number of tokens computed
-                # in the current step.
-                # num_computed_tokens_step =
-                # num_scheduled_tokens - num_tokens_rejected,
-                # where num_tokens_rejected =
+                # num_computed_tokens_step represents the number of tokens
+                # processed in the current step, considering scheduled
+                # tokens and rejections.
+                # It is calculated as:
+                # num_computed_tokens_step = num_scheduled_tokens -
+                #                            num_tokens_rejected,
+                # where num_tokens_rejected is given by:
                 # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
-                # We use this way of calculating num_computed_tokens_step
-                # because of chunked prefill. In chunked prefill, number of
-                # computed tokens is not equal to the number of
-                # generated/sampled tokens. Here, len(scheduled_spec_token_ids)
-                # + 1 is the maximum number of tokens generated in the current
-                # step, len(scheduled_spec_token_ids) + 1 -
-                # len(generated_token_ids) is the number of tokens rejected
-                # in the current step.
                 scheduled_spec_token_ids = (
-                    scheduler_output.scheduled_spec_decode_tokens.get(
-                        req_id, []))
+                    scheduler_output.scheduled_spec_decode_tokens[req_id])
+
                 num_computed_tokens_step = num_scheduled_tokens[req_id] - (
                     len(scheduled_spec_token_ids) + 1 -
                     len(generated_token_ids))
@@ -516,7 +508,8 @@ class Scheduler:
                             request, input_id)
 
             if request.num_computed_tokens >= request.num_tokens:
-                # We assume all spec tokens are verified
+                # Clear the spec tokens as the request has generated
+                # a new token. Here, We assume all spec tokens are verified
                 # if we perform speculative decoding for this request.
                 # Therefore, we can clear all spec tokens after
                 # the generation step.
@@ -534,6 +527,7 @@ class Scheduler:
                     request.append_output_token_ids(output_token_id)
                     new_token_ids.append(output_token_id)
 
+                    # Check for stop and update request state.
                     # This must be called before we make the EngineCoreOutput.
                     stopped = self._check_stop(request)
                     if stopped:

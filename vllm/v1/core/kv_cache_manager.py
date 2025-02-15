@@ -84,7 +84,9 @@ class KVCacheManager:
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
-        self.cached_block_num: Dict[str, int] = defaultdict(int)
+        # This is only used to track the RUNNING requests, we do not track the
+        # data for reempted ones.
+        self.num_cached_block: Dict[str, int] = defaultdict(int)
         self.prefix_cache_stats = PrefixCacheStats()
 
     @property
@@ -244,7 +246,10 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
-        num_cached_blocks = self.cached_block_num[request.request_id]
+        num_cached_blocks = self.num_cached_block[request.request_id]
+        # Speculated tokens might be rejected in the future, so we does
+        # not cache any speculated tokens. We only cache blocks with
+        # generated (accepted) tokens.
         num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
             request.spec_token_ids)) // self.block_size
         new_full_blocks = req_blocks[
@@ -258,7 +263,7 @@ class KVCacheManager:
                 full_blocks=new_full_blocks,
                 prev_block=(req_blocks[num_cached_blocks -
                                        1] if num_cached_blocks > 0 else None))
-        self.cached_block_num[
+        self.num_cached_block[
             request.request_id] = num_full_blocks_after_append
         return new_blocks
 
@@ -283,7 +288,7 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
-        self.cached_block_num.pop(request.request_id, None)
+        self.num_cached_block.pop(request.request_id, None)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF

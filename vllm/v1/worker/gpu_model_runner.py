@@ -435,8 +435,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         use_spec_decode = len(all_spec_token_ids) > 0
         if use_spec_decode:
-            # Currently, we assume all speculated tokens are verified.
-            # We don't support partial verification.
 
             # 1. Write spec_token_ids to input batch.
             # Step 1. Get req indices that perform spec decode and repeat
@@ -467,7 +465,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cumsums_spec_offsets = torch.from_numpy(cumsums_spec_offsets).to(
                 torch.int64)
             all_spec_token_ids = torch.tensor(all_spec_token_ids,
-                                              device=self.input_ids_cpu.device,
+                                              device="cpu",
                                               dtype=self.input_ids_cpu.dtype)
 
             # Step 2. Write spec token ids to input_ids_cpu.
@@ -759,7 +757,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _prepare_sampling(
         self,
         batch_changed: bool,
-        req_id_spec_token_ids: Dict[str, List[int]],
+        req_to_spec_token_ids: Dict[str, List[int]],
     ) -> SamplingMetadata:
         # Create the sampling metadata.
         req_id_output_token_ids: Dict[str, List[int]] = \
@@ -767,7 +765,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for req_id, req in self.requests.items()}
 
         sampling_metadata = self.input_batch.make_sampling_metadata(
-            req_id_output_token_ids, req_id_spec_token_ids, not batch_changed)
+            req_id_output_token_ids, req_to_spec_token_ids, not batch_changed)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -937,7 +935,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampling_metadata=sampling_metadata,
         )
 
-        sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
@@ -948,8 +945,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
             if seq_len >= req_state.num_tokens:
-                # We don't rewind the generator state for requests now
-                # because spec decode only supports greedy decoding for now.
                 request_seq_lens.append((i, req_state, seq_len))
             else:
                 # Ignore the sampled token from the partial request.
@@ -965,9 +960,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
 
-        logprobs_tensors = sampler_output.logprobs_tensors
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
+        sampled_token_ids = sampler_output.sampled_token_ids
+        logprobs_tensors = sampler_output.logprobs_tensors
         logprobs_lists = logprobs_tensors.tolists() \
             if logprobs_tensors is not None else None
 
@@ -978,18 +974,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Update batch with the valid generated tokens.
-        valid_mask = sampled_token_ids != INVALID_TOKEN_ID
-        gen_lens = valid_mask.sum(dim=1).tolist()
-        valid_sampled_token_ids = [
-            seq.tolist()
-            for seq in sampled_token_ids[valid_mask].split(gen_lens)
-        ]
-        self.input_batch.num_tokens[:num_reqs] += gen_lens
-        for i, req_state, seq_len in request_seq_lens:
-            target_slice = slice(seq_len - gen_lens[i] + 1, seq_len + 1)
-            self.input_batch.token_ids_cpu[
-                i, target_slice] = valid_sampled_token_ids[i]
-            req_state.output_token_ids.extend(valid_sampled_token_ids[i])
+        max_gen_len = sampled_token_ids.shape[-1]
+        if max_gen_len == 1:
+            for i, req_state, seq_len in request_seq_lens:
+                token_id = sampled_token_ids[i]
+                self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                req_state.output_token_ids.append(token_id)
+        else:
+            valid_mask = sampled_token_ids != INVALID_TOKEN_ID
+            gen_lens = valid_mask.sum(dim=1).tolist()
+            valid_sampled_token_ids = [
+                seq.tolist()
+                for seq in sampled_token_ids[valid_mask].split(gen_lens)
+            ]
+            self.input_batch.num_tokens[:num_reqs] += gen_lens
+            for i, req_state, seq_len in request_seq_lens:
+                target_slice = slice(seq_len - gen_lens[i] + 1, seq_len + 1)
+                self.input_batch.token_ids_cpu[
+                    i, target_slice] = valid_sampled_token_ids[i]
+                req_state.output_token_ids.extend(valid_sampled_token_ids[i])
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
