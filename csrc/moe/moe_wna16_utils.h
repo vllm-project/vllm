@@ -78,7 +78,6 @@ class ScalarType<nv_bfloat16> {
 #endif
 };
 
-
 template <int lut>
 __device__ inline int lop3(int a, int b, int c) {
   int res;
@@ -87,7 +86,6 @@ __device__ inline int lop3(int a, int b, int c) {
                : "r"(a), "r"(b), "r"(c), "n"(lut));
   return res;
 }
-
 
 template <int start_byte, int mask>
 __device__ inline uint32_t prmt(uint32_t a) {
@@ -98,16 +96,11 @@ __device__ inline uint32_t prmt(uint32_t a) {
   return res;
 }
 
-
 template <typename scalar_t2, int bit>
-__device__ inline  void dequant(int q, scalar_t2* res) {
-
-}
-
-
+__device__ inline void dequant(int q, scalar_t2* res) {}
 
 template <>
-__device__ inline  void dequant<half2, 4>(int q, half2* res) {
+__device__ inline void dequant<half2, 4>(int q, half2* res) {
   const int LO = 0x000f000f;
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
@@ -115,17 +108,17 @@ __device__ inline  void dequant<half2, 4>(int q, half2* res) {
   const int MUL = 0x2c002c00;
   const int ADD = 0xd400d400;
 
-  int lo0 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi0 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
   q >>= 8;
-  int lo1 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi1 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
 
   res[0] = __hsub2(*reinterpret_cast<half2*>(&lo0),
                    *reinterpret_cast<const half2*>(&SUB));
   res[1] = __hfma2(*reinterpret_cast<half2*>(&hi0),
                    *reinterpret_cast<const half2*>(&MUL),
-                  *reinterpret_cast<const half2*>(&ADD));
+                   *reinterpret_cast<const half2*>(&ADD));
   res[2] = __hsub2(*reinterpret_cast<half2*>(&lo1),
                    *reinterpret_cast<const half2*>(&SUB));
   res[3] = __hfma2(*reinterpret_cast<half2*>(&hi1),
@@ -133,9 +126,8 @@ __device__ inline  void dequant<half2, 4>(int q, half2* res) {
                    *reinterpret_cast<const half2*>(&ADD));
 }
 
-
 template <>
-__device__ inline  void dequant<half2, 8>(int q, half2* res) {
+__device__ inline void dequant<half2, 8>(int q, half2* res) {
   static constexpr uint32_t mask_for_elt_01 = 0x5250;
   static constexpr uint32_t mask_for_elt_23 = 0x5351;
   static constexpr uint32_t start_byte_for_fp16 = 0x64646464;
@@ -151,22 +143,19 @@ __device__ inline  void dequant<half2, 8>(int q, half2* res) {
                    *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
 }
 
-
-
-
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 template <>
-__device__ inline  void dequant<nv_bfloat162, 4>(int q, nv_bfloat162* res) {
+__device__ inline void dequant<nv_bfloat162, 4>(int q, nv_bfloat162* res) {
   static constexpr uint32_t MASK = 0x000f000f;
   static constexpr uint32_t EX = 0x43004300;
 
-  int lo0 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int lo0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int hi0 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int hi0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int lo1 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int lo1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int hi1 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int hi1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
 
   static constexpr uint32_t MUL = 0x3F803F80;
   static constexpr uint32_t ADD = 0xC300C300;
@@ -178,16 +167,15 @@ __device__ inline  void dequant<nv_bfloat162, 4>(int q, nv_bfloat162* res) {
                    *reinterpret_cast<const nv_bfloat162*>(&MUL),
                    *reinterpret_cast<const nv_bfloat162*>(&ADD));
   res[2] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&lo1),
-                  *reinterpret_cast<const nv_bfloat162*>(&MUL),
-                  *reinterpret_cast<const nv_bfloat162*>(&ADD));
+                   *reinterpret_cast<const nv_bfloat162*>(&MUL),
+                   *reinterpret_cast<const nv_bfloat162*>(&ADD));
   res[3] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&hi1),
                    *reinterpret_cast<const nv_bfloat162*>(&MUL),
                    *reinterpret_cast<const nv_bfloat162*>(&ADD));
 }
 
-
 template <>
-__device__ inline  void dequant<nv_bfloat162, 8>(int q, nv_bfloat162* res) {
+__device__ inline void dequant<nv_bfloat162, 8>(int q, nv_bfloat162* res) {
   float fp32_intermediates[4];
   uint32_t* fp32_intermediates_casted =
       reinterpret_cast<uint32_t*>(fp32_intermediates);
@@ -208,6 +196,5 @@ __device__ inline  void dequant<nv_bfloat162, 8>(int q, nv_bfloat162* res) {
                                    fp32_intermediates_casted[1], 0x7632);
   bf16_result_ptr[1] = __byte_perm(fp32_intermediates_casted[2],
                                    fp32_intermediates_casted[3], 0x7632);
-
 }
 #endif

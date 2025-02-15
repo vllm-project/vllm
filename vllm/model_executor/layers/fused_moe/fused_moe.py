@@ -694,12 +694,12 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                                        block_size_m=config["BLOCK_SIZE_M"]))
 
         if use_moe_wna16_cuda:
-            ops.moe_wna16_gemm(
-                A, C, B, B_scale, B_zp,
-                topk_weights if mul_routed_weight else None, sorted_token_ids,
-                expert_ids, num_tokens_post_padded, top_k,
-                config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"],
-                config["BLOCK_SIZE_K"], 4)
+            ops.moe_wna16_gemm(A, C, B, B_scale, B_zp,
+                               topk_weights if mul_routed_weight else None,
+                               sorted_token_ids, expert_ids,
+                               num_tokens_post_padded, top_k,
+                               config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"],
+                               config["BLOCK_SIZE_K"], 4)
             return
 
         fused_moe_kernel_gptq_awq[grid](
@@ -835,11 +835,11 @@ def get_moe_configs(
     return None
 
 
-def get_moe_wna16_block_config(config: Dict[str, int],
-                               use_moe_wna16_cuda: bool, num_valid_tokens: int,
-                               size_k: int, size_n: int, num_experts: int,
-                               group_size: int, real_top_k: int,
-                               block_size_m: int):
+def get_moe_wna16_block_config(config: Dict[str,
+                                            int], use_moe_wna16_cuda: bool,
+                               num_valid_tokens: int, size_k: int, size_n: int,
+                               num_experts: int, group_size: int,
+                               real_top_k: int, block_size_m: int):
     if "BLOCK_SIZE_N" in config and "BLOCK_SIZE_K" in config:
         return {}
     if not use_moe_wna16_cuda:
@@ -864,18 +864,18 @@ def get_moe_wna16_block_config(config: Dict[str, int],
         if size_k % 256 == 0 and num_blocks >= 256 and \
                 block_size_k < 256:
             block_size_k = 256
-            num_blocks = num_blocks / (256 / block_size_k)
+            num_blocks = num_blocks // (256 // block_size_k)
 
         if num_m_blocks <= 16 and size_k % (block_size_k * 2) == 0 and \
                 size_k % (block_size_k * 2) == 0 and block_size_k <= 512 and \
                 num_blocks >= 512:
             block_size_k = block_size_k * 2
-            num_blocks /= 2
+            num_blocks = num_blocks // 2
 
         if num_blocks > 1024:
             block_size_n = 256
-            num_n_blocks = num_n_blocks / 2
-            num_blocks /= 2
+            num_n_blocks = num_n_blocks // 2
+            num_blocks = num_blocks // 2
 
         if size_n <= 1024 and num_blocks >= 1024:
             block_size_n = 1024
