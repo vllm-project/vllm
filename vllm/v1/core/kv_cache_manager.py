@@ -6,7 +6,6 @@ from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.hybrid_kv_cache_manager import HybridKVCacheManager
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock,
                                          generate_block_hash_extra_keys,
@@ -326,6 +325,7 @@ def init_kv_cache_manager(kv_cache_config: KVCacheConfig,
                           max_model_len: int,
                           enable_caching: bool = True,
                           num_preallocate_tokens: int = 64):
+    from vllm.v1.core.hybrid_kv_cache_manager import HybridKVCacheManager
     print("kv_cache_config", kv_cache_config)
     if len(kv_cache_config.groups) > 1:
         logger.info("Using HybridKVCacheManager")

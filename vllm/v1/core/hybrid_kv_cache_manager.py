@@ -7,6 +7,7 @@ from typing import DefaultDict, Dict, List, Optional, Tuple
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock, PrefixLength,
                                          ReqKVCacheBlocks,
@@ -85,9 +86,9 @@ class HybridKVCacheManager:
             str, List[List[BlockHashType]]] = defaultdict(
                 lambda: [[] for _ in range(self.num_kv_cache_groups)])
 
-    @property
-    def usage(self) -> float:
-        return self.block_pool.get_usage()
+    usage = KVCacheManager.usage
+    reset_prefix_cache = KVCacheManager.reset_prefix_cache
+    free_block_hashes = KVCacheManager.free_block_hashes
 
     def get_computed_blocks(self,
                             request: Request) -> Tuple[ReqKVCacheBlocks, int]:
@@ -302,9 +303,6 @@ class HybridKVCacheManager:
             # eviction priority.
             self._free_blocks([list(reversed(blks)) for blks in blocks])
 
-    def reset_prefix_cache(self) -> bool:
-        return self.block_pool.reset_prefix_cache()
-
     def get_num_common_prefix_blocks(
         self,
         request: Request,
@@ -357,14 +355,6 @@ class HybridKVCacheManager:
                     break
             num_common_blocks_per_group.append(num_common_blocks)
         return num_common_blocks_per_group
-
-    def free_block_hashes(self, request: Request) -> None:
-        """Discard the block hashes for the request.
-
-        NOTE: Unlike `free`, this method should be called only when the request
-        is finished, not when it is preempted.
-        """
-        self.req_to_block_hashes.pop(request.request_id, None)
 
     def _free_useless_blocks(self, req_blocks: ReqKVCacheBlocks,
                              num_computed_tokens: int) -> None:
