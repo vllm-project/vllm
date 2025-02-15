@@ -354,7 +354,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
         })
     if pt_records:
         # Don't use json suffix here as we don't want CI to pick it up
-        pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch"
+        pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
         with open(pt_file, "w") as f:
             json.dump(pt_records, f)
 
