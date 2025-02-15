@@ -90,6 +90,10 @@ class Sampler(nn.Module):
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
 
+        # Apply min_p.
+        if not sampling_metadata.no_min_p:
+            logits = self.apply_min_p(logits, sampling_metadata.min_p)
+
         # Apply top_k and/or top_p.
         random_sampled = self.topk_topp_sampler(
             logits,
@@ -99,9 +103,6 @@ class Sampler(nn.Module):
             sampling_metadata.no_top_p,
             sampling_metadata.top_p,
         )
-
-        if not sampling_metadata.no_min_p:
-            logits = self.apply_min_p(logits, sampling_metadata.min_p)
 
         if greedy_sampled is None:
             return random_sampled
