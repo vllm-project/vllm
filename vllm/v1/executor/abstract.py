@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Type
+from concurrent.futures import Future
+from typing import List, Type, Union
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.ray_distributed_executor import (  # noqa
-    RayDistributedExecutor as RayDistributedExecutorV0)
 from vllm.executor.uniproc_executor import (  # noqa
     ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0)
 from vllm.executor.uniproc_executor import (  # noqa
@@ -33,6 +32,8 @@ class Executor(ExecutorBase):
                     f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
+            from vllm.v1.executor.ray_distributed_executor import (  # noqa
+                RayDistributedExecutor)
             executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
@@ -70,10 +71,14 @@ class Executor(ExecutorBase):
     def execute_model(
         self,
         scheduler_output,
-    ) -> ModelRunnerOutput:
+    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
         output = self.collective_rpc("execute_model",
                                      args=(scheduler_output, ))
         return output[0]
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        return 1
 
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start, ))
@@ -84,8 +89,4 @@ class UniProcExecutor(UniProcExecutorV0, Executor):
 
 
 class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
-    pass
-
-
-class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
     pass
