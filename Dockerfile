@@ -195,19 +195,22 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
 
-# How to build this FlashInfer wheel:
+# If we need to build FlashInfer wheel before its release:
 # $ export FLASHINFER_ENABLE_AOT=1
 # $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
 # $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
 # $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
 # $ cd flashinfer
 # $ git checkout 524304395bd1d8cd7d07db083859523fcaa246a4
+# $ rm -rf build
 # $ python3 setup.py bdist_wheel --dist-dir=dist --verbose
+# $ ls dist
+# $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl
 
 RUN --mount=type=cache,target=/root/.cache/pip \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    python3 -m pip install https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.0.post1-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl; \
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.1.post1/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl ; \
 fi
 COPY examples examples
 
