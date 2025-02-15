@@ -611,7 +611,8 @@ class BartEncoder(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata) -> torch.Tensor:
+                attn_metadata: AttentionMetadata,
+                inputs_embeds: Optional[torch.Tensor] = None,) -> torch.Tensor:
         r"""
         Args:
             input_ids
@@ -628,7 +629,8 @@ class BartEncoder(nn.Module):
             Decoder output torch.Tensor
         """
         # retrieve input_ids and inputs_embeds
-        inputs_embeds = self.embed_tokens(input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
 
         embed_pos = self.embed_positions(positions)
         embed_pos = embed_pos.to(inputs_embeds.device)

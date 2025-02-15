@@ -2,14 +2,14 @@
 
 import math
 from functools import cached_property
-from typing import Iterable, List, Optional, Set, Tuple, OrderedDict
+from typing import Iterable, List, Optional, Set, Tuple, OrderedDict, Mapping, Literal, TypedDict, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, BatchFeature
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -20,9 +20,26 @@ from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartParallelLMHead,
                                              BartScaledWordEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
+                                   MultiModalDataDict, MultiModalDataItems)
+from vllm.multimodal.processing import (BaseProcessingInfo,
+                                        BaseMultiModalProcessor,
+                                        EncDecMultiModalProcessor,
+                                        PromptReplacement)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .utils import AutoWeightsLoader
+from .interfaces import SupportsMultiModal
+from .utils import AutoWeightsLoader, merge_multimodal_embeddings
+
+
+class Florence2ImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: """
+    """(batch_size, num_channel, height, width)"""
 
 
 class LearnedAbsolutePositionEmbedding2D(nn.Module):
@@ -590,7 +607,8 @@ class Florence2LanguageModel(nn.Module):
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 encoder_input_ids: torch.Tensor,
                 encoder_positions: torch.Tensor, kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata) -> torch.Tensor:
+                attn_metadata: AttentionMetadata,
+                inputs_embeds: Optional[torch.Tensor] = None,) -> torch.Tensor:
         r"""
         Args:
             input_ids
@@ -619,7 +637,8 @@ class Florence2LanguageModel(nn.Module):
             encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
                                                  positions=encoder_positions,
                                                  kv_caches=kv_caches,
-                                                 attn_metadata=attn_metadata)
+                                                 attn_metadata=attn_metadata,
+                                                 inputs_embeds=inputs_embeds)
 
         # decoder outputs consists of
         # (dec_features, past_key_value, dec_hidden, dec_attn)
@@ -663,6 +682,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         encoder_positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -682,8 +702,12 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         Returns:
             Output torch.Tensor
         """
+
         return self.model(input_ids, positions, encoder_input_ids,
-                          encoder_positions, kv_caches, attn_metadata)
+                          encoder_positions, kv_caches, attn_metadata, inputs_embeds=inputs_embeds)
+    
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.shared(input_ids)
 
     def compute_logits(
         self,
@@ -732,11 +756,113 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         return loaded_params
 
 
-class Florence2ForConditionalGeneration(nn.Module):
+class Florence2ProcessingInfo(BaseProcessingInfo):
+
+    def get_hf_config(self):
+        return self.ctx.get_hf_config()
+    
+    def get_hf_processor(self):
+        return self.ctx.get_hf_processor()
+    
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {"image": 577}
+
+
+class Florence2DummyInputsBuilder(BaseDummyInputsBuilder[Florence2ProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+
+        target_width = target_height = self.info.get_hf_config().projection_dim
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text="<pad>" * num_images,
+            mm_data=mm_data,
+        )
+
+
+class Florence2MultiModalProcessor(BaseMultiModalProcessor[Florence2ProcessingInfo]):
+
+    def _hf_processor_applies_repl(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
+    
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if mm_data:
+            pad_token = [self.info.get_hf_config().pad_token_id]
+            processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+            input_ids_without_pad_token = processed_outputs["input_ids"].squeeze(0).tolist()
+            input_ids = pad_token + input_ids_without_pad_token
+            processed_outputs["input_ids"] = torch.tensor(input_ids).unsqueeze(0)
+        else:
+            tokenizer = self.info.get_tokenizer()
+            processed_outputs = tokenizer(prompt,
+                                          add_special_tokens=True,
+                                          return_tensors="pt")
+        return processed_outputs
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        pad_token_id = self.info.get_hf_config().pad_token_id
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[pad_token_id],
+                replacement=[pad_token_id] * 577,
+            )
+        ]
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Florence2MultiModalProcessor,
+    info=Florence2ProcessingInfo,
+    dummy_inputs=Florence2DummyInputsBuilder)
+class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self.config = config
         assert config.vision_config.model_type == 'davit', 'only DaViT is supported for now'
         self.vision_tower = DaViT.from_config(config=config.vision_config)
         self._build_image_projection_layers(config)
@@ -744,6 +870,7 @@ class Florence2ForConditionalGeneration(nn.Module):
             vllm_config=vllm_config.with_hf_config(config.text_config),
             prefix=f"{prefix}.language_model",
         )
+        self.pad_token_id = config.pad_token_id
 
     def _build_image_projection_layers(self, config: PretrainedConfig):
         image_dim_out = config.vision_config.dim_embed[-1]
@@ -779,6 +906,120 @@ class Florence2ForConditionalGeneration(nn.Module):
             return self.language_model.sampler
         return get_sampler()
 
+    def _validate_pixel_values(
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
+        h = w = self.config.projection_dim
+        expected_dims = (3, h, w)
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape[1:])
+
+            if actual_dims != expected_dims:
+                expected_expr = ("num_patches", *map(str, expected_dims))
+                raise ValueError(
+                    "The expected shape of pixel values per image per batch "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
+
+        return data
+        
+    def _parse_and_validate_image_input(self, **kwargs: object):
+        pixel_values: Optional[Union[List[List[torch.Tensor]],
+                                     List[torch.Tensor],
+                                     torch.Tensor]] = kwargs.pop(
+                                         "pixel_values", None)
+        image_embeds: Optional[Union[List[List[torch.Tensor]],
+                                     List[torch.Tensor],
+                                     torch.Tensor]] = kwargs.pop(
+                                         "image_embeds", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        if pixel_values is not None and image_embeds is not None:
+            raise ValueError(
+                "Both pixel values and image embeds are provided.")
+
+        if pixel_values is not None:
+            return Florence2ImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+            )
+
+        if image_embeds is not None:
+            raise NotImplementedError
+
+        raise AssertionError("This line should be unreachable.")
+    
+    def _encode_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        batch_size, T = pixel_values.size(0), 1
+        x = self.vision_tower.forward_features_unpool(pixel_values)
+        if self.image_pos_embed is not None:
+            x = x.view(batch_size * T, -1, x.shape[-1])
+            num_tokens = x.shape[-2]
+            h, w = int(num_tokens ** 0.5), int(num_tokens ** 0.5)
+            assert h * w == num_tokens, 'only support square feature maps for now'
+            x = x.view(batch_size * T, h, w, x.shape[-1])
+            pos_embed = self.image_pos_embed(x)
+            x = x + pos_embed
+            x = x.view(batch_size, T * h*w, x.shape[-1])
+
+        if self.visual_temporal_embed is not None:
+            visual_temporal_embed = self.visual_temporal_embed(x.view(batch_size, T, -1, x.shape[-1])[:, :, 0])
+            x = x.view(batch_size, T, -1, x.shape[-1]) + visual_temporal_embed.view(1, T, 1, x.shape[-1])
+
+        x_feat_dict = {}
+
+        spatial_avg_pool_x = x.view(batch_size, T, -1, x.shape[-1]).mean(dim=2)
+        x_feat_dict['spatial_avg_pool'] = spatial_avg_pool_x
+
+        temporal_avg_pool_x = x.view(batch_size, T, -1, x.shape[-1]).mean(dim=1)
+        x_feat_dict['temporal_avg_pool'] = temporal_avg_pool_x
+
+        x = x.view(batch_size, T, -1, x.shape[-1])[:, -1]
+        x_feat_dict['last_frame'] = x
+
+        new_x = []
+        for _image_feature_source in self.image_feature_source:
+            if _image_feature_source not in x_feat_dict:
+                raise ValueError('invalid image feature source: {}'.format(_image_feature_source))
+            new_x.append(x_feat_dict[_image_feature_source])
+
+        x = torch.cat(new_x, dim=1)
+
+        x = x @ self.image_projection
+        x = self.image_proj_norm(x)
+
+        return x
+    
+    def _process_image_input(self, image_input: Florence2ImagePixelInputs) -> torch.Tensor:
+        assert image_input["type"] == "pixel_values"
+        pixel_values = image_input["data"]
+        return self._encode_image(pixel_values)
+    
+    def get_multimodal_embeddings(self, **kwargs: object) -> torch.Tensor:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        vision_embeddings = self._encode_image(image_input)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.pad_token_id)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -808,8 +1049,14 @@ class Florence2ForConditionalGeneration(nn.Module):
         Returns:
             Output torch.Tensor
         """
-        return self.language_model(input_ids, positions, encoder_input_ids,
-                                   encoder_positions, kv_caches, attn_metadata)
+        vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+        inputs_embeds = self.get_input_embeddings(input_ids,
+                                                  vision_embeddings)
+        input_ids = None
+
+        hidden_states = self.language_model(input_ids, positions, encoder_input_ids,
+                                   encoder_positions, kv_caches, attn_metadata, inputs_embeds=inputs_embeds)
+        return hidden_states
 
     def compute_logits(
         self,
