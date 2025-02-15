@@ -5,13 +5,13 @@ import dataclasses
 import json
 import os
 import random
-import sys
 import time
 from functools import cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import uvloop
+from benchmark_utils import convert_to_pytorch_benchmark_format
 from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -27,9 +27,6 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
-
-sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from benchmark_utils import convert_to_pytorch_benchmark_format
 
 
 @dataclasses.dataclass

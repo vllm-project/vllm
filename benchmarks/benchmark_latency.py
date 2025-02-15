@@ -5,13 +5,13 @@ import argparse
 import dataclasses
 import json
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
+from benchmark_utils import convert_to_pytorch_benchmark_format
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
@@ -19,9 +19,6 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser
-
-sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from benchmark_utils import convert_to_pytorch_benchmark_format
 
 
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
