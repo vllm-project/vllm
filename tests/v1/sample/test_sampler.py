@@ -115,7 +115,7 @@ def _generate_min_token_penalties_and_stop_tokens(
     for index in range(batch_size):
         if index in batch_indices_for_min_token_penalty:
             min_tokens[index] = np.random.randint(num_output_tokens + 1,
-                                  2 * num_output_tokens)
+                                                  2 * num_output_tokens)
             stop_token_ids.append(
                 set(
                     np.random.randint(0, vocab_size - 1)

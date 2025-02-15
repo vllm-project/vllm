@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Set, Tuple, Dict
+from typing import Dict, List, Set, Tuple
 
 import torch
 
