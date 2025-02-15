@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, Generic, List, Optional, Tuple
@@ -190,6 +191,15 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
+
+        # Handle the differences between the flash_attn_varlen from flash_attn
+        # and the one from vllm_flash_attn. The former is used on RoCM and the
+        # latter has an additional parameter to control FA2 vs FA3
+        self.flash_attn_varlen_func = flash_attn_varlen_func
+        if self.vllm_flash_attn_version is not None:
+            self.flash_attn_varlen_func = \
+                functools.partial(flash_attn_varlen_func,
+                                  fa_version=self.vllm_flash_attn_version)
 
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
@@ -495,7 +505,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
 
-        attn_output = flash_attn_varlen_func(
+        attn_output = self.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v_padded,
@@ -505,7 +515,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
             max_seqlen_k=max_prefill_seq_len,
             softmax_scale=self.scale,
             causal=True,
-            fa_version=self.vllm_flash_attn_version,
         )
         attn_output = attn_output\
             .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\

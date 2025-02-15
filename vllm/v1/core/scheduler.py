@@ -58,6 +58,9 @@ class Scheduler:
         # Priority queues for requests.
         self.waiting: Deque[Request] = deque()
         self.running: List[Request] = []
+        # The requests that have been scheduled and are being executed
+        # by the executor.
+        self.scheduled_req_ids: Set[str] = set()
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -118,6 +121,11 @@ class Scheduler:
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if request.request_id in self.scheduled_req_ids:
+                # This request has already been scheduled.
+                req_index += 1
+                continue
+
             num_new_tokens = request.num_tokens - request.num_computed_tokens
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
@@ -164,6 +172,7 @@ class Scheduler:
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
+            self.scheduled_req_ids.add(request.request_id)
             req_to_new_block_ids[request.request_id] = [
                 b.block_id for b in new_blocks
             ]
@@ -251,6 +260,7 @@ class Scheduler:
 
                 self.waiting.popleft()
                 self.running.append(request)
+                self.scheduled_req_ids.add(request.request_id)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                     self.request_scheduled(request, scheduled_timestamp)
@@ -519,6 +529,7 @@ class Scheduler:
                         stop_reason=request.stop_reason,
                         events=request.take_events()))
 
+            self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
                 new_running.append(request)
 
@@ -575,6 +586,8 @@ class Scheduler:
 
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
+                if request.request_id in self.scheduled_req_ids:
+                    self.scheduled_req_ids.remove(request.request_id)
             else:
                 self.waiting.remove(request)
             request.status = finished_status
@@ -594,6 +607,10 @@ class Scheduler:
 
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
+
+    def get_num_unscheduled_requests(self) -> int:
+        """Number of requests that are not being processed by the executor."""
+        return self.get_num_unfinished_requests() - len(self.scheduled_req_ids)
 
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()

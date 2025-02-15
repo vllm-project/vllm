@@ -347,6 +347,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
 
+        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
+
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
@@ -363,8 +365,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
-        return (len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
-                or len(scheduler_output.finished_req_ids) > 0)
+
+        return batch_changed
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1156,11 +1158,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Trigger compilation for general shape.
             hidden_states = self._dummy_run(self.max_num_tokens,
                                             dummy_kv_caches)
-            if not get_pp_group().is_last_rank:
-                return hidden_states
-            hidden_states = hidden_states[logit_indices]
-            logits = self.model.compute_logits(hidden_states, None)
-            # TODO(woosuk): Consider the memory usage of the sampler.
+            if get_pp_group().is_last_rank:
+                hidden_states = hidden_states[logit_indices]
+                logits = self.model.compute_logits(hidden_states, None)
+                # TODO(woosuk): Consider the memory usage of the sampler.
+            else:
+                logits = None
             torch.cuda.synchronize()
             del hidden_states, logits
             self.encoder_cache.clear()
