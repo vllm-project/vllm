@@ -167,7 +167,7 @@ __global__ void moe_wna16_gemm_kernel(
 
       if (tmp_k % 4 == 0) {
         *expert_qweight_tmp_float4 = reinterpret_cast<float4*>(
-            &expert_qweight)[weight_offset / pack_factor / 4];
+            expert_qweight)[weight_offset / pack_factor / 4];
       }
 
       if (tmp_k % (group_size / pack_factor) == 0) {
