@@ -631,8 +631,6 @@ class BartEncoder(nn.Module):
         # retrieve input_ids and inputs_embeds
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        else:
-            positions = inputs_embeds[:, -1]
 
         embed_pos = self.embed_positions(positions)
         embed_pos = embed_pos.to(inputs_embeds.device)
