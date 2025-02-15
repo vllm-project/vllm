@@ -433,7 +433,7 @@ def test_schedule_concurrent_batches():
     model_runner_output = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
         req_id_to_index={requests[0].request_id: 0},
-        sampled_token_ids=[0],
+        sampled_token_ids=[[0]],
         logprobs=None,
         prompt_logprobs_dict={},
     )
@@ -449,7 +449,7 @@ def test_schedule_concurrent_batches():
     model_runner_output = ModelRunnerOutput(
         req_ids=[requests[1].request_id],
         req_id_to_index={requests[1].request_id: 0},
-        sampled_token_ids=[0],
+        sampled_token_ids=[[0]],
         logprobs=None,
         prompt_logprobs_dict={},
     )
