@@ -8,7 +8,7 @@
 #include <cuda_bf16.h>
 #include "moe_wna16_utils.h"
 
-#define DIVIDE(x, size) (((x) + (size)-1) / (size))
+#define DIVIDE(x, size) (((x) + (size) - 1) / (size))
 
 template <typename scalar_t, int bit, int GROUPS>
 __global__ void moe_wna16_gemm_kernel(
