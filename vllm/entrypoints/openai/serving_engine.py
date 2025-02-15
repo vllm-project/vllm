@@ -465,6 +465,7 @@ class OpenAIServing:
                 request,
                 tokenizer,
                 request_prompt,
+                suffix=None,
                 truncate_prompt_tokens=truncate_prompt_tokens,
                 add_special_tokens=add_special_tokens,
             )
