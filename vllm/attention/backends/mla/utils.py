@@ -509,12 +509,18 @@ class MLACommonMetadata(AttentionMetadata):
     # The dimension of the attention heads
     head_dim: Optional[int] = None
 
+    # Used when chunked prefill is enabled to simulate worst case workspace 
+    # allocations, hopefully to avoid going OOM 
+    is_profile_run: bool = False
+
     # New for MLA (compared to FlashAttention)
     # For chunked prefill
     context_chunk_cu_seq_lens: Optional[torch.Tensor] = None
     context_chunk_starts: Optional[torch.Tensor] = None
     context_chunk_seq_tot: Optional[List[int]] = None
     context_chunk_max_seq_lens: Optional[List[int]] = None
+    # Set by MLAAttentionState in `begin_forward` so it doesnt get broadcasted
+    chunked_prefill_workspace: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
@@ -577,6 +583,7 @@ class MLACommonMetadata(AttentionMetadata):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             head_dim=self.head_dim,
+            is_profile_run=self.is_profile_run,
             # MLACommonMetadata Chunk prefill specific
             context_chunk_cu_seq_lens=self.context_chunk_cu_seq_lens,
             context_chunk_starts=self.context_chunk_starts,
@@ -633,7 +640,8 @@ class MLACommonMetadata(AttentionMetadata):
             context_lens_tensor=None,
             block_tables=block_tables,
             input_positions=input_positions,
-            head_dim=self.head_dim)
+            head_dim=self.head_dim,
+            is_profile_run=self.is_profile_run)
         return self._cached_decode_metadata
 
     def advance_step(self,
@@ -966,6 +974,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             head_dim=self.runner.model_config.get_head_size(),
+            is_profile_run=self.runner.in_profile_run,
             # MLACommonMetadata Chunk prefill specific
             context_chunk_cu_seq_lens=context_chunk_cu_seq_lens,
             context_chunk_starts=context_chunk_starts,
@@ -1420,6 +1429,18 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         if output is not None:
             raise NotImplementedError(
                 "output is not yet supported for MLAImplBase")
+
+        if attn_metadata.is_profile_run and \
+            attn_metadata.chunked_prefill_workspace is not None:
+            # During the profile run try to simulate to worse case output size
+            # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
+            # since this can be large
+            _ = torch.empty(
+                (attn_metadata.chunked_prefill_workspace.shape[0], 
+                 self.num_heads, self.qk_nope_head_dim + self.v_head_dim),
+                device=k_c_normed.device,
+                dtype=k_c_normed.dtype,
+            )
 
         has_decode = attn_metadata.decode_metadata is not None
         has_prefill = attn_metadata.prefill_metadata is not None
