@@ -32,7 +32,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal
-from .utils import AutoWeightsLoader, merge_multimodal_embeddings
+from .utils import AutoWeightsLoader, merge_multimodal_embeddings, flatten_bn
 
 
 class Florence2ImagePixelInputs(TypedDict):
@@ -631,7 +631,7 @@ class Florence2LanguageModel(nn.Module):
 
         encoder_hidden_states = None
 
-        if encoder_input_ids.numel() > 0:
+        if inputs_embeds is not None or encoder_input_ids.numel() > 0:
             # Run encoder attention if a non-zero number of encoder tokens
             # are provided as input
             encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
@@ -647,7 +647,8 @@ class Florence2LanguageModel(nn.Module):
             decoder_positions=positions,
             encoder_hidden_states=encoder_hidden_states,
             kv_caches=kv_caches,
-            attn_metadata=attn_metadata)
+            attn_metadata=attn_metadata,
+            inputs_embeds=inputs_embeds)
 
         return decoder_outputs
 
@@ -707,7 +708,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
                           encoder_positions, kv_caches, attn_metadata, inputs_embeds=inputs_embeds)
     
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.shared(input_ids)
+        return self.model.encoder.embed_tokens(input_ids)
 
     def compute_logits(
         self,
@@ -799,7 +800,7 @@ class Florence2DummyInputsBuilder(BaseDummyInputsBuilder[Florence2ProcessingInfo
         )
 
 
-class Florence2MultiModalProcessor(BaseMultiModalProcessor[Florence2ProcessingInfo]):
+class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2ProcessingInfo]):
 
     def _hf_processor_applies_repl(
         self,
@@ -808,7 +809,17 @@ class Florence2MultiModalProcessor(BaseMultiModalProcessor[Florence2ProcessingIn
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> bool:
         return False
-    
+
+    def create_encoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        data = mm_data.get("image", [])
+        num_images = 1
+        pad_token_id = self.info.get_hf_config().pad_token_id
+        return [pad_token_id] * num_images
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -914,12 +925,12 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         expected_dims = (3, h, w)
 
         def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape[1:])
+            actual_dims = tuple(d.shape)
 
             if actual_dims != expected_dims:
-                expected_expr = ("num_patches", *map(str, expected_dims))
+                expected_expr = tuple(*map(str, expected_dims))
                 raise ValueError(
-                    "The expected shape of pixel values per image per batch "
+                    "The expected shape of pixel values per batch "
                     f"is {expected_expr}. You supplied {tuple(d.shape)}.")
 
         for d in data:
@@ -947,7 +958,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         if pixel_values is not None:
             return Florence2ImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(pixel_values),
+                data=self._validate_pixel_values(flatten_bn(pixel_values, concat=True)),
             )
 
         if image_embeds is not None:
@@ -1005,7 +1016,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
-        vision_embeddings = self._encode_image(image_input)
+        vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
     def get_input_embeddings(
@@ -1050,9 +1061,9 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             Output torch.Tensor
         """
         vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-        inputs_embeds = self.get_input_embeddings(input_ids,
+        inputs_embeds = self.get_input_embeddings(encoder_input_ids,
                                                   vision_embeddings)
-        input_ids = None
+        encoder_input_ids = None
 
         hidden_states = self.language_model(input_ids, positions, encoder_input_ids,
                                    encoder_positions, kv_caches, attn_metadata, inputs_embeds=inputs_embeds)

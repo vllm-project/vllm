@@ -631,6 +631,8 @@ class BartEncoder(nn.Module):
         # retrieve input_ids and inputs_embeds
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+        else:
+            positions = inputs_embeds[:, -1]
 
         embed_pos = self.embed_positions(positions)
         embed_pos = embed_pos.to(inputs_embeds.device)
@@ -697,7 +699,8 @@ class BartDecoder(nn.Module):
                 decoder_positions: torch.Tensor,
                 encoder_hidden_states: Optional[torch.Tensor],
                 kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata) -> torch.Tensor:
+                attn_metadata: AttentionMetadata,
+                inputs_embeds: Optional[torch.Tensor],) -> torch.Tensor:
         r"""
         Args:
             decoder_input_ids
@@ -715,8 +718,10 @@ class BartDecoder(nn.Module):
         Returns:
             Decoder output torch.Tensor
         """
-
-        inputs_embeds = self.embed_tokens(decoder_input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(decoder_input_ids)
+        else:
+            decoder_positions = inputs_embeds[:, -1]
 
         # embed positions
         embed_pos = self.embed_positions(decoder_positions)
