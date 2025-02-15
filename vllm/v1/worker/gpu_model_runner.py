@@ -990,6 +990,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 token_id = valid_sampled_token_ids[i][0]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
+                self.input_batch.num_tokens[i] += 1
         else:
             valid_mask = sampled_token_ids != INVALID_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
