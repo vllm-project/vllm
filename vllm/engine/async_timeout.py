@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Workaround for https://github.com/python/cpython/issues/86296
 #
 # From https://github.com/aio-libs/async-timeout/blob/master/async_timeout/__init__.py

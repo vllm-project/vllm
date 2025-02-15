@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import re
 from typing import List, Optional, Tuple, Type
@@ -5,7 +7,7 @@ from typing import List, Optional, Tuple, Type
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.multimodal.utils import rescale_image_size
+from vllm.multimodal.image import rescale_image_size
 from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
 
@@ -44,8 +46,6 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
 
 target_dtype = "half"
-if current_platform.is_cpu():
-    target_dtype = "bfloat16"
 
 # ROCm Triton FA can run into shared memory issues with these models,
 # use other backends in the meantime

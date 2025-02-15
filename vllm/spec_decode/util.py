@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -5,6 +7,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SequenceGroupMetadata,
                            SequenceOutput)
@@ -39,13 +42,15 @@ def get_sampled_token_logprobs(
     """
     num_steps, batch_size, vocab_size = logprob_tensor.shape
 
-    selected_logprobs = logprob_tensor[torch.arange(num_steps).unsqueeze(1),
-                                       torch.arange(batch_size),
-                                       sampled_token_ids, ]
+    selected_logprobs = logprob_tensor[
+        torch.arange(num_steps).unsqueeze(1),
+        torch.arange(batch_size),
+        sampled_token_ids,
+    ]
     expanded_selected_logprobs = selected_logprobs.unsqueeze(-1).expand(
         -1, -1, vocab_size)
-    sampled_token_ids_ranks = (logprob_tensor >
-                               expanded_selected_logprobs).sum(-1).add_(1)
+    sampled_token_ids_ranks = (logprob_tensor
+                               > expanded_selected_logprobs).sum(-1).add_(1)
 
     return sampled_token_ids_ranks, selected_logprobs
 
@@ -247,11 +252,14 @@ def nvtx_range(msg, *args, **kwargs):
     Arguments:
         msg (string): message to associate with the range
     """
-    torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
-    try:
+    if current_platform.is_cuda_alike():
+        torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
+        try:
+            yield
+        finally:
+            torch.cuda.nvtx.range_pop()
+    else:
         yield
-    finally:
-        torch.cuda.nvtx.range_pop()
 
 
 class Timer:

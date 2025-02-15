@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -111,9 +113,6 @@ class QQQConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return QQQLinearMethod(self)
         return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
 
 
 class QQQLinearMethod(LinearMethodBase):

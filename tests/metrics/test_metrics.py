@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from typing import List
 
@@ -365,6 +367,7 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
             "vllm:request_prompt_tokens",
             "vllm:request_generation_tokens",
             "vllm:request_params_n",
+            "vllm:request_params_max_tokens",
         ]
         for metric_name in request_histogram_metrics:
             metric_value = REGISTRY.get_sample_value(f"{metric_name}_count",
@@ -410,7 +413,7 @@ def test_engine_log_metrics_ray(
         logger = _RayPrometheusStatLogger(
             local_interval=0.5,
             labels=dict(model_name=engine.model_config.served_model_name),
-            max_model_len=engine.model_config.max_model_len)
+            vllm_config=engine.vllm_config)
         engine.add_logger("ray", logger)
         for i, prompt in enumerate(example_prompts):
             engine.add_request(

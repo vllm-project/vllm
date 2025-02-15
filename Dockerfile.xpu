@@ -30,8 +30,18 @@ COPY requirements-common.txt /workspace/vllm/requirements-common.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
-    --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ \
     -r requirements-xpu.txt
+
+RUN git clone https://github.com/intel/pti-gpu && \
+    cd pti-gpu/sdk && \
+    git checkout 6c491f07a777ed872c2654ca9942f1d0dde0a082 && \
+    mkdir build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/icpx_toolchain.cmake -DBUILD_TESTING=OFF .. && \
+    make -j && \
+    cmake --install . --config Release --prefix "/usr/local"
+
+ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
 COPY . .
 ARG GIT_REPO_CHECK
@@ -54,5 +64,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 ENV VLLM_USAGE_SOURCE production-docker-image \
     TRITON_XPU_PROFILE 1
-
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]

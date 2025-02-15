@@ -1,9 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import tempfile
 from collections import OrderedDict
 from typing import Dict, List, TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
+import safetensors
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
@@ -20,6 +23,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
+from vllm.platforms import current_platform
 
 
 class ContextIDInfo(TypedDict):
@@ -64,13 +68,16 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 @pytest.fixture
 def dist_init():
     temp_file = tempfile.mkstemp()[1]
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend="nccl",
-    )
+
+    backend = "nccl"
+    if current_platform.is_cpu():
+        backend = "gloo"
+
+    init_distributed_environment(world_size=1,
+                                 rank=0,
+                                 distributed_init_method=f"file://{temp_file}",
+                                 local_rank=0,
+                                 backend=backend)
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory(shutdown_ray=True)
@@ -80,13 +87,15 @@ def dist_init():
 def dist_init_torch_only():
     if torch.distributed.is_initialized():
         return
+    backend = "nccl"
+    if current_platform.is_cpu():
+        backend = "gloo"
+
     temp_file = tempfile.mkstemp()[1]
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=1,
-        rank=0,
-        init_method=f"file://{temp_file}",
-    )
+    torch.distributed.init_process_group(world_size=1,
+                                         rank=0,
+                                         init_method=f"file://{temp_file}",
+                                         backend=backend)
 
 
 @pytest.fixture
@@ -153,6 +162,11 @@ def sql_lora_files(sql_lora_huggingface_id):
 
 
 @pytest.fixture(scope="session")
+def lora_bias_files():
+    return snapshot_download(repo_id="followumesh/granite-3b-lora8-bias")
+
+
+@pytest.fixture(scope="session")
 def mixtral_lora_files():
     # Note: this module has incorrect adapter_config.json to test
     # https://github.com/vllm-project/vllm/pull/5909/files.
@@ -162,6 +176,29 @@ def mixtral_lora_files():
 @pytest.fixture(scope="session")
 def mixtral_lora_files_all_target_modules():
     return snapshot_download(repo_id="dyang415/mixtral-lora-v0")
+
+
+@pytest.fixture(scope="session")
+def jamba_lora_files():
+    #   some of the adapters have unnecessary weights for serving,
+    #   hence we remove them
+    def remove_unnecessary_weights(path):
+        lora_path = f"{adapter_path}/adapter_model.safetensors"
+        tensors = safetensors.torch.load_file(lora_path)
+        nonlora_keys = []
+        for k in list(tensors.keys()):
+            if "lora" not in k:
+                nonlora_keys.append(k)
+        for k in nonlora_keys:
+            del tensors[k]
+        safetensors.torch.save_file(tensors, lora_path)
+
+    adapter_path = snapshot_download(
+        repo_id=
+        "hf-100/Jamba-1.5-mini-Spellbound-StoryWriter-0.1-6583896-ckpt53-lora")
+
+    remove_unnecessary_weights(adapter_path)
+    return adapter_path
 
 
 @pytest.fixture(scope="session")
@@ -193,6 +230,11 @@ def baichuan_regex_lora_files():
 @pytest.fixture(scope="session")
 def minicpmv_lora_files():
     return snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen2-vl-lora-pokemon")
 
 
 @pytest.fixture(scope="session")
@@ -264,3 +306,20 @@ def llama_2_7b_engine_extra_embeddings():
 def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
     yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
            model_runner.model)
+
+
+@pytest.fixture(params=[True, False])
+def run_with_both_engines_lora(request, monkeypatch):
+    # Automatically runs tests twice, once with V1 and once without
+    use_v1 = request.param
+    # Tests decorated with `@skip_v1` are only run without v1
+    skip_v1 = request.node.get_closest_marker("skip_v1")
+
+    if use_v1:
+        if skip_v1:
+            pytest.skip("Skipping test on vllm V1")
+        monkeypatch.setenv('VLLM_USE_V1', '1')
+    else:
+        monkeypatch.setenv('VLLM_USE_V1', '0')
+
+    yield

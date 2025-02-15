@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/tests/lora/test_llama.py
 from dataclasses import dataclass
@@ -68,11 +70,20 @@ def do_sample(llm: vllm.LLM,
     return generated_texts
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", [1])
 def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
                           tp_size):
-    if num_gpus_available < tp_size:
+    if num_gpus_available < tp_size and \
+        tp_size > 1 and current_platform.is_cuda_alike():
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     llm = vllm.LLM(
@@ -84,7 +95,8 @@ def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
         tensor_parallel_size=tp_size,
         gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
-        trust_remote_code=True)
+        trust_remote_code=True,
+        enable_chunked_prefill=True)
 
     if model.quantization is None:
         expected_no_lora_output = [
@@ -176,7 +188,8 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
-        trust_remote_code=True)
+        trust_remote_code=True,
+        enable_chunked_prefill=True)
     output_tp1 = do_sample(llm_tp1, tinyllama_lora_files, lora_id=1)
 
     del llm_tp1
@@ -189,7 +202,8 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
         max_loras=4,
         tensor_parallel_size=2,
         gpu_memory_utilization=0.2,  #avoid OOM
-        quantization=model.quantization)
+        quantization=model.quantization,
+        enable_chunked_prefill=True)
     output_tp2 = do_sample(llm_tp2, tinyllama_lora_files, lora_id=1)
 
     del llm_tp2

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import copy
 import functools
@@ -15,6 +17,7 @@ import openai
 import pytest
 import requests
 import torch
+import torch.nn.functional as F
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
@@ -43,8 +46,9 @@ if current_platform.is_rocm():
         finally:
             amdsmi_shut_down()
 elif current_platform.is_cuda():
-    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
-                        nvmlInit, nvmlShutdown)
+    from vllm.third_party.pynvml import (nvmlDeviceGetHandleByIndex,
+                                         nvmlDeviceGetMemoryInfo, nvmlInit,
+                                         nvmlShutdown)
 
     @contextmanager
     def _nvml():
@@ -156,18 +160,23 @@ class RemoteOpenAIServer:
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
 
-    def get_client(self):
+    def get_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
         return openai.OpenAI(
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
         )
 
-    def get_async_client(self):
-        return openai.AsyncOpenAI(
-            base_url=self.url_for("v1"),
-            api_key=self.DUMMY_API_KEY,
-            max_retries=0,
-        )
+    def get_async_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return openai.AsyncOpenAI(base_url=self.url_for("v1"),
+                                  api_key=self.DUMMY_API_KEY,
+                                  max_retries=0,
+                                  **kwargs)
 
 
 def _test_completion(
@@ -515,13 +524,14 @@ def compare_all_settings(model: str,
                     ref_result = copy.deepcopy(ref_result)
                     compare_result = copy.deepcopy(compare_result)
                     if "embedding" in ref_result and method == "encode":
-                        ref_embedding = torch.tensor(ref_result["embedding"])
-                        compare_embedding = torch.tensor(
-                            compare_result["embedding"])
-                        mse = ((ref_embedding - compare_embedding)**2).mean()
-                        assert mse < 1e-6, (
+                        sim = F.cosine_similarity(
+                            torch.tensor(ref_result["embedding"]),
+                            torch.tensor(compare_result["embedding"]),
+                            dim=0,
+                        )
+                        assert sim >= 0.999, (
                             f"Embedding for {model=} are not the same.\n"
-                            f"mse={mse}\n")
+                            f"cosine_similarity={sim}\n")
                         del ref_result["embedding"]
                         del compare_result["embedding"]
                     assert ref_result == compare_result, (
@@ -680,10 +690,12 @@ def fork_new_process_for_each_test(
 
 
 def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
-    """Gets a pytest skipif mark, which triggers ig the the device doesn't have
-    meet a minimum memory requirement in gb; can be leveraged via 
-    @large_gpu_test to skip tests in environments without enough resources, or
-    called when filtering tests to run directly.
+    """
+    Get a pytest mark, which skips the test if the GPU doesn't meet
+    a minimum memory requirement in GB.
+    
+    This can be leveraged via `@large_gpu_test` to skip tests in environments
+    without enough resources, or called when filtering tests to run directly.
     """
     try:
         if current_platform.is_cpu():
@@ -699,7 +711,7 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
 
     return pytest.mark.skipif(
         memory_gb < min_gb,
-        reason=f"Need at least {memory_gb}GB GPU memory to run the test.",
+        reason=f"Need at least {min_gb}GB GPU memory to run the test.",
     )
 
 
@@ -710,26 +722,37 @@ def large_gpu_test(*, min_gb: int):
 
     Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
     """
-    test_skipif = large_gpu_mark(min_gb)
+    mark = large_gpu_mark(min_gb)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        return test_skipif(f)
+        return mark(f)
 
     return wrapper
+
+
+def multi_gpu_marks(*, num_gpus: int):
+    """Get a collection of pytest marks to apply for `@multi_gpu_test`."""
+    test_selector = pytest.mark.distributed(num_gpus=num_gpus)
+    test_skipif = pytest.mark.skipif(
+        cuda_device_count_stateless() < num_gpus,
+        reason=f"Need at least {num_gpus} GPUs to run the test.",
+    )
+
+    return [test_selector, test_skipif]
 
 
 def multi_gpu_test(*, num_gpus: int):
     """
     Decorate a test to be run only when multiple GPUs are available.
     """
-    test_selector = getattr(pytest.mark, f"distributed_{num_gpus}_gpus")
-    test_skipif = pytest.mark.skipif(
-        cuda_device_count_stateless() < num_gpus,
-        reason=f"Need at least {num_gpus} GPUs to run the test.",
-    )
+    marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        return test_selector(test_skipif(fork_new_process_for_each_test(f)))
+        func = fork_new_process_for_each_test(f)
+        for mark in reversed(marks):
+            func = mark(func)
+
+        return func
 
     return wrapper
 
@@ -766,7 +789,6 @@ async def completions_with_server_args(
     assert len(max_tokens) == len(prompts)
 
     outputs = None
-    max_wait_seconds = 240 * 3  # 240 is default
     with RemoteOpenAIServer(model_name,
                             server_cli_args,
                             max_wait_seconds=max_wait_seconds) as server:

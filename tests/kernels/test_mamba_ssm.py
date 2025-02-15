@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -510,7 +512,7 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
         for var in (u_ref, delta_ref, B_ref, C_ref, z_ref)
     ]
     for i in range(len(seqlens[0])):
-        u_s, delta_s, B_s, C_s, z_s = [v[i].unsqueeze(0) for v in splits]
+        u_s, delta_s, B_s, C_s, z_s = (v[i].unsqueeze(0) for v in splits)
         if padded_state_indices[i] == PAD_SLOT_ID:
             continue
         out_ref_s, _ = selective_scan_ref(

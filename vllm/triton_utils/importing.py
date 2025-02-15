@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from importlib.util import find_spec
 
 from vllm.logger import init_logger
@@ -8,7 +10,6 @@ logger = init_logger(__name__)
 HAS_TRITON = (
     find_spec("triton") is not None
     and not current_platform.is_xpu()  # Not compatible
-    and not current_platform.is_neuron()  # neuron has too old torch
 )
 
 if not HAS_TRITON:

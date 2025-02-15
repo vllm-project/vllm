@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import cached_property
 from importlib.util import find_spec
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.jit
@@ -9,6 +11,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeStochasticBaseSampler)
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -39,7 +42,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             strict_mode: Whether or not to perform shape/device/dtype checks
             during sampling. This catches correctness issues but adds
             nontrivial latency.
-            use_falshinfer: We will use this parameter to determine whether
+            use_flashinfer: We will use this parameter to determine whether
             to use the FlashInfer rejection sampling kernel or not. If it's
             None, we will use the default value from the environment variable.
             This parameter is only used for testing purposes.
@@ -118,7 +121,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         # If use Flashinfer chain_speculative_sampling kernel
         # for rejection sampling
-        if self.use_flashinfer:
+        if self.use_flashinfer and chain_speculative_sampling is not None:
             batch_size, k, _ = draft_probs.shape
             uniform_samples = self._create_uniform_samples(
                 seeded_seqs, batch_size, k, draft_probs.device)
@@ -368,7 +371,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 # Note that we always sample with replacement.
 # probs will be modified in place, but this is fine, as we pass
 # in a copy already.
-@torch.jit.script
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
@@ -386,16 +389,12 @@ def _multinomial(
     if not seeded_seqs:
         q.exponential_(1.0)
     else:
-        non_seeded_indices: List[int] = []
         start = 0
         for idx in range(len(q) // k):
             end = start + k
             generator = seeded_seqs.get(idx)
-            if generator is None:
-                non_seeded_indices.extend(list(range(start, end)))
-            else:
-                q[start:end].exponential_(1.0, generator=generator)
+            # Note: generator might be None for non seeded
+            q[start:end].exponential_(1.0, generator=generator)
             start = end
-        q[non_seeded_indices].exponential_(1.0)
 
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)

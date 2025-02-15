@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -63,9 +65,6 @@ class FBGEMMFp8Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return FBGEMMFp8LinearMethod(self)
         return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
 
 
 class FBGEMMFp8LinearMethod(LinearMethodBase):

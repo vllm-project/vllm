@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Type
 
 import pytest
 import torch.nn.functional as F
-import transformers
 from transformers import AutoModelForVision2Seq
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
@@ -47,7 +48,7 @@ def _run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     with vllm_runner(model,
-                     task="embedding",
+                     task="embed",
                      dtype=dtype,
                      max_model_len=4096,
                      enforce_eager=True) as vllm_model:
@@ -55,6 +56,10 @@ def _run_test(
 
     with hf_runner(model, dtype=dtype,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
+        # Patch the issue where generation_config.json is missing
+        hf_model.processor.patch_size = \
+            hf_model.model.config.vision_config.patch_size
+
         # Patch the issue where image_token_id
         # exceeds the maximum allowed vocab size
         hf_model.model.resize_token_embeddings(
@@ -86,8 +91,7 @@ def _run_test(
     )
 
 
-@pytest.mark.skipif(transformers.__version__.startswith("4.46"),
-                    reason="Model broken with changes in transformers 4.46")
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_text(
@@ -112,6 +116,7 @@ def test_models_text(
 
 
 @large_gpu_test(min_gb=48)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_image(

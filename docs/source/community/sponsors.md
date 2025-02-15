@@ -5,25 +5,34 @@ vLLM is a community project. Our compute resources for development and testing a
 <!-- Note: Please sort them in alphabetical order. -->
 <!-- Note: Please keep these consistent with README.md. -->
 
+Cash Donations:
+
 - a16z
+- Dropbox
+- Sequoia Capital
+- Skywork AI
+- ZhenFund
+
+Compute Resources:
+
 - AMD
 - Anyscale
 - AWS
 - Crusoe Cloud
 - Databricks
 - DeepInfra
-- Dropbox
 - Google Cloud
 - Lambda Lab
+- Nebius
+- Novita AI
 - NVIDIA
 - Replicate
 - Roblox
 - RunPod
-- Sequoia Capital
-- Skywork AI
 - Trainy
 - UC Berkeley
 - UC San Diego
-- ZhenFund
+
+Slack Sponsor: Anyscale
 
 We also have an official fundraising venue through [OpenCollective](https://opencollective.com/vllm). We plan to use the fund to support the development, maintenance, and adoption of vLLM.

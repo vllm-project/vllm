@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import signal
+import socket
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Optional
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -15,7 +18,8 @@ from vllm.utils import find_process_using_port
 logger = init_logger(__name__)
 
 
-async def serve_http(app: FastAPI, **uvicorn_kwargs: Any):
+async def serve_http(app: FastAPI, sock: Optional[socket.socket],
+                     **uvicorn_kwargs: Any):
     logger.info("Available routes are:")
     for route in app.routes:
         methods = getattr(route, "methods", None)
@@ -32,7 +36,8 @@ async def serve_http(app: FastAPI, **uvicorn_kwargs: Any):
 
     loop = asyncio.get_running_loop()
 
-    server_task = loop.create_task(server.serve())
+    server_task = loop.create_task(
+        server.serve(sockets=[sock] if sock else None))
 
     def signal_handler() -> None:
         # prevents the uvicorn signal handler to exit early
