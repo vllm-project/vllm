@@ -647,8 +647,7 @@ class Florence2LanguageModel(nn.Module):
             decoder_positions=positions,
             encoder_hidden_states=encoder_hidden_states,
             kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-            inputs_embeds=inputs_embeds)
+            attn_metadata=attn_metadata)
 
         return decoder_outputs
 
@@ -1068,7 +1067,6 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         vision_embeddings = self.get_multimodal_embeddings(**kwargs)
         inputs_embeds = self.get_input_embeddings(encoder_input_ids,
                                                   vision_embeddings)
-        encoder_input_ids = None
 
         hidden_states = self.language_model(input_ids, positions, encoder_input_ids,
                                    encoder_positions, kv_caches, attn_metadata, inputs_embeds=inputs_embeds)
