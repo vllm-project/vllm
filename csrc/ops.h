@@ -176,8 +176,7 @@ void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
                               torch::Tensor const& b_scales,
                               std::optional<torch::Tensor> const& bias);
 
-bool cutlass_sparse_compress_entry(torch::Tensor& a_compressed,
-                                   torch::Tensor& e, torch::Tensor const& a);
+std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
@@ -194,6 +193,10 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         bool use_exllama, int64_t bit);
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
+
+void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
+                      torch::Tensor& output_scale,
+                      torch::Tensor const& input_scale);
 
 void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
                              torch::Tensor const& scale);
