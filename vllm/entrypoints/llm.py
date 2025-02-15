@@ -421,7 +421,7 @@ class LLM:
             instead pass them via the ``inputs`` parameter.
         """
         runner_type = self.llm_engine.model_config.runner_type
-        if runner_type != "generate":
+        if runner_type not in ["generate", "transcription"]:
             messages = [
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).",
