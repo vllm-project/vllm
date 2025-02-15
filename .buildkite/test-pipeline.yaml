@@ -77,8 +77,6 @@ steps:
   - tests/basic_correctness/test_cpu_offload
   - tests/basic_correctness/test_preemption
   - tests/basic_correctness/test_cumem.py
-  - tests/basic_correctness/test_cumem.py
-  - tests/models/decoder_only/language/test_mamba.py
   commands:
   - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
