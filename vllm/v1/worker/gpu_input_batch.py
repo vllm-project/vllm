@@ -171,9 +171,8 @@ class InputBatch:
                 self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: Set[str] = set()
 
-        # req_index -> min_tokens
-        self.min_tokens: Dict[int, int] = {}
-        self.stop_token_ids: List[Set[int]] = [set()] * max_num_reqs
+        # req_index -> (min_tokens, stop_token_ids)
+        self.min_tokens: Dict[int, Tuple[int, Set[int]]] = {}
 
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
@@ -267,8 +266,8 @@ class InputBatch:
         if sampling_params.repetition_penalty != 1.0:
             self.repetition_penalties_reqs.add(req_id)
         if sampling_params.min_tokens:
-            self.min_tokens[req_index] = sampling_params.min_tokens
-        self.stop_token_ids[req_index] = sampling_params.all_stop_token_ids
+            self.min_tokens[req_index] = (sampling_params.min_tokens,
+                                          sampling_params.all_stop_token_ids)
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -309,7 +308,7 @@ class InputBatch:
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
         self.min_p_reqs.discard(req_id)
-        self.min_tokens.pop(req_index)
+        self.min_tokens.pop(req_index, None)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -400,14 +399,12 @@ class InputBatch:
             self.repetition_penalties_cpu[
                 empty_index] = self.repetition_penalties_cpu[last_req_index]
             self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
-            self.stop_token_ids[empty_index] = self.stop_token_ids[
-                last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
 
-            min_token = self.min_tokens.pop(last_req_index, 0)
-            if min_token:
+            min_token = self.min_tokens.pop(last_req_index, None)
+            if min_token is not None:
                 self.min_tokens[empty_index] = min_token
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
@@ -479,7 +476,6 @@ class InputBatch:
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(List[List[int]], self.req_output_token_ids),
             min_tokens=self.min_tokens,
-            stop_token_ids=self.stop_token_ids[:num_reqs],
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
         )

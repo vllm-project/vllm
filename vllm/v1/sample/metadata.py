@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -29,7 +29,8 @@ class SamplingMetadata:
     repetition_penalties: torch.Tensor
 
     output_token_ids: List[List[int]]
-    min_tokens: Dict[int, int]
-    stop_token_ids: List[Set[int]]
+
+    # req_index -> (min_tokens, stop_token_ids)
+    min_tokens: Dict[int, Tuple[int, Set[int]]]
 
     logit_bias: List[Optional[Dict[int, float]]]

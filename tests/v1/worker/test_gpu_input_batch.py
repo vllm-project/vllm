@@ -64,8 +64,7 @@ def _construct_expected_sampling_metadata(
     top_p = [0.0 for _ in range(num_reqs)]
     min_p = [0.0 for _ in range(num_reqs)]
     temperature = [0.0 for _ in range(num_reqs)]
-    stop_token_ids: List[Set[int]] = [set() for _ in range(num_reqs)]
-    min_tokens = [0 for _ in range(num_reqs)]
+    min_tokens = {}
     logit_bias = [None] * num_reqs
     for req in reqs:
         if req.req_id not in req_ids_retained:
@@ -83,8 +82,6 @@ def _construct_expected_sampling_metadata(
         top_p[index_in_input_batch] = req.sampling_params.top_p
         min_p[index_in_input_batch] = req.sampling_params.min_p
         temperature[index_in_input_batch] = req.sampling_params.temperature
-        stop_token_ids[
-            index_in_input_batch] = req.sampling_params.all_stop_token_ids
         min_tokens[index_in_input_batch] = req.sampling_params.min_tokens
         logit_bias[index_in_input_batch] = req.sampling_params.logit_bias
     return SamplingMetadata(
@@ -117,7 +114,6 @@ def _construct_expected_sampling_metadata(
                                           device=device),
         output_token_ids=output_token_ids,
         min_tokens=min_tokens,
-        stop_token_ids=stop_token_ids,
         no_penalties=(all(x == 0 for x in presence_penalties)
                       and all(x == 0 for x in frequency_penalties)
                       and all(x == 1 for x in repetition_penalties)),
@@ -240,8 +236,6 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     assert (expected_sampling_metadata.output_token_ids ==
             sampling_metadata.output_token_ids)
     assert expected_sampling_metadata.min_tokens == sampling_metadata.min_tokens
-    assert expected_sampling_metadata.stop_token_ids == \
-           sampling_metadata.stop_token_ids
     assert expected_sampling_metadata.no_penalties == \
            sampling_metadata.no_penalties
     assert expected_sampling_metadata.logit_bias == sampling_metadata.logit_bias

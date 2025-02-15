@@ -167,7 +167,6 @@ class Sampler(nn.Module):
         if sampling_metadata.min_tokens:
             apply_min_token_penalties(logits,
                                       sampling_metadata.output_token_ids,
-                                      sampling_metadata.stop_token_ids,
                                       sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None

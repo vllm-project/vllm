@@ -99,7 +99,7 @@ def _create_default_sampling_metadata(
 def _generate_min_token_penalties_and_stop_tokens(
     num_output_tokens: int, batch_size: int, vocab_size: int,
     batch_indices_for_min_token_penalty: List[int]
-) -> Tuple[Dict[int, int], List[Set[int]]]:
+) -> Dict[int, Tuple[int, Set[int]]]:
     """
     Generates and returns a dict of minimum token penalties (`min_tokens`)
     and a corresponding list of stop token IDs (`stop_token_ids`) for each
@@ -110,21 +110,19 @@ def _generate_min_token_penalties_and_stop_tokens(
     and a random set of stop token IDs is created. Otherwise, a lower
     `min_tokens` value is assigned, and the stop token IDs set is empty.
     """
-    stop_token_ids: List[Set[int]] = []
-    min_tokens: Dict[int, int] = {}
+    min_tokens: Dict[int, Tuple[int, Set[int]]] = {}
     for index in range(batch_size):
         if index in batch_indices_for_min_token_penalty:
-            min_tokens[index] = np.random.randint(num_output_tokens + 1,
-                                                  2 * num_output_tokens)
-            stop_token_ids.append(
+            min_tokens[index] = (
+                np.random.randint(num_output_tokens + 1,
+                                  2 * num_output_tokens),
                 set(
                     np.random.randint(0, vocab_size - 1)
                     for _ in range(np.random.randint(0, vocab_size))))
-
         else:
-            min_tokens[index] = np.random.randint(0, num_output_tokens)
-            stop_token_ids.append(set())
-    return min_tokens, stop_token_ids
+            min_tokens[index] = (np.random.randint(0,
+                                                   num_output_tokens), set())
+    return min_tokens
 
 
 def _create_weighted_output_token_list(
