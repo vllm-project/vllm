@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Union
+from typing import TYPE_CHECKING, Dict, List, Union, cast, overload
 
 import torch
 
@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.utils import cdiv, get_dtype_size
 
 if TYPE_CHECKING:
-    from vllm.v1.core.kv_cache_utils import ReqKVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock, ReqKVCacheBlocks
 
 logger = init_logger(__name__)
 
@@ -194,12 +194,25 @@ MayGroupedInt = Union[int, List[int]]
 class BlockIDGenerator:
     num_kv_cache_groups: int
 
+    @overload
+    @classmethod
+    def generate(cls, kv_cache_blocks: List[KVCacheBlock]) -> List[int]:
+        ...
+
+    @overload
+    @classmethod
+    def generate(cls,
+                 kv_cache_blocks: List[List[KVCacheBlock]]) -> GroupedBlockIDs:
+        ...
+
     @classmethod
     def generate(
         cls, kv_cache_blocks: Union[List["KVCacheBlock"],
                                     List[List["KVCacheBlock"]]]
     ) -> MayGroupedBlockIDs:
         if cls.num_kv_cache_groups == 1:
+            kv_cache_blocks = cast(List["KVCacheBlock"], kv_cache_blocks)
             return [blk.block_id for blk in kv_cache_blocks]
         else:
+            kv_cache_blocks = cast(List[List["KVCacheBlock"]], kv_cache_blocks)
             return GroupedBlockIDs.from_kv_cache_blocks(kv_cache_blocks)

@@ -1,15 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from itertools import chain
-from typing import Callable, Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Tuple, Type
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          PrefixLength, PrefixLengthRange)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, SlidingWindowSpec)
-from vllm.v1.utils import ConstantList
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
+                                        SlidingWindowSpec)
 
 
 class SpecializedManager(ABC):
@@ -30,7 +29,8 @@ class SpecializedManager(ABC):
 
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
-            block_pool_operations: Operations to interact with the block pool. TODO update
+            block_pool_operations: Operations to interact with the block pool. 
+            TODO update
 
         Returns:
             None
@@ -42,7 +42,7 @@ class SpecializedManager(ABC):
 
     @abstractmethod
     def get_possible_cached_prefix(
-        self, block_hashes: ConstantList[BlockHashType]
+        self, block_hashes: List[BlockHashType]
     ) -> Tuple[PrefixLength, List[KVCacheBlock]]:
         """
         Get the possible cached prefixes of a request based on its block hashes.
@@ -102,7 +102,7 @@ class SpecializedManager(ABC):
 class FullAttentionManager(SpecializedManager):
 
     def get_possible_cached_prefix(
-        self, block_hashes: ConstantList[BlockHashType]
+        self, block_hashes: List[BlockHashType]
     ) -> Tuple[List[PrefixLengthRange], List[KVCacheBlock]]:
         computed_blocks: List[KVCacheBlock] = []
         for block_hash in block_hashes:
@@ -139,7 +139,7 @@ class SlidingWindowManager(FullAttentionManager):
         self._null_block = block_pool.get_null_block()
 
     def get_possible_cached_prefix(
-        self, block_hashes: ConstantList[BlockHashType]
+        self, block_hashes: List[BlockHashType]
     ) -> Tuple[List[PrefixLengthRange], List[KVCacheBlock]]:
         # TODO: check the hit every num_block_sliding_window blocks, to optimize
         # the time complexity from O(num_block) to

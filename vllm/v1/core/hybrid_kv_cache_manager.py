@@ -2,17 +2,14 @@
 
 import math
 from collections import defaultdict
-from typing import DefaultDict, Dict, List, Optional, Tuple
+from typing import DefaultDict, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock, PrefixLength,
-                                         ReqKVCacheBlocks,
-                                         generate_block_hash_extra_keys,
-                                         hash_block_tokens,
+from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+                                         PrefixLength, ReqKVCacheBlocks,
                                          hash_request_tokens, intersect_ranges)
 from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -262,12 +259,12 @@ class HybridKVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
+        # NOTE(rickyx): We are assuming the `num_tokens` are actual
+        # tokens rather than lookahead slots (e.g. for speculative decoding).
+        # TODO(rickyx): When supporting speculative decoding, we will need to
+        # differentiate between them so that we can know how many blocks are
+        # full after appending the actual tokens.
         for i, manager in enumerate(self.managers):
-            # NOTE(rickyx): We are assuming the `num_tokens` are actual
-            # tokens rather than lookahead slots (e.g. for speculative decoding).
-            # TODO(rickyx): When supporting speculative decoding, we will need to
-            # differentiate between them so that we can know how many blocks are
-            # full after appending the actual tokens.
             block_hashes = self.req_to_block_hashes[request.request_id][i]
             self.block_pool.cache_full_blocks(
                 request=request,

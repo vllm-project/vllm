@@ -1,8 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import BlockHashType, FreeKVCacheBlockQueue, KVCacheBlock, generate_block_hash_extra_keys, hash_block_tokens
+from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
+                                         KVCacheBlock,
+                                         generate_block_hash_extra_keys,
+                                         hash_block_tokens)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -86,8 +90,7 @@ class BlockPool:
         if num_computed_full_blocks == 0:
             prev_block_hash_value = None
         else:
-
-            prev_block = blocks[num_computed_full_blocks - 1],
+            prev_block = blocks[num_computed_full_blocks - 1]
             assert prev_block.block_hash is not None
             prev_block_hash_value = prev_block.block_hash.hash_value
         # Update the new blocks with the block hashes through the chain.
@@ -214,7 +217,7 @@ class BlockPool:
                 self._free_block_queue.remove(block)
             block.incr_ref()
 
-    def free_blocks(self, ordered_blocks: List[KVCacheBlock]) -> None:
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """
         TODO: add docstring
         the first block will be evicted first
@@ -244,7 +247,7 @@ class BlockPool:
             return False
 
         # Remove all hashes so that no new blocks will hit.
-        self.cached_block_hash_to_block = defaultdict(dict)
+        self._cached_block_hash_to_block = defaultdict(dict)
 
         # Remove all hashes from all blocks.
         for block in self._block_pool:

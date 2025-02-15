@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections import defaultdict
-from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
+from typing import DefaultDict, Iterable, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
-                                         generate_block_hash_extra_keys,
-                                         hash_block_tokens,
+from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
 from vllm.v1.core.specialized_manager import get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -95,8 +92,8 @@ class KVCacheManager:
             block_hashes = hash_request_tokens(self.block_size, request, 0)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
-        prefix_length, computed_blocks = self.manager.get_possible_cached_prefix(
-            block_hashes)
+        prefix_length, computed_blocks = \
+            self.manager.get_possible_cached_prefix(block_hashes)
         num_computed_tokens = prefix_length[-1].end
         computed_blocks = computed_blocks[:num_computed_tokens //
                                           self.block_size]

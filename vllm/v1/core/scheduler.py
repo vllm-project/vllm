@@ -10,10 +10,10 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheManager, init_kv_cache_manager
+from vllm.v1.core.kv_cache_manager import init_kv_cache_manager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (BlockIDGenerator, FullAttentionSpec,
-                                        GroupedBlockIDs, KVCacheConfig)
+                                        KVCacheConfig, MayGroupedBlockIDs)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -109,7 +109,7 @@ class Scheduler:
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
 
-        req_to_new_block_ids: Dict[str, GroupedBlockIDs] = {}
+        req_to_new_block_ids: Dict[str, MayGroupedBlockIDs] = {}
         num_scheduled_tokens: Dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -332,7 +332,7 @@ class Scheduler:
     def _make_cached_request_data(
         self,
         request: Request,
-        new_block_ids: GroupedBlockIDs,
+        new_block_ids: MayGroupedBlockIDs,
         num_computed_tokens: int,
         resumed_from_preemption: bool,
     ) -> "CachedRequestData":
@@ -584,14 +584,14 @@ class NewRequestData:
     mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
-    block_ids: GroupedBlockIDs
+    block_ids: MayGroupedBlockIDs
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: GroupedBlockIDs,
+        block_ids: MayGroupedBlockIDs,
         num_computed_tokens: int,
     ) -> "NewRequestData":
         return cls(
@@ -615,7 +615,7 @@ class CachedRequestData:
     # the request's block IDs. If True, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
-    new_block_ids: GroupedBlockIDs
+    new_block_ids: MayGroupedBlockIDs
     num_computed_tokens: int
 
     @classmethod
@@ -623,7 +623,7 @@ class CachedRequestData:
         cls,
         request: Request,
         resumed_from_preemption: bool,
-        new_block_ids: GroupedBlockIDs,
+        new_block_ids: MayGroupedBlockIDs,
         num_computed_tokens: int,
     ) -> "CachedRequestData":
         return cls(
