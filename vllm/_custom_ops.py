@@ -774,6 +774,7 @@ def scaled_fp4_quant(
             two values are packed into a uint8 and float8_e4m3 scaling factors
             in the sizzled layout.
     """
+    assert not current_platform.is_rocm()
     assert input.ndim >= 1, (
         f'input.ndim needs to be >= 1, but got {input.ndim}.')
     other_dims = 1 if input.ndim == 1 else -1
