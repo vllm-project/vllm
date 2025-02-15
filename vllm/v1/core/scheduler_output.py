@@ -30,7 +30,6 @@ class NewRequestData:
         cls,
         request: "Request",
         block_ids: List[int],
-        num_computed_tokens: int,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -41,7 +40,7 @@ class NewRequestData:
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
             block_ids=block_ids,
-            num_computed_tokens=num_computed_tokens,
+            num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
         )
 
@@ -54,6 +53,7 @@ class CachedRequestData:
     # the request's block IDs. If True, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
+    input_token_ids: List[int]
     new_block_ids: List[int]
     num_computed_tokens: int
 
@@ -62,14 +62,15 @@ class CachedRequestData:
         cls,
         request: "Request",
         resumed_from_preemption: bool,
+        input_token_ids: List[int],
         new_block_ids: List[int],
-        num_computed_tokens: int,
     ) -> "CachedRequestData":
         return cls(
             req_id=request.request_id,
             resumed_from_preemption=resumed_from_preemption,
+            input_token_ids=input_token_ids,
             new_block_ids=new_block_ids,
-            num_computed_tokens=num_computed_tokens,
+            num_computed_tokens=request.num_computed_tokens,
         )
 
 

@@ -2,7 +2,7 @@
 
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -322,7 +322,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_state = self.requests[req_id]
 
             # Update the cached states.
-            req_state.num_computed_tokens = req_data.num_computed_tokens
+            num_computed_tokens = req_data.num_computed_tokens
+            req_state.num_computed_tokens = num_computed_tokens
+            # Add the sampled token(s) from the previous step (if any).
+            num_new_tokens = (num_computed_tokens +
+                              len(req_data.input_token_ids) -
+                              req_state.num_tokens)
+            new_token_ids = (req_data.input_token_ids[-num_new_tokens:]
+                             if num_new_tokens > 0 else [])
+            if new_token_ids:
+                req_state.output_token_ids.extend(new_token_ids)
+            # Update the block IDs.
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
                 req_state.block_ids.extend(req_data.new_block_ids)
@@ -341,12 +351,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                req_data.num_computed_tokens)
+                num_computed_tokens)
             start_index = len(req_state.block_ids) - len(
                 req_data.new_block_ids)
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
+            if new_token_ids:
+                start_token_index = num_computed_tokens
+                end_token_index = num_computed_tokens + num_new_tokens
+                self.input_batch.token_ids_cpu[
+                    req_index,
+                    start_token_index:end_token_index] = new_token_ids
 
+        # Check if the batch has changed. If not, we can skip copying the
+        # sampling metadata from CPU to GPU.
         batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
 
         # Add the new or resumed requests to the persistent batch.
@@ -856,33 +874,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
-        request_seq_lens: List[Tuple[int, CachedRequestState, int]] = []
-        for i, req_id in enumerate(  # type: ignore[assignment]
-                self.input_batch.req_ids[:num_reqs]):
+        req_ids: List[str] = []
+        for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
+            req_ids.append(req_id)
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
-            assert seq_len <= req_state.num_tokens
-            if seq_len == req_state.num_tokens:
-                # Append the sampled token to the output token ids.
-                self.input_batch.num_tokens[i] += 1
-                # OPTIMIZATION: Priming the state updates for later updates.
-                req_state.output_token_ids.append(0)
-                request_seq_lens.append((i, req_state, seq_len))
-            else:
-                # Ignore the sampled token from the partial request.
+            if seq_len < req_state.num_tokens:
+                # Ignore the sampled token.
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
                 if generator is not None:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
-
-        # num_reqs entries should be non-None
-        assert all(
-            req_id is not None for req_id in
-            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
-        req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -896,12 +901,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states,
             scheduler_output,
         )
-
-        # Update with the actual token ids
-        for i, req_state, seq_len in request_seq_lens:
-            token_id = sampled_token_ids[i]
-            self.input_batch.token_ids_cpu[i, seq_len] = token_id
-            req_state.output_token_ids[-1] = token_id
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,

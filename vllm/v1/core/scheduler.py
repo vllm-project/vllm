@@ -312,23 +312,22 @@ class Scheduler:
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
-                                        req_to_new_block_ids[req.request_id],
-                                        req.num_computed_tokens)
+                                        req_to_new_block_ids[req.request_id])
             for req in scheduled_new_reqs
         ]
         resumed_reqs_data = [
             self._make_cached_request_data(
                 req,
+                num_scheduled_tokens[req.request_id],
                 req_to_new_block_ids[req.request_id],
-                req.num_computed_tokens,
                 resumed_from_preemption=True,
             ) for req in scheduled_resumed_reqs
         ]
         running_reqs_data = [
             self._make_cached_request_data(
                 req,
+                num_scheduled_tokens[req.request_id],
                 req_to_new_block_ids[req.request_id],
-                req.num_computed_tokens,
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
         ]
@@ -353,22 +352,26 @@ class Scheduler:
     def _make_cached_request_data(
         self,
         request: Request,
+        num_scheduled_tokens: int,
         new_block_ids: List[int],
-        num_computed_tokens: int,
         resumed_from_preemption: bool,
     ) -> "CachedRequestData":
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
-        if request.request_id in self._cached_reqs_data:
-            req_data = self._cached_reqs_data[request.request_id]
+        num_computed_tokens = request.num_computed_tokens
+        input_token_ids = request.all_token_ids[
+            num_computed_tokens:num_computed_tokens + num_scheduled_tokens]
+        req_data = self._cached_reqs_data.get(request.request_id)
+        if req_data is not None:
             req_data.resumed_from_preemption = resumed_from_preemption
+            req_data.input_token_ids = input_token_ids
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
         else:
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,
-                                                      new_block_ids,
-                                                      num_computed_tokens)
+                                                      input_token_ids,
+                                                      new_block_ids)
             self._cached_reqs_data[request.request_id] = req_data
         return req_data
 
