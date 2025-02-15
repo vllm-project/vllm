@@ -1065,8 +1065,11 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             Output torch.Tensor
         """
         vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-        inputs_embeds = self.get_input_embeddings(encoder_input_ids,
-                                                  vision_embeddings)
+        if encoder_input_ids.numel() > 0 or vision_embeddings is not None:
+            inputs_embeds = self.get_input_embeddings(encoder_input_ids,
+                                                    vision_embeddings)
+        else:
+            inputs_embeds = None
 
         hidden_states = self.language_model(input_ids, positions, encoder_input_ids,
                                    encoder_positions, kv_caches, attn_metadata, inputs_embeds=inputs_embeds)
