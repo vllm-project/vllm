@@ -564,22 +564,9 @@ def cutlass_sparse_compress(a: torch.Tensor) \
 
     # a_meta.dtype: torch.uint8 so elemsPerMetaElem = 8b / 2b_per_nz = 4
     elemsPerMetaElem = 4
+    assert (a.shape[1] % (2 * elemsPerMetaElem) == 0)
 
-    m = a.shape[0]
-    k = a.shape[1]
-    assert (k % 2 == 0)
-    a_nzs = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
-    a_meta = torch.empty((m, k // 2 // elemsPerMetaElem),
-                         dtype=torch.uint8,
-                         device=a.device)
-
-    if not (torch.ops._C.cutlass_sparse_compress_entry(a_nzs, a_meta, a)):
-        raise ValueError
-
-    assert (a_nzs.is_contiguous())
-    assert (a_meta.is_contiguous())
-
-    return a_nzs, a_meta
+    return torch.ops._C.cutlass_sparse_compress(a)
 
 
 def cutlass_scaled_sparse_mm(
@@ -763,6 +750,64 @@ if hasattr(torch.ops._C, "permute_cols"):
 
 def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.permute_cols(a, perm)
+
+
+# fp4
+def scaled_fp4_quant(
+        input: torch.Tensor,
+        input_global_scale: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize input tensor to FP4 and return quantized tensor and scale.
+
+    This function quantizes the last dimension of the given tensor `input`. For
+    every 16 consecutive elements, a single dynamically computed scaling factor
+    is shared. This scaling factor is quantized using the `input_global_scale`
+    and is stored in a swizzled layout (see
+    https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x).
+
+    Args:
+        input: The input tensor to be quantized to FP4
+        input_global_scale: A scalar scaling factor for the entire tensor.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
+            two values are packed into a uint8 and float8_e4m3 scaling factors
+            in the sizzled layout.
+    """
+    assert not current_platform.is_rocm()
+    assert input.ndim >= 1, (
+        f'input.ndim needs to be >= 1, but got {input.ndim}.')
+    other_dims = 1 if input.ndim == 1 else -1
+    input = input.reshape(other_dims, input.shape[-1])
+    m, n = input.shape
+    block_size = 16
+    device = input.device
+
+    assert n % block_size == 0, (
+        f'last dim has to be multiple of 16, but got {n}.')
+    assert input.dtype in (torch.float16, torch.bfloat16), (
+        f'input.dtype needs to be fp16 or bf16 but got {input.dtype}.')
+
+    # Two fp4 values will be packed into an uint8.
+    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+
+    # We use the rounded values to store the swizzled values. Due to the
+    # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
+    # So, we first pad the scales to multiples of 128 and 4. Then, the scales
+    # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
+    # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+    round_up = lambda x, y: (x + y - 1) // y * y
+    rounded_m = round_up(m, 128)
+    scale_n = n // block_size
+    rounded_n = round_up(scale_n, 4)
+    output_scale = torch.empty((rounded_m, rounded_n // 4),
+                               device=device,
+                               dtype=torch.int32)
+
+    torch.ops._C.scaled_fp4_quant(output, input, output_scale,
+                                  input_global_scale)
+    output_scale = output_scale.view(torch.float8_e4m3fn)
+    return output, output_scale
 
 
 # fp8

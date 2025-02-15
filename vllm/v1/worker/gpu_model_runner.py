@@ -12,7 +12,7 @@ import torch.nn as nn
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed.parallel_state import graph_capture
+from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -21,12 +21,13 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
+from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -36,7 +37,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler import SchedulerOutput
+    from vllm.v1.core.scheduler_output import SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -94,9 +95,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
-        # NOTE: Initialized input mapper is only used for processing dummy
+        # NOTE: Initialized client is only used for processing dummy
         # multimodal data into multimodal kwargs for GPU memory profiling.
-        self.mm_input_mapper_profiling = MMInputMapperClient(self.model_config)
+        # Only applicable to multimodal models with legacy input mapper.
+        self.mm_input_mapper_profiling = MMInputCacheClient(self.model_config)
         self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
@@ -345,6 +347,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
 
+        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
+
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
@@ -361,7 +365,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
-        return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+
+        return batch_changed
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -773,6 +778,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
         batch_changed = self._update_states(scheduler_output)
 
@@ -831,8 +837,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions=positions,
                 kv_caches=self.kv_caches,
                 attn_metadata=None,
+                intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+        if not get_pp_group().is_last_rank:
+            return hidden_states
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
@@ -1007,12 +1016,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             positions = self.mrope_positions[:, :num_tokens]
         else:
             positions = self.positions[:num_tokens]
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=num_tokens,
+                dtype=self.model_config.dtype,
+                device=self.device)
         with set_forward_context(None, self.vllm_config):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
                 kv_caches=kv_caches,
                 attn_metadata=None,
+                intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
         return hidden_states
@@ -1142,9 +1158,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Trigger compilation for general shape.
             hidden_states = self._dummy_run(self.max_num_tokens,
                                             dummy_kv_caches)
-            hidden_states = hidden_states[logit_indices]
-            logits = self.model.compute_logits(hidden_states, None)
-            # TODO(woosuk): Consider the memory usage of the sampler.
+            if get_pp_group().is_last_rank:
+                hidden_states = hidden_states[logit_indices]
+                logits = self.model.compute_logits(hidden_states, None)
+                # TODO(woosuk): Consider the memory usage of the sampler.
+            else:
+                logits = None
             torch.cuda.synchronize()
             del hidden_states, logits
             self.encoder_cache.clear()

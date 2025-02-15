@@ -105,7 +105,9 @@ def run_glm4v(question: str, modality: str):
               max_num_seqs=2,
               trust_remote_code=True,
               enforce_eager=True,
+              hf_overrides={"architectures": ["GLM4VForCausalLM"]},
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+
     prompt = f"<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
         {question}<|assistant|>"
 
@@ -495,6 +497,7 @@ def run_qwen_vl(question: str, modality: str):
         trust_remote_code=True,
         max_model_len=1024,
         max_num_seqs=2,
+        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 

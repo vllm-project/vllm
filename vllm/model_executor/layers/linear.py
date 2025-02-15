@@ -290,29 +290,30 @@ class ColumnParallelLinear(LinearBase):
                  quant_config: Optional[QuantizationConfig] = None,
                  output_sizes: Optional[list[int]] = None,
                  prefix: str = ""):
+        # Divide the weight matrix along the last dimension.
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.input_size_per_partition = input_size
+        self.output_size_per_partition = divide(output_size, self.tp_size)
+        self.output_partition_sizes = [self.output_size_per_partition]
+        # If QKV or MergedColumn, use output size of each partition.
+        if hasattr(self, "output_sizes"):
+            self.output_partition_sizes = [
+                divide(output_size, self.tp_size)
+                for output_size in self.output_sizes
+            ]
+
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, prefix)
 
         self.gather_output = gather_output
 
-        # Divide the weight matrix along the last dimension.
-        tp_size = get_tensor_model_parallel_world_size()
-        assert self.quant_method is not None
-        self.output_size_per_partition = divide(self.output_size, tp_size)
-        self.output_partition_sizes = [self.output_size_per_partition]
-        # If QKV or MergedColumn, use output size of each partition.
-        if hasattr(self, "output_sizes"):
-            self.output_partition_sizes = [
-                divide(output_size, tp_size)
-                for output_size in self.output_sizes
-            ]
-
         if output_sizes is None:
             output_sizes = [output_size]
 
+        assert self.quant_method is not None
         self.quant_method.create_weights(
             layer=self,
-            input_size_per_partition=self.input_size,
+            input_size_per_partition=self.input_size_per_partition,
             output_partition_sizes=self.output_partition_sizes,
             input_size=self.input_size,
             output_size=self.output_size,
@@ -335,6 +336,12 @@ class ColumnParallelLinear(LinearBase):
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
 
+        is_sharded_weight = getattr(param, "is_sharded_weight", False)
+        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
+        # bitsandbytes loads the weights of the specific portion
+        # no need to narrow
+        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
+
         # Special case for GGUF
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
@@ -343,13 +350,12 @@ class ColumnParallelLinear(LinearBase):
 
         # Materialize GGUF UninitializedParameter
         if is_gguf_weight and isinstance(param, UninitializedParameter):
-            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
-
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-        is_sharded_weight = getattr(param, "is_sharded_weight", False)
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow
-        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
+            final_shape = list(loaded_weight.shape)
+            if output_dim is not None:
+                tp_size = get_tensor_model_parallel_world_size()
+                assert final_shape[output_dim] % tp_size == 0
+                final_shape[output_dim] = final_shape[output_dim] // tp_size
+            param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         param_data = param.data
         if output_dim is not None and not is_sharded_weight:
@@ -1039,22 +1045,24 @@ class RowParallelLinear(LinearBase):
                  reduce_results: bool = True,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
+        # Divide the weight matrix along the first dimension.
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.output_size_per_partition = output_size
+        self.output_partition_sizes = [output_size]
+
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, prefix)
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
-        # Divide the weight matrix along the last dimension.
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, self.tp_size)
         assert self.quant_method is not None
-
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
-            output_partition_sizes=[self.output_size],
+            output_partition_sizes=self.output_partition_sizes,
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,

@@ -13,14 +13,15 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config
+from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType)
-from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
+from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -38,11 +39,14 @@ class EngineCore:
         self,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
+        log_stats: bool,
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
+
+        self.log_stats = log_stats
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -59,9 +63,10 @@ class EngineCore:
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
+            log_stats=self.log_stats,
         )
 
-        self.mm_input_mapper_server = MMInputMapperServer(
+        self.mm_input_cache_server = MMInputCacheServer(
             vllm_config.model_config)
 
     def _initialize_kv_caches(self,
@@ -69,20 +74,25 @@ class EngineCore:
         start = time.time()
 
         # Get all kv cache needed by the model
-        kv_cache_spec = self.model_executor.get_kv_cache_spec()
+        kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
         # Profiles the peak memory usage of the model to determine how much
         # memory can be allocated for kv cache.
-        availble_gpu_memory = self.model_executor.determine_available_memory()
+        available_gpu_memory = self.model_executor.determine_available_memory()
 
         # Get the kv cache tensor size
-        kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                              availble_gpu_memory)
-        num_gpu_blocks = kv_cache_config.num_blocks
+        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
+                                                available_gpu_memory)
+        num_gpu_blocks_set = set(config.num_blocks
+                                 for config in kv_cache_configs)
+        assert len(num_gpu_blocks_set) == 1, (
+            f"num_gpu_blocks need to be the same across workers, "
+            f"but they are different: {num_gpu_blocks_set}")
+        num_gpu_blocks = num_gpu_blocks_set.pop()
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution
-        self.model_executor.initialize(kv_cache_config)
+        self.model_executor.initialize(kv_cache_configs)
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
@@ -93,13 +103,13 @@ class EngineCore:
         """Add request to the scheduler."""
 
         if request.mm_hashes is not None:
-            # Here, if hash exists for an image, then it will be fetched
-            # from the cache, else it will be added to the cache.
-            # Note that the cache here is mirrored with the client side of the
-            # MM mapper, so anything that has a hash must have a HIT cache
-            # entry here as well.
+            # Here, if hash exists for a multimodal input, then it will be
+            # fetched from the cache, else it will be added to the cache.
+            # Note that the cache here is mirrored with the client cache, so
+            # anything that has a hash must have a HIT cache entry here
+            # as well.
             assert request.mm_inputs is not None
-            request.mm_inputs = self.mm_input_mapper_server.process_inputs(
+            request.mm_inputs = self.mm_input_cache_server.get_and_update(
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
@@ -137,6 +147,9 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        self.model_executor.add_lora(lora_request)
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -148,11 +161,9 @@ class EngineCoreProc(EngineCore):
         ready_pipe: Connection,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        log_stats: bool = False,
+        log_stats: bool,
     ):
-        super().__init__(vllm_config, executor_class)
-
-        self.log_stats = log_stats
+        super().__init__(vllm_config, executor_class, log_stats)
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -255,12 +266,15 @@ class EngineCoreProc(EngineCore):
             self.reset_prefix_cache()
         elif request_type == EngineCoreRequestType.PROFILE:
             self.model_executor.profile(request)
+        elif request_type == EngineCoreRequestType.ADD_LORA:
+            self.model_executor.add_lora(request)
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
+        add_lora_decoder = MsgpackDecoder(LoRARequest)
         generic_decoder = MsgpackDecoder()
 
         with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
@@ -270,9 +284,14 @@ class EngineCoreProc(EngineCore):
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                 # Deserialize the request data.
-                decoder = add_request_decoder if (
-                    request_type
-                    == EngineCoreRequestType.ADD) else generic_decoder
+                decoder = None
+                if request_type == EngineCoreRequestType.ADD:
+                    decoder = add_request_decoder
+                elif request_type == EngineCoreRequestType.ADD_LORA:
+                    decoder = add_lora_decoder
+                else:
+                    decoder = generic_decoder
+
                 request = decoder.decode(data_frame.buffer)
 
                 # Push to input queue for core busy loop.
