@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from functools import cached_property
 from typing import Iterable, List, Optional, Set, Tuple, OrderedDict
 
 import torch
@@ -8,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from einops import rearrange
+from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -21,6 +23,97 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .utils import AutoWeightsLoader
+
+
+class LearnedAbsolutePositionEmbedding2D(nn.Module):
+    """
+    This module learns positional embeddings up to a fixed maximum size.
+    """
+
+    def __init__(self, embedding_dim=256, num_pos=50):
+        super().__init__()
+        self.row_embeddings = nn.Embedding(num_pos, embedding_dim // 2)
+        self.column_embeddings = nn.Embedding(num_pos, embedding_dim - (embedding_dim // 2))
+
+    def forward(self, pixel_values):
+        """
+        pixel_values: (batch_size, height, width, num_channels) 
+        returns: (batch_size, height, width, embedding_dim * 2)
+        """
+        if len(pixel_values.shape) != 4:
+            raise ValueError('pixel_values must be a 4D tensor')
+        height, width = pixel_values.shape[1:3]
+        width_values = torch.arange(width, device=pixel_values.device)
+        height_values = torch.arange(height, device=pixel_values.device)
+        x_emb = self.column_embeddings(width_values)
+        y_emb = self.row_embeddings(height_values)
+        # (height, width, embedding_dim * 2)
+        pos = torch.cat([x_emb.unsqueeze(0).repeat(height, 1, 1), y_emb.unsqueeze(1).repeat(1, width, 1)], dim=-1)
+        # (embedding_dim * 2, height, width)
+        pos = pos.permute(2, 0, 1)
+        pos = pos.unsqueeze(0)
+        # (batch_size, embedding_dim * 2, height, width)
+        pos = pos.repeat(pixel_values.shape[0], 1, 1, 1)
+        # (batch_size, height, width, embedding_dim * 2)
+        pos = pos.permute(0, 2, 3, 1)
+        return pos
+
+
+class PositionalEmbeddingCosine1D(nn.Module):
+    """
+    This class implements a very simple positional encoding. It follows closely
+    the encoder from the link below:
+    https://pytorch.org/tutorials/beginner/translation_transformer.html
+    Args:
+        embed_dim: The dimension of the embeddings.
+        dropout_prob: The dropout probability.
+        max_seq_len: The maximum length to precompute the positional encodings.
+    """
+    def __init__(
+            self,
+            embed_dim: int = 512,
+            max_seq_len: int = 1024) -> None:
+        super(PositionalEmbeddingCosine1D, self).__init__()
+        self.embed_dim = embed_dim
+        self.max_seq_len = max_seq_len
+        # Generate the sinusoidal arrays.
+        factor = math.log(10000)
+        denominator = torch.exp(
+            -factor * torch.arange(0, self.embed_dim, 2) / self.embed_dim)
+        # Matrix where rows correspond to a positional embedding as a function
+        # of the position index (i.e., the row index).
+        frequencies = \
+            torch.arange(0, self.max_seq_len) \
+            .reshape(self.max_seq_len, 1) * denominator
+        pos_idx_to_embed = torch.zeros((self.max_seq_len, self.embed_dim))
+        # Populate uneven entries.
+        pos_idx_to_embed[:, 0::2] = torch.sin(frequencies)
+        pos_idx_to_embed[:, 1::2] = torch.cos(frequencies)
+        # Save the positional embeddings in a constant buffer.
+        # self.register_buffer("pos_idx_to_embed", pos_idx_to_embed)
+        self.pos_idx_to_embed = nn.Parameter(pos_idx_to_embed, requires_grad=False)
+
+    def forward(self, seq_embeds: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            seq_embeds: The sequence embeddings in order. Allowed size:
+                1. [T, D], where T is the length of the sequence, and D is the
+                frame embedding dimension.
+                2. [B, T, D], where B is the batch size and T and D are the
+                same as above.
+        Returns a tensor of with the same dimensions as the input: i.e.,
+        [1, T, D] or [T, D].
+        """
+        shape_len = len(seq_embeds.shape)
+        assert 2 <= shape_len <= 3
+        len_seq = seq_embeds.size(-2)
+        assert len_seq <= self.max_seq_len
+        pos_embeds = self.pos_idx_to_embed[0:seq_embeds.size(-2), :]
+        # Adapt pre-computed positional embeddings to the input.
+        if shape_len == 3:
+            pos_embeds = pos_embeds.view(
+                (1, pos_embeds.size(0), pos_embeds.size(1)))
+        return pos_embeds
 
 
 class MySequential(nn.Sequential):
@@ -416,9 +509,7 @@ class DaViT(nn.Module):
         self.convs = nn.ModuleList(convs)
         self.blocks = nn.ModuleList(blocks)
 
-        self.norms = norm_layer(self.embed_dims[-1])
         self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Linear(self.embed_dims[-1], num_classes) if num_classes > 0 else nn.Identity()
 
     @property
     def dim_out(self):
@@ -648,14 +739,45 @@ class Florence2ForConditionalGeneration(nn.Module):
         config = vllm_config.model_config.hf_config
         assert config.vision_config.model_type == 'davit', 'only DaViT is supported for now'
         self.vision_tower = DaViT.from_config(config=config.vision_config)
+        self._build_image_projection_layers(config)
         self.language_model = Florence2LanguageForConditionalGeneration(
             vllm_config=vllm_config.with_hf_config(config.text_config),
             prefix=f"{prefix}.language_model",
         )
 
-    @property
+    def _build_image_projection_layers(self, config: PretrainedConfig):
+        image_dim_out = config.vision_config.dim_embed[-1]
+        dim_projection = config.vision_config.projection_dim
+        self.image_projection = nn.Parameter(
+            torch.empty(image_dim_out, dim_projection)
+        )
+        self.image_proj_norm = nn.LayerNorm(dim_projection)
+        image_pos_embed_config = config.vision_config.image_pos_embed
+        if image_pos_embed_config['type'] == 'learned_abs_2d':
+            self.image_pos_embed = LearnedAbsolutePositionEmbedding2D(
+                embedding_dim=image_dim_out,
+                num_pos=image_pos_embed_config['max_pos_embeddings']
+            )
+        else:
+            raise NotImplementedError('Florence2 only supports learned_abs_2d as image position embedding.')
+
+        self.image_feature_source = config.vision_config.image_feature_source
+
+        # temporal embedding
+        visual_temporal_embedding_config = config.vision_config.visual_temporal_embedding
+        if visual_temporal_embedding_config['type'] == 'COSINE':
+            self.visual_temporal_embed = PositionalEmbeddingCosine1D(
+                embed_dim=image_dim_out,
+                max_seq_len=visual_temporal_embedding_config['max_temporal_embeddings']
+            )
+        else:
+            raise NotImplementedError('Florence2 only supports COSINE as temporal embedding.')
+
+    @cached_property
     def sampler(self):
-        return self.language_model.sampler
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+        return get_sampler()
 
     def forward(
         self,
@@ -706,9 +828,5 @@ class Florence2ForConditionalGeneration(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        skip_prefixes = [
-            'image_projection', "image_proj_norm",
-            "image_pos_embed", "visual_temporal_embed"
-        ]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
