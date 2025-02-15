@@ -77,12 +77,9 @@ def _create_default_sampling_metadata(
         temperature=torch.full((batch_size, ), 0.0),
         all_greedy=True,
         all_random=False,
-        top_p=torch.empty(batch_size, ),
-        top_k=torch.empty(batch_size, ),
-        no_top_p=True,
-        no_top_k=True,
-        min_p=torch.empty(batch_size, ),
-        no_min_p=True,
+        top_p=None,
+        top_k=None,
+        min_p=None,
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=_create_prompt_tokens_tensor(prompt_token_ids,
@@ -92,7 +89,7 @@ def _create_default_sampling_metadata(
         presence_penalties=_create_penalty_tensor(batch_size, 0.0, device),
         repetition_penalties=_create_penalty_tensor(batch_size, 1.0, device),
         no_penalties=True,
-        min_tokens=[],
+        min_tokens={},
         stop_token_ids=[],
         logit_bias=[None] * batch_size,
     )
@@ -102,9 +99,9 @@ def _create_default_sampling_metadata(
 def _generate_min_token_penalties_and_stop_tokens(
     num_output_tokens: int, batch_size: int, vocab_size: int,
     batch_indices_for_min_token_penalty: List[int]
-) -> Tuple[List[int], List[Set[int]]]:
+) -> Tuple[Dict[int, int], List[Set[int]]]:
     """
-    Generates and returns a list of minimum token penalties (`min_tokens`)
+    Generates and returns a dict of minimum token penalties (`min_tokens`)
     and a corresponding list of stop token IDs (`stop_token_ids`) for each
     batch.
 
@@ -114,21 +111,20 @@ def _generate_min_token_penalties_and_stop_tokens(
     `min_tokens` value is assigned, and the stop token IDs set is empty.
     """
     stop_token_ids: List[Set[int]] = []
-    min_tokens: List[int] = []
+    min_tokens: Dict[int, int] = {}
     for index in range(batch_size):
         if index in batch_indices_for_min_token_penalty:
-            min_tokens.append(
-                np.random.randint(num_output_tokens + 1,
-                                  2 * num_output_tokens))
+            min_tokens[index] = np.random.randint(num_output_tokens + 1,
+                                  2 * num_output_tokens)
             stop_token_ids.append(
                 set(
                     np.random.randint(0, vocab_size - 1)
                     for _ in range(np.random.randint(0, vocab_size))))
 
         else:
-            min_tokens.append(np.random.randint(0, num_output_tokens))
+            min_tokens[index] = np.random.randint(0, num_output_tokens)
             stop_token_ids.append(set())
-    return (min_tokens, stop_token_ids)
+    return min_tokens, stop_token_ids
 
 
 def _create_weighted_output_token_list(

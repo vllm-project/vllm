@@ -13,12 +13,9 @@ class SamplingMetadata:
     all_greedy: bool
     all_random: bool
 
-    top_p: torch.Tensor
-    top_k: torch.Tensor
-    no_top_p: bool
-    no_top_k: bool
-    min_p: torch.Tensor
-    no_min_p: bool
+    top_p: Optional[torch.Tensor]
+    top_k: Optional[torch.Tensor]
+    min_p: Optional[torch.Tensor]
 
     generators: Dict[int, torch.Generator]
 
@@ -32,7 +29,7 @@ class SamplingMetadata:
     repetition_penalties: torch.Tensor
 
     output_token_ids: List[List[int]]
-    min_tokens: List[int]
+    min_tokens: Dict[int, int]
     stop_token_ids: List[Set[int]]
 
     logit_bias: List[Optional[Dict[int, float]]]

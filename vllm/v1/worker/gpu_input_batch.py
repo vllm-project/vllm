@@ -171,7 +171,8 @@ class InputBatch:
                 self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: Set[str] = set()
 
-        self.min_tokens: List[int] = [0] * max_num_reqs
+        # req_index -> min_tokens
+        self.min_tokens: Dict[int, int] = {}
         self.stop_token_ids: List[Set[int]] = [set()] * max_num_reqs
 
         # lora related
@@ -265,7 +266,8 @@ class InputBatch:
             req_index] = sampling_params.repetition_penalty
         if sampling_params.repetition_penalty != 1.0:
             self.repetition_penalties_reqs.add(req_id)
-        self.min_tokens[req_index] = sampling_params.min_tokens
+        if sampling_params.min_tokens:
+            self.min_tokens[req_index] = sampling_params.min_tokens
         self.stop_token_ids[req_index] = sampling_params.all_stop_token_ids
 
         # NOTE(woosuk): self.generators should not include the requests that
@@ -307,6 +309,7 @@ class InputBatch:
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
         self.min_p_reqs.discard(req_id)
+        self.min_tokens.pop(req_index)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -338,6 +341,7 @@ class InputBatch:
         self.frequency_penalties_reqs.clear()
         self.presence_penalties_reqs.clear()
         self.repetition_penalties_reqs.clear()
+        self.min_tokens.clear()
         self.generators.clear()
         self.num_logprobs.clear()
         self.num_prompt_logprobs.clear()
@@ -396,12 +400,15 @@ class InputBatch:
             self.repetition_penalties_cpu[
                 empty_index] = self.repetition_penalties_cpu[last_req_index]
             self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
-            self.min_tokens[empty_index] = self.min_tokens[last_req_index]
             self.stop_token_ids[empty_index] = self.stop_token_ids[
                 last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
+
+            min_token = self.min_tokens.pop(last_req_index, 0)
+            if min_token:
+                self.min_tokens[empty_index] = min_token
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
                 last_req_index]
@@ -424,9 +431,12 @@ class InputBatch:
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         copy_slice(self.temperature_cpu_tensor, self.temperature, num_reqs)
-        copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
-        copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
-        copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
+        if not self.no_top_p:
+            copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
+        if not self.no_top_k:
+            copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
+        if not self.no_min_p:
+            copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
 
         if not self.no_penalties:
             # Since syncing these tensors is expensive only copy them
@@ -458,12 +468,9 @@ class InputBatch:
             temperature=self.temperature[:num_reqs],
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            top_p=self.top_p[:num_reqs],
-            top_k=self.top_k[:num_reqs],
-            min_p=self.min_p[:num_reqs],
-            no_min_p=self.no_min_p,
-            no_top_p=self.no_top_p,
-            no_top_k=self.no_top_k,
+            top_p=None if self.no_top_p else self.top_p[:num_reqs],
+            top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            min_p=None if self.no_min_p else self.min_p[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
@@ -471,7 +478,7 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(List[List[int]], self.req_output_token_ids),
-            min_tokens=self.min_tokens[:num_reqs],
+            min_tokens=self.min_tokens,
             stop_token_ids=self.stop_token_ids[:num_reqs],
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],

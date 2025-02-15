@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pytest
@@ -91,10 +91,10 @@ def _construct_expected_sampling_metadata(
                                  device=device),
         all_greedy=False,
         all_random=True,
-        top_p=torch.tensor(top_p, dtype=torch.float, device=device),
-        top_k=torch.tensor(top_k, dtype=torch.int, device=device),
-        no_top_p=all(x == 1.0 for x in top_p),
-        no_top_k=all(x == 0 for x in top_k),
+        top_p=None if all(x == 1.0 for x in top_p) else torch.tensor(
+            top_p, dtype=torch.float, device=device),
+        top_k=None if all(x == 0 for x in top_k) else torch.tensor(
+            top_k, dtype=torch.int, device=device),
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=make_tensor_with_pad(
@@ -210,13 +210,16 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         input_batch.req_id_to_index,
         device=torch.device(device))
 
+    def same(t1: Optional[torch.Tensor], t2: Optional[torch.Tensor]) -> bool:
+        return (t1 is None
+                and t2 is None) or (t1 is not None and t2 is not None
+                                    and torch.allclose(t1, t2))
+
     # Assert the actual and expected output.
     assert torch.allclose(expected_sampling_metadata.temperature,
                           sampling_metadata.temperature)
-    assert torch.allclose(expected_sampling_metadata.top_p,
-                          sampling_metadata.top_p)
-    assert torch.allclose(expected_sampling_metadata.top_k,
-                          sampling_metadata.top_k)
+    assert same(expected_sampling_metadata.top_p, sampling_metadata.top_p)
+    assert same(expected_sampling_metadata.top_k, sampling_metadata.top_k)
     assert torch.allclose(
         expected_sampling_metadata.frequency_penalties,
         sampling_metadata.frequency_penalties,
@@ -238,6 +241,4 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
            sampling_metadata.stop_token_ids
     assert expected_sampling_metadata.no_penalties == \
            sampling_metadata.no_penalties
-    assert expected_sampling_metadata.no_top_p == sampling_metadata.no_top_p
-    assert expected_sampling_metadata.no_top_k == sampling_metadata.no_top_k
     assert expected_sampling_metadata.logit_bias == sampling_metadata.logit_bias
