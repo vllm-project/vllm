@@ -9,13 +9,8 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_layer)
 from vllm.model_executor.utils import set_weight_attrs
@@ -37,6 +32,12 @@ class MoeWNA16Config(QuantizationConfig):
         self.linear_quant_method = linear_quant_method
         self.full_config = full_config
         self.use_marlin = False
+        # Avoid circular import
+        from vllm.model_executor.layers.quantization.awq import AWQConfig
+        from vllm.model_executor.layers.quantization.awq_marlin import (
+            AWQMarlinConfig)
+        from vllm.model_executor.layers.quantization.gptq_marlin import (
+            GPTQMarlinConfig)
         if self.linear_quant_method == "gptq":
             self.use_marlin = GPTQMarlinConfig.is_gptq_marlin_compatible(
                 full_config)
@@ -115,6 +116,8 @@ class MoeWNA16Config(QuantizationConfig):
         capability_tuple = current_platform.get_device_capability()
         device_capability = (-1 if capability_tuple is None else
                              capability_tuple.to_int())
+        # Avoid circular import
+        from vllm.model_executor.layers.quantization.awq import AWQConfig
         awq_min_capability = AWQConfig.get_min_capability()
 
         gptq_compatible = quant_method == "gptq" and \
@@ -129,6 +132,13 @@ class MoeWNA16Config(QuantizationConfig):
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
+            # Avoid circular import
+            from vllm.model_executor.layers.quantization.awq import AWQConfig
+            from vllm.model_executor.layers.quantization.awq_marlin import (
+                AWQMarlinConfig)
+            from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+            from vllm.model_executor.layers.quantization.gptq_marlin import (
+                GPTQMarlinConfig)
             if self.linear_quant_method == "gptq":
                 if self.use_marlin:
                     return GPTQMarlinConfig.from_config(
