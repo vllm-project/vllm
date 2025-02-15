@@ -166,7 +166,7 @@ __global__ void moe_wna16_gemm_kernel(
       const int32_t weight_offset = offset_n * size_k + k;
 
       if (tmp_k % 4 == 0) {
-        *expert_qweight_tmp_float4 = reinterpret_cast<float4*>(
+        *expert_qweight_tmp_float4 = reinterpret_cast<const float4*>(
             expert_qweight)[weight_offset / pack_factor / 4];
       }
 
