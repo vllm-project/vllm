@@ -213,3 +213,54 @@ def test_schedule_partial_requests():
     assert output.num_scheduled_tokens[requests[0].request_id] == 1
     assert output.num_scheduled_tokens[requests[1].request_id] == 700
     assert requests[2].request_id not in output.num_scheduled_tokens
+
+
+def test_schedule_concurrent_batches():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        max_num_seqs=2,
+    )
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=512,
+    )
+
+    # Schedule the first request.
+    scheduler.add_request(requests[0])
+    scheduler_output0 = scheduler.schedule()
+    assert len(scheduler_output0.scheduled_new_reqs) == 1
+    assert scheduler_output0.num_scheduled_tokens[
+        requests[0].request_id] == 512
+
+    # The first request is still running, so only schedule the second request.
+    scheduler.add_request(requests[1])
+    scheduler_output1 = scheduler.schedule()
+    assert len(scheduler_output1.scheduled_new_reqs) == 1
+    assert scheduler_output1.num_scheduled_tokens[
+        requests[1].request_id] == 512
+
+    # Model output of the first request.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[requests[0].request_id],
+        req_id_to_index={requests[0].request_id: 0},
+        sampled_token_ids=[0],
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+    scheduler.update_from_output(scheduler_output0, model_runner_output)
+
+    # Schedule the next step.
+    # The first request can be scheduled again while the second
+    # request is still running.
+    scheduler_output2 = scheduler.schedule()
+    assert scheduler_output2.num_scheduled_tokens[requests[0].request_id] == 1
+
+    # Model output of the second request.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[requests[1].request_id],
+        req_id_to_index={requests[1].request_id: 0},
+        sampled_token_ids=[0],
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+    scheduler.update_from_output(scheduler_output1, model_runner_output)
