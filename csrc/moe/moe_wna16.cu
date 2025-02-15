@@ -52,8 +52,8 @@ __global__ void moe_wna16_gemm_kernel(
 
     int32_t num_valid_tokens = 0;
     extern __shared__ uint16_t block_input_tmp[];
-    scalar_t* block_input = reinterpret_cast<scalar_t*>(&block_input_tmp);
-    scalar_t2* block_input_half2 = reinterpret_cast<scalar_t2*>(&block_input);
+    scalar_t* block_input = reinterpret_cast<scalar_t*>(block_input_tmp);
+    scalar_t2* block_input_half2 = reinterpret_cast<scalar_t2*>(block_input);
 
     // load BLOCK_SIZE_M * BLOCK_SIZE_K into shared memory
     for (int m = 0; m < BLOCK_SIZE_M; m++) {
@@ -101,7 +101,7 @@ __global__ void moe_wna16_gemm_kernel(
     // weight would be loaded in loop
     uint32_t expert_qweight_tmp[4];
     float4* expert_qweight_tmp_float4 =
-        reinterpret_cast<float4*>(&expert_qweight_tmp);
+        reinterpret_cast<float4*>(expert_qweight_tmp);
 
     // load all required scales one time
     scalar_t expert_scales_groups[GROUPS];
@@ -111,48 +111,52 @@ __global__ void moe_wna16_gemm_kernel(
       *expert_scales_groups = expert_scales[scales_offset_tmp];
     } else if constexpr (GROUPS == 2) {
       float* expert_scales_groups_tmp =
-          reinterpret_cast<float*>(&expert_scales_groups);
+          reinterpret_cast<float*>(expert_scales_groups);
       *expert_scales_groups_tmp =
-          reinterpret_cast<float*>(&expert_scales)[scales_offset_tmp];
+          reinterpret_cast<const float*>(expert_scales)[scales_offset_tmp];
     } else if constexpr (GROUPS == 4) {
       float2* expert_scales_groups_tmp =
-          reinterpret_cast<float2*>(&expert_scales_groups);
+          reinterpret_cast<float2*>(expert_scales_groups);
       *expert_scales_groups_tmp =
-          reinterpret_cast<float2*>(&expert_scales)[scales_offset_tmp];
+          reinterpret_cast<const float2*>(expert_scales)[scales_offset_tmp];
     } else if constexpr (GROUPS == 8) {
       float4* expert_scales_groups_tmp =
-          reinterpret_cast<float4*>(&expert_scales_groups);
+          reinterpret_cast<float4*>(expert_scales_groups);
       *expert_scales_groups_tmp =
-          reinterpret_cast<float4*>(&expert_scales)[scales_offset_tmp];
+          reinterpret_cast<const float4*>(expert_scales)[scales_offset_tmp];
     }
 
     // load all required qzeros one time
     uint8_t expert_qzeros_groups[GROUPS];
     if (!has_zp) {
-      qzero_f2 = Dtype::num2num2(Dtype::int2num(8));
+      if constexpr (bit == 4) {
+        qzero_f2 = Dtype::num2num2(Dtype::int2num(8));
+      } else {
+        qzero_f2 = Dtype::num2num2(Dtype::int2num(128));
+      }
     } else {
       int qzeros_offset_tmp = (offset_n / 2) * (size_k / group_size / GROUPS) +
                               offset_k / group_size / GROUPS;
       if constexpr (GROUPS == 1) {
         uint8_t* expert_qzeros_groups_tmp =
-            reinterpret_cast<uint8_t*>(&expert_qzeros_groups);
+            reinterpret_cast<uint8_t*>(expert_qzeros_groups);
         *expert_qzeros_groups_tmp =
-            reinterpret_cast<uint16_t*>(&expert_qzeros)[qzeros_offset_tmp];
+            reinterpret_cast<const uint8_t*>(expert_qzeros)[qzeros_offset_tmp];
       } else if constexpr (GROUPS == 2) {
         uint16_t* expert_qzeros_groups_tmp =
-            reinterpret_cast<uint16_t*>(&expert_qzeros_groups);
+            reinterpret_cast<uint16_t*>(expert_qzeros_groups);
         *expert_qzeros_groups_tmp =
-            reinterpret_cast<uint16_t*>(&expert_qzeros)[qzeros_offset_tmp];
+            reinterpret_cast<const uint16_t*>(expert_qzeros)[qzeros_offset_tmp];
       } else if constexpr (GROUPS == 4) {
         uint32_t* expert_qzeros_groups_tmp =
-            reinterpret_cast<uint32_t*>(&expert_qzeros_groups);
+            reinterpret_cast<uint32_t*>(expert_qzeros_groups);
         *expert_qzeros_groups_tmp =
-            reinterpret_cast<uint32_t*>(&expert_qzeros)[qzeros_offset_tmp];
+            reinterpret_cast<const uint32_t*>(expert_qzeros)[qzeros_offset_tmp];
       } else if constexpr (GROUPS == 8) {
         uint64_t* expert_qzeros_groups_tmp =
-            reinterpret_cast<uint64_t*>(&expert_qzeros_groups);
+            reinterpret_cast<uint64_t*>(expert_qzeros_groups);
         *expert_qzeros_groups_tmp =
-            reinterpret_cast<uint64_t*>(&expert_qzeros)[qzeros_offset_tmp];
+            reinterpret_cast<const uint64_t*>(expert_qzeros)[qzeros_offset_tmp];
       }
     }
 

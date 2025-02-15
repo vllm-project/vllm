@@ -694,12 +694,13 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                                        block_size_m=config["BLOCK_SIZE_M"]))
 
         if use_moe_wna16_cuda:
+            bit = 4 if use_int4_w4a16 else 8
             ops.moe_wna16_gemm(A, C, B, B_scale, B_zp,
                                topk_weights if mul_routed_weight else None,
                                sorted_token_ids, expert_ids,
                                num_tokens_post_padded, top_k,
                                config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"],
-                               config["BLOCK_SIZE_K"], 4)
+                               config["BLOCK_SIZE_K"], bit)
             return
 
         fused_moe_kernel_gptq_awq[grid](

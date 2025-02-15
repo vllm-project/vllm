@@ -191,7 +191,7 @@ __device__ inline void dequant<nv_bfloat162, 8>(int q, nv_bfloat162* res) {
   fp32_intermediates[2] -= 8388608.f;
   fp32_intermediates[3] -= 8388608.f;
 
-  uint32_t* bf16_result_ptr = reinterpret_cast<uint32_t*>(&res);
+  uint32_t* bf16_result_ptr = reinterpret_cast<uint32_t*>(res);
   bf16_result_ptr[0] = __byte_perm(fp32_intermediates_casted[0],
                                    fp32_intermediates_casted[1], 0x7632);
   bf16_result_ptr[1] = __byte_perm(fp32_intermediates_casted[2],
