@@ -8,7 +8,7 @@ from vllm import LLM, SamplingParams
 def test_prompts():
     return [
         "Can you repeat the sentence ten times, this is a sentence.",
-        "Can you repeat the sentence ten times, the future of AI is right.",
+        "Can you repeat the sentence ten times, this is a test.",
     ]
 
 
