@@ -49,6 +49,9 @@ PRECISION = "bfloat16"
 
         # Main model
         "model_name": MAIN_MODEL,
+
+        # GPU memory utilization
+        "gpu_memory_utilization": 0.85
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -88,6 +91,9 @@ def test_mtp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 
         # Main model
         "model_name": MAIN_MODEL,
+
+        # GPU memory utilization
+        "gpu_memory_utilization": 0.85
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -184,6 +190,9 @@ def test_mtp_e2e_greedy_correctness_cuda_graph(vllm_runner, common_llm_kwargs,
 
         # Main model
         "model_name": MAIN_MODEL,
+
+        # GPU memory utilization
+        "gpu_memory_utilization": 0.9
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -224,6 +233,9 @@ def test_mtp_e2e_greedy_correctness_with_preemption(
 
         # Main model
         "model_name": MAIN_MODEL,
+
+        # GPU memory utilization
+        "gpu_memory_utilization": 0.9
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -268,6 +280,9 @@ def test_mtp_different_k(vllm_runner, common_llm_kwargs,
 
         # Main model
         "model_name": MAIN_MODEL,
+
+        # GPU memory utilization
+        "gpu_memory_utilization": 0.9
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])

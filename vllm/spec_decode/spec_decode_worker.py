@@ -256,6 +256,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             allow_zero_draft_token_step=allow_zero_draft_token_step,
             enable_lm_head_weight_load=enable_lm_head_weight_load,
             num_spec_prefill_steps=num_spec_prefill_steps)
+
     def __init__(
         self,
         proposer_worker: ProposerWorkerBase,
