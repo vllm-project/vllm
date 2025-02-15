@@ -57,7 +57,7 @@ class AsyncLLM(EngineClient):
         if self.log_stats:
             self.stat_loggers.extend([
                 LoggingStatLogger(),
-                PrometheusStatLogger(vllm_config.model_config),
+                PrometheusStatLogger(vllm_config),
             ])
 
         # Tokenizer (+ ensure liveness if running in another process).
