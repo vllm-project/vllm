@@ -104,6 +104,7 @@ def run_test(
         model=model,
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
+        task="generate",
     )
 
     sampling_params = SamplingParams(
