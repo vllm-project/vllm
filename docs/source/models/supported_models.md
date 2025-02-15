@@ -938,6 +938,26 @@ The following table lists those that are tested in vLLM.
   * ✅︎
 :::
 
+#### Transcription (`--task transcription`)
+
+Speech2Text models trained specifically for Automatic Speech Recognition.
+
+:::{list-table}
+:widths: 25 25 25 5 5
+:header-rows: 1
+
+- * Architecture
+  * Models
+  * Example HF Models
+  * [LoRA](#lora-adapter)
+  * [PP](#distributed-serving)
+- * `Whisper`
+  * Whisper-based
+  * `openai/whisper-large-v3-turbo`
+  * 🚧
+  * 🚧
+:::
+
 _________________
 
 ## Model Support Policy
