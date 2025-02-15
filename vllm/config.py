@@ -1430,6 +1430,17 @@ class SchedulerConfig:
     # Maximum length of a sequence (including prompt and generated text).
     max_model_len: int = 8192
 
+    # Maximum number of sequences that can be partially prefilled concurrently
+    max_num_partial_prefills: int = 1
+
+    # Maximum number of "very long prompt" sequences that can be prefilled
+    # concurrently (long is defined by long_prefill_threshold)
+    max_long_partial_prefills: int = 1
+
+    # calculate context length that determines which sequences are
+    # considered "long"
+    long_prefill_token_threshold: int = 0
+
     # The number of slots to allocate per sequence per
     # step, beyond the known token ids. This is used in speculative
     # decoding to store KV activations of tokens which may or may not be
@@ -1537,6 +1548,18 @@ class SchedulerConfig:
                 self.max_num_batched_tokens)
 
         self.chunked_prefill_enabled = self.enable_chunked_prefill
+        if self.max_num_partial_prefills > 1:
+            if self.long_prefill_token_threshold == 0:
+                self.long_prefill_token_threshold = int(self.max_model_len *
+                                                        0.04)
+
+            logger.info(
+                "Concurrent partial prefills enabled with "
+                "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
+                "long_prefill_token_threshold=%d",
+                self.max_num_partial_prefills, self.max_long_partial_prefills,
+                self.long_prefill_token_threshold)
+
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1567,6 +1590,29 @@ class SchedulerConfig:
                 "num_scheduler_steps "
                 f"({self.num_scheduler_steps}) must be greater than or "
                 "equal to 1.")
+
+        if self.max_num_partial_prefills < 1:
+            raise ValueError(
+                f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
+                "must be greater than or equal to 1.")
+        elif self.max_num_partial_prefills > 1:
+            if not self.chunked_prefill_enabled:
+                raise ValueError("Chunked prefill must be enabled to set "
+                                 "max_num_partial_prefills > 1.")
+
+            if self.long_prefill_token_threshold > self.max_model_len:
+                raise ValueError(
+                    "long_prefill_token_threshold "
+                    f"({self.long_prefill_token_threshold}) cannot be greater "
+                    f"than the max_model_len ({self.max_model_len}).")
+
+        if (self.max_long_partial_prefills
+                < 1) or (self.max_long_partial_prefills
+                         > self.max_num_partial_prefills):
+            raise ValueError(
+                f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
+                "must be greater than or equal to 1 and less than or equal to "
+                f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
 
     @property
     def is_multi_step(self) -> bool:
