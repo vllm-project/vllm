@@ -112,8 +112,7 @@ class StopChecker:
         for stop_str in stop:
             stop_string_len = len(stop_str)
             # Avoid searching already-searched text.
-            stop_index = output_text.find(stop_str, 
-                                          len(output_text) - new_char_count - stop_string_len + 1)
+            stop_index = output_text.find(stop_str, 1 - new_char_count - stop_string_len)
             if stop_index == -1:
                 continue
 
