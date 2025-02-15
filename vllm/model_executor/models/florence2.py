@@ -795,7 +795,7 @@ class Florence2DummyInputsBuilder(BaseDummyInputsBuilder[Florence2ProcessingInfo
         }
 
         return ProcessorInputs(
-            prompt_text="<pad>" * num_images,
+            prompt_text="",
             mm_data=mm_data,
         )
 
@@ -818,7 +818,12 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         data = mm_data.get("image", [])
         num_images = 1
         pad_token_id = self.info.get_hf_config().pad_token_id
-        return [pad_token_id] * num_images
+        if isinstance(prompt, str):
+            tokenizer = self.info.get_tokenizer()
+            prompt_token_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        else:
+            prompt_token_ids = prompt
+        return [pad_token_id] * num_images + prompt_token_ids
 
     def _call_hf_processor(
         self,
