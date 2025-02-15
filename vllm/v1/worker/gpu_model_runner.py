@@ -987,7 +987,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if max_gen_len == 1:
             valid_sampled_token_ids = sampled_token_ids.tolist()
             for i, req_state, seq_len in request_seq_lens:
-                token_id = sampled_token_ids[i][0]
+                token_id = valid_sampled_token_ids[i][0]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
         else:
