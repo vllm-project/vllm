@@ -63,25 +63,24 @@ def get_logits_processors(
         try:
             # Convert token_id to integer
             # Clamp the bias between -100 and 100 per OpenAI API spec
-            clamped_logit_bias: Dict[int, float] = {
-                int(token_id): min(100.0, max(-100.0, bias))
-                for token_id, bias in logit_bias.items()
-            }
+            logit_bias_index = [int(token_id) for token_id in logit_bias]
+            logit_bias_value = [
+                min(100.0, max(-100.0, bias)) for bias in logit_bias.values()
+            ]
         except ValueError as exc:
             raise ValueError(
                 "Found token_id in logit_bias that is not "
                 "an integer or string representing an integer") from exc
 
         # Check if token_id is within the vocab size
-        for token_id, bias in clamped_logit_bias.items():
+        for token_id in logit_bias_index:
             if token_id < 0 or token_id >= len(tokenizer):
                 raise ValueError(f"token_id {token_id} in logit_bias contains "
                                  "out-of-vocab token id")
 
-        clamped_logit_bias = {
-            "index": torch.tensor(list(clamped_logit_bias.keys())),
-            "value": torch.tensor(list(clamped_logit_bias.values()),
-                                  dtype=dtype)
+        clamped_logit_bias: Dict[str, torch.Tensor] = {
+            "index": torch.tensor(logit_bias_index),
+            "value": torch.tensor(logit_bias_value, dtype=dtype)
         }
         logits_processors.append(
             partial(logit_bias_logits_processor, clamped_logit_bias))
