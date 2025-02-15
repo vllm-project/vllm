@@ -13,13 +13,14 @@ repos:
   rev: v0.9.3
   hooks:
   - id: ruff
-    args: [--output-format, github]
+    args: [--output-format, github, --fix]
     exclude: 'vllm/third_party/.*'
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.0
   hooks:
   - id: codespell
-    exclude: 'benchmarks/sonnet.txt|(build|tests/(lora/data|models/fixtures|prompts))/.*|vllm/third_party/.*'
+    additional_dependencies: ['tomli']
+    args: ['--toml', 'pyproject.toml']
 - repo: https://github.com/PyCQA/isort
   rev: 5.13.2
   hooks:

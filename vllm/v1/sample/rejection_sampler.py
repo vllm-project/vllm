@@ -26,21 +26,26 @@ class RejectionSampler(nn.Module):
                 "Only greedy sampling is supported by rejection sampler.")
 
         if is_flashinfer_available:
+            logger.info("User FlashInfer for rejection sampling.")
             return RejectionSampler.flashinfer_sample(logits,
                                                       sampling_metadata)
         else:
-            return RejectionSampler.greedy_sample_ref(logits,
-                                                      sampling_metadata)
+            logger.warning(
+                "FlashInfer is not available. Falling back to the PyTorch-"
+                "native implementation of rejection sampling.")
+            return RejectionSampler.greedy_sample_native(
+                logits, sampling_metadata)
 
     @staticmethod
     def flashinfer_sample(
             logits: torch.Tensor,
             sampling_metadata: SamplingMetadata) -> SamplerOutput:
+        # NOTE: The following input preparationg can be moved
+        # to the model runner with a persistent manner for better
+        # performance.
         spec_token_ids = sampling_metadata.spec_token_ids
-        spec_lengths = torch.tensor([len(s) for s in spec_token_ids],
-                                    device="cpu")
-        max_spec_len = torch.max(spec_lengths).item()
-        batch_size = len(spec_lengths)
+        max_spec_len = max(len(s) for s in spec_token_ids)
+        batch_size = len(spec_token_ids)
         draft_token_ids = torch.full((batch_size, max_spec_len),
                                      INVALID_TOKEN_ID,
                                      device="cpu",
@@ -51,6 +56,7 @@ class RejectionSampler(nn.Module):
                                       device=logits.device,
                                       dtype=torch.long)
 
+        # TODO: Vectorize the following loop for better performance.
         start_loc = 0
         for i in range(batch_size):
             num_spec_tokens = len(spec_token_ids[i])
@@ -63,6 +69,7 @@ class RejectionSampler(nn.Module):
             start_loc = end_loc
 
         vocab_size = logits.size(-1)
+        # NOTE: CPU <-> GPU synchronization happens here.
         draft_token_ids = draft_token_ids.to(logits.device)
         draft_probs = RejectionSampler._create_greedy_token_probs(
             draft_token_ids, vocab_size, logits.device)
@@ -81,8 +88,9 @@ class RejectionSampler(nn.Module):
         return SamplerOutput(sampled_token_ids=sampled_token_ids,
                              logprobs_tensors=None)
 
+    # TODO: The following method can be optimized for better performance.
     @staticmethod
-    def greedy_sample_ref(
+    def greedy_sample_native(
             logits: torch.Tensor,
             sampling_metadata: SamplingMetadata) -> SamplerOutput:
         spec_lens = [len(x) for x in sampling_metadata.spec_token_ids]
