@@ -270,6 +270,12 @@ class InputBatch:
             self.logit_bias[req_index] = sampling_params.logit_bias
 
         if sampling_params.allowed_token_ids:
+            # NOTE(houseroad): put the check here since no vocab_size info
+            # available in vllm/sampling_params.py
+            if not all(0 <= tid < self.vocab_size
+                       for tid in sampling_params.allowed_token_ids):
+                raise ValueError(
+                    "allowed_token_ids contains out-of-vocab token id")
             self.has_allowed_token_ids[req_index] = True
             self.allowed_token_ids_mask[req_index][
                 sampling_params.allowed_token_ids] = True
