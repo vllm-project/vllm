@@ -91,10 +91,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
 
-        # Parallelism related.
-        self.tp_size = parallel_config.tensor_parallel_size
-        self.pp_size = parallel_config.pipeline_parallel_size
-
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
