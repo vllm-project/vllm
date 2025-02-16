@@ -97,7 +97,6 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
     model: str = args.model
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
-
     # Load the dataset.
     with open(dataset_path) as f:
         dataset = json.load(f)
@@ -346,6 +345,7 @@ def main(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
     if args.dataset is None:
+        print("Dataset is None!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         vocab_size = tokenizer.vocab_size
         requests = []
         for _ in range(args.num_prompts):
@@ -386,6 +386,7 @@ def main(args: argparse.Namespace):
                               expected_output_len=args.output_len,
                               lora_request=lora_request))
     else:
+        print("Dataset is not None!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         requests = sample_requests(tokenizer, args)
 
     is_multi_modal = any(request.multi_modal_data is not None
