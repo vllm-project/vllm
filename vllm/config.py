@@ -2612,6 +2612,9 @@ class ObservabilityConfig:
 
     # If set, collects the model execute time for the request.
     collect_model_execute_time: bool = False
+    
+    # Interval for collecting log_stats. default value is 5.0
+    log_stats_interval: float = 5.0
 
     def compute_hash(self) -> str:
         """
