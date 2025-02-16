@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024- the Outlines developers
 # This file is adapted from
 # https://github.com/outlines-dev/outlines/blob/main/outlines/serve/vllm.py
@@ -15,52 +17,101 @@
 # limitations under the License.
 import copy
 import json
-import math
 from collections import defaultdict
 from functools import lru_cache
-from typing import Callable, DefaultDict, Dict, List, Optional, Union
+from typing import Callable, DefaultDict, Dict, List, Union
 
+import numpy as np
 import torch
-from outlines.fsm.fsm import CFGFSM, FSM, RegexFSM
-from outlines.fsm.json_schema import build_regex_from_schema
+from outlines import grammars
+from outlines.caching import cache
+from outlines.fsm.guide import (CFGGuide, CFGState, Generate, Guide,
+                                RegexGuide, Write)
+from outlines.fsm.parsing import PartialLark
+from outlines_core.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
+
+from vllm.platforms import current_platform
 
 
 class BaseLogitsProcessor:
 
-    def __init__(self):
-        # Child class should use initialize in their init.
-        self.fsm: FSM
-
-    def init_state(self):
-        """Initialize the FSM states."""
-        self.fsm_state: DefaultDict[int, int] = defaultdict(int)
+    def __init__(self, guide: Guide):
+        self._guide: Guide = guide
+        # CFGState is used for the FSM state for CFGGuide
+        self._fsm_state: DefaultDict[int, Union[int,
+                                                CFGState]] = defaultdict(int)
 
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
         seq_id = hash(tuple(input_ids))
 
-        if len(input_ids) == 0:
-            self.init_state()
-        else:
+        if len(input_ids) > 0:
             last_token = input_ids[-1]
             last_seq_id = hash(tuple(input_ids[:-1]))
-            self.fsm_state[seq_id] = self.fsm.next_state(
-                self.fsm_state[last_seq_id], last_token)
+            self._fsm_state[seq_id] = self._guide.get_next_state(
+                state=self._fsm_state[last_seq_id], token_id=last_token)
+        else:
+            # Note: this is a hack.
+            # Lark pickling does not work properly (silent failure),
+            # which breaks the RPC (which uses python pickleing).
+            # We need to find a better solution.
+            # On the first time this is called, we simply re-create
+            # the Lark object.
+            if isinstance(self._guide, CFGGuide):
+                self._guide.parser = PartialLark(
+                    self._guide.cfg_string,
+                    parser="lalr",
+                    import_paths=[grammars.GRAMMAR_PATH],
+                )
+                self._fsm_state[seq_id] = CFGState(
+                    parser_state=self._guide.parser.parse(""), prev_token=None)
 
-        allowed_tokens = self.fsm.allowed_token_ids(self.fsm_state[seq_id])
+        instruction = self._guide.get_next_instruction(
+            state=self._fsm_state[seq_id])
+
+        if type(instruction) == Generate:  # noqa: E721
+            allowed_tokens = instruction.tokens
+        elif type(instruction) == Write:  # noqa: E721
+            # TODO: support fast forward tokens
+            allowed_tokens = [instruction.tokens[0]]
+        else:
+            raise TypeError(
+                f"Unsupported instruction type {type(instruction)}")
 
         mask = torch.full((scores.shape[-1], ),
-                          -math.inf,
+                          -torch.inf,
                           device=scores.device)
-        mask[allowed_tokens] = 0
-        scores.add_(mask)
+        # The tokenizer may support more token ids than the model can generate,
+        # eg. Llama 3.2 Vision models have an `<|image|>` token with id 128256
+        # but scores.shape == torch.Size([128256])
+        # Using NumPy is faster for filtering token ids
+        allowed_tokens = np.array(allowed_tokens, dtype=np.int64)
+        allowed_tokens = torch.tensor(allowed_tokens, device=scores.device)
+        allowed_tokens = allowed_tokens.masked_select(
+            allowed_tokens < scores.shape[-1])
+        mask.index_fill_(0, allowed_tokens, 0)
+        if current_platform.is_hpu():
+            # Workaround for HPU bug where add_() raise RuntimeError:
+            # synNodeCreateWithId failed for node: strided_insert
+            # with synStatus 1 [Invalid argument], hopefully it will
+            # be fixed in the future releases of the HPU runtime.
+            scores = scores.add(mask)
+        else:
+            scores.add_(mask)
         return scores
 
 
 class RegexLogitsProcessor(BaseLogitsProcessor):
+
+    @classmethod
+    @cache()
+    def _get_guide(cls, regex_string: str,
+                   tokenizer: PreTrainedTokenizerBase) -> Guide:
+        tokenizer = _adapt_tokenizer(tokenizer)
+        return RegexGuide.from_regex(regex_string, tokenizer)
 
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the regex-structured generation.
@@ -73,17 +124,15 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        tokenizer = _adapt_tokenizer(tokenizer)
-        fsm = RegexFSM(regex_string, tokenizer)
-        self.fsm = fsm
+        super().__init__(
+            RegexLogitsProcessor._get_guide(regex_string, tokenizer))
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
-    def __init__(self,
-                 schema: Union[str, Dict, BaseModel],
+    def __init__(self, schema: Union[str, Dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
-                 whitespace_pattern: Optional[str] = None):
+                 whitespace_pattern: Union[str, None]):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
@@ -116,6 +165,12 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
 
 class CFGLogitsProcessor(BaseLogitsProcessor):
 
+    @classmethod
+    @cache()
+    def _get_guide(cls, cfg: str, tokenizer: PreTrainedTokenizerBase) -> Guide:
+        tokenizer = _adapt_tokenizer(tokenizer)
+        return CFGGuide(cfg, tokenizer)
+
     def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the context free grammar generation.
 
@@ -127,17 +182,11 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        tokenizer = _adapt_tokenizer(tokenizer)
-        fsm = CFGFSM(cfg, tokenizer)
-        self.fsm = fsm
-
-    def init_state(self):
-        """Initialize state with a CFGFSM copy."""
-        super().init_state()
-        self.fsm = self.fsm.copy()
+        super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer))
+        self._guide = self._guide.copy()
 
 
-@lru_cache
+@lru_cache(maxsize=32)
 def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
     """Adapt vLLM's tokenizer to use to compile the FSM.
 
@@ -163,7 +212,8 @@ def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
         string = tokenizer.convert_tokens_to_string([token])
 
         # A hack to handle missing spaces to HF's Llama tokenizers
-        if token.startswith(SPIECE_UNDERLINE) or token == "<0x20>":
+        if (type(token) is str and token.startswith(SPIECE_UNDERLINE)
+                or token == "<0x20>"):
             return " " + string
 
         return string
@@ -174,6 +224,9 @@ def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
         """Sync vLLM's decoder with the outlines by returning list."""
 
         def new_decoder(inp_tokens: List[int]) -> List[str]:
+            if (isinstance(inp_tokens, list) and len(inp_tokens) == 1
+                    and isinstance(inp_tokens[0], list)):
+                inp_tokens = inp_tokens[0]
             return [decoder(inp_tokens)]
 
         return new_decoder

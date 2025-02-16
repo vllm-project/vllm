@@ -1,73 +1,149 @@
-# Adapted from
-# https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
+# SPDX-License-Identifier: Apache-2.0
 """Logging configuration for vLLM."""
 import datetime
+import json
 import logging
 import os
 import sys
-from functools import partial
-from typing import Optional
+from functools import lru_cache, partial
+from logging import Logger
+from logging.config import dictConfig
+from os import path
+from types import MethodType
+from typing import Any, Optional, cast
 
-VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
+import vllm.envs as envs
 
-_FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
+VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
+VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
+VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
+VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
+
+_FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
+           "%(filename)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
-
-class NewLineFormatter(logging.Formatter):
-    """Adds logging prefix to newlines to align multi-line messages."""
-
-    def __init__(self, fmt, datefmt=None):
-        logging.Formatter.__init__(self, fmt, datefmt)
-
-    def format(self, record):
-        msg = logging.Formatter.format(self, record)
-        if record.message != "":
-            parts = msg.split(record.message)
-            msg = msg.replace("\n", "\r\n" + parts[0])
-        return msg
-
-
-_root_logger = logging.getLogger("vllm")
-_default_handler: Optional[logging.Handler] = None
-
-
-def _setup_logger():
-    _root_logger.setLevel(logging.DEBUG)
-    global _default_handler
-    if _default_handler is None:
-        _default_handler = logging.StreamHandler(sys.stdout)
-        _default_handler.flush = sys.stdout.flush  # type: ignore
-        _default_handler.setLevel(logging.INFO)
-        _root_logger.addHandler(_default_handler)
-    fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
-    _default_handler.setFormatter(fmt)
-    # Setting this will avoid the message
-    # being propagated to the parent logger.
-    _root_logger.propagate = False
+DEFAULT_LOGGING_CONFIG = {
+    "formatters": {
+        "vllm": {
+            "class": "vllm.logging_utils.NewLineFormatter",
+            "datefmt": _DATE_FORMAT,
+            "format": _FORMAT,
+        },
+    },
+    "handlers": {
+        "vllm": {
+            "class": "logging.StreamHandler",
+            "formatter": "vllm",
+            "level": VLLM_LOGGING_LEVEL,
+            "stream": "ext://sys.stdout",
+        },
+    },
+    "loggers": {
+        "vllm": {
+            "handlers": ["vllm"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+    },
+    "version": 1,
+    "disable_existing_loggers": False
+}
 
 
-# The logger is initialized when the module is imported.
-# This is thread-safe as the module is only imported once,
-# guaranteed by the Python GIL.
-if VLLM_CONFIGURE_LOGGING:
-    _setup_logger()
+@lru_cache
+def _print_info_once(logger: Logger, msg: str) -> None:
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.info(msg, stacklevel=2)
 
 
-def init_logger(name: str):
-    # Use the same settings as above for root logger
-    logger = logging.getLogger(name)
-    logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
+@lru_cache
+def _print_warning_once(logger: Logger, msg: str) -> None:
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.warning(msg, stacklevel=2)
+
+
+class _VllmLogger(Logger):
+    """
+    Note:
+        This class is just to provide type information.
+        We actually patch the methods directly on the :class:`logging.Logger`
+        instance to avoid conflicting with other libraries such as
+        `intel_extension_for_pytorch.utils._logger`.
+    """
+
+    def info_once(self, msg: str) -> None:
+        """
+        As :meth:`info`, but subsequent calls with the same message
+        are silently dropped.
+        """
+        _print_info_once(self, msg)
+
+    def warning_once(self, msg: str) -> None:
+        """
+        As :meth:`warning`, but subsequent calls with the same message
+        are silently dropped.
+        """
+        _print_warning_once(self, msg)
+
+
+def _configure_vllm_root_logger() -> None:
+    logging_config = dict[str, Any]()
+
+    if not VLLM_CONFIGURE_LOGGING and VLLM_LOGGING_CONFIG_PATH:
+        raise RuntimeError(
+            "VLLM_CONFIGURE_LOGGING evaluated to false, but "
+            "VLLM_LOGGING_CONFIG_PATH was given. VLLM_LOGGING_CONFIG_PATH "
+            "implies VLLM_CONFIGURE_LOGGING. Please enable "
+            "VLLM_CONFIGURE_LOGGING or unset VLLM_LOGGING_CONFIG_PATH.")
 
     if VLLM_CONFIGURE_LOGGING:
-        if _default_handler is None:
-            raise ValueError(
-                "_default_handler is not set up. This should never happen!"
-                " Please open an issue on Github.")
-        logger.addHandler(_default_handler)
-        logger.propagate = False
-    return logger
+        logging_config = DEFAULT_LOGGING_CONFIG
 
+    if VLLM_LOGGING_CONFIG_PATH:
+        if not path.exists(VLLM_LOGGING_CONFIG_PATH):
+            raise RuntimeError(
+                "Could not load logging config. File does not exist: %s",
+                VLLM_LOGGING_CONFIG_PATH)
+        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
+            custom_config = json.loads(file.read())
+
+        if not isinstance(custom_config, dict):
+            raise ValueError("Invalid logging config. Expected Dict, got %s.",
+                             type(custom_config).__name__)
+        logging_config = custom_config
+
+    for formatter in logging_config.get("formatters", {}).values():
+        # This provides backwards compatibility after #10134.
+        if formatter.get("class") == "vllm.logging.NewLineFormatter":
+            formatter["class"] = "vllm.logging_utils.NewLineFormatter"
+
+    if logging_config:
+        dictConfig(logging_config)
+
+
+def init_logger(name: str) -> _VllmLogger:
+    """The main purpose of this function is to ensure that loggers are
+    retrieved in such a way that we can be sure the root vllm logger has
+    already been configured."""
+
+    logger = logging.getLogger(name)
+
+    methods_to_patch = {
+        "info_once": _print_info_once,
+        "warning_once": _print_warning_once,
+    }
+
+    for method_name, method in methods_to_patch.items():
+        setattr(logger, method_name, MethodType(method, logger))
+
+    return cast(_VllmLogger, logger)
+
+
+# The root logger is initialized when the module is imported.
+# This is thread-safe as the module is only imported once,
+# guaranteed by the Python GIL.
+_configure_vllm_root_logger()
 
 logger = init_logger(__name__)
 
@@ -94,13 +170,14 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
                 last_lineno = 0
                 last_func_name = ""
             with open(log_path, 'a') as f:
+                ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
                 if event == 'call':
-                    f.write(f"{datetime.datetime.now()} Call to"
+                    f.write(f"{ts} Call to"
                             f" {func_name} in {filename}:{lineno}"
                             f" from {last_func_name} in {last_filename}:"
                             f"{last_lineno}\n")
                 else:
-                    f.write(f"{datetime.datetime.now()} Return from"
+                    f.write(f"{ts} Return from"
                             f" {func_name} in {filename}:{lineno}"
                             f" to {last_func_name} in {last_filename}:"
                             f"{last_lineno}\n")

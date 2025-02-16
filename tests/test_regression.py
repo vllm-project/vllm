@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Containing tests that check for regressions in vLLM's behavior.
 
 It should include tests that are reported by users and making sure they
@@ -51,6 +52,27 @@ def test_gc():
     # Usually, it's around 10MB.
     allocated = torch.cuda.memory_allocated()
     assert allocated < 50 * 1024 * 1024
+
+
+def test_model_from_modelscope(monkeypatch):
+    # model: https://modelscope.cn/models/qwen/Qwen1.5-0.5B-Chat/summary
+    MODELSCOPE_MODEL_NAME = "qwen/Qwen1.5-0.5B-Chat"
+    monkeypatch.setenv("VLLM_USE_MODELSCOPE", "True")
+    try:
+        llm = LLM(model=MODELSCOPE_MODEL_NAME)
+
+        prompts = [
+            "Hello, my name is",
+            "The president of the United States is",
+            "The capital of France is",
+            "The future of AI is",
+        ]
+        sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+        outputs = llm.generate(prompts, sampling_params)
+        assert len(outputs) == 4
+    finally:
+        monkeypatch.delenv("VLLM_USE_MODELSCOPE", raising=False)
 
 
 if __name__ == "__main__":

@@ -2,8 +2,9 @@
 -r requirements-common.txt
 
 # Dependencies for NVIDIA GPUs
-ray >= 2.9
-nvidia-ml-py # for pynvml package
-vllm-nccl-cu12>=2.18,<2.19  # for downloading nccl library
-torch == 2.2.1
-xformers == 0.0.25  # Requires PyTorch 2.2.1
+ray[default] >= 2.9
+torch == 2.5.1
+torchaudio==2.5.1
+# These must be updated alongside torch
+torchvision == 0.20.1 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+xformers == 0.0.28.post3; platform_system == 'Linux' and platform_machine == 'x86_64'  # Requires PyTorch 2.5.1

@@ -1,19 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM when using beam search.
 
 Run `pytest tests/samplers/test_beam_search.py`.
 """
-import gc
 
 import pytest
-import torch
 
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.
 #   3. Use the model "huggyllama/llama-7b".
-MAX_TOKENS = [128]
+MAX_TOKENS = [64]
 BEAM_WIDTHS = [4]
-MODELS = ["facebook/opt-125m"]
+MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -30,23 +29,24 @@ def test_beam_search_single_input(
     beam_width: int,
 ) -> None:
     example_prompts = example_prompts[:1]
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width,
-                                               max_tokens)
-    del hf_model
-
-    vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.generate_beam_search(example_prompts, beam_width,
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width,
                                                    max_tokens)
-    del vllm_model
-    # NOTE(woosuk): For some reason, the following GC is required to avoid
-    # GPU OOM errors in the following tests using `vllm_runner`.
-    gc.collect()
-    torch.cuda.empty_cache()
+
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.generate_beam_search(example_prompts,
+                                                       beam_width, max_tokens)
 
     for i in range(len(example_prompts)):
-        hf_output_ids, _ = hf_outputs[i]
-        vllm_output_ids, _ = vllm_outputs[i]
+        hf_output_ids, hf_output_texts = hf_outputs[i]
+        vllm_output_ids, vllm_output_texts = vllm_outputs[i]
+        for i, (hf_text,
+                vllm_text) in enumerate(zip(hf_output_texts,
+                                            vllm_output_texts)):
+            print(f">>>{i}-th hf output:")
+            print(hf_text)
+            print(f">>>{i}-th vllm output:")
+            print(vllm_text)
         assert len(hf_output_ids) == len(vllm_output_ids)
         for j in range(len(hf_output_ids)):
             assert hf_output_ids[j] == vllm_output_ids[j], (

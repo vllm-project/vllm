@@ -1,9 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import List
 from typing import Sequence as GenericSequence
+from typing import Tuple
 
 from vllm.sequence import Sequence, SequenceGroup
+from vllm.utils import Device
 
 
 class AllocStatus(enum.Enum):
@@ -26,18 +30,21 @@ class BlockSpaceManager(ABC):
     def get_block_space_manager_class(version: str):
         version = version.lower()
 
-        if version == "v1":
-            from vllm.core.block_manager_v1 import BlockSpaceManagerV1
-            return BlockSpaceManagerV1
+        if version == "selfattn":
+            from vllm.core.block_manager import SelfAttnBlockSpaceManager
+            return SelfAttnBlockSpaceManager
 
-        if version == "v2":
-            from vllm.core.block_manager_v2 import BlockSpaceManagerV2
-            return BlockSpaceManagerV2
+        if version == "placeholder":
+            from vllm.core.placeholder_block_space_manager import (
+                PlaceholderBlockSpaceManager)
+            return PlaceholderBlockSpaceManager
 
         raise ValueError(f"Unknown version {version=}")
 
     @abstractmethod
-    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
+    def can_allocate(self,
+                     seq_group: SequenceGroup,
+                     num_lookahead_slots: int = 0) -> AllocStatus:
         pass
 
     @abstractmethod
@@ -54,7 +61,7 @@ class BlockSpaceManager(ABC):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> Dict[int, List[int]]:
+    ) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -63,12 +70,11 @@ class BlockSpaceManager(ABC):
 
     @abstractmethod
     def can_swap_in(self, seq_group: SequenceGroup,
-                    num_lookahead_slots: int) -> bool:
+                    num_lookahead_slots: int) -> AllocStatus:
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> Dict[int, int]:
+    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -76,7 +82,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -109,5 +115,20 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
+        pass
+
+    @abstractmethod
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
+        pass
+
+    @abstractmethod
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache for all devices."""
+        pass
+
+    @abstractmethod
+    def get_num_cached_tokens(self, seq: Sequence) -> int:
         pass

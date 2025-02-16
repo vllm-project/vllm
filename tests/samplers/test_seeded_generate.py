@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Verify that seeded random sampling is deterministic.
 
 Run `pytest tests/samplers/test_seeded_generate.py`.
@@ -17,9 +18,8 @@ RANDOM_SEEDS = list(range(5))
 
 @pytest.fixture
 def vllm_model(vllm_runner):
-    vllm_model = vllm_runner(MODEL, dtype="half")
-    yield vllm_model
-    del vllm_model
+    with vllm_runner(MODEL, dtype="half") as vllm_model:
+        yield vllm_model
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
@@ -32,7 +32,7 @@ def test_random_sample_with_seed(
 
     sampling_params = SamplingParams(
         # Parameters to ensure sufficient randomness
-        temperature=2.0,
+        temperature=3.0,
         top_p=min(random.random() + 0.3, 1),
         top_k=random.randint(5, 20),
         n=random.randint(1, 10),
@@ -57,11 +57,7 @@ def test_random_sample_with_seed(
                 sampling_params_seed_1,
                 sampling_params_seed_2,
         ):
-            llm._add_request(
-                prompt=prompt,
-                prompt_token_ids=None,
-                sampling_params=params,
-            )
+            llm._add_request(prompt, params=params)
 
     results = llm._run_engine(use_tqdm=False)
     all_outputs = [[out.token_ids for out in output.outputs]
@@ -80,3 +76,8 @@ def test_random_sample_with_seed(
         # verify requests with the same seed match
         assert outputs[1] == outputs[4]
         assert outputs[2] == outputs[5]
+
+        # verify generations within the same parallel sampling group differ
+        for output in outputs:
+            for sub_output_a, sub_output_b in combinations(output, 2):
+                assert sub_output_a != sub_output_b

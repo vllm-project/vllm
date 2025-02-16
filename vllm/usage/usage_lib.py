@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import datetime
 import json
 import logging
@@ -7,7 +9,7 @@ import time
 from enum import Enum
 from pathlib import Path
 from threading import Thread
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 from uuid import uuid4
 
 import cpuinfo
@@ -15,20 +17,41 @@ import psutil
 import requests
 import torch
 
-_config_home = os.getenv("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-_USAGE_STATS_JSON_PATH = os.path.join(_config_home, "vllm/usage_stats.json")
-_USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home,
-                                              "vllm/do_not_track")
+import vllm.envs as envs
+from vllm.connections import global_http_connection
+from vllm.version import __version__ as VLLM_VERSION
+
+_config_home = envs.VLLM_CONFIG_ROOT
+_USAGE_STATS_JSON_PATH = os.path.join(_config_home, "usage_stats.json")
+_USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home, "do_not_track")
 _USAGE_STATS_ENABLED = None
-_USAGE_STATS_SERVER = os.environ.get("VLLM_USAGE_STATS_SERVER",
-                                     "https://stats.vllm.ai")
+_USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
+
+_GLOBAL_RUNTIME_DATA: Dict[str, Union[str, int, bool]] = {}
+
+_USAGE_ENV_VARS_TO_COLLECT = [
+    "VLLM_USE_MODELSCOPE",
+    "VLLM_USE_TRITON_FLASH_ATTN",
+    "VLLM_ATTENTION_BACKEND",
+    "VLLM_USE_FLASHINFER_SAMPLER",
+    "VLLM_PP_LAYER_PARTITION",
+    "VLLM_USE_TRITON_AWQ",
+    "VLLM_USE_V1",
+    "VLLM_ENABLE_V1_MULTIPROCESSING",
+]
+
+
+def set_runtime_usage_data(key: str, value: Union[str, int, bool]) -> None:
+    """Set global usage data that will be sent with every usage heartbeat."""
+    _GLOBAL_RUNTIME_DATA[key] = value
 
 
 def is_usage_stats_enabled():
     """Determine whether or not we can send usage stats to the server.
     The logic is as follows:
     - By default, it should be enabled.
-    - Two environment variables can disable it:
+    - Three environment variables can disable it:
+        - VLLM_DO_NOT_TRACK=1
         - DO_NOT_TRACK=1
         - VLLM_NO_USAGE_STATS=1
     - A file in the home directory can disable it if it exists:
@@ -36,8 +59,8 @@ def is_usage_stats_enabled():
     """
     global _USAGE_STATS_ENABLED
     if _USAGE_STATS_ENABLED is None:
-        do_not_track = os.environ.get("DO_NOT_TRACK", "0") == "1"
-        no_usage_stats = os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1"
+        do_not_track = envs.VLLM_DO_NOT_TRACK
+        no_usage_stats = envs.VLLM_NO_USAGE_STATS
         do_not_track_file = os.path.exists(_USAGE_STATS_DO_NOT_TRACK_PATH)
 
         _USAGE_STATS_ENABLED = not (do_not_track or no_usage_stats
@@ -88,6 +111,7 @@ class UsageContext(str, Enum):
     LLM_CLASS = "LLM_CLASS"
     API_SERVER = "API_SERVER"
     OPENAI_API_SERVER = "OPENAI_API_SERVER"
+    OPENAI_BATCH_RUNNER = "OPENAI_BATCH_RUNNER"
     ENGINE_CONTEXT = "ENGINE_CONTEXT"
 
 
@@ -108,9 +132,11 @@ class UsageMessage:
         self.total_memory: Optional[int] = None
         self.architecture: Optional[str] = None
         self.platform: Optional[str] = None
+        self.cuda_runtime: Optional[str] = None
         self.gpu_count: Optional[int] = None
         self.gpu_type: Optional[str] = None
         self.gpu_memory_per_device: Optional[int] = None
+        self.env_var_json: Optional[str] = None
 
         # vLLM Information
         self.model_architecture: Optional[str] = None
@@ -140,11 +166,14 @@ class UsageMessage:
                            usage_context: UsageContext,
                            extra_kvs: Dict[str, Any]) -> None:
         # Platform information
-        if torch.cuda.is_available():
+        from vllm.platforms import current_platform
+        if current_platform.is_cuda_alike():
             device_property = torch.cuda.get_device_properties(0)
             self.gpu_count = torch.cuda.device_count()
             self.gpu_type = device_property.name
             self.gpu_memory_per_device = device_property.total_memory
+        if current_platform.is_cuda():
+            self.cuda_runtime = torch.version.cuda
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
@@ -160,14 +189,19 @@ class UsageMessage:
         ])
 
         # vLLM information
-        import vllm  # delayed import to prevent circular import
         self.context = usage_context.value
-        self.vllm_version = vllm.__version__
+        self.vllm_version = VLLM_VERSION
         self.model_architecture = model_architecture
+
+        # Environment variables
+        self.env_var_json = json.dumps({
+            env_var: getattr(envs, env_var)
+            for env_var in _USAGE_ENV_VARS_TO_COLLECT
+        })
 
         # Metadata
         self.log_time = _get_current_timestamp_ns()
-        self.source = os.environ.get("VLLM_USAGE_SOURCE", "production")
+        self.source = envs.VLLM_USAGE_SOURCE
 
         data = vars(self)
         if extra_kvs:
@@ -184,19 +218,24 @@ class UsageMessage:
         """
         while True:
             time.sleep(600)
-            data = {"uuid": self.uuid, "log_time": _get_current_timestamp_ns()}
+            data = {
+                "uuid": self.uuid,
+                "log_time": _get_current_timestamp_ns(),
+            }
+            data.update(_GLOBAL_RUNTIME_DATA)
 
             self._write_to_file(data)
             self._send_to_server(data)
 
-    def _send_to_server(self, data):
+    def _send_to_server(self, data: Dict[str, Any]) -> None:
         try:
-            requests.post(_USAGE_STATS_SERVER, json=data)
+            global_http_client = global_http_connection.get_sync_client()
+            global_http_client.post(_USAGE_STATS_SERVER, json=data)
         except requests.exceptions.RequestException:
             # silently ignore unless we are using debug log
             logging.debug("Failed to send usage data to server")
 
-    def _write_to_file(self, data):
+    def _write_to_file(self, data: Dict[str, Any]) -> None:
         os.makedirs(os.path.dirname(_USAGE_STATS_JSON_PATH), exist_ok=True)
         Path(_USAGE_STATS_JSON_PATH).touch(exist_ok=True)
         with open(_USAGE_STATS_JSON_PATH, "a") as f:
