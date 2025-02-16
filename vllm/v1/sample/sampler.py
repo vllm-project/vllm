@@ -47,10 +47,10 @@ class Sampler(nn.Module):
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
+        # Apply allowed token ids.
+        logits = self.apply_allowed_token_ids(logits, sampling_metadata)
         # Apply logits bias.
         logits = self.apply_logits_bias(logits, sampling_metadata)
-        # Apply allowed toekn ids.
-        logits = self.apply_allowed_token_ids(logits, sampling_metadata)
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
         # Apply temperature.
@@ -60,8 +60,9 @@ class Sampler(nn.Module):
 
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
-        logprobs_tensors = None if num_logprobs is None else \
-            self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+        logprobs_tensors = (None
+                            if num_logprobs is None else self.gather_logprobs(
+                                raw_logprobs, num_logprobs, token_ids=sampled))
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -183,17 +184,22 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        apply_min_token_penalties(logits, sampling_metadata.output_token_ids,
-                                  sampling_metadata.stop_token_ids,
-                                  sampling_metadata.min_tokens)
+        apply_min_token_penalties(
+            logits,
+            sampling_metadata.output_token_ids,
+            sampling_metadata.stop_token_ids,
+            sampling_metadata.min_tokens,
+        )
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
             logits = apply_all_penalties(
-                logits, sampling_metadata.prompt_token_ids,
+                logits,
+                sampling_metadata.prompt_token_ids,
                 sampling_metadata.presence_penalties,
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
-                sampling_metadata.output_token_ids)
+                sampling_metadata.output_token_ids,
+            )
         return logits
 
     def apply_min_p(
@@ -232,7 +238,6 @@ class Sampler(nn.Module):
                     logits[i, token_id] += bias
         return logits
 
-
     def apply_allowed_token_ids(
         self,
         logits: torch.Tensor,
@@ -240,6 +245,9 @@ class Sampler(nn.Module):
     ) -> torch.Tensor:
         # One idea is implement this as a PyTorch C++ op, and we may
         # even optimize the logit_bias layout.
-        for i, allowed_token_ids in enumerate(sampling_metadata.has_allowed_token_ids):
+        for i, allowed_token_ids in enumerate(
+                sampling_metadata.has_allowed_token_ids):
             if allowed_token_ids:
-                logits[i].masked_fill_(sampling_metadata.allowed_token_ids_mask[i], float("-inf"))
+                logits[i].masked_fill_(
+                    sampling_metadata.allowed_token_ids_mask[i], float("-inf"))
+        return logits
