@@ -12,11 +12,15 @@ class SamplingMetadata:
     temperature: torch.Tensor
     all_greedy: bool
     all_random: bool
+    rejection_sampling: bool
+    spec_token_ids: List[List[int]]
 
     top_p: torch.Tensor
     top_k: torch.Tensor
     no_top_p: bool
     no_top_k: bool
+    min_p: torch.Tensor
+    no_min_p: bool
 
     generators: Dict[int, torch.Generator]
 
@@ -32,3 +36,5 @@ class SamplingMetadata:
     output_token_ids: List[List[int]]
     min_tokens: List[int]
     stop_token_ids: List[Set[int]]
+
+    logit_bias: List[Optional[Dict[int, float]]]
