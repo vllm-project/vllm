@@ -277,6 +277,7 @@ def _compare_tp(
         text_overrides = {
             "num_layers": 1,
             "num_hidden_layers": 1,
+            "num_attention_heads": tp_size * pp_size,
             "num_experts": 2,
             "num_experts_per_tok": 2,
             "num_local_experts": 2,
@@ -307,8 +308,7 @@ def _compare_tp(
         "8",
     ]
     if chunked_prefill:
-        common_args.extend(
-            ["--enable-chunked-prefill", "--disable-sliding-window"])
+        common_args.append("--enable-chunked-prefill")
     if eager_mode:
         common_args.append("--enforce-eager")
     if task != "auto":
