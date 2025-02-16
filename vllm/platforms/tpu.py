@@ -115,3 +115,7 @@ class TpuPlatform(Platform):
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on TPU.")
         return False
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.tpu_communicator.TpuCommunicator"  # noqa

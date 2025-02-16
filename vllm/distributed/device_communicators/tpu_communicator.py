@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from typing import Optional
 
 import torch
-import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.platforms import current_platform
+
+from .base_device_communicator import DeviceCommunicatorBase
 
 if current_platform.is_tpu():
     import torch_xla.core.xla_model as xm
@@ -16,19 +18,20 @@ if current_platform.is_tpu():
     from vllm.executor import ray_utils
 
 
-class TpuCommunicator:
+class TpuCommunicator(DeviceCommunicatorBase):
 
-    def __init__(self, group: ProcessGroup):
-        if not current_platform.is_tpu():
-            self.disabled = True
-            return
-        self.disabled = False
+    def __init__(self,
+                 cpu_group: ProcessGroup,
+                 device: Optional[torch.device] = None,
+                 device_group: Optional[ProcessGroup] = None,
+                 unique_name: str = ""):
+        super().__init__(cpu_group, device, device_group, unique_name)
 
         # NOTE(woosuk): When using TP > 1 on TPUs, every TPU on the same node
         # must be used together. Therefore, the local rank and world size can
         # be simply calculated as follows.
-        global_rank = dist.get_rank(group)
-        global_world_size = dist.get_world_size(group)
+        global_rank = self.global_rank
+        global_world_size = self.global_world_size
 
         # Calculate how many TPU nodes are in the current deployment. This
         # is the Ray placement group if it is deployed with Ray. Default
@@ -55,9 +58,9 @@ class TpuCommunicator:
         pjrt.initialize_multiprocess(local_rank, local_world_size)
         xr._init_world_size_ordinal()
 
-    def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
-        return xm.all_reduce(xm.REDUCE_SUM, x)
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        return xm.all_reduce(xm.REDUCE_SUM, input_)
 
-    def all_gather(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         assert dim == -1, "TPUs only support dim=-1 for all-gather."
-        return xm.all_gather(x, dim=dim)
+        return xm.all_gather(input_, dim=dim)
