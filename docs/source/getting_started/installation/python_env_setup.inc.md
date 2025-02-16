@@ -2,8 +2,8 @@ You can create a new Python environment using `conda`:
 
 ```console
 # (Recommended) Create a new conda environment.
-conda create -n myenv python=3.12 -y
-conda activate myenv
+conda create -n vllm python=3.12 -y
+conda activate vllm
 ```
 
 :::{note}
@@ -14,6 +14,6 @@ Or you can create a new Python environment using [uv](https://docs.astral.sh/uv/
 
 ```console
 # (Recommended) Create a new uv environment. Use `--seed` to install `pip` and `setuptools` in the environment.
-uv venv myenv --python 3.12 --seed
-source myenv/bin/activate
+uv venv vllm --python 3.12 --seed
+source vllm/bin/activate
 ```
