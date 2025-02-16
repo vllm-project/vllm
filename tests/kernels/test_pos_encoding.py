@@ -70,7 +70,7 @@ def test_rotary_embedding(
     if rotary_dim is None:
         rotary_dim = head_size
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style)
-    rope = rope.to(dtype=dtype)
+    rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
     query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
@@ -125,7 +125,7 @@ def test_batched_rotary_embedding(
         "rope_type": "linear",
         "factor": (1, )
     })
-    rope = rope.to(dtype=dtype)
+    rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
     query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
@@ -184,7 +184,7 @@ def test_batched_rotary_embedding_multi_lora(
         "rope_type": "linear",
         "factor": tuple(scaling_factors)
     })
-    rope = rope.to(dtype=dtype)
+    rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
     query = torch.randn(batch_size,
