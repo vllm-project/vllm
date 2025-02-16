@@ -959,6 +959,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
         req_ids: List[str] = []
+        # Because `input_batch.req_ids` is a list of length `max_num_reqs`,
+        # we need to stop at `num_reqs`.
+        # FIXME(woosuk): This is hacky. Refactor.
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
             req_ids.append(req_id)
