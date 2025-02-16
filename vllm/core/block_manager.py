@@ -13,6 +13,7 @@ from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+from vllm.core.logger import logger
 
 SeqId = int
 EncoderSeqId = str
@@ -202,6 +203,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             assert encoder_seq is not None
             block_table = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
+            
+        # log the allocation with the logger
+        # Will include each sequence in the group and the request id
+        # need to save the allocated block for each sequence
+        for seq in waiting_seqs:
+            logger.debug(f"Allocated block for sequence {seq.seq_id} with request id {seq_group.request_id}")
+        
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
