@@ -275,6 +275,8 @@ def _compare_tp(
     if load_format == "dummy":
         # Avoid OOM
         text_overrides = {
+            "hidden_size": 512,
+            "intermediate_size": 800,
             "num_layers": 1,
             "num_hidden_layers": 1,
             "num_attention_heads": tp_size * pp_size,
