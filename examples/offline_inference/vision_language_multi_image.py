@@ -78,14 +78,13 @@ def load_deepseek_vl2(question: str, image_urls: List[str]):
 
 
 def load_h2ovl(question: str, image_urls: List[str]) -> ModelRequestData:
-    model_name = "h2oai/h2ovl-mississippi-2b"
+    model_name = "h2oai/h2ovl-mississippi-800m"
 
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
         max_model_len=8192,
         limit_mm_per_prompt={"image": len(image_urls)},
-        mm_processor_kwargs={"max_dynamic_patch": 4},
     )
 
     placeholders = "\n".join(f"Image-{i}: <image>\n"
@@ -99,7 +98,7 @@ def load_h2ovl(question: str, image_urls: List[str]) -> ModelRequestData:
                                            add_generation_prompt=True)
 
     # Stop tokens for H2OVL-Mississippi
-    # https://huggingface.co/h2oai/h2ovl-mississippi-2b
+    # https://huggingface.co/h2oai/h2ovl-mississippi-800m
     stop_token_ids = [tokenizer.eos_token_id]
 
     return ModelRequestData(

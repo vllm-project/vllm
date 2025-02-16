@@ -726,7 +726,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.
   *
   * ✅︎
-  * \*
+  * ✅︎\*
 - * `Idefics3ForConditionalGeneration`
   * Idefics3
   * T + I
@@ -869,7 +869,7 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{note}
-H2O-VL series models will be available in V1 once we support backends other than FlashAttention.
+`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
 :::
 
 :::{note}
