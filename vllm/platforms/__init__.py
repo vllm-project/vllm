@@ -33,12 +33,14 @@ def cuda_platform_plugin() -> Optional[str]:
     is_cuda = False
 
     try:
+        import torch
+
         from vllm.utils import import_pynvml
         pynvml = import_pynvml()
         pynvml.nvmlInit()
         try:
-            if pynvml.nvmlDeviceGetCount() > 0:
-                is_cuda = True
+            is_cuda = (pynvml.nvmlDeviceGetCount() > 0
+                       and torch.cuda.is_available())
         finally:
             pynvml.nvmlShutdown()
     except Exception as e:
