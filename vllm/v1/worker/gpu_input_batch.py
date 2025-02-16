@@ -11,6 +11,10 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.v1.sample.logits_processor import (LogitBiasLogitsProcessor,
+                                             LogitsProcessor,
+                                             MinPLogitsProcessor,
+                                             MinTokensLogitsProcessor)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable
 
@@ -122,16 +126,6 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
 
-        self.min_p = torch.empty((max_num_reqs, ),
-                                 dtype=torch.float32,
-                                 device=device)
-        self.min_p_cpu_tensor = torch.empty((max_num_reqs, ),
-                                            dtype=torch.float32,
-                                            device="cpu",
-                                            pin_memory=pin_memory)
-        self.min_p_cpu = self.min_p_cpu_tensor.numpy()
-        self.min_p_reqs: Set[str] = set()
-
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ),
                                                dtype=torch.float,
@@ -170,10 +164,6 @@ class InputBatch:
                 self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: Set[str] = set()
 
-        self.min_tokens: List[int] = [0] * max_num_reqs
-        self.stop_token_ids: List[Set[int]] = [
-            set() for _ in range(max_num_reqs)
-        ]
         self.prompt_token_ids: Optional[torch.Tensor] = None
 
         # lora related
@@ -192,14 +182,21 @@ class InputBatch:
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: Dict[str, int] = {}
 
-        self.logit_bias: List[Optional[Dict[int,
-                                            float]]] = [None] * max_num_reqs
+        self.logit_procs: List[LogitsProcessor] = [
+            MinTokensLogitsProcessor(pin_memory=pin_memory, device=device),
+            LogitBiasLogitsProcessor(pin_memory=pin_memory, device=device),
+        ]
+        self.nongreedy_logits_procs: List[LogitsProcessor] = [
+            MinPLogitsProcessor(pin_memory=pin_memory,
+                                device=device,
+                                max_num_reqs=max_num_reqs)
+        ]
 
     def add_request(
         self,
         request: "CachedRequestState",
         req_index: Optional[int] = None,
-    ) -> None:
+    ) -> int:
         if req_index is None:
             req_index = self.num_reqs
         assert req_index < self.max_num_reqs
@@ -235,11 +232,8 @@ class InputBatch:
         self.top_k_cpu[req_index] = sampling_params.top_k
         if sampling_params.top_k > 0:
             self.top_k_reqs.add(req_id)
-        self.min_p_cpu[req_index] = sampling_params.min_p
         self.frequency_penalties_cpu[
             req_index] = sampling_params.frequency_penalty
-        if sampling_params.min_p > _SAMPLING_EPS:
-            self.min_p_reqs.add(req_id)
         if sampling_params.frequency_penalty != 0.0:
             self.frequency_penalties_reqs.add(req_id)
         self.presence_penalties_cpu[
@@ -250,8 +244,6 @@ class InputBatch:
             req_index] = sampling_params.repetition_penalty
         if sampling_params.repetition_penalty != 1.0:
             self.repetition_penalties_reqs.add(req_id)
-        self.min_tokens[req_index] = sampling_params.min_tokens
-        self.stop_token_ids[req_index] = sampling_params.all_stop_token_ids
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -262,8 +254,6 @@ class InputBatch:
             self.num_logprobs[req_id] = sampling_params.logprobs
         if sampling_params.prompt_logprobs is not None:
             self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
-        if sampling_params.logit_bias is not None:
-            self.logit_bias[req_index] = sampling_params.logit_bias
 
         # Add request lora ID
         if request.lora_request:
@@ -278,6 +268,8 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
+        return req_index
+
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
@@ -288,7 +280,6 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
-        self.min_p_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -305,7 +296,6 @@ class InputBatch:
                 self.lora_id_to_lora_request.pop(lora_id)
             self.request_lora_mapping[req_index] = 0
 
-        self.logit_bias[req_index] = None
         return req_index
 
     def clear(self) -> None:
@@ -315,7 +305,6 @@ class InputBatch:
         self.random_reqs.clear()
         self.top_p_reqs.clear()
         self.top_k_reqs.clear()
-        self.min_p_reqs.clear()
         self.frequency_penalties_reqs.clear()
         self.presence_penalties_reqs.clear()
         self.repetition_penalties_reqs.clear()
@@ -325,16 +314,16 @@ class InputBatch:
         self.request_lora_mapping.fill(0)
         self.lora_id_to_lora_request.clear()
         self.lora_id_to_request_ids.clear()
-        self.logit_bias = [None] * self.max_num_reqs
 
-    def condense(self, empty_req_indices: List[int]) -> None:
+    def condense(self, empty_req_indices: List[int]) -> List[Tuple[int, int]]:
         if self.num_reqs == 0:
             # The batched states are empty.
-            return
+            return []
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
         # is sorted in descending order.
         last_req_index = self.num_reqs + len(empty_req_indices) - 1
+        swaps = []
         while empty_req_indices:
             # Find the largest non-empty index.
             while last_req_index in empty_req_indices:
@@ -346,6 +335,7 @@ class InputBatch:
                 break
 
             # Swap the states.
+            swaps.append((last_req_index, empty_index))
             req_id = self.req_ids[last_req_index]
             assert req_id is not None
             self.req_ids[empty_index] = req_id
@@ -371,10 +361,6 @@ class InputBatch:
                 empty_index] = self.presence_penalties_cpu[last_req_index]
             self.repetition_penalties_cpu[
                 empty_index] = self.repetition_penalties_cpu[last_req_index]
-            self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
-            self.min_tokens[empty_index] = self.min_tokens[last_req_index]
-            self.stop_token_ids[empty_index] = self.stop_token_ids[
-                last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -382,10 +368,10 @@ class InputBatch:
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
                 last_req_index]
 
-            self.logit_bias[empty_index] = self.logit_bias[last_req_index]
-
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
+
+        return swaps
 
     def make_sampling_metadata(
         self,
@@ -400,8 +386,6 @@ class InputBatch:
                 self.top_p_cpu_tensor[:self.num_reqs], non_blocking=True)
             self.top_k[:self.num_reqs].copy_(
                 self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
-            self.min_p[:self.num_reqs].copy_(
-                self.min_p_cpu_tensor[:self.num_reqs], non_blocking=True)
             if not self.no_penalties:
                 # Since syncing these tensors is expensive only copy them
                 # if necessary i.e. if there are requests which require
@@ -450,8 +434,6 @@ class InputBatch:
             rejection_sampling=rejection_sampling,
             top_p=self.top_p[:self.num_reqs],
             top_k=self.top_k[:self.num_reqs],
-            min_p=self.min_p[:self.num_reqs],
-            no_min_p=self.no_min_p,
             no_top_p=self.no_top_p,
             no_top_k=self.no_top_k,
             generators=self.generators,
@@ -462,10 +444,9 @@ class InputBatch:
             repetition_penalties=self.repetition_penalties[:self.num_reqs],
             output_token_ids=output_token_ids,
             spec_token_ids=spec_token_ids,
-            min_tokens=self.min_tokens[:self.num_reqs],
-            stop_token_ids=self.stop_token_ids[:self.num_reqs],
             no_penalties=self.no_penalties,
-            logit_bias=self.logit_bias[:self.num_reqs],
+            logits_procs=self.logit_procs,
+            nongreedy_logits_procs=self.nongreedy_logits_procs,
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
@@ -528,10 +509,6 @@ class InputBatch:
     @property
     def no_top_k(self) -> bool:
         return len(self.top_k_reqs) == 0
-
-    @property
-    def no_min_p(self) -> bool:
-        return len(self.min_p_reqs) == 0
 
     @property
     def no_penalties(self) -> bool:
