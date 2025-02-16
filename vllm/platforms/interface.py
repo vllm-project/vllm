@@ -37,6 +37,7 @@ class _Backend(enum.Enum):
     TRITON_MLA = enum.auto()
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
+    PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
