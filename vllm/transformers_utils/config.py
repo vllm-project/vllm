@@ -115,7 +115,7 @@ def list_repo_files(
     token: Union[str, bool, None] = None,
 ) -> list[str]:
 
-    def lookup_files():
+    def lookup_files() -> list[str]:
         # directly list files if model is local
         if (local_path := Path(repo_id)).exists():
             return [
