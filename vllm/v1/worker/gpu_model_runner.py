@@ -1327,6 +1327,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def capture_model(self) -> None:
+        if self.use_spec_decode:
+            # Trigger Numba JIT compilation for N-gram proposer.
+            self.drafter.propose(
+                np.empty(1024, dtype=np.int32),
+                self.speculative_config.ngram_prompt_lookup_min,
+                self.speculative_config.num_speculative_tokens,
+            )
+
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. Please add "
