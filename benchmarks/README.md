@@ -30,18 +30,20 @@ wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_f
 
 # Downloading and using the LongBench dataset
 
-To download the configuration for system prompts used for each dataset: 
+To download the configuration for system prompts used for each dataset:
 
 ```
 wget https://raw.githubusercontent.com/THUDM/LongBench/refs/heads/main/LongBench/config/dataset2prompt.json
 ```
 
 To download the configuration for the max length limited for each dataset:
+
 ```
 wget https://raw.githubusercontent.com/THUDM/LongBench/refs/heads/main/LongBench/config/dataset2maxlen.json
 ```
 
-An example command to run benchmark_serving.py with LongBench dataset: 
+An example command to run benchmark_serving.py with LongBench dataset:
+
 ```
 python benchmarks/benchmark_serving.py \
     --backend vllm \
