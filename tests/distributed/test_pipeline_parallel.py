@@ -275,11 +275,11 @@ def _compare_tp(
     if load_format == "dummy":
         # Avoid OOM
         text_overrides = {
-            "num_layers": 1,
-            "num_hidden_layers": 1,
-            "num_experts": 2,
-            "num_experts_per_tok": 2,
-            "num_local_experts": 2,
+            "num_hidden_layers": 4,
+            "hidden_size": 512,
+            "intermediate_size": 800,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
         }
 
         if is_multimodal:
