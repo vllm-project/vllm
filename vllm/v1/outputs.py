@@ -43,7 +43,10 @@ class LogprobsTensors(NamedTuple):
 @dataclass
 class SamplerOutput:
 
-    # [num_reqs]
+    # [num_reqs, max_num_generated_tokens]
+    # Different requests can have different number of generated tokens.
+    # All requests are padded to max_num_generated_tokens.
+    # INVALID_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: Optional[LogprobsTensors]
 
@@ -58,8 +61,11 @@ class ModelRunnerOutput:
     # req_id -> index
     req_id_to_index: Dict[str, int]
 
-    # [num_reqs]
-    sampled_token_ids: List[int]
+    # num_reqs x num_generated_tokens
+    # num_generated_tokens is the number of tokens
+    # generated in the current step. It can be different for
+    # each request due to speculative/jump decoding.
+    sampled_token_ids: List[List[int]]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]

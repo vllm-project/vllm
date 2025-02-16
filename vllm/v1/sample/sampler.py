@@ -9,6 +9,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.penalties import (apply_all_penalties,
                                           apply_min_token_penalties)
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+from vllm.v1.sample.rejection_sampler import RejectionSampler
 
 _SAMPLING_EPS = 1e-5
 
@@ -18,12 +19,21 @@ class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
+        self.rejection_sampler = RejectionSampler()
 
     def forward(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
+        if sampling_metadata.rejection_sampling:
+            if sampling_metadata.max_num_logprobs:
+                raise NotImplementedError(
+                    "Rejection sampling does not support logprobs.")
+            return self.rejection_sampler(
+                logits,
+                sampling_metadata,
+            )
 
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
@@ -54,7 +64,10 @@ class Sampler(nn.Module):
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
-            sampled_token_ids=sampled,
+            # The sampled tokens are expanded to 2D tensor with shape
+            # [num_requests, 1], where each row represents one generated
+            # token per request.
+            sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
         )
         return sampler_output
