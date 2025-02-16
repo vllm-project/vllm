@@ -273,7 +273,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
         seq_lens: List[Tuple[int, int]], num_heads: Tuple[int, int],
         head_size: int, dtype: torch.dtype, block_size: int,
         soft_cap: Optional[float]) -> None:
-    pytest.skip("Need to add fp8 computation in ref_paged_attn")
+    pytest.skip("TODO: fix the accuracy issue")
     torch.set_default_device("cuda")
     current_platform.seed_everything(0)
     num_seqs = len(seq_lens)
@@ -385,7 +385,7 @@ def test_flashinfer_decode_with_paged_fp8_kv(
     block_size: int,
     soft_cap: Optional[float],
 ) -> None:
-    pytest.skip("Need to add fp8 computation in ref_paged_attn")
+    pytest.skip("TODO: fix the accuracy issue")
     # test doesn't work for num_heads = (16,16)
     torch.set_default_device("cuda")
     current_platform.seed_everything(0)
