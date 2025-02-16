@@ -58,6 +58,7 @@ class GPTQConfig(QuantizationConfig):
         #  r"+:.*\.(?:1[6-9]|20|21)\..*": {"bits": 8, "group_size": 64,},
         #  r"-:.*\.moe\..*": {}, # negative match (skip) all `moe` layers
         # }
+        super().__init__()
         self.dynamic = dynamic
 
         self.weight_bits = weight_bits

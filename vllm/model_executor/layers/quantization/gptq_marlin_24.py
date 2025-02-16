@@ -38,6 +38,7 @@ class GPTQMarlin24Config(QuantizationConfig):
         weight_bits: int,
         group_size: int,
     ) -> None:
+        super().__init__()
         quant_type = {
             4: scalar_types.uint4b8,
             8: scalar_types.uint8b128,

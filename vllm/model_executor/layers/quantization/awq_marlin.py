@@ -47,6 +47,7 @@ class AWQMarlinConfig(QuantizationConfig):
                  lm_head_quantized: bool,
                  modules_to_not_convert: Optional[List[str]],
                  full_config: Dict[str, Any]) -> None:
+        super().__init__()
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
         self.zero_point = zero_point

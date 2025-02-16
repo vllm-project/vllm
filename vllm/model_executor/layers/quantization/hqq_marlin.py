@@ -33,6 +33,7 @@ class HQQMarlinConfig(QuantizationConfig):
         group_size: int,
         skip_modules: Optional[List[str]] = None,
     ) -> None:
+        super().__init__()
         assert group_size == 64, ("The only supported HQQ group size is "
                                   "currently 64.")
         assert weight_bits == 4, ("The only supported HQQ quantization "
