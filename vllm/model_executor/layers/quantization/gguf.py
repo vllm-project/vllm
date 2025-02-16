@@ -20,7 +20,7 @@ class GGUFConfig(QuantizationConfig):
     """Config class for GGUF."""
 
     def __init__(self, ) -> None:
-        pass
+        super().__init__()
 
     def __repr__(self) -> str:
         return ("GGUFConfig()")

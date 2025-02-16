@@ -46,6 +46,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                  is_sym: bool, lm_head_quantized: bool,
                  dynamic: Dict[str, Dict[str, Union[int, bool]]],
                  full_config: Dict[str, Any]) -> None:
+        super().__init__()
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)

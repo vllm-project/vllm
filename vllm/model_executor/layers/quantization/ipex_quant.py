@@ -35,6 +35,7 @@ class IPEXConfig(QuantizationConfig):
         desc_act: Optional[bool] = None,
         lm_head_quantized: Optional[bool] = None,
     ) -> None:
+        super().__init__()
         self.method = method
         self.weight_bits = weight_bits
         self.group_size = group_size

@@ -24,6 +24,7 @@ class MoeWNA16Config(QuantizationConfig):
                  group_size: int, has_zp: bool, lm_head_quantized: bool,
                  modules_to_not_convert: Optional[List[str]],
                  full_config: Dict[str, Any]) -> None:
+        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.has_zp = has_zp
