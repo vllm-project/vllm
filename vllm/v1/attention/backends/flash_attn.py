@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -279,9 +280,10 @@ class FlashAttentionMetadataBuilder:
     def __init__(self, runner: "GPUModelRunner"):
         self.runner = runner
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return False
+    def reorder_batch(
+            self, input_batch: "InputBatch",
+            scheduler_output: "SchedulerOutput") -> Sequence[tuple[int, int]]:
+        return ()
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int):

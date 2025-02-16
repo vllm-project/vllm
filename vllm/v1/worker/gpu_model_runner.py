@@ -3,6 +3,7 @@
 import gc
 import time
 import weakref
+from itertools import chain
 from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
@@ -34,6 +35,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
+from vllm.v1.sample.logits_processor import BatchUpdate
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -443,6 +445,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
+        removed = removed_req_indices
+        added = []
         removed_req_indices = sorted(removed_req_indices, reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
@@ -452,11 +456,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 # Append to the end.
                 req_index = None
-            self.input_batch.add_request(req_state, req_index)
+            req_index = self.input_batch.add_request(req_state, req_index)
+            added.append((req_index, req_state.sampling_params,
+                          req_state.output_token_ids))
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
-            self.input_batch.condense(removed_req_indices)
+            moved = self.input_batch.condense(removed_req_indices)
+        else:
+            moved = []
+
+        # Some attention backends (namely MLA) may want to separate requests
+        # based on if the attention computation will be compute-bound or
+        # memory-bound. This gives them a hook to do that.
+        if swaps := self.attn_metadata_builder.reorder_batch(
+                self.input_batch, scheduler_output):
+            moved.extend(swaps)
+            batch_changed = True
+
+        # Update states of logits processors
+        batch_update = None if not batch_changed else BatchUpdate(
+            removed=removed,
+            moved=moved,
+            added=added,
+            batch_size=self.input_batch.num_reqs,
+        )
+
+        for processor in chain(self.input_batch.logit_procs,
+                               self.input_batch.nongreedy_logits_procs):
+            processor.update_states(batch_update)
 
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
@@ -470,14 +498,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
-        # Some attention backends (namely MLA) may want to separate requests
-        # based on if the attention computation will be compute-bound or
-        # memory-bound. This gives them a hook to do that.
-        modified_batch = self.attn_metadata_builder.reorder_batch(
-            self.input_batch, scheduler_output)
-        if modified_batch:
-            self.input_batch.refresh_sampling_metadata()
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -1468,7 +1488,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             all_random=False,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
-            min_p=None,
             generators={},
             max_num_logprobs=None,
             no_penalties=True,
@@ -1477,10 +1496,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             presence_penalties=dummy_tensors(0.1),
             repetition_penalties=dummy_tensors(0.1),
             output_token_ids=[[] for _ in range(num_reqs)],
-            min_tokens={},
-            logit_bias=[None for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
+            logits_procs=[],
+            nongreedy_logits_procs=[],
         )
         try:
             sampler_output = self.model.sample(
