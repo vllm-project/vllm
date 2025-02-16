@@ -362,6 +362,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_batch.token_ids_cpu[
                     req_index,
                     start_token_index:end_token_index] = new_token_ids
+                self.input_batch.num_tokens[req_index] += num_new_tokens
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
