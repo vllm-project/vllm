@@ -12,9 +12,10 @@ class ParallelSamplingRequestManager:
     
     Store parent request ID and sampling params.
     Facilitate generating child request sampling params.
+    Transform child request outputs into parent request
+    outputs.
     When stream mode is disabled, then `self.request_output`
-    aggregates child request completions & transforms them
-    into a parent request completion.
+    aggregates child request completions.
     """
 
     request_id: str

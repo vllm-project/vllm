@@ -244,7 +244,7 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
-    def _generate_parallel_sampling(
+    async def _generate_parallel_sampling(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -274,9 +274,11 @@ class AsyncLLM(EngineClient):
             gen = req_mgr.parallel_sampling_child_gen(child_gen, idx)
             gens.append(gen)
 
-        return merge_async_iterators(*gens)
+        # Merge generators
+        async for out in merge_async_iterators(*gens):
+            yield out[1]  # out[0] is index
 
-    async def generate(
+    def generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -288,7 +290,7 @@ class AsyncLLM(EngineClient):
     ) -> AsyncGenerator[RequestOutput, None]:
         n = sampling_params.n
         _generate  = self._generate if n is None or n == 1 \
-            else self._generate_parallel_sampling
+            else self._generate_parallel_sampling # handle parallel sampling
         return _generate(prompt, sampling_params, request_id, lora_request,
                          trace_headers, prompt_adapter_request, priority)
 
