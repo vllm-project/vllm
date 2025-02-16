@@ -307,7 +307,8 @@ def _compare_tp(
         "8",
     ]
     if chunked_prefill:
-        common_args.append("--enable-chunked-prefill")
+        common_args.extend(
+            ["--enable-chunked-prefill", "--disable-sliding-window"])
     if eager_mode:
         common_args.append("--enforce-eager")
     if task != "auto":
