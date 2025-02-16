@@ -131,44 +131,6 @@ def sample_sharegpt_requests(
 
     return filtered_dataset
 
-def sample_longbench_requests(
-    dataset_name: str,
-    num_requests: int,
-    tokenizer: PreTrainedTokenizerBase,
-    dataset_to_prompt_path: str,
-    dataset_to_maxlen_path: str,
-    max_input_len: int) -> List[Tuple[str, int, int, None]]:
-    """Args:
-        dataset_name (str): The name of the LongBench dataset. 
-        num_requests (int): The number of requests to sample.
-        tokenizer (PreTrainedTokenizerBase): The tokenizer to use. 
-        dataset_to_prompt_path (str): The path to the dataset-to-prompt config.
-        dataset_to_maxlen_path (str): The path to the dataset-to-maxlen config.
-    """
-    # Load the dataset.
-    dataset = load_dataset("THUDM/LongBench", dataset_name, split="test")
-    dataset2prompt = json.load(open(dataset_to_prompt_path, "r"))
-    dataset2maxlen = json.load(open(dataset_to_maxlen_path, "r"))
-    processed_dataset = []
-    prompt_format = dataset2prompt[dataset_name]
-    max_output_len = dataset2maxlen[dataset_name]
-    # shuffle the dataset
-    dataset = dataset.shuffle(seed=42)
-    for i in range(min(len(dataset), num_requests)):
-        json_obj = dataset[i]
-        # Apply the prompt format to the json object.
-        prompt = prompt_format.format(**json_obj)
-        # Truncate the prompt if it is too long.
-        # Reference: https://github.com/THUDM/LongBench/blob/main/LongBench/pred.py#L62
-        tokenized_prompt = tokenizer(prompt, 
-                                     truncation=False, 
-                                     return_tensors="pt").input_ids[0]
-        if len(tokenized_prompt) > max_input_len:
-            half = max_input_len // 2
-            prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True) \
-                +tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
-        processed_dataset.append((prompt, len(tokenizer(prompt).input_ids), max_output_len, None))
-    return processed_dataset
 
 def sample_burstgpt_requests(
     dataset_path: str,
@@ -432,6 +394,50 @@ def sample_random_requests(
                                int(output_lens[i]), None))
 
     return input_requests
+
+
+def sample_longbench_requests(
+        dataset_name: str, num_requests: int,
+        tokenizer: PreTrainedTokenizerBase, dataset_to_prompt_path: str,
+        dataset_to_maxlen_path: str,
+        max_input_len: int) -> List[Tuple[str, int, int, None]]:
+    """Args:
+        dataset_name (str): The name of the LongBench dataset. 
+        num_requests (int): The number of requests to sample.
+        tokenizer (PreTrainedTokenizerBase): The tokenizer to use. 
+        dataset_to_prompt_path (str): The path to the dataset-to-prompt config.
+        dataset_to_maxlen_path (str): The path to the dataset-to-maxlen config.
+        max_input_len (int): The maximum input length.
+    """
+    # Load the dataset.
+    dataset = load_dataset("THUDM/LongBench", dataset_name, split="test")
+    with open(dataset_to_prompt_path, encoding='utf-8') as f:
+        dataset2prompt = json.load(f)
+    with open(dataset_to_maxlen_path, encoding='utf-8') as f:
+        dataset2maxlen = json.load(f)
+    processed_dataset = []
+    prompt_format = dataset2prompt[dataset_name]
+    max_output_len = dataset2maxlen[dataset_name]
+    # shuffle the dataset
+    dataset = dataset.shuffle(seed=42)
+    for i in range(min(len(dataset), num_requests)):
+        json_obj = dataset[i]
+        # Apply the prompt format to the json object.
+        prompt = prompt_format.format(**json_obj)
+        # Truncate the prompt if it is too long.
+        # Reference: https://github.com/THUDM/LongBench/blob/main/LongBench/pred.py#L62
+        tokenized_prompt = tokenizer(prompt,
+                                     truncation=False,
+                                     return_tensors="pt").input_ids[0]
+        if len(tokenized_prompt) > max_input_len:
+            half = max_input_len // 2
+            prompt = tokenizer.decode(tokenized_prompt[:half],
+                                      skip_special_tokens=True) + \
+                tokenizer.decode(tokenized_prompt[-half:],
+                                 skip_special_tokens=True)
+        processed_dataset.append(
+            (prompt, len(tokenizer(prompt).input_ids), max_output_len, None))
+    return processed_dataset
 
 
 async def get_request(
@@ -964,8 +970,7 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             dataset_to_prompt_path=args.dataset_to_prompt_path,
             dataset_to_maxlen_path=args.dataset_to_maxlen_path,
-            max_input_len=args.max_input_len
-        )
+            max_input_len=args.max_input_len)
 
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
@@ -1081,7 +1086,9 @@ if __name__ == "__main__":
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "longbench"],
+        choices=[
+            "sharegpt", "burstgpt", "sonnet", "random", "hf", "longbench"
+        ],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument("--dataset-path",
@@ -1324,12 +1331,15 @@ if __name__ == "__main__":
         "--dataset-to-prompt-path",
         type=str,
         default=None,
-        help="The config to specify the system prompt for each dataset in LongBench.")
+        help=
+        "The config to specify the system prompt for each dataset in LongBench."
+    )
     longbench_group.add_argument(
         "--dataset-to-maxlen-path",
         type=str,
         default=None,
-        help="The config to specify the max length for each dataset in LongBench.")
+        help=
+        "The config to specify the max length for each dataset in LongBench.")
     longbench_group.add_argument(
         "--longbench-dataset-name",
         type=str,
@@ -1366,6 +1376,5 @@ if __name__ == "__main__":
                         "launching the server. For each request, the "
                         "script chooses a LoRA module at random.")
 
-    
     args = parser.parse_args()
     main(args)
