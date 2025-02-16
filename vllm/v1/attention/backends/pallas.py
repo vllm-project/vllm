@@ -202,12 +202,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
             value_cache,
             attn_metadata.context_lens,
             attn_metadata.block_tables,
-            # TODO(xw32): set query_start_loc in attn_metadata.
             attn_metadata.query_start_loc,
-            # TODO(xw32): set num_seqs in attn_metadata.
             attn_metadata.num_seqs,
-            num_kv_pages_per_compute_block=128,
-            num_queries_per_compute_block=128,
+            num_kv_pages_per_block=16,
+            num_queries_per_block=128,
             use_kernel=True,
         )
 

@@ -108,17 +108,18 @@ class TPUModelRunner(ModelRunnerBase):
                                          device="cpu",
                                          pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
+        # xw32: slot_mapping maps a token to its position in the block (=block_numbers * self.block_size+block_offset)
         self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
                                             dtype=torch.int64,
                                             device="cpu",
                                             pin_memory=self.pin_memory)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
-        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+        self.query_start_loc_cpu = torch.zeros(self.max_num_tokens + 1,
                                                dtype=torch.int32,
                                                device="cpu",
                                                pin_memory=self.pin_memory)
         self.query_start_loc_np = self.query_start_loc_cpu.numpy()
-        self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
+        self.seq_lens_cpu = torch.zeros(self.max_num_tokens,
                                         dtype=torch.int32,
                                         device="cpu",
                                         pin_memory=self.pin_memory)
@@ -126,7 +127,8 @@ class TPUModelRunner(ModelRunnerBase):
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
 
-        
+
+        print(f'xw32 _prepare_inputs begins. {scheduler_output=}')
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -134,39 +136,44 @@ class TPUModelRunner(ModelRunnerBase):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
+        # xw32q: Do we need this?
         self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = []
-        max_num_scheduled_tokens = 0
+        num_scheduled_tokens_per_req = []
+        max_num_scheduled_tokens_all_reqs = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens.append(num_tokens)
-            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
+            # print(f'xw32 TPUModelRunner.prepare_input line148. {req_id=}, {num_tokens=}')
+            # xw32 TPUModelRunner.prepare_input line148. req_id='0', num_tokens=5
+            num_scheduled_tokens_per_req.append(num_tokens)
+            max_num_scheduled_tokens_all_reqs = max(max_num_scheduled_tokens_all_reqs,
                                            num_tokens)
-        num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
-        assert max_num_scheduled_tokens > 0
+        num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req, dtype=np.int32)
+        assert max_num_scheduled_tokens_all_reqs > 0
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         req_indices = np.repeat(self.arange_np[:num_reqs],
-                                num_scheduled_tokens)
+                                num_scheduled_tokens_per_req)
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         arange = np.concatenate(
-            [self.arange_np[:n] for n in num_scheduled_tokens])
+            [self.arange_np[:n] for n in num_scheduled_tokens_per_req])
         
         # Get positions.
         # TODO(xw32): add an example of the output positions_np.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
+        # print(f'xw32 TPUModelRunner.prepare_input. {total_num_scheduled_tokens=}, {self.input_batch.num_computed_tokens_cpu=}, {self.input_batch.num_reqs=}, {self.model_config.uses_mrope=}')
+        # xw32 TPUModelRunner.prepare_input. total_num_scheduled_tokens=5, self.input_batch.num_computed_tokens_cpu=array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=int32), self.input_batch.num_reqs=1, self.model_config.uses_mrope=False
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
         
-        # Do we need to check self.model_config.uses_mrope?
+        # xw32: Do we need to check self.model_config.uses_mrope?
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -174,9 +181,13 @@ class TPUModelRunner(ModelRunnerBase):
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
+        # print(f'xw32 TPUModelRunner.prepare_input line148. {positions_np=}, {req_indices=}, {self.input_batch.token_ids_cpu.shape=}, {token_indices}')
+        # xw32 TPUModelRunner.prepare_input line148. positions_np=array([0, 1, 2, 3, 4]), req_indices=array([0, 0, 0, 0, 0], dtype=int32), self.input_batch.token_ids_cpu.shape=(16, 512), [0 1 2 3 4]
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
+        
+        # print(f'xw32 TPUModelRunner.prepare_input line189 . {self.input_batch.token_ids_cpu_tensor=}') # prints a 2d tensor
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
@@ -201,32 +212,33 @@ class TPUModelRunner(ModelRunnerBase):
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
         
         # Prepare the attention metadata.
+        print(f'xw32 TPUModelRunner.prepare_input line214. {self.query_start_loc_np.shape=}')
         self.query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens,
+        np.cumsum(num_scheduled_tokens_per_req,
                   out=self.query_start_loc_np[1:num_reqs + 1])
         
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens)
-        max_seq_len = self.seq_lens_np[:num_reqs].max()
+            num_scheduled_tokens_per_req)
 
         # Copy the tensors to the TPU.
-        input_ids = self.input_ids[:total_num_scheduled_tokens].to(self.device)
-        position_ids = self.positions[:total_num_scheduled_tokens].to(self.device)
-        query_start_loc = self.query_start_loc_cpu.to(self.device)
-        seq_lens = self.seq_lens_cpu.to(self.device)
+        self.input_ids = self.input_ids[:total_num_scheduled_tokens].to(self.device)
+        self.position_ids = self.positions[:total_num_scheduled_tokens].to(self.device)
+        query_start_loc = self.query_start_loc_cpu[:total_num_scheduled_tokens+1].to(self.device)
+        seq_lens = self.seq_lens_cpu[:total_num_scheduled_tokens].to(self.device)
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(self.device)
+        print(f'xw32 TPUModelRunner.prepare_input line230 . {self.input_batch.block_table.get_device_tensor().shape=}, {total_num_scheduled_tokens=}, {num_reqs=}')
 
         attn_metadata = PallasMetadata(
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            query_start_loc=query_start_loc,
-            max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
-            num_seqs=num_reqs,
-            block_table=(
-                self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=slot_mapping,
+            block_tables=(
+                self.input_batch.block_table.get_device_tensor()[:total_num_scheduled_tokens]),
+            context_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            num_seqs=num_reqs,
+            # num_actual_tokens=total_num_scheduled_tokens,
+            # max_query_len=max_num_scheduled_tokens,
+            # max_seq_len=max_seq_len,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -248,15 +260,11 @@ class TPUModelRunner(ModelRunnerBase):
         self.update_states(scheduler_output)
 
         # Prepare inputs
-        # prompt_data = self._prepare_prompt_inputs(scheduler_output)
-        # decode_data = self._prepare_decode_inputs(scheduler_output)
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         num_input_tokens = num_scheduled_tokens
-        attn_metadata.num_input_tokens = num_input_tokens
 
         input_ids = self.input_ids[:num_input_tokens]
-        inputs_embeds = None
 
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config): 
@@ -265,9 +273,11 @@ class TPUModelRunner(ModelRunnerBase):
                 token_ids=input_ids,
                 position_ids=positions,
                 kv_caches=self.kv_caches,
-                attn_metadata=None,
+                # xw32q: Why in gpu_model_runner.py, attn_metadata is None https://github.com/vllm-project/vllm/blob/46fe9b46d83e733130ce952eb3967a9c96713583/vllm/v1/worker/gpu_model_runner.py#L455?
+                attn_metadata=attn_metadata,
             )
 
+        # Then, let's update the cache state.
         num_reqs = self.input_batch.num_reqs
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             assert req_id is not None
@@ -282,6 +292,7 @@ class TPUModelRunner(ModelRunnerBase):
                 self.input_batch.num_tokens[i] += 1
                 req_state.output_token_ids.append(token_id)
             else:
+                # xw32q: what are these from gpu_model_runner.py? I don't understand.
                 # Ignore the sampled token from the partial request.
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
@@ -446,17 +457,6 @@ class TPUModelRunner(ModelRunnerBase):
         query_start_loc = torch.zeros(num_tokens+1, dtype=torch.int32, device=self.device)
         # how do I set torch._dynamo.mark_dynamic?
         # The attn_metadata is used in torch._dynamo.mark_dynamic.
-        # attn_metadata = PallasMetadata(
-        #    num_prefills=num_tokens,
-        #    num_prefill_tokens=num_tokens * seq_len,
-        #    num_decode_tokens=0,
-        #    slot_mapping=slot_mapping,
-        #    multi_modal_placeholder_index_maps=None,
-        #    enable_kv_scales_calculation=True,
-        #    block_tables=None,
-        #    context_lens=None,
-        #    effective_query_lens=None,
-        #)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -674,6 +674,7 @@ class ModelWrapperV1(nn.Module):
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it
             # work, we need to flatten the first three dimensions and modify
             # the slot_mapping accordingly.
+            # kv_caches: List[Tuple[torch.Tensor, torch.Tensor]]
             num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
             slot_mapping = attn_metadata.slot_mapping
             slot_mapping = slot_mapping.flatten()
