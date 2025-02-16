@@ -33,12 +33,19 @@ def cuda_platform_plugin() -> Optional[str]:
     is_cuda = False
 
     try:
+        from importlib.metadata import version
+
         from vllm.utils import import_pynvml
         pynvml = import_pynvml()
         pynvml.nvmlInit()
         try:
-            if pynvml.nvmlDeviceGetCount() > 0:
-                is_cuda = True
+            # NOTE: Edge case: vllm cpu build on a GPU machine.
+            # Third-party pynvml can be imported in cpu build,
+            # we need to check if vllm is built with cpu too.
+            # Otherwise, vllm will always activate cuda plugin
+            # on a GPU machine, even if in a cpu build.
+            is_cuda = (pynvml.nvmlDeviceGetCount() > 0
+                       and "cpu" not in version("vllm"))
         finally:
             pynvml.nvmlShutdown()
     except Exception as e:
