@@ -31,7 +31,6 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators
-from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = init_logger(__name__)
 

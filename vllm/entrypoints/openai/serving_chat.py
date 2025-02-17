@@ -37,7 +37,6 @@ from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                 truncate_tool_call_ids)
-from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = init_logger(__name__)
 
