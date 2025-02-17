@@ -4,8 +4,14 @@
 
 The tables below show mutually exclusive features and the support on some hardware.
 
+The symbols used have the following meanings:
+
+- ✅ = Full compatibility
+- 🟠 = Partial compatibility
+- ❌ = No compatibility
+
 :::{note}
-Check the ❌ with links to see tracking issue for unsupported feature/hardware combination.
+Check the ❌ or 🟠 with links to see tracking issue for unsupported feature/hardware combination.
 :::
 
 ## Feature x Feature
@@ -255,7 +261,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
 - * <abbr title="Multimodal Inputs">mm</abbr>
   * ✅
   * [❌](gh-pr:8348)
-  * [❌](gh-pr:4194)
+  * [🟠](gh-pr:4194)
   * ❔
   * ❔
   * ✅
