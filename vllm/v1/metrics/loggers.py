@@ -7,7 +7,7 @@ from typing import Dict, List
 import numpy as np
 import prometheus_client
 
-from vllm.config import ModelConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
@@ -92,13 +92,13 @@ class LoggingStatLogger(StatLoggerBase):
 
 class PrometheusStatLogger(StatLoggerBase):
 
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self, vllm_config: VllmConfig):
         self._unregister_vllm_metrics()
 
         labelnames = ["model_name"]
-        labelvalues = [model_config.served_model_name]
+        labelvalues = [vllm_config.model_config.served_model_name]
 
-        max_model_len = model_config.max_model_len
+        max_model_len = vllm_config.model_config.max_model_len
 
         self.gauge_scheduler_running = prometheus_client.Gauge(
             name="vllm:num_requests_running",
@@ -160,6 +160,13 @@ class PrometheusStatLogger(StatLoggerBase):
                 name="vllm:request_generation_tokens",
                 documentation="Number of generation tokens processed.",
                 buckets=build_1_2_5_buckets(max_model_len),
+                labelnames=labelnames).labels(*labelvalues)
+
+        self.histogram_iteration_tokens = \
+            prometheus_client.Histogram(
+                name="vllm:iteration_tokens_total",
+                documentation="Histogram of number of tokens per engine_step.",
+                buckets=build_cudagraph_buckets(vllm_config),
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_time_to_first_token = \
@@ -237,6 +244,9 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(
             iteration_stats.num_generation_tokens)
+        self.histogram_iteration_tokens.observe(
+            iteration_stats.num_prompt_tokens + \
+            iteration_stats.num_generation_tokens)
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason].inc()
@@ -293,3 +303,13 @@ def build_1_2_5_buckets(max_value: int) -> List[int]:
     [1, 2, 5, 10, 20, 50, 100]
     """
     return build_buckets([1, 2, 5], max_value)
+
+
+def build_cudagraph_buckets(vllm_config: VllmConfig) -> List[int]:
+    if not vllm_config.model_config.enforce_eager:
+        buckets = vllm_config.compilation_config.\
+            cudagraph_capture_sizes.copy()
+        buckets.sort()
+        return buckets
+    else:
+        return [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
