@@ -129,7 +129,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Trigger Numba JIT compilation for N-gram proposer.
             # This usually takes less than 1 second.
             self.drafter.propose(
-                np.empty(1024, dtype=np.int32),
+                np.zeros(1024, dtype=np.int32),
                 self.speculative_config.ngram_prompt_lookup_min,
                 self.speculative_config.num_speculative_tokens,
             )
