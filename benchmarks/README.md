@@ -11,6 +11,7 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 
 The json file refers to several image datasets (coco, llava, etc.). The benchmark scripts
 will ignore a datapoint if the referred image is missing.
+
 ```bash
 wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json
 mkdir coco -p
@@ -58,4 +59,11 @@ Mean ITL (ms):                           22.79
 Median ITL (ms):                         22.72
 P99 ITL (ms):                            27.37
 ==================================================
+=======
+# Downloading the BurstGPT dataset
+
+You can download the BurstGPT v1.1 dataset by running:
+
+```bash
+wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv
 ```

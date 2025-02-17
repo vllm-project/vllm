@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Union
+import time
+from typing import List, Optional, Union
 
 import msgspec
 
+from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.inputs import PlaceholderRange
+from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-
-if TYPE_CHECKING:
-    from vllm.lora.request import LoRARequest
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.inputs import PlaceholderRange
-    from vllm.sampling_params import SamplingParams
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -38,8 +37,11 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-@dataclass
-class EngineCoreRequest:
+class EngineCoreRequest(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        gc=False):  # type: ignore[call-arg]
 
     # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
     # but this object is currently not playing well with msgspec
@@ -50,13 +52,37 @@ class EngineCoreRequest:
     # Detokenizer, but set to None when it is added to EngineCoreClient.
     prompt: Optional[str]
     prompt_token_ids: List[int]
-    mm_inputs: Optional[List[Optional["MultiModalKwargs"]]]
+    mm_inputs: Optional[List[Optional[MultiModalKwargs]]]
     mm_hashes: Optional[List[str]]
-    mm_placeholders: Optional[List["PlaceholderRange"]]
-    sampling_params: "SamplingParams"
+    mm_placeholders: Optional[List[PlaceholderRange]]
+    sampling_params: SamplingParams
     eos_token_id: Optional[int]
     arrival_time: float
-    lora_request: Optional["LoRARequest"]
+    lora_request: Optional[LoRARequest]
+
+
+class EngineCoreEventType(enum.IntEnum):
+    """The type of engine core request event."""
+    QUEUED = 1
+    SCHEDULED = 2
+
+
+class EngineCoreEvent(msgspec.Struct):
+    """A timestamped engine core event associated with a request.
+
+    The timestamp is a monotonic timestamps and is used for by the engine
+    frontend to calculate intervals between engine core events. These
+    timestamps should not be compared with timestamps from other processes.
+    """
+    type: EngineCoreEventType
+    timestamp: float
+
+    @classmethod
+    def new_event(cls,
+                  event_type: EngineCoreEventType,
+                  timestamp: Optional[float] = None) -> "EngineCoreEvent":
+        timestamp = time.monotonic() if timestamp is None else timestamp
+        return cls(event_type, timestamp)
 
 
 class EngineCoreOutput(
@@ -67,9 +93,17 @@ class EngineCoreOutput(
 
     request_id: str
     new_token_ids: List[int]
-    finished: bool
+
+    new_logprobs: Optional[LogprobsLists] = None
+    new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
+
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
+    events: Optional[List[EngineCoreEvent]] = None
+
+    @property
+    def finished(self) -> bool:
+        return self.finish_reason is not None
 
 
 class EngineCoreOutputs(
@@ -83,17 +117,12 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
-    scheduler_stats: SchedulerStats
+    scheduler_stats: Optional[SchedulerStats]
+    timestamp: float = 0.0
 
-
-@dataclass
-class EngineCoreProfile:
-    is_start: bool
-
-
-@dataclass
-class EngineCoreResetPrefixCache:
-    pass
+    def __post_init__(self):
+        if self.timestamp == 0.0:
+            self.timestamp = time.monotonic()
 
 
 class EngineCoreRequestType(enum.Enum):
@@ -105,7 +134,4 @@ class EngineCoreRequestType(enum.Enum):
     ABORT = b'\x01'
     PROFILE = b'\x02'
     RESET_PREFIX_CACHE = b'\x03'
-
-
-EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile,
-                               EngineCoreResetPrefixCache, List[str]]
+    ADD_LORA = b'\x04'
