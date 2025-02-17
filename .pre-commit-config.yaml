@@ -13,13 +13,14 @@ repos:
   rev: v0.9.3
   hooks:
   - id: ruff
-    args: [--output-format, github]
+    args: [--output-format, github, --fix]
     exclude: 'vllm/third_party/.*'
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.0
   hooks:
   - id: codespell
-    exclude: 'benchmarks/sonnet.txt|(build|tests/(lora/data|models/fixtures|prompts))/.*|csrc/rocm/.*|csrc/gradlib/.*|vllm/third_party/.*'
+    additional_dependencies: ['tomli']
+    args: ['--toml', 'pyproject.toml']
 - repo: https://github.com/PyCQA/isort
   rev: 5.13.2
   hooks:
@@ -116,13 +117,6 @@ repos:
     language: python
     types: [python]
     exclude: 'vllm/third_party/.*'
-  - id: suggestion
-    name: Suggestion
-    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
-    language: system
-    verbose: true
-    pass_filenames: false
-    exclude: 'vllm/third_party/.*'
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
@@ -133,3 +127,12 @@ repos:
     always_run: true
     pass_filenames: false
     exclude: 'vllm/third_party/.*'
+  # Keep `suggestion` last
+  - id: suggestion
+    name: Suggestion
+    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    language: system
+    verbose: true
+    pass_filenames: false
+    exclude: 'vllm/third_party/.*'
+  # Insert new entries above the `suggestion` entry
