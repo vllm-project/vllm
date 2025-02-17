@@ -118,10 +118,11 @@ def list_repo_files(
     def lookup_files():
         try:
             if VLLM_USE_MODELSCOPE:
-                from vllm.transformers_utils.utils import modelscope_list_repo_files
+                from vllm.transformers_utils.utils import (
+                    modelscope_list_repo_files)
                 return modelscope_list_repo_files(repo_id,
-                                      revision=revision,
-                                      token=token)
+                                                  revision=revision,
+                                                  token=token)
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
@@ -503,7 +504,6 @@ def get_sentence_transformer_tokenizer_config(model: str,
             repo_files = list_repo_files(model,
                                          revision=revision,
                                          token=HF_TOKEN)
-            logger.info(repo_files)
         except Exception as e:
             logger.error("Error getting repo files", e)
             repo_files = []
