@@ -327,7 +327,7 @@ class Platform:
         """
         Get device specific communicator class for distributed communication.
         """
-        return "vllm.distributed.device_communicator.base_device_communicator.DeviceCommunicatorBase"  # noqa
+        return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
 
 class UnspecifiedPlatform(Platform):

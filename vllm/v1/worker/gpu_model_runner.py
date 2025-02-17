@@ -97,11 +97,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
-        # NOTE: Initialized client is only used for processing dummy
-        # multimodal data into multimodal kwargs for GPU memory profiling.
-        # Only applicable to multimodal models with legacy input mapper.
-        self.mm_input_mapper_profiling = MMInputCacheClient(self.model_config)
-        self.mm_input_mapper_profiling.use_cache = False
+        if self.is_multimodal_model:
+            # NOTE: Initialized client is only used for processing dummy
+            # multimodal data into multimodal kwargs for GPU memory profiling.
+            # Only applicable to multimodal models with legacy input mapper.
+            self.mm_input_mapper_profiling = MMInputCacheClient(
+                self.model_config)
+            self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
@@ -424,14 +426,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens_list: List[int] = []
+        num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
+        max_num_scheduled_tokens = 0
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens_list.append(num_tokens)
-        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
-                                        dtype=np.int32)
-        max_num_scheduled_tokens = num_scheduled_tokens.max()
+            num_scheduled_tokens[i] = num_tokens
+            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
+                                           num_tokens)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -726,14 +728,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Get the number of spec decode tokens for each request.
         num_reqs = self.input_batch.num_reqs
-        num_spec_decode_tokens_list: List[int] = []
-        for req_id in self.input_batch.req_ids[:num_reqs]:
+        num_spec_decode_tokens = np.empty(num_reqs, dtype=np.int32)
+        for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
-            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, [])
-            num_spec_decode_tokens_list.append(len(spec_token_ids))
-        num_spec_decode_tokens = np.array(num_spec_decode_tokens_list,
-                                          dtype=np.int32)
+            num_spec_decode_tokens[i] = len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
 
         # Get spec decode logits indices.
         # E.g.,   num_scheduled_tokens: [4, 100, 3,   100, 2]

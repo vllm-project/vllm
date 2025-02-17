@@ -1833,6 +1833,15 @@ class SpeculativeConfig:
 
             draft_hf_config = draft_model_config.hf_config
 
+            # Detect EAGLE prefix to replace hf_config for EAGLE draft_model
+            if "eagle-" in draft_model_config.model.lower():
+                from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                if isinstance(draft_model_config.hf_config, EAGLEConfig):
+                    pass
+                else:
+                    eagle_config = EAGLEConfig(draft_model_config.hf_config)
+                    draft_model_config.hf_config = eagle_config
+
             if (num_speculative_tokens is not None
                     and hasattr(draft_hf_config, "num_lookahead_tokens")):
                 draft_hf_config.num_lookahead_tokens = num_speculative_tokens
