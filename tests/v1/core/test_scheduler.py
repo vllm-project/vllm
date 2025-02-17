@@ -35,6 +35,7 @@ def create_scheduler(
         cache_dtype="auto",
     )
     cache_config.num_gpu_blocks = 10000
+    cache_config.num_cpu_blocks = 0
     return Scheduler(scheduler_config,
                      model_config,
                      cache_config,

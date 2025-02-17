@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Type
+from typing import Dict, Type
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
@@ -79,6 +79,9 @@ class Executor(ExecutorBase):
 
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start, ))
+
+    def swap_blocks(self, h2d_map: Dict[int, int], d2h_map: Dict[int, int]):
+        self.collective_rpc("swap_blocks", args=(h2d_map, d2h_map))
 
 
 class UniProcExecutor(UniProcExecutorV0, Executor):
