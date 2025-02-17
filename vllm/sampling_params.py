@@ -149,7 +149,7 @@ class SamplingParams(
             always return the log probability of the sampled token, so there
             may be up to `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
-        detokenize: Whether to detokenize the output. Defaults to True.
+        detokenize: Whether to detokenize the output. Defaults to None.
         skip_special_tokens: Whether to skip special tokens in the output.
         spaces_between_special_tokens: Whether to add spaces between special
             tokens in the output.  Defaults to True.
