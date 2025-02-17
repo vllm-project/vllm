@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import torch
 
 from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.config import VllmConfig
 
 
 @dataclass
@@ -22,8 +23,14 @@ class MambaCacheParams:
 
 class MambaCacheManager:
 
-    def __init__(self, dtype, num_mamba_layers, max_batch_size,
-                 conv_state_shape, temporal_state_shape):
+    def __init__(self, vllm_config: VllmConfig, dtype: torch.dtype,
+                 num_mamba_layers: int, conv_state_shape: Tuple[int, int],
+                 temporal_state_shape: Tuple[int, int]):
+
+        # Determine max batch size to set size of MambaCache
+        max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        if not vllm_config.model_config.enforce_eager:
+            max_batch_size = vllm_config.pad_for_cudagraph(max_batch_size)
 
         conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                  conv_state_shape,
