@@ -151,7 +151,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
-        # self.intermediate_tensors  # Set after load_model
+        # None in the first PP rank. The rest are set after load_model.
+        self.intermediate_tensors: Optional[IntermediateTensors] = None
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -922,6 +923,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
         else:
+            assert intermediate_tensors is not None
+            assert self.intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                self.intermediate_tensors[k][:num_input_tokens].copy_(
+                    v[:num_input_tokens], non_blocking=True)
             intermediate_tensors = IntermediateTensors({
                 k: v[:num_input_tokens]
                 for k, v in self.intermediate_tensors.items()
@@ -1120,7 +1126,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
         else:
-            if not hasattr(self, "intermediate_tensors"):
+            if self.intermediate_tensors is None:
                 self.intermediate_tensors = (
                     self.model.make_empty_intermediate_tensors(
                         batch_size=self.max_num_tokens,
