@@ -390,6 +390,7 @@ class InputBatch:
     def make_sampling_metadata(
         self,
         req_id_output_token_ids: Dict[str, List[int]],
+        req_id_to_spec_token_ids: Dict[str, List[int]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -423,7 +424,8 @@ class InputBatch:
                 self.prompt_token_ids = self._make_prompt_token_ids_tensor()
 
         output_token_ids: List[List[int]] = []
-
+        spec_token_ids: List[List[int]] = []
+        rejection_sampling = False
         for req_id in self.req_ids[:self.num_reqs]:
             assert req_id is not None
             # Currently we create a tensor for output_token_ids from scratch
@@ -434,11 +436,18 @@ class InputBatch:
             # TODO - Replace this with incremental update to output token
             # statistics.
             output_token_ids.append(req_id_output_token_ids[req_id])
+            req_spec_token_ids = req_id_to_spec_token_ids.get(req_id, [])
+            spec_token_ids.append(req_spec_token_ids)
+            if req_spec_token_ids:
+                # If any of the requests require speculative decoding, set the
+                # flag to True.
+                rejection_sampling = True
 
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],
             all_greedy=self.all_greedy,
             all_random=self.all_random,
+            rejection_sampling=rejection_sampling,
             top_p=self.top_p[:self.num_reqs],
             top_k=self.top_k[:self.num_reqs],
             min_p=self.min_p[:self.num_reqs],
@@ -452,6 +461,7 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:self.num_reqs],
             repetition_penalties=self.repetition_penalties[:self.num_reqs],
             output_token_ids=output_token_ids,
+            spec_token_ids=spec_token_ids,
             min_tokens=self.min_tokens[:self.num_reqs],
             stop_token_ids=self.stop_token_ids[:self.num_reqs],
             no_penalties=self.no_penalties,
