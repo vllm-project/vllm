@@ -3,8 +3,8 @@ from vllm import LLM, SamplingParams
 import argparse
 import os
 
-#model_path = "/data/DeepSeek-R1-G2"
-model_path = "/data/DeepSeek-R1-Dynamic-full-FP8"
+model_path = "/data/DeepSeek-R1-G2"
+#model_path = "/data/DeepSeek-R1-Dynamic-full-FP8"
 
 # Parse the command-line arguments.
 parser = argparse.ArgumentParser()

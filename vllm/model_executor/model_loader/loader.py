@@ -55,6 +55,13 @@ from vllm.transformers_utils.s3_utils import glob as s3_glob
 from vllm.transformers_utils.utils import is_s3
 from vllm.utils import is_pin_memory_available
 
+import torch.distributed as dist
+is_hpu = current_platform.is_hpu()
+def hpu_distributed_barrier():
+    if is_hpu:
+        torch.hpu.synchronize()
+        if dist.is_initialized():
+            dist.barrier()
 
 @contextmanager
 def device_loading_context(module: torch.nn.Module,
@@ -404,6 +411,9 @@ class DefaultModelLoader(BaseModelLoader):
 
                     logger.warning(warning_msg)
 
+            if is_hpu:
+                hpu_distributed_barrier()
+
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
@@ -414,6 +424,8 @@ class DefaultModelLoader(BaseModelLoader):
                     # parameters onto device for processing and back off after.
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
+                    if is_hpu:
+                        hpu_distributed_barrier()
                 if isinstance(module, Attention) and \
                     hasattr(module, "process_weights_after_loading"):
                     # When attention modules need to process weights after
@@ -421,6 +433,8 @@ class DefaultModelLoader(BaseModelLoader):
                     # TODO(lucas): see if there is a way to unify the signatures
                     # of process_weights_after_loading
                     module.process_weights_after_loading(model_config.dtype)
+                    if is_hpu:
+                        hpu_distributed_barrier()
         return model.eval()
 
 
