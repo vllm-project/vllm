@@ -1196,6 +1196,9 @@ class EngineArgs:
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
+        if model_config.use_mla:
+            logger.info("MLA is enabled; forcing chunked prefill disabled.")
+            self.enable_chunked_prefill = False
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
