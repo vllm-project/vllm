@@ -521,11 +521,9 @@ steps:
   - pip install -e ./plugins/vllm_add_dummy_platform
   - pytest -v -s plugins_tests/test_platform_plugins.py
   - pip uninstall vllm_add_dummy_platform -y
-  - pip install -e ./plugins/vllm_add_dummy_scheduler
-  - pytest -v -s plugins_tests/test_scheduler_plugins.py
-  - pip uninstall vllm_add_dummy_scheduler -y
   # end platform plugin tests
   # other tests continue here:
+  - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
   - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
