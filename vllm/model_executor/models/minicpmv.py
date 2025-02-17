@@ -255,13 +255,16 @@ class MiniCPMVImageEmbeddingItems(DictEmbeddingItems):
     def __init__(
         self,
         data: Mapping[str, torch.Tensor],
-        fields_config: Mapping[str, MultiModalFieldConfig],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
     ) -> None:
         super().__init__(
             data,
             modality="image",
-            fields_config=fields_config,
             required_fields={"image_embeds", "image_sizes"},
+            fields_factory=fields_factory,
         )
 
     def get_image_size(self, index: int) -> ImageSize:
@@ -274,13 +277,16 @@ class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
     def __init__(
         self,
         data: Mapping[str, torch.Tensor],
-        fields_config: Mapping[str, MultiModalFieldConfig],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
     ) -> None:
         super().__init__(
             data,
             modality="video",
-            fields_config=fields_config,
             required_fields={"video_embeds", "video_image_sizes"},
+            fields_factory=fields_factory,
         )
 
     def get_frame_size(self, index: int) -> ImageSize:
@@ -300,7 +306,7 @@ class MiniCPMVMultiModalDataParser(MultiModalDataParser):
         if isinstance(data, dict):
             return MiniCPMVImageEmbeddingItems(
                 data,
-                fields_config=_minicpmv_field_config(data),
+                fields_factory=_minicpmv_field_config,
             )
 
         return super()._parse_image_data(data)
@@ -312,7 +318,7 @@ class MiniCPMVMultiModalDataParser(MultiModalDataParser):
         if isinstance(data, dict):
             return MiniCPMVVideoEmbeddingItems(
                 data,
-                fields_config=_minicpmv_field_config(data),
+                fields_factory=_minicpmv_field_config,
             )
 
         return super()._parse_video_data(data)

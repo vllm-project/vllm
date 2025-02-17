@@ -62,6 +62,7 @@ def _construct_expected_sampling_metadata(
     repetition_penalties = [1.0 for _ in range(num_reqs)]
     top_k = [0 for _ in range(num_reqs)]
     top_p = [0.0 for _ in range(num_reqs)]
+    min_p = [0.0 for _ in range(num_reqs)]
     temperature = [0.0 for _ in range(num_reqs)]
     stop_token_ids: List[Set[int]] = [set() for _ in range(num_reqs)]
     min_tokens = [0 for _ in range(num_reqs)]
@@ -80,21 +81,24 @@ def _construct_expected_sampling_metadata(
             req.sampling_params.repetition_penalty)
         top_k[index_in_input_batch] = req.sampling_params.top_k
         top_p[index_in_input_batch] = req.sampling_params.top_p
+        min_p[index_in_input_batch] = req.sampling_params.min_p
         temperature[index_in_input_batch] = req.sampling_params.temperature
         stop_token_ids[
             index_in_input_batch] = req.sampling_params.all_stop_token_ids
         min_tokens[index_in_input_batch] = req.sampling_params.min_tokens
         logit_bias[index_in_input_batch] = req.sampling_params.logit_bias
-
     return SamplingMetadata(
         temperature=torch.tensor(temperature, dtype=torch.float,
                                  device=device),
         all_greedy=False,
         all_random=True,
+        rejection_sampling=False,
         top_p=torch.tensor(top_p, dtype=torch.float, device=device),
         top_k=torch.tensor(top_k, dtype=torch.int, device=device),
         no_top_p=all(x == 1.0 for x in top_p),
         no_top_k=all(x == 0 for x in top_k),
+        min_p=torch.tensor(min_p, dtype=torch.float, device=device),
+        no_min_p=all(x == 0.0 for x in min_p),
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=make_tensor_with_pad(
@@ -113,6 +117,7 @@ def _construct_expected_sampling_metadata(
                                           dtype=torch.float,
                                           device=device),
         output_token_ids=output_token_ids,
+        spec_token_ids=[],
         min_tokens=min_tokens,
         stop_token_ids=stop_token_ids,
         no_penalties=(all(x == 0 for x in presence_penalties)
@@ -202,7 +207,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
 
     # Generate the sampling metadata
     sampling_metadata = input_batch.make_sampling_metadata(
-        req_id_output_token_ids, skip_copy=False)
+        req_id_output_token_ids, req_id_to_spec_token_ids={}, skip_copy=False)
 
     # Create expected output.
     expected_sampling_metadata = _construct_expected_sampling_metadata(
