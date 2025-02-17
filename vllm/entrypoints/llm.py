@@ -55,6 +55,17 @@ SamplingParamsArgType=Optional[Union[SamplingParams,
 LoRARequestArgType=Optional[Union[List[LoRARequest], LoRARequest]]
 PriorityArgType=Optional[List[int]]
 
+def split_parallel_sampling_batch(
+        sampling_params: SamplingParamsArgType,
+)->List[int]:
+    if isinstance(sampling_params,SamplingParams) and sampling_params.n>1:
+        # There is one parallel sampling request
+        return [0]
+    if isinstance(sampling_params,Sequence[SamplingParams]):
+        # Multiple requests with potentially one or more
+        # parallel sampling requests
+        return any([sp.n>1 for sp in sampling_params])
+    return []
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -464,7 +475,9 @@ class LLM:
         if sampling_params is None:
             # Use default sampling params. Note: n=1 by default
             sampling_params = self.get_default_sampling_params()
+            do_parallel_sampling = False
         elif self._v1:
+            do_parallel_sampling = any([sampling_params])
             # V1 engine only: break out parallel sampling
             # requests into `n` child requests
             (
