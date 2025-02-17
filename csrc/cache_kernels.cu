@@ -4,6 +4,7 @@
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
+#include "logging.h"
 
 #ifdef USE_ROCM
   #include "quantization/fp8/amd/quant_utils.cuh"
@@ -60,6 +61,10 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
     cudaMemcpyAsync(dst_ptr + dst_offset, src_ptr + src_offset,
                     block_size_in_bytes, memcpy_type, stream);
   }
+
+  // print out the swap information. 
+  logg_511("Swap blocks: src_device={}, at ptr={}, dst_device={}, at ptr={}, num_blocks={}",
+            src_device, src_ptr, dst_device, dst_ptr, num_blocks);
 }
 
 namespace vllm {
