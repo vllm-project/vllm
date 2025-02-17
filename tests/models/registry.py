@@ -145,6 +145,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
+    "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1",
+                                         is_available_online=False),
     "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),  # noqa: E501
     "MiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-2B-sft-bf16",
                                          trust_remote_code=True),
