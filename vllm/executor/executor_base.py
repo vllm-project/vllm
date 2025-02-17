@@ -109,7 +109,7 @@ class ExecutorBase(ABC):
         """
         # NOTE: This is logged in the executor because there can be >1 workers.
         logger.info("# %s blocks: %d, # CPU blocks: %d",
-                    vllm.platforms.current_platform.dispatch_key,
+                    vllm.platforms.current_platform.device_name,
                     num_gpu_blocks, num_cpu_blocks)
         max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
                            self.model_config.max_model_len)
