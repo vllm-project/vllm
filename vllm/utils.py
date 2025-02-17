@@ -33,8 +33,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
-                    NamedTuple, Optional, Tuple, Type, TypeVar, Union,
-                    overload)
+                    NamedTuple, Optional, Tuple, Type, TypeVar, Union)
 from uuid import uuid4
 
 import cloudpickle
@@ -975,38 +974,6 @@ JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
 
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Dict[str, JSONTree[T]],
-) -> Dict[str, JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: List[JSONTree[T]],
-) -> List[JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Tuple[JSONTree[T], ...],
-) -> Tuple[JSONTree[U], ...]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: JSONTree[T],
-) -> JSONTree[U]:
-    ...
-
-
 def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
     if isinstance(value, dict):
         return {k: json_map_leaves(func, v) for k, v in value.items()}
@@ -1124,11 +1091,16 @@ def current_stream() -> torch.cuda.Stream:
     the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
     from C/C++ code.
     """
+    from vllm.platforms import current_platform
     global _current_stream
     if _current_stream is None:
         # when this function is called before any stream is set,
         # we return the default stream.
-        _current_stream = torch.cuda.current_stream()
+        # On ROCm using the default 0 stream in combination with RCCL
+        # is hurting performance. Therefore creating a dedicated stream
+        # per process
+        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
+        ) else torch.cuda.current_stream()
     return _current_stream
 
 
@@ -2424,3 +2396,46 @@ def import_pynvml():
     """
     import vllm.third_party.pynvml as pynvml
     return pynvml
+
+
+def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
+    """
+    A replacement for `abc.ABC`.
+    When we use `abc.ABC`, subclasses will fail to instantiate
+    if they do not implement all abstract methods.
+    Here, we only require `raise NotImplementedError` in the
+    base class, and log a warning if the method is not implemented
+    in the subclass.
+    """
+
+    original_init = cls.__init__
+
+    def find_unimplemented_methods(self: object):
+        unimplemented_methods = []
+        for attr_name in dir(self):
+            # bypass inner method
+            if attr_name.startswith('_'):
+                continue
+
+            try:
+                attr = getattr(self, attr_name)
+                # get the func of callable method
+                if callable(attr):
+                    attr_func = attr.__func__
+            except AttributeError:
+                continue
+            src = inspect.getsource(attr_func)
+            if "NotImplementedError" in src:
+                unimplemented_methods.append(attr_name)
+        if unimplemented_methods:
+            method_names = ','.join(unimplemented_methods)
+            msg = (f"Methods {method_names} not implemented in {self}")
+            logger.warning(msg)
+
+    @wraps(original_init)
+    def wrapped_init(self, *args, **kwargs) -> None:
+        original_init(self, *args, **kwargs)
+        find_unimplemented_methods(self)
+
+    type.__setattr__(cls, '__init__', wrapped_init)
+    return cls
