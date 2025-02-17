@@ -47,8 +47,9 @@ def resolve_transformers_fallback(model_config: ModelConfig,
     for i, arch in enumerate(architectures):
         if arch == "TransformersModel":
             continue
-        custom_module = None
-        auto_map = getattr(model_config.hf_config, "auto_map", None)
+        custom_model_module = None
+        auto_map: Optional[dict[str, str]] = getattr(model_config.hf_config,
+                                                     "auto_map", None)
         if auto_map is not None and "AutoModel" in auto_map:
             # NOTE(Isotr0py): we need to resolve all modules in auto_map across
             # executor to avoid relative dynamic module imports error, otherwise
@@ -58,17 +59,17 @@ def resolve_transformers_fallback(model_config: ModelConfig,
                 name: get_class_from_dynamic_module(module, model_config.model)
                 for name, module in auto_map.items()
             }
-            custom_module = auto_modules["AutoModel"]
+            custom_model_module = auto_modules["AutoModel"]
         # TODO(Isotr0py): Further clean up these raises.
         # perhaps handled them in _ModelRegistry._raise_for_unsupported?
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
-            if not is_transformers_impl_compatible(arch, custom_module):
+            if not is_transformers_impl_compatible(arch, custom_model_module):
                 raise ValueError(
                     f"The Transformers implementation of {arch} is not "
                     "compatible with vLLM.")
             architectures[i] = "TransformersModel"
         if model_config.model_impl == ModelImpl.AUTO:
-            if not is_transformers_impl_compatible(arch, custom_module):
+            if not is_transformers_impl_compatible(arch, custom_model_module):
                 raise ValueError(
                     f"{arch} has no vLLM implementation and the Transformers "
                     "implementation is not compatible with vLLM.")
