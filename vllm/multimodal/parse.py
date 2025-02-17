@@ -125,22 +125,26 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
         self,
         data: Mapping[str, torch.Tensor],
         modality: str,
-        fields_config: Mapping[str, MultiModalFieldConfig],
         required_fields: set[str],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
     ) -> None:
         super().__init__(data, modality)
-
-        missing_required_fields = required_fields - fields_config.keys()
-        if missing_required_fields:
-            fields = set(fields_config.keys())
-            msg = f"{required_fields=} should be a subset of {fields=}"
-            raise ValueError(msg)
 
         missing_required_data_keys = required_fields - data.keys()
         if missing_required_data_keys:
             data_keys = set(data.keys())
             msg = (f"The data should contain the fields: {required_fields}, "
                    f"but only found the following keys: {data_keys}")
+            raise ValueError(msg)
+
+        fields_config = fields_factory(data)
+        missing_required_fields = required_fields - fields_config.keys()
+        if missing_required_fields:
+            fields = set(fields_config.keys())
+            msg = f"{required_fields=} should be a subset of {fields=}"
             raise ValueError(msg)
 
         self.fields_config = fields_config

@@ -184,8 +184,8 @@ llm = LLM("openbmb/MiniCPM-V-2_6", trust_remote_code=True, limit_mm_per_prompt={
 mm_data = {
     "image": {
         "image_embeds": image_embeds,
-        # image_size_list is needed to calculate details of the sliced image.
-        "image_size_list": [image.size for image in images],  # list of image sizes
+        # image_sizes is needed to calculate details of the sliced image.
+        "image_sizes": [image.size for image in images],  # list of image sizes
     }
 }
 

@@ -691,8 +691,8 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                fields_config=_qwen2vl_field_config(data),
                 required_fields={"image_embeds", "image_grid_thw"},
+                fields_factory=_qwen2vl_field_config,
             )
 
         return super()._parse_image_data(data)
@@ -705,8 +705,8 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                fields_config=_qwen2vl_field_config(data),
                 required_fields={"video_embeds", "video_grid_thw"},
+                fields_factory=_qwen2vl_field_config,
             )
 
         return super()._parse_video_data(data)
