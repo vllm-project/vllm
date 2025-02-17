@@ -500,6 +500,20 @@ class OpenAIServing:
         return None
 
     @staticmethod
+    def _clean_prompt_logprobs(
+            prompt_logprobs: Union[None, List[Union[None, Dict]]]) -> None:
+        """
+        Preprocess prompt_logprobs result 
+         to avoid starlette.response.JSONResponse's error
+        """
+        if prompt_logprobs:
+            for logprob_dict in prompt_logprobs:
+                if logprob_dict:
+                    for logprob_values in logprob_dict.values():
+                        if logprob_values.logprob == float('-inf'):
+                            logprob_values.logprob = -9999.0
+
+    @staticmethod
     def _base_request_id(raw_request: Optional[Request],
                          default: Optional[str] = None) -> Optional[str]:
         """Pulls the request id to use from a header, if provided"""
