@@ -102,6 +102,7 @@ class TPUWorker:
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
+        # TODO(xw32): may need to follow gpu_worker's determine_available_memory
         kv_caches: Dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():
@@ -123,6 +124,7 @@ class TPUWorker:
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
 
+        # TODO(xw32): change here.
         self.model_runner.dummy_run(
             runner_kv_caches,
             num_tokens=1,

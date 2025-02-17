@@ -110,8 +110,9 @@ class TPUModelRunner():
         # KV caches for forward pass
         self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
+        # xw32: do the swap thing later. Use the synchronous way now as baseline.
         # Cached torch/numpy tensor
-        # xw32: what's the numpy array (eg input_ids_np) for?
+        # The pytorch tensor and numpy array share the same buffer. Sometimes the numpy op is faster.
         self.input_ids_cpu = torch.empty(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device="cpu")
@@ -141,6 +142,7 @@ class TPUModelRunner():
 
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
+        # TODO(xw32): may need to replace max_num_tokens with max_model_len.
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
@@ -312,7 +314,8 @@ class TPUModelRunner():
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         # xw32q: Do we need this?
-        self.input_batch.block_table.commit(num_reqs)
+        # TODO(xw32): check if TPU support async copy. Similar to the pined_memory
+        # self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -643,6 +646,7 @@ class TPUModelRunner():
             query_start_loc=query_start_loc,
             num_seqs=num_tokens,  # xw32: is it correct?
         )
+        # TODO(xw32): work with Alex to fix the issue later.
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
             logger.info(f"xw32 TPUModelRunner.dummy_run. before calling self.model, {input_ids.shape=}, {position_ids.shape=}")
