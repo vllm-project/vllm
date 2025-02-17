@@ -117,6 +117,12 @@ def list_repo_files(
 
     def lookup_files():
         try:
+            if VLLM_USE_MODELSCOPE:
+                from vllm.transformers_utils.utils import (
+                    modelscope_list_repo_files)
+                return modelscope_list_repo_files(repo_id,
+                                                  revision=revision,
+                                                  token=token)
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
@@ -382,17 +388,17 @@ def get_hf_file_to_dict(file_name: str,
 @cache
 def get_pooling_config(model: str, revision: Optional[str] = 'main'):
     """
-    This function gets the pooling and normalize 
-    config from the model - only applies to 
-    sentence-transformers models. 
+    This function gets the pooling and normalize
+    config from the model - only applies to
+    sentence-transformers models.
 
     Args:
         model (str): The name of the Hugging Face model.
-        revision (str, optional): The specific version 
+        revision (str, optional): The specific version
         of the model to use. Defaults to 'main'.
 
     Returns:
-        dict: A dictionary containing the pooling 
+        dict: A dictionary containing the pooling
         type and whether normalization is used.
     """
 
@@ -499,7 +505,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
                                          revision=revision,
                                          token=HF_TOKEN)
         except Exception as e:
-            logger.debug("Error getting repo files", e)
+            logger.error("Error getting repo files", e)
             repo_files = []
 
         for config_name in sentence_transformer_config_files:
