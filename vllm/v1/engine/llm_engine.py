@@ -21,6 +21,7 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import ParallelSamplingRequestManager
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
@@ -119,6 +120,57 @@ class LLMEngine:
         self.output_processor.abort_requests(request_ids)
 
     def add_request(
+        self,
+        request_id: str,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> None:
+        _add_request = (self._add_request if params is None
+                        or isinstance(params, PoolingParams) or params.n == 1
+                        else self._add_request_parallel_sampling)
+        return _add_request(request_id=request_id,
+                            prompt=prompt,
+                            params=params,
+                            arrival_time=arrival_time,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            prompt_adapter_request=prompt_adapter_request,
+                            priority=priority)
+
+    def _add_request_parallel_sampling(
+        self,
+        request_id: str,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> None:
+        req_mgr = ParallelSamplingRequestManager(request_id, params)
+        n = req_mgr.n
+
+        # Add n child requests with unique request IDs and
+        # n=1
+        for idx in range(n):
+            c_params = req_mgr.get_child_sampling_params(idx)
+            c_request_id = req_mgr.get_child_request_id(idx)
+            self._add_request(request_id=c_request_id,
+                              prompt=prompt,
+                              params=c_params,
+                              arrival_time=arrival_time,
+                              lora_request=lora_request,
+                              trace_headers=trace_headers,
+                              prompt_adapter_request=prompt_adapter_request,
+                              priority=priority)
+
+    def _add_request(
         self,
         request_id: str,
         prompt: PromptType,
