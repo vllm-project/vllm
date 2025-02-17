@@ -203,6 +203,7 @@ def test_schedule_partial_requests():
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
         sampled_token_ids=[[0] for _ in range(len(requests))],
+        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
     )
@@ -434,6 +435,7 @@ def test_schedule_concurrent_batches():
         req_ids=[requests[0].request_id],
         req_id_to_index={requests[0].request_id: 0},
         sampled_token_ids=[[0]],
+        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
     )
@@ -450,6 +452,7 @@ def test_schedule_concurrent_batches():
         req_ids=[requests[1].request_id],
         req_id_to_index={requests[1].request_id: 0},
         sampled_token_ids=[[0]],
+        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
     )
