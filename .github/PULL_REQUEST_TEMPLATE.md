@@ -1,6 +1,3 @@
-FILL IN THE PR DESCRIPTION HERE
+Please direct your PRs to the upstream vllm (https://github.com/vllm-project/vllm.git)
 
-FIX #xxxx (*link existing issues this PR will resolve*)
-
-<!--- pyml disable-next-line no-emphasis-as-heading -->
-**BEFORE SUBMITTING, PLEASE READ <https://docs.vllm.ai/en/latest/contributing/overview.html>**
+Accepting PRs into the ROCm fork (https://github.com/ROCm/vllm) will require a clear previously communicated exception
