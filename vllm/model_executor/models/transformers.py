@@ -38,6 +38,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsQuant
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -124,12 +125,10 @@ def replace_linear_class(
     )
 
 
-class TransformersModel(nn.Module):
+class TransformersModel(nn.Module, SupportsQuant):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
-
-    packed_modules_mapping = {}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -137,12 +136,10 @@ class TransformersModel(nn.Module):
 
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         config = model_config.hf_config
 
         self.config = config
-        self.quant_config = quant_config
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
 
@@ -168,7 +165,7 @@ class TransformersModel(nn.Module):
                 scale=config.head_dim**-0.5,
                 num_kv_heads=divide(config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
-                quant_config=quant_config,
+                quant_config=self.quant_config,
                 prefix=f"{i}.attn") for i in range(config.num_hidden_layers)
         ]
 
@@ -178,7 +175,7 @@ class TransformersModel(nn.Module):
         # ForCausalLM modifications
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=quant_config,
+                                      quant_config=self.quant_config,
                                       prefix=maybe_prefix(prefix, "lm_head"))
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.get_input_embeddings().weight
