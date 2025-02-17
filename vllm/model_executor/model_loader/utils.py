@@ -49,6 +49,10 @@ def resolve_transformers_fallback(model_config: ModelConfig,
             continue
         auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
                                            None) or dict()
+        # We need to get all dynamic modules from auto_map to make sure that
+        # they're all initialized properly. Otherwise, it will raise an error
+        # due to missing relative imported dynamic modules on spawn multiproc
+        # executor.
         auto_modules = {
             name: get_class_from_dynamic_module(module, model_config.model)
             for name, module in auto_map.items()
