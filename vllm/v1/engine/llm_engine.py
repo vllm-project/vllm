@@ -23,6 +23,7 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParallelSamplingRequestManager
 from vllm.v1.engine.processor import Processor
+from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
@@ -47,6 +48,10 @@ class LLMEngine:
     ) -> None:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
+
+        # Parallel sampling infra
+        self.parallel_parent_reqs: Dict[str,ParallelSamplingRequestManager]={}
+        self.parallel_child_reqs: Dict[str,str]={}
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -154,13 +159,14 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
         req_mgr = ParallelSamplingRequestManager(request_id, params)
+        self.parallel_parent_reqs[request_id]=req_mgr
         n = req_mgr.n
 
-        # Add n child requests with unique request IDs and
-        # n=1
+        # Add n child requests with unique request IDs and n=1
         for idx in range(n):
             c_params = req_mgr.get_child_sampling_params(idx)
             c_request_id = req_mgr.get_child_request_id(idx)
+            self.parallel_child_reqs[c_request_id]=(idx,request_id)
             self._add_request(request_id=c_request_id,
                               prompt=prompt,
                               params=c_params,
@@ -195,10 +201,38 @@ class LLMEngine:
         # 3) Add the request to EngineCore.
         self.engine_core.add_request(request)
 
+    def _aggregate_parallel_sampling_outputs(
+            self,
+            outputs: EngineCoreOutputs,
+    )->List[RequestOutput]:
+        agg_outputs=[]
+        for c_out in outputs.outputs:
+            c_req_id=c_out.request_id
+            if cdx_req_id := self.parallel_child_reqs.get(c_req_id,None):
+                (cdx,req_id)=cdx_req_id
+                # Update parallel sampling request
+                req_mgr=self.parallel_parent_reqs[req_id]
+                if out := req_mgr._process_output(c_out,cdx):
+                    # Return parent request output if complete;
+                    # cleanup parent request
+                    agg_outputs.append(out)
+                    del self.parallel_parent_reqs[req_id]
+                # Cleanup child request
+                del self.parallel_child_reqs[c_req_id]
+            else:
+                # Not a parallel sampling request output
+                agg_outputs.append(c_out)
+        return agg_outputs
+
+    def _is_any_parallel_sampling(self)->bool:
+        return len(self.parallel_parent_reqs)>0
+
     def step(self) -> List[RequestOutput]:
 
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()
+        if self._is_any_parallel_sampling():
+            outputs=self._aggregate_parallel_sampling_outputs(outputs)
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(

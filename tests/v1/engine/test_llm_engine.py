@@ -5,6 +5,11 @@ import pytest
 from tests.v1.engine.utils import PLP_APC_UNSUPPORTED_MSG
 from vllm import LLM, SamplingParams
 
+def test_parallel_sampling(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    output=LLM(model="facebook/opt-125m", enable_prefix_caching=True).generate(
+            "Hello, my name is",
+            SamplingParams(temperature=0.8, top_p=0.95, n=2))
 
 def test_llm_engine_refuses_prompt_logprobs_with_apc(monkeypatch):
     """Test passes if LLMEngine raises an exception when it is configured
