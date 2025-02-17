@@ -10,7 +10,8 @@ import torch.nn as nn
 
 from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.communication_op import (broadcast_tensor_dict,
-                                               get_tp_group)
+                                               get_tp_group,
+                                               tensor_model_parallel_gather)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -156,6 +157,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     ) -> "SpecDecodeWorker":
 
         allow_zero_draft_token_step = True
+        enable_lm_head_weight_load = False
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
@@ -188,6 +190,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                             "EAGLE does not support TP > 1 yet")
 
                     allow_zero_draft_token_step = False
+
+                # Load lm_head weight for eagle in init_device
+                if draft_model_config.hf_config.model_type == "eagle":
+                    enable_lm_head_weight_load = True
+
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
@@ -240,7 +247,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             disable_log_stats=disable_log_stats,
             disable_by_batch_size=disable_by_batch_size,
             spec_decode_sampler=spec_decode_sampler,
-            allow_zero_draft_token_step=allow_zero_draft_token_step)
+            allow_zero_draft_token_step=allow_zero_draft_token_step,
+            enable_lm_head_weight_load=enable_lm_head_weight_load)
 
     def __init__(
         self,
@@ -253,6 +261,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
         allow_zero_draft_token_step: Optional[bool] = True,
+        enable_lm_head_weight_load: Optional[bool] = False,
     ):
         """
         Create a SpecDecodeWorker.
@@ -283,6 +292,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             allow_zero_draft_token_step: whether to allow a step where the draft
                 model generates no draft token; should disallow when the tp of
                 draft model is larger than 1 (TODO: #5814)
+            enable_lm_head_weight_load: whether to load lm_head weight for
+                draft models like eagle.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
@@ -292,6 +303,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
         self.spec_decode_sampler = spec_decode_sampler
         self._allow_zero_draft_token_step = allow_zero_draft_token_step
+        self._enable_lm_head_weight_load = enable_lm_head_weight_load
         self._metrics = AsyncMetricsCollector(
             self.spec_decode_sampler
         ) if metrics_collector is None else metrics_collector
@@ -327,6 +339,17 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # NOTE(cade): load_model is not part of the WorkerBase interface.
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
+
+        if self._enable_lm_head_weight_load:
+            # NOTE(Shangming): gather lm_head weight when tp enabled
+            target_lm_head_weight: torch.Tensor = tensor_model_parallel_gather(
+                self.scorer_worker.model_runner.model_runner.model.lm_head.\
+                    weight.data,
+                    dim=0,
+            )
+
+            self.proposer_worker.maybe_load_lm_head_weight(
+                target_lm_head_weight)
 
         self._metrics.init_tensors(self.rank, device_type=self.device)
         self.spec_decode_sampler.init_tensors(get_tp_group().local_rank,
