@@ -276,6 +276,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         # Free table/blocks
         self.block_tables[seq_id].free()
         del self.block_tables[seq_id]
+        
+        # log the freeing with the logger
+        logger.debug(f"Freed block for sequence {seq_id}")
 
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id
@@ -399,6 +402,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
             physical_block_id_mapping.extend(
                 list(seq_physical_block_id_mapping.items()))
+            
+            # log the swapping with the logger
+            logger.debug(f"Swapped in block for sequence {seq.seq_id}")
 
         return physical_block_id_mapping
 
@@ -452,6 +458,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
             physical_block_id_mapping.extend(
                 list(seq_physical_block_id_mapping.items()))
+            
+            # log the swapping with the logger
+            logger.debug(f"Swapped out block for sequence {seq.seq_id}")
 
         return physical_block_id_mapping
 

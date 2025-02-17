@@ -7,6 +7,8 @@ from vllm.core.block.common import BlockList
 from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
 from vllm.utils import Device, cdiv, chunk_list
 
+from vllm.core.logger import logger
+
 
 class BlockTable:
     """A class to manage blocks for a specific sequence.
@@ -105,6 +107,11 @@ class BlockTable:
                                                      extra_hash=extra_hash)
         self.update(blocks)
         self._num_full_slots = len(token_ids)
+        
+        # log token_ids and block ids
+        block_ids = [block.block_id for block in blocks]
+        logger.debug(f"token_ids: {token_ids}, in blocks {block_ids}")
+        
 
     def update(self, blocks: List[Block]) -> None:
         """Resets the table to the newly provided blocks 
