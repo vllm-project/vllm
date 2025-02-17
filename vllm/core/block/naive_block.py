@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import heapq
-from typing import FrozenSet, Iterable, List, Optional, Tuple, Union
+from collections import deque
+from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple, Union
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
@@ -38,14 +38,7 @@ class NaiveBlockAllocator(BlockAllocator):
         if block_ids is None:
             block_ids = range(num_blocks)
 
-        # use heap to manage free block indices instead of deque
-        # similar to deque, heap removes the first element in O(1)
-        # it ensure that the smallest block id is always at the top
-        # which is the next block to be allocated
-        # it can improve the performance of block allocation
-        # in some cases while do not affect the overall performance
-        self._free_block_indices: List[BlockId] = list(block_ids)
-        heapq.heapify(self._free_block_indices)
+        self._free_block_indices: Deque[BlockId] = deque(block_ids)
         self._all_block_indices = frozenset(block_ids)
         assert len(self._all_block_indices) == num_blocks
 
@@ -141,7 +134,7 @@ class NaiveBlockAllocator(BlockAllocator):
         if not self._free_block_indices:
             raise BlockAllocator.NoFreeBlocksError()
 
-        block_id = heapq.heappop(self._free_block_indices)
+        block_id = self._free_block_indices.popleft()
         self._refcounter.incr(block_id)
         return block_id
 
@@ -155,7 +148,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
         refcount = self._refcounter.decr(block_id)
         if refcount == 0:
-            heapq.heappush(self._free_block_indices, block_id)
+            self._free_block_indices.appendleft(block_id)
 
     def free(self, block: Block, keep_block_object: bool = False) -> None:
         # Release the physical block id
