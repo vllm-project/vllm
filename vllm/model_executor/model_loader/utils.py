@@ -47,19 +47,13 @@ def resolve_transformers_fallback(model_config: ModelConfig,
     for i, arch in enumerate(architectures):
         if arch == "TransformersModel":
             continue
-        custom_model_module = None
-        auto_map: Optional[dict[str, str]] = getattr(model_config.hf_config,
-                                                     "auto_map", None)
-        if auto_map is not None and "AutoModel" in auto_map:
-            # NOTE(Isotr0py): we need to resolve all modules in auto_map across
-            # executor to avoid relative dynamic module imports error, otherwise
-            # some using related imported dynamic modules will be false-positive
-            # and failed to be imported in multiproc executor.
-            auto_modules = {
-                name: get_class_from_dynamic_module(module, model_config.model)
-                for name, module in auto_map.items()
-            }
-            custom_model_module = auto_modules["AutoModel"]
+        auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
+                                           None) or dict()
+        auto_modules = {
+            name: get_class_from_dynamic_module(module, model_config.model)
+            for name, module in auto_map.items()
+        }
+        custom_model_module = auto_modules.get("AutoModel")
         # TODO(Isotr0py): Further clean up these raises.
         # perhaps handled them in _ModelRegistry._raise_for_unsupported?
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
