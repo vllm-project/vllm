@@ -290,7 +290,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "ggml_moe_a8(torch::Tensor X, torch::Tensor W1,"
       "torch::Tensor sorted_token_ids, torch::Tensor expert_ids"
-      "SymInt type, SymInt row) -> Tensor ");
+      "SymInt type, SymInt row, SymInt top_k) -> Tensor ");
   ops.impl("ggml_moe_a8", torch::kCUDA, &ggml_moe_a8);
 
 #ifndef USE_ROCM

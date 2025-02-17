@@ -4,33 +4,29 @@ template <int qk, int qr, int qi, bool need_sum, typename block_q_t, int mmq_x,
           int mmq_y, int nwarps, allocate_tiles_cuda_t allocate_tiles,
           load_tiles_cuda_t load_tiles, int vdr,
           vec_dot_q_mul_mat_cuda_t vec_dot>
-__global__ void moe_q(const void* __restrict__ vx, const void* __restrict__ vy,
-                      const half* __restrict__ dst,
-                      const int* __restrict__ sorted_token_ids,
-                      const int* __restrict__ expert_ids, const int exp_stride,
-                      const int ncols_x, const int nrows_x, const int ncols_y,
-                      const int nrows_y, const int nrows_dst) {
-  // ) {
-
-  // const block_q_t  * x = (const block_q_t  *) ((char*)v + exp_idx *
-  // exp_stride); const block_q8_1 * y = (const block_q8_1 *) ((char*)x +
-  // token_idx * token_stride);
-
+static __device__ __forceinline__ void moe_q(
+    const void* __restrict__ vx, const void* __restrict__ vy,
+    const half* __restrict__ dst, const int* __restrict__ sorted_token_ids,
+    const int* __restrict__ expert_ids, const int exp_stride, const int ncols_x,
+    const int nrows_x, const int ncols_y, const int nrows_y,
+    const int nrows_dst, const int top_k) {
   const int blocks_per_row_x = ncols_x / qk;
   const int blocks_per_col_y = nrows_y / QK8_1;
   const int blocks_per_warp = WARP_SIZE_GGUF / qi;
 
-  const int& ncols_dst = ncols_y;
+  const int ncols_dst = ncols_y * top_k;
 
   const int row_dst_0 = blockIdx.x * mmq_y;
   const int& row_x_0 = row_dst_0;
 
   const int col_dst_0 = blockIdx.y * mmq_x;
-  const int& col_y_0 = col_dst_0;
+  // const int& col_y_0 = col_dst_0;
 
-  const int token_ids[mmq_x / nwarps];
+  int token_ids[mmq_x / nwarps];
+  int token_offs[mmq_x / nwarps];
   for (int i = 0; i < mmq_x; i += nwarps) {
-    token_ids[i / nwarps] = sorted_token_ids[col_dst_0 + threadIdx.y + i] / 8;
+    token_offs[i / nwarps] = sorted_token_ids[col_dst_0 + threadIdx.y + i];
+    token_ids[i / nwarps] = token_offs[i / nwarps] / top_k;
   }
   const int exp_idx = expert_ids[blockIdx.x];
 
@@ -81,7 +77,7 @@ __global__ void moe_q(const void* __restrict__ vx, const void* __restrict__ vy,
                         mmq_x;
         const int kby = threadIdx.x % (WARP_SIZE_GGUF / QI8_1);
         const int col_y_eff =
-            min(ttoken_ids[i / nwarps * QI8_1] + ids, ncols_y - 1);
+            min(token_ids[ids0 / nwarps * QI8_1] + ids, ncols_y - 1);
         // const int col_y_eff = min(col_y_0 + threadIdx.y + i, ncols_y-1); //
         // to prevent out-of-bounds memory accesses const int col_y_eff =
         // min(token_ids[i/nwarps], ncols_y-1); // to prevent out-of-bounds
@@ -124,7 +120,7 @@ __global__ void moe_q(const void* __restrict__ vx, const void* __restrict__ vy,
 #pragma unroll
   for (int j = 0; j < mmq_x; j += nwarps) {
     // const int col_dst = col_dst_0 + j + threadIdx.y;
-    const int col_dst = token_ids[j / nwarps];
+    const int col_dst = token_offs[j / nwarps];
     if (col_dst >= ncols_dst) {
       return;
     }
@@ -157,9 +153,10 @@ static __global__ void
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q2_K, 2)
 #endif
     moe_q2_K(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* expert_ids,
-             const int exp_stride, const int ncols_x, const int nrows_x,
-             const int ncols_y, const int nrows_y, const int nrows_dst) {
+             half* __restrict__ dst, const int* sorted_token_ids,
+             const int* expert_ids, const int exp_stride, const int ncols_x,
+             const int nrows_x, const int ncols_y, const int nrows_y,
+             const int nrows_dst, const int top_k) {
   const int mmq_x = MMQ_X_Q2_K;
   const int mmq_y = MMQ_Y_Q2_K;
   const int nwarps = NWARPS_Q2_K;
@@ -167,34 +164,35 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q2_K, 2)
   moe_q<QK_K, QR2_K, QI2_K, false, block_q2_K, mmq_x, mmq_y, nwarps,
         allocate_tiles_q2_K<mmq_y>, load_tiles_q2_K<mmq_y, nwarps, need_check>,
         VDR_Q2_K_Q8_1_MMQ, vec_dot_q2_K_q8_1_mul_mat>(
-      vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst);
+      vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
+      ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q2_K_q8_1_cuda(const void* inp, const void* w,
-                                    const half* out,
+static void ggml_moe_q2_K_q8_1_cuda(const void* inp, const void* w, half* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
                                     const int ncols_y, const int nrows_y,
-                                    const int nrows_dst, cudaStream_t stream) {
+                                    const int nrows_dst, const int top_k,
+                                    cudaStream_t stream) {
   const int mmq_x = MMQ_X_Q2_K;
   const int mmq_y = MMQ_Y_Q2_K;
   const int nwarps = NWARPS_Q2_K;
 
   const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
-  const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
+  const int block_num_y = (ncols_y * top_k + mmq_x - 1) / mmq_x;
   const dim3 block_nums(block_num_x, block_num_y, 1);
   const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
     moe_q2_K<need_check><<<block_nums, block_dims, 0, stream>>>(
-        w, inp, out, expert_ids, exp_stride, ncols_x, nrows_x, ncols_y, nrows_y,
-        nrows_dst);
+        w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
+        ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
     moe_q2_K<need_check><<<block_nums, block_dims, 0, stream>>>(
-        w, inp, out, expert_ids, exp_stride, ncols_x, nrows_x, ncols_y, nrows_y,
-        nrows_dst);
+        w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
+        ncols_y, nrows_y, nrows_dst, top_k);
   }
 }

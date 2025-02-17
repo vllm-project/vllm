@@ -439,8 +439,12 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         expert_ids: torch.Tensor,
         quant_type: int,
         row: torch.SymInt,
+        top_k: torch.SymInt,
     ) -> torch.Tensor:
-        return torch.empty(X.shape, dtype=torch.float16, device=W.device)
+        tokens = X.size(0)
+        return torch.empty((tokens * top_k, row),
+                           dtype=torch.float16,
+                           device=W.device)
 
 
 # cutlass

@@ -154,8 +154,8 @@ torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
 torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W1,
                           torch::Tensor sorted_token_ids,
                           torch::Tensor expert_ids,
-                          torch::Tensor num_tokens_post_padded, int64_t type,
-                          int64_t row);
+                          // torch::Tensor num_tokens_post_padded,
+                          int64_t type, int64_t row, int64_t top_k);
 #ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
