@@ -524,4 +524,15 @@ class OpenAIServing:
         return tokenizer.decode(token_id)
 
     def _is_model_supported(self, model_name):
+        if not model_name:
+            return True
         return self.models.is_base_model(model_name)
+
+    def _get_model_name(self,
+                        model_name: Optional[str] = None,
+                        lora_request: Optional[LoRARequest] = None):
+        if lora_request:
+            return lora_request.lora_name
+        if model_name is None:
+            return self.models.base_model_paths[0].name
+        return model_name
