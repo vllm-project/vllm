@@ -46,10 +46,13 @@ class Scheduler:
 
         num_gpu_blocks = cache_config.num_gpu_blocks
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        num_cpu_blocks = cache_config.num_cpu_blocks
+        assert isinstance(num_cpu_blocks, int) and num_cpu_blocks >= 0
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             block_size=self.cache_config.block_size,
             num_gpu_blocks=num_gpu_blocks,
+            num_cpu_blocks=num_cpu_blocks,
             max_model_len=self.max_model_len,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching,
@@ -242,8 +245,8 @@ class Scheduler:
                         break
 
                 # Get already-cached tokens.
-                computed_blocks, num_computed_tokens = \
-                    self.kv_cache_manager.get_computed_blocks(request)
+                computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+                    self.kv_cache_manager.get_computed_blocks(request))
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
@@ -259,7 +262,10 @@ class Scheduler:
                     # improve the performance.
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
-                    computed_blocks.pop()
+                    if computed_blocks:
+                        computed_blocks.pop()
+                    else:
+                        computed_cpu_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
@@ -273,7 +279,11 @@ class Scheduler:
                     break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks)
+                    request,
+                    num_new_tokens,
+                    computed_blocks,
+                    computed_cpu_blocks,
+                )
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
@@ -367,7 +377,11 @@ class Scheduler:
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+            h2d_swap_map=self.kv_cache_manager.step_h2d_swap_map,
+            d2h_swap_map=self.kv_cache_manager.step_d2h_swap_map,
         )
+
+        self.kv_cache_manager.end_schedule_step()
 
         self.finished_req_ids = set()
         return scheduler_output

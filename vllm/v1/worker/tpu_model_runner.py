@@ -945,9 +945,9 @@ class TPUModelRunner:
                 raise NotImplementedError
 
         bind_kv_cache(
-            kv_caches,
+            kv_caches, None,
             self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+            self.kv_caches, None)
 
 
 class ModelWrapperV1(nn.Module):

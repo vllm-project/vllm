@@ -47,8 +47,11 @@ class EngineCore:
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
-        logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
-                    VLLM_VERSION, vllm_config)
+        logger.info(
+            "Initializing a V1 LLM engine (v%s) with config: %s",
+            VLLM_VERSION,
+            vllm_config,
+        )
 
         self.log_stats = log_stats
 
@@ -99,22 +102,31 @@ class EngineCore:
         available_gpu_memory = self.model_executor.determine_available_memory()
 
         # Get the kv cache tensor size
-        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
-                                                available_gpu_memory)
+        kv_cache_configs = get_kv_cache_configs(
+            vllm_config, kv_cache_specs, available_gpu_memory,
+            vllm_config.cache_config.swap_space_bytes)
         num_gpu_blocks_set = set(config.num_blocks
+                                 for config in kv_cache_configs)
+        num_cpu_blocks_set = set(config.num_cpu_blocks
                                  for config in kv_cache_configs)
         assert len(num_gpu_blocks_set) == 1, (
             f"num_gpu_blocks need to be the same across workers, "
             f"but they are different: {num_gpu_blocks_set}")
+        assert len(num_cpu_blocks_set) == 1, (
+            f"num_cpu_blocks_set need to be the same across workers, "
+            f"but they are different: {num_cpu_blocks_set}")
         num_gpu_blocks = num_gpu_blocks_set.pop()
-        num_cpu_blocks = 0
+        num_cpu_blocks = num_cpu_blocks_set.pop()
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info(("init engine (profile, create kv cache, "
-                     "warmup model) took %.2f seconds"), elapsed)
+        logger.info(
+            ("init engine (profile, create kv cache, "
+             "warmup model) took %.2f seconds"),
+            elapsed,
+        )
         return num_gpu_blocks, num_cpu_blocks
 
     def add_request(self, request: EngineCoreRequest):
@@ -151,6 +163,22 @@ class EngineCore:
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         scheduler_output = self.scheduler.schedule()
+
+        # Swap the kv cache blocks between CPU and GPU.
+        # NOTE: A hidden assumption here is that we need to complete the d2h
+        # swap before the h2d swap, since it is possible that a block that
+        # just got swapped out (i.e. evicted) needs to be swapped in again for
+        # another request. This is currently guaranteed since both are issued
+        # to the current stream.
+        # TODO(meng): make it more explicit.
+        # TODO(meng): This means there is an optimization opportunity here,
+        # where we can get the intersection of h2d destinations and d2h
+        # sources and just do d2d copies.
+        self.model_executor.swap_blocks(
+            scheduler_output.h2d_swap_map,
+            scheduler_output.d2h_swap_map,
+        )
+
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
@@ -255,7 +283,7 @@ class EngineCoreProc(EngineCore):
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
         self.input_queue: queue.Queue[Tuple[EngineCoreRequestType,
-                                            Any]] = queue.Queue()
+                                            Any]] = (queue.Queue())
         self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),

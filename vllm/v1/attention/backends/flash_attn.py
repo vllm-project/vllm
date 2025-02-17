@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import numpy as np
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import get_flash_attn_version
@@ -54,6 +55,14 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
+
+    @staticmethod
+    def swap_blocks(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: torch.Tensor,
+    ) -> None:
+        return swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
 
 @dataclass
@@ -372,3 +381,16 @@ def cascade_attention(
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
                       suffix_lse)
+
+
+def swap_blocks(
+    src_kv_cache: torch.Tensor,
+    dst_kv_cache: torch.Tensor,
+    src_to_dst: torch.Tensor,
+) -> None:
+    src_key_cache = src_kv_cache[0]
+    dst_key_cache = dst_kv_cache[0]
+    ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+    src_value_cache = src_kv_cache[1]
+    dst_value_cache = dst_kv_cache[1]
+    ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)

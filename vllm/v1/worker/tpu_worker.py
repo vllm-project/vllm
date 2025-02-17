@@ -120,9 +120,9 @@ class TPUWorker:
 
         runner_kv_caches: List[torch.Tensor] = []
         bind_kv_cache(
-            kv_caches,
+            kv_caches, None,
             self.vllm_config.compilation_config.static_forward_context,
-            runner_kv_caches)
+            runner_kv_caches, None)
 
         self.model_runner.dummy_run(
             runner_kv_caches,

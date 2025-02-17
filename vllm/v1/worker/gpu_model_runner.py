@@ -115,6 +115,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: List[torch.Tensor] = []
+        self.cpu_kv_caches: List[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
@@ -1362,11 +1363,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "supported yet.")
 
         kv_caches: Dict[str, torch.Tensor] = {}
+        cpu_kv_caches: Dict[str, torch.Tensor] = {}
 
         for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
             tensor_config = kv_cache_config.tensors[layer_name]
             assert tensor_config.size % layer_spec.page_size_bytes == 0
             num_blocks = tensor_config.size // layer_spec.page_size_bytes
+            num_cpu_blocks = kv_cache_config.num_cpu_blocks
             if isinstance(layer_spec, FullAttentionSpec):
                 kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
                     num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
@@ -1375,13 +1378,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_caches[layer_name] = torch.zeros(kv_cache_shape,
                                                     dtype=dtype,
                                                     device=self.device)
+                cpu_kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+                    num_cpu_blocks, layer_spec.block_size,
+                    layer_spec.num_kv_heads, layer_spec.head_size)
+                dtype = layer_spec.dtype
+                cpu_kv_caches[layer_name] = torch.zeros(cpu_kv_cache_shape,
+                                                        dtype=dtype,
+                                                        device="cpu",
+                                                        pin_memory=True)
             else:
                 raise NotImplementedError
 
         bind_kv_cache(
             kv_caches,
+            cpu_kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+            self.kv_caches,
+            self.cpu_kv_caches,
+        )
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
@@ -1417,3 +1431,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     f"Unknown attention type: {attn_module.attn_type}")
 
         return kv_cache_spec
+
+    def swap_blocks(self, h2d_map: Dict[int, int], d2h_map: Dict[int, int]):
+        """
+        Swap blocks between CPU and GPU. Both h2d and d2h calls are issued
+        to the same steam with the former issued first.
+        Args:
+            h2d_map: A dictionary mapping CPU block IDs to GPU block IDs.
+            d2h_map: A dictionary mapping GPU block IDs to CPU block IDs.
+        """
+
+        # Host to device.
+        if len(h2d_map) != 0:
+            h2d_map_t = torch.tensor(list(h2d_map.items()), device="cpu")
+            for src_tensor, dst_tensor in zip(self.cpu_kv_caches,
+                                              self.kv_caches):
+                FlashAttentionBackend.swap_blocks(src_tensor, dst_tensor,
+                                                  h2d_map_t)
+
+        # Device to host.
+        if len(d2h_map) != 0:
+            d2h_map = torch.tensor(list(d2h_map.items()), device="cpu")
+            for src_tensor, dst_tensor in zip(self.kv_caches,
+                                              self.cpu_kv_caches):
+                FlashAttentionBackend.swap_blocks(src_tensor, dst_tensor,
+                                                  d2h_map)

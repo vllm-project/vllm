@@ -94,6 +94,8 @@ class KVCacheConfig:
     """
     """The number of KV cache blocks"""
     num_blocks: int
+    """The number of CPU KV cache blocks"""
+    num_cpu_blocks: int
     """layer_name -> how to initialize KV cache for that layer"""
     tensors: Dict[str, KVCacheTensor]
     """
