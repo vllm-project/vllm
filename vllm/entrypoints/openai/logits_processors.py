@@ -77,10 +77,10 @@ def _get_logit_bias_logits_processor(
     try:
         # Convert token_id to integer
         # Clamp the bias between -100 and 100 per OpenAI API spec
-        logit_bias_index: List[int] = [
+        clamped_logit_bias_index: List[int] = [
             int(token_id) for token_id in logit_bias_index
         ]
-        logit_bias_value: List[float] = [
+        clamped_logit_bias_value: List[float] = [
             min(100.0, max(-100.0, bias)) for bias in logit_bias_value
         ]
     except ValueError as exc:
@@ -89,13 +89,13 @@ def _get_logit_bias_logits_processor(
             "an integer or string representing an integer") from exc
 
     # Check if token_id is within the vocab size
-    for token_id in logit_bias_index:
+    for token_id in clamped_logit_bias_index:
         if token_id < 0 or token_id >= vocab_size:
             raise ValueError(f"token_id {token_id} in logit_bias contains "
                              "out-of-vocab token id")
 
-    return LogitBiasLogitsProcessor(logit_bias_index,
-                                    logit_bias_value,
+    return LogitBiasLogitsProcessor(clamped_logit_bias_index,
+                                    clamped_logit_bias_value,
                                     dtype=dtype)
 
 
