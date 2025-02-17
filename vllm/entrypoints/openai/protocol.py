@@ -472,8 +472,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # Create KVTransferParams based on input from request
         kv_transfer_params = KVTransferParams.from_optional(
-            input_json=self.kv_transfer_params_json,
-        )
+            input_json=self.kv_transfer_params_json)
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -844,8 +843,7 @@ class CompletionRequest(OpenAIBaseModel):
 
         # Create KVTransferParams based on input from request
         kv_transfer_params = KVTransferParams.from_optional(
-            input_json=self.kv_transfer_params_json,
-        )
+            input_json=self.kv_transfer_params_json)
 
         return SamplingParams.from_optional(
             n=self.n,
