@@ -57,7 +57,7 @@ class AsyncLLM(EngineClient):
         if self.log_stats:
             self.stat_loggers.extend([
                 LoggingStatLogger(),
-                PrometheusStatLogger(vllm_config.model_config),
+                PrometheusStatLogger(vllm_config),
             ])
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -361,6 +361,10 @@ class AsyncLLM(EngineClient):
     async def reset_prefix_cache(self) -> None:
         await self.engine_core.reset_prefix_cache_async()
 
+    async def add_lora(self, lora_request: LoRARequest) -> None:
+        """Load a new LoRA adapter into the engine for future requests."""
+        await self.engine_core.add_lora_async(lora_request)
+
     @property
     def is_running(self) -> bool:
         return True
@@ -376,7 +380,3 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return Exception()  # TODO: implement
-
-    async def add_lora(self, lora_request: LoRARequest) -> None:
-        """Load a new LoRA adapter into the engine for future requests."""
-        raise NotImplementedError("LoRA not yet supported in V1")

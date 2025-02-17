@@ -99,7 +99,7 @@ def test_register_quantization_config():
 
 @pytest.mark.parametrize(argnames="model",
                          argvalues=[
-                             "meta-llama/Meta-Llama-3-8B-Instruct",
+                             "meta-llama/Llama-3.2-1B-Instruct",
                          ])
 def test_custom_quant(vllm_runner, model):
     """Test infer with the custom quantization method."""
