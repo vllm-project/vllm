@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import msgspec
 
 
 # Helper function to check if all elements in a list are integers or None
-def valid_prefix_prompt_ids(lst: Union[List[int], List[List[int]]]) -> bool:
+def valid_prefix_prompt_ids(lst: List[Any]) -> bool:
     return (all(isinstance(x, int) for x in lst) or all(x is None for x in lst)
             or all(
                 isinstance(x, list) and all(isinstance(i, int) for i in x)
@@ -17,7 +17,7 @@ def valid_prefix_prompt_ids(lst: Union[List[int], List[List[int]]]) -> bool:
 
 
 # Helper function to check if all elements in a list are strings or None
-def valid_kvcache_keys(lst: Union[List[str], List[List[str]]]) -> bool:
+def valid_kvcache_keys(lst: List[Any]) -> bool:
     return (all(isinstance(x, str) for x in lst) or all(x is None for x in lst)
             or all(
                 isinstance(x, list) and all(isinstance(i, str) for i in x)
@@ -62,9 +62,9 @@ class KVTransferParams(
         kvcache_store_keys: If provided, then it contains the keys of the
             KVCache that need to be send.
     """
-    prefix_prompt_ids: Optional[Union[List[int], List[List[int]]]] = None
-    kvcache_load_keys: Optional[Union[List[str], List[List[str]]]] = None
-    kvcache_store_keys: Optional[Union[List[str], List[List[str]]]] = None
+    prefix_prompt_ids: Optional[Any] = None
+    kvcache_load_keys: Optional[Any] = None
+    kvcache_store_keys: Optional[Any] = None
 
     def __post_init__(self):
         self._verify_args()
