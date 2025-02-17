@@ -1589,7 +1589,12 @@ class HPUModelRunner:
 
             # sampler now returns cpu list instead of device tensor -
             # and i don't like it
-            prefill_output_device = torch.cat(prefill_output_tokens, dim=0)
+            if len(prefill_output_tokens) > 0:
+                prefill_output_device = torch.tensor(
+                    prefill_output_tokens,
+                    device=prefill_output_tokens[0].device,
+                    dtype=prefill_output_tokens[0].dtype)
+                #torch.cat(prefill_output_tokens, dim=0)
             htorch.core.mark_step()
 
         # From this point onward, all operations are done on CPU.
