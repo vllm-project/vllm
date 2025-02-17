@@ -260,7 +260,7 @@ Check the ❌ or 🟠 with links to see tracking issue for unsupported feature/h
   *
 - * <abbr title="Multimodal Inputs">mm</abbr>
   * ✅
-  * [❌](gh-pr:8348)
+  * [🟠](gh-pr:8348)
   * [🟠](gh-pr:4194)
   * ❔
   * ❔
