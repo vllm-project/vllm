@@ -124,9 +124,8 @@ class CudaPlatformBase(Platform):
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Speculative decoding is not yet supported on VLLM V1."
-                    )
+                    parallel_config.worker_cls = \
+                            "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = \
                         "vllm.spec_decode.spec_decode_worker.create_spec_worker"
@@ -233,6 +232,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
 
 
 # NVML utils

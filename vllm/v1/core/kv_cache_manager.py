@@ -82,6 +82,11 @@ class KVCacheManager:
         self.req_to_block_hashes: DefaultDict[
             str, List[BlockHashType]] = defaultdict(list)
 
+        # {req_id: The number of cached blocks for this given request}
+        # This is used to track the number of cached blocks for each request.
+        # This is only used to track the RUNNING requests, we do not track the
+        # data for reempted ones.
+        self.num_cached_block: Dict[str, int] = defaultdict(int)
         self.prefix_cache_stats = PrefixCacheStats()
 
     @property
@@ -241,23 +246,25 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
-        # NOTE(rickyx): We are assuming the `num_tokens` are actual
-        # tokens rather than lookahead slots (e.g. for speculative decoding).
-        # TODO(rickyx): When supporting speculative decoding, we will need to
-        # differentiate between them so that we can know how many blocks are
-        # full after appending the actual tokens.
-        num_full_blocks = (num_computed_tokens + num_tokens) // self.block_size
-        num_computed_full_blocks = num_computed_tokens // self.block_size
-        new_full_blocks = req_blocks[num_computed_full_blocks:num_full_blocks]
+        num_cached_blocks = self.num_cached_block[request.request_id]
+        # Speculated tokens might be rejected in the future, so we does
+        # not cache any speculated tokens. We only cache blocks with
+        # generated (accepted) tokens.
+        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
+            request.spec_token_ids)) // self.block_size
+        new_full_blocks = req_blocks[
+            num_cached_blocks:num_full_blocks_after_append]
+
         if new_full_blocks:
             self._cache_full_blocks(
                 request=request,
-                blk_start_idx=num_computed_full_blocks,
+                blk_start_idx=num_cached_blocks,
                 # The new full blocks are the full blocks that are not computed.
                 full_blocks=new_full_blocks,
-                prev_block=(req_blocks[num_computed_full_blocks - 1]
-                            if num_computed_full_blocks > 0 else None))
-
+                prev_block=(req_blocks[num_cached_blocks -
+                                       1] if num_cached_blocks > 0 else None))
+        self.num_cached_block[
+            request.request_id] = num_full_blocks_after_append
         return new_blocks
 
     def free(self, request: Request) -> None:
@@ -280,6 +287,8 @@ class KVCacheManager:
             block.decr_ref()
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
+
+        self.num_cached_block.pop(request.request_id, None)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
