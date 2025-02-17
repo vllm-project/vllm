@@ -143,7 +143,7 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
         fields_config = fields_factory(data)
         missing_required_fields = required_fields - fields_config.keys()
         if missing_required_fields:
-            fields = set(fields_factory.keys())
+            fields = set(fields_config.keys())
             msg = f"{required_fields=} should be a subset of {fields=}"
             raise ValueError(msg)
 
