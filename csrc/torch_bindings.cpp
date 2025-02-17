@@ -286,6 +286,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
   ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
 
+  // mmvq kernel for GGML.
+  ops.def(
+      "ggml_moe_a8(torch::Tensor X, torch::Tensor W1,"
+      "torch::Tensor sorted_token_ids, torch::Tensor expert_ids"
+      "SymInt type, SymInt row) -> Tensor ");
+  ops.impl("ggml_moe_a8", torch::kCUDA, &ggml_moe_a8);
+
 #ifndef USE_ROCM
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def(

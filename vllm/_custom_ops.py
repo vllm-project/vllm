@@ -431,6 +431,17 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         batch = X.size(0)
         return torch.empty((batch, row), dtype=torch.float16, device=W.device)
 
+    @register_fake("_C::ggml_moe_a8")
+    def _ggml_moe_a8_fake(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        quant_type: int,
+        row: torch.SymInt,
+    ) -> torch.Tensor:
+        return torch.empty(X.shape, dtype=torch.float16, device=W.device)
+
 
 # cutlass
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:

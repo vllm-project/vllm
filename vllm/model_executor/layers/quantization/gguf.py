@@ -9,6 +9,7 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -280,6 +281,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
+        out = moe_align_block_size(topk_ids, 8, 256)
         final_hidden_states = torch.empty_like(x)
         for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
             inp = x[tok].reshape((1, ) + x.shape[1:])
