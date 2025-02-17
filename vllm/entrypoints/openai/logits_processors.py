@@ -47,8 +47,10 @@ def logit_bias_logits_processor(
     token_ids: List[int],
     logits: torch.Tensor,
 ) -> torch.Tensor:
-    logits.index_add_(0, logit_bias["index"].to(logits.device),
-                      logit_bias["value"].to(logits.device))
+    if logit_bias["value"].device != logits.device:
+        logit_bias["index"] = logit_bias["index"].to(logits.device)
+        logit_bias["value"] = logit_bias["value"].to(logits.device)
+    logits.index_add_(0, logit_bias["index"], logit_bias["value"])
     return logits
 
 
