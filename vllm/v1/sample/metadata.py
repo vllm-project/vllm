@@ -12,6 +12,8 @@ class SamplingMetadata:
     temperature: torch.Tensor
     all_greedy: bool
     all_random: bool
+    rejection_sampling: bool
+    spec_token_ids: List[List[int]]
 
     top_p: Optional[torch.Tensor]
     top_k: Optional[torch.Tensor]

@@ -30,7 +30,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         llm_int8_skip_modules: Optional[List[str]] = None,
         llm_int8_threshold: float = 6.0,
     ) -> None:
-
+        super().__init__()
         self.load_in_8bit = load_in_8bit
         self.load_in_4bit = load_in_4bit
         self.bnb_4bit_compute_dtype = bnb_4bit_compute_dtype

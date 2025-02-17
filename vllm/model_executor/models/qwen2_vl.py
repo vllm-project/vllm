@@ -31,7 +31,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
+from packaging.version import Version
 from transformers import BatchFeature
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.qwen2_vl import (Qwen2VLImageProcessor,
                                           Qwen2VLProcessor)
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
@@ -689,8 +691,8 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                fields_config=_qwen2vl_field_config(data),
                 required_fields={"image_embeds", "image_grid_thw"},
+                fields_factory=_qwen2vl_field_config,
             )
 
         return super()._parse_image_data(data)
@@ -703,8 +705,8 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                fields_config=_qwen2vl_field_config(data),
                 required_fields={"video_embeds", "video_grid_thw"},
+                fields_factory=_qwen2vl_field_config,
             )
 
         return super()._parse_video_data(data)
@@ -746,7 +748,13 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         hf_processor = self.get_hf_processor(min_pixels=min_pixels,
                                              max_pixels=max_pixels)
         image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2VLImageProcessor)
+        if Version(TRANSFORMERS_VERSION) >= Version("4.49"):
+            from transformers.models.qwen2_vl import Qwen2VLImageProcessorFast
+            assert isinstance(
+                image_processor,
+                (Qwen2VLImageProcessor, Qwen2VLImageProcessorFast))
+        else:
+            assert isinstance(image_processor, Qwen2VLImageProcessor)
         return image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:

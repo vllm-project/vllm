@@ -89,6 +89,7 @@ def _construct_expected_sampling_metadata(
                                  device=device),
         all_greedy=False,
         all_random=True,
+        rejection_sampling=False,
         top_p=None if all(x == 1.0 for x in top_p) else torch.tensor(
             top_p, dtype=torch.float, device=device),
         top_k=None if all(x == 0 for x in top_k) else torch.tensor(
@@ -113,6 +114,7 @@ def _construct_expected_sampling_metadata(
                                           dtype=torch.float,
                                           device=device),
         output_token_ids=output_token_ids,
+        spec_token_ids=[],
         min_tokens=min_tokens,
         no_penalties=(all(x == 0 for x in presence_penalties)
                       and all(x == 0 for x in frequency_penalties)

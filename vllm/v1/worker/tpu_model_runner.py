@@ -695,7 +695,7 @@ class TPUModelRunner:
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=sampled_token_ids,
+            sampled_token_ids=[[token_id] for token_id in sampled_token_ids],
             logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )

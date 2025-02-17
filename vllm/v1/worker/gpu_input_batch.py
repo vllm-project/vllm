@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import itertools
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
@@ -425,6 +425,8 @@ class InputBatch:
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()
 
+
+#         req_id_to_spec_token_ids: Dict[str, List[int]],
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         copy_slice(self.temperature_cpu_tensor, self.temperature, num_reqs)
@@ -450,7 +452,12 @@ class InputBatch:
             # the sampling process. Hence copy these tensors only when
             # there are requests which need penalties to be applied.
             prompt_token_ids = self._make_prompt_token_ids_tensor()
+        else:
+            prompt_token_ids = None
 
+        spec_token_ids: List[List[int]] = []
+        rejection_sampling = False
+        for req_id in itertools.islice(self.req_ids, num_reqs):
             # Currently we create a tensor for output_token_ids from scratch
             # at each step. However, for the penalties computation what we
             # need is stats about the token ids present in the output. This
@@ -458,13 +465,18 @@ class InputBatch:
             # from scratch at each step.
             # TODO - Replace this with incremental update to output token
             # statistics.
-        else:
-            prompt_token_ids = None
+            req_spec_token_ids = req_id_to_spec_token_ids.get(req_id, ())
+            spec_token_ids.append(req_spec_token_ids)
+            if req_spec_token_ids:
+                # If any of the requests have speculated tokens, set the
+                # flag to True.
+                rejection_sampling = True
 
         return SamplingMetadata(
             temperature=self.temperature[:num_reqs],
             all_greedy=self.all_greedy,
             all_random=self.all_random,
+            rejection_sampling=rejection_sampling,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
             min_p=None if self.no_min_p else self.min_p[:num_reqs],
@@ -475,6 +487,7 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(List[List[int]], self.req_output_token_ids),
+            spec_token_ids=spec_token_ids,
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
