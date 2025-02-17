@@ -260,6 +260,7 @@ def test_stop_via_update_from_output():
         sampled_token_ids=[[EOS_TOKEN_ID],
                            [10,
                             11]],  # First request hits EOS, second continues
+        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={})
 
