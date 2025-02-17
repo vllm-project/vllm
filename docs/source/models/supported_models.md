@@ -58,11 +58,11 @@ If it is `TransformersModel` then it means it's based on `transformers`!
 
 ##### Quantization
 
-Transformers fallback has supported most of available quantization in vllm (except GGUF). See [Quantization page](#quantization-index) for more information about supported quantization in vllm.
+Transformers fallback has supported most of available quantization in vLLM (except GGUF). See [Quantization page](#quantization-index) for more information about supported quantization in vllm.
 
 ##### LoRA
 
-LoRA hasn't supported yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
+LoRA hasn't supported on transformers fallback yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
 
 Usually `transformers` model load weights via the `load_adapters` API, that depends on PEFT. We need to work a bit to either use this api (for now this would result in some weights not being marked as loaded) or replace modules accordingly.
 

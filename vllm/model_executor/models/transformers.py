@@ -103,12 +103,6 @@ def replace_linear_class(
         "rowwise": RowParallelLinear,
     }.get(style, ReplicatedLinear)
 
-    if vllm_linear_cls is None:
-        logger.warning(
-            "Unsupported parallel style value: %s. "
-            "This layer will not be tensor parallelized.", style)
-        return linear
-
     class HFCompatibleLinear(vllm_linear_cls):
         """
         Wrapper class that removes `output_bias` from returned output.
