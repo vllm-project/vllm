@@ -726,7 +726,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.
   *
   * ✅︎
-  * \*
+  * ✅︎\*
 - * `Idefics3ForConditionalGeneration`
   * Idefics3
   * T + I
@@ -869,7 +869,7 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{note}
-H2O-VL series models will be available in V1 once we support backends other than FlashAttention.
+`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
 :::
 
 :::{note}
@@ -936,6 +936,26 @@ The following table lists those that are tested in vLLM.
   * `MrLight/dse-qwen2-2b-mrl-v1`
   *
   * ✅︎
+:::
+
+#### Transcription (`--task transcription`)
+
+Speech2Text models trained specifically for Automatic Speech Recognition.
+
+:::{list-table}
+:widths: 25 25 25 5 5
+:header-rows: 1
+
+- * Architecture
+  * Models
+  * Example HF Models
+  * [LoRA](#lora-adapter)
+  * [PP](#distributed-serving)
+- * `Whisper`
+  * Whisper-based
+  * `openai/whisper-large-v3-turbo`
+  * 🚧
+  * 🚧
 :::
 
 _________________
