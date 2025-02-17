@@ -4,7 +4,7 @@ import functools
 import json
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -41,12 +41,13 @@ def load_v1_op_config(op_type: str,
 
 # TODO (varun) : Maybe rename !! Merge with the normal path !!
 @functools.lru_cache(maxsize=100)
-def get_v1_op_configs(op_type: str,
-                      batch: int,
-                      hidden_size: int,
-                      rank: int,
-                      num_slices: int,
-                      add_inputs: Optional[bool] = None) -> dict[str, int]:
+def get_v1_op_configs(
+        op_type: str,
+        batch: int,
+        hidden_size: int,
+        rank: int,
+        num_slices: int,
+        add_inputs: Optional[bool] = None) -> dict[str, Optional[int]]:
 
     assert op_type in ["shrink", "expand"]
 
@@ -77,6 +78,9 @@ def get_v1_op_configs(op_type: str,
 
     k, n = (hidden_size, rank) if op_type == "shrink" else (rank, hidden_size)
 
+    # config_data is nested as,
+    # config_data[num_slices][m][k][n] -> config
+    config_data: Any
     config_data = load_v1_op_config(op_type, add_inputs)
     if not config_data:
         return default
