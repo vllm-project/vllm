@@ -2,7 +2,7 @@
 
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import torch
@@ -97,11 +97,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
-        # NOTE: Initialized client is only used for processing dummy
-        # multimodal data into multimodal kwargs for GPU memory profiling.
-        # Only applicable to multimodal models with legacy input mapper.
-        self.mm_input_mapper_profiling = MMInputCacheClient(self.model_config)
-        self.mm_input_mapper_profiling.use_cache = False
+        if self.is_multimodal_model:
+            # NOTE: Initialized client is only used for processing dummy
+            # multimodal data into multimodal kwargs for GPU memory profiling.
+            # Only applicable to multimodal models with legacy input mapper.
+            self.mm_input_mapper_profiling = MMInputCacheClient(
+                self.model_config)
+            self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
@@ -150,6 +152,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
+        # self.intermediate_tensors  # Set after load_model
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -914,7 +917,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> ModelRunnerOutput:
+    ) -> Union[ModelRunnerOutput, torch.Tensor]:
         batch_changed = self._update_states(scheduler_output)
 
         if self.is_multimodal_model:
@@ -964,9 +967,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             positions = self.positions[:num_input_tokens]
 
+        if get_pp_group().is_first_rank:
+            intermediate_tensors = None
+        else:
+            intermediate_tensors = IntermediateTensors({
+                k: v[:num_input_tokens]
+                for k, v in self.intermediate_tensors.items()
+            })
         bypass_model_exec = False
         if self.need_recv_kv(attn_metadata, self.kv_caches):
-            print("needing to receive kv")
             hidden_states, bypass_model_exec = \
                 get_kv_transfer_group().recv_kv_caches_and_hidden_states(
                     self.model,
@@ -974,9 +983,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     kv_caches=self.kv_caches,
                     attn_metadata=attn_metadata,
                 )
-            print("received hidden states", hidden_states.shape,
-                  self.kv_caches[0].shape)
-
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         if bypass_model_exec is False:
@@ -990,10 +996,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     inputs_embeds=inputs_embeds,
                 )
         if not get_pp_group().is_last_rank:
+            # For mid-pipeline stages, return the hidden states.
             return hidden_states
         if self.need_send_kv(attn_metadata, self.kv_caches):
             get_kv_transfer_group().send_kv_caches_and_hidden_states(
-                # model_executable is used to know which layer the current
+                # model is used to know which layer the current
                 # worker is working on, so that we can send KV for only those
                 # layers.
                 self.model,
@@ -1188,12 +1195,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             positions = self.mrope_positions[:, :num_tokens]
         else:
             positions = self.positions[:num_tokens]
-        intermediate_tensors = None
-        if not get_pp_group().is_first_rank:
-            intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                batch_size=num_tokens,
-                dtype=self.model_config.dtype,
-                device=self.device)
+
+        if get_pp_group().is_first_rank:
+            intermediate_tensors = None
+        else:
+            if not hasattr(self, "intermediate_tensors"):
+                self.intermediate_tensors = (
+                    self.model.make_empty_intermediate_tensors(
+                        batch_size=self.max_num_tokens,
+                        dtype=self.model_config.dtype,
+                        device=self.device))
+            intermediate_tensors = IntermediateTensors({
+                k: v[:num_tokens]
+                for k, v in self.intermediate_tensors.items()
+            })
+
         with set_forward_context(None, self.vllm_config):
             hidden_states = model(
                 input_ids=input_ids,
