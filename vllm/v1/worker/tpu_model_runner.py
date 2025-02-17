@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+import enum
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
@@ -12,14 +14,19 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.sampling_params import SamplingType
+from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata)
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.model_runner_base import ExecutionMode, ModelRunnerBase
@@ -39,81 +46,88 @@ _ENABLE_TOP_P = False
 _MAX_NUM_SAMPLES = 128
 
 
-class TPUModelRunner(ModelRunnerBase):
+class TPUModelRunner():
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        super().__init__(vllm_config, device)
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
+        self.device_config = vllm_config.device_config
 
+        model_config = self.model_config
+        cache_config = self.cache_config
+        scheduler_config = self.scheduler_config
+        parallel_config = self.parallel_config
+        self.device = device
+        self.pin_memory = is_pin_memory_available()
+        self.dtype = self.model_config.dtype
+
+        self.is_multimodal_model = model_config.is_multimodal_model
+        self.sliding_window = model_config.get_sliding_window()
+        self.block_size = cache_config.block_size
+        self.max_model_len = model_config.max_model_len
+        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
+        self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        self.max_num_reqs = scheduler_config.max_num_seqs
+
+        # Model-related.
+        self.num_attn_layers = model_config.get_num_layers_by_block_type(
+            parallel_config, LayerBlockType.attention)
+        self.num_query_heads = model_config.get_num_attention_heads(
+            parallel_config)
+        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        self.head_size = model_config.get_head_size()
+        self.hidden_size = model_config.get_hidden_size()
+
+        self.model: Optional[nn.Module] = None
 
         # Persistent batch.
-        # TODO(xw32): delete this as the base class has already done it.
-        # self.input_batch = InputBatch(
-        #     max_num_reqs=self.max_num_reqs,
-        #     max_model_len=self.max_model_len,
-        #     max_num_blocks_per_req=self.max_num_blocks_per_req,
-        #     device=self.device,
-        #     pin_memory=self.pin_memory,
-        #     vocab_size=self.model_config.get_vocab_size(),
-        # )
-        # print(f'xw32 {self.max_num_reqs=}, {self.max_model_len=}, {self.max_num_blocks_per_req=}, {self.model_config.get_vocab_size()=}') # xw32 self.max_num_reqs=16, self.max_model_len=512, self.max_num_blocks_per_req=32, self.model_config.get_vocab_size()=151936
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+        )
 
         # Request states.
-        # TODO(xw32): delete this as the base class has already done it.
-        # self.requests: Dict[str, CachedRequestState] = {}
+        self.requests: Dict[str, CachedRequestState] = {}
+
+        # req_id -> (input_id -> encoder_output)
+        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
         # KV caches for forward pass
         self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
-        # xw32: Don't need the `prefill_input_positions` because prefill_input_positions was used in _prepare_prompt_inputs previously and we don't need it with the new kernel.
-        # Used to initialize positions for the individual prefills
-        # self.prefill_input_positions = torch.tensor(range(self.max_model_len),
-        #                                             device="cpu",
-        #                                             dtype=torch.int32).reshape(
-        #                                                 1, -1)
-
-        # xw32: below are copied from the gpu_model_runner.py. Can be used for
-        # capture the graph, etc.
-        # Persistent buffers for XLA graphs.
-        self.input_ids = torch.zeros(self.max_num_tokens,
+        # Cached torch/numpy tensor
+        self.input_ids = torch.empty(self.max_num_tokens,
                                      dtype=torch.int32,
-                                     device=self.device)
-        self.positions = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int64,
-                                     device=self.device)
-        
-        # In gpu_model_runner.py, inputs_embeds is only used for multimodal. So we don't need it for now.
-        # self.inputs_embeds = torch.zeros(
-        #     (self.max_num_tokens, self.hidden_size),
-        #     dtype=self.dtype,
-        #     device=self.device)
-        
-        # OPTIMIZATION: Cache the tensors rather than creating them every step.
-        self.arange_np = np.arange(max(self.max_num_reqs + 1,
-                                       self.max_model_len),
-                                   dtype=np.int32)
-        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
-        # a faster version of creating a new tensor every time. Thus, we should
-        # not make any assumptions about the values in these tensors.
-        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
-                                         dtype=torch.int32,
-                                         device="cpu",
-                                         pin_memory=self.pin_memory)
+                                     device="cpu")
         self.input_ids_np = self.input_ids_cpu.numpy()
-        self.positions_cpu = torch.zeros(self.max_num_tokens,
-                                         dtype=torch.int64,
-                                         device="cpu",
-                                         pin_memory=self.pin_memory)
+
+        self.positions_cpu = torch.empty(self.max_num_tokens,
+                                         dtype=torch.int32,
+                                         device="cpu")
         self.positions_np = self.positions_cpu.numpy()
+
         # xw32: slot_mapping maps a token to its position in the block (=block_numbers * self.block_size+block_offset)
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
+        self.slot_mapping_cpu = torch.empty(self.max_num_tokens,
                                             dtype=torch.int64,
-                                            device="cpu",
-                                            pin_memory=self.pin_memory)
+                                            device="cpu")
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+
         self.query_start_loc_cpu = torch.zeros(self.max_num_tokens + 1,
                                                dtype=torch.int32,
                                                device="cpu",
@@ -125,9 +139,170 @@ class TPUModelRunner(ModelRunnerBase):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
+        # Range tensor with values [0 .. self.max_num_tokens - 1].
+        # Used to initialize positions / context_lens / seq_lens
+        self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
+
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
+        """Update the cached states and the persistent batch with the scheduler
+        output.
+
+        The updated states are used by the `_prepare_inputs` function to create
+        the input GPU tensors for the model.
+
+        Returns:
+            True if there is a new/resumed/paused/finished request in the batch.
+            If False, we can skip copying SamplingMetadata to the GPU.
+        """
+        # Remove finished requests from the cached states.
+        for req_id in scheduler_output.finished_req_ids:
+            self.requests.pop(req_id, None)
+
+        # Remove the finished requests from the persistent batch.
+        # NOTE(woosuk): There could be an edge case where finished_req_ids and
+        # scheduled_req_ids overlap. This happens when a request is aborted and
+        # then resubmitted with the same ID. In this case, we treat them as two
+        # distinct requests - clearing the cached states for the first request
+        # and handling the second as a new request.
+        removed_req_indices: List[int] = []
+        for req_id in scheduler_output.finished_req_ids:
+            req_index = self.input_batch.remove_request(req_id)
+            if req_index is not None:
+                removed_req_indices.append(req_index)
+
+        # Remove the unscheduled requests from the persistent batch.
+        # NOTE(woosuk): The unscheduled requests are either preempted requests
+        # or running requests that are not scheduled in this step. We remove
+        # them from the persistent batch but keep their cached states since
+        # they will be scheduled again sometime in the future.
+        scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
+        cached_req_ids = self.input_batch.req_id_to_index.keys()
+        unscheduled_req_ids = cached_req_ids - scheduled_req_ids
+        # NOTE(woosuk): The persistent batch optimization assumes that
+        # consecutive batches contain mostly the same requests. If batches
+        # have low request overlap (e.g., alternating between two distinct
+        # sets of requests), this optimization becomes very inefficient.
+        for req_id in unscheduled_req_ids:
+            req_index = self.input_batch.remove_request(req_id)
+            assert req_index is not None
+            removed_req_indices.append(req_index)
+
+        req_ids_to_add: List[str] = []
+        # Add new requests to the cached states.
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            req_id = new_req_data.req_id
+            sampling_params = new_req_data.sampling_params
+            if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+                generator = torch.Generator(device=self.device)
+                generator.manual_seed(sampling_params.seed)
+            else:
+                generator = None
+
+            self.requests[req_id] = CachedRequestState(
+                req_id=req_id,
+                prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt=new_req_data.prompt,
+                mm_inputs=new_req_data.mm_inputs,
+                mm_positions=new_req_data.mm_positions,
+                sampling_params=sampling_params,
+                generator=generator,
+                block_ids=new_req_data.block_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
+                output_token_ids=[],
+                lora_request=new_req_data.lora_request,
+            )
+
+            req_ids_to_add.append(req_id)
+
+        # Update the states of the running/resumed requests.
+        for req_data in scheduler_output.scheduled_cached_reqs:
+            req_id = req_data.req_id
+            req_state = self.requests[req_id]
+
+            # Update the cached states.
+            req_state.num_computed_tokens = req_data.num_computed_tokens
+            if not req_data.resumed_from_preemption:
+                # Append the new blocks to the existing block IDs.
+                req_state.block_ids.extend(req_data.new_block_ids)
+            else:
+                # The request is resumed from preemption.
+                # Replace the existing block IDs with the new ones.
+                req_state.block_ids = req_data.new_block_ids
+
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is None:
+                # The request is not in the persistent batch.
+                # The request was either preempted and resumed later, or was not
+                # scheduled in the previous step and needs to be added again.
+                req_ids_to_add.append(req_id)
+                continue
+
+            # Update the persistent batch.
+            self.input_batch.num_computed_tokens_cpu[req_index] = (
+                req_data.num_computed_tokens)
+            start_index = len(req_state.block_ids) - len(
+                req_data.new_block_ids)
+            self.input_batch.block_table.append_row(req_index, start_index,
+                                                    req_data.new_block_ids)
+
+        # Add the new or resumed requests to the persistent batch.
+        # The smaller empty indices are filled first.
+        removed_req_indices = sorted(removed_req_indices, reverse=True)
+        for req_id in req_ids_to_add:
+            req_state = self.requests[req_id]
+            if removed_req_indices:
+                # Fill the empty index.
+                req_index = removed_req_indices.pop()
+            else:
+                # Append to the end.
+                req_index = None
+            self.input_batch.add_request(req_state, req_index)
+
+        # Condense the batched states if there are empty indices.
+        if removed_req_indices:
+            self.input_batch.condense(removed_req_indices)
+        return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+
+    def get_model(self) -> nn.Module:
+        assert self.model is not None
+        return self.model
+
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        """
+        Generates the KVCacheSpec by parsing the kv cache format from each 
+        Attention module in the static forward context.
+        Returns:
+            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            format. Layers that do not need KV cache are not included.
+        """
+
+        forward_ctx = self.vllm_config.compilation_config.static_forward_context
+        block_size = self.vllm_config.cache_config.block_size
+        kv_cache_spec: KVCacheSpec = {}
+        for layer_name, attn_module in forward_ctx.items():
+            # TODO: Support other attention modules, e.g., sliding window,
+            # cross-attention, MLA.
+            assert isinstance(attn_module, Attention)
+            if attn_module.attn_type == AttentionType.DECODER:
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=attn_module.dtype,
+                )
+            elif attn_module.attn_type in (AttentionType.ENCODER,
+                                           AttentionType.ENCODER_ONLY):
+                # encoder-only attention does not need KV cache.
+                continue
+            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                raise NotImplementedError
+            else:
+                raise ValueError(
+                    f"Unknown attention type: {attn_module.attn_type}")
+
+        return kv_cache_spec
+
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
-
-
         print(f'xw32 _prepare_inputs begins. {scheduler_output=}')
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -414,6 +589,7 @@ class TPUModelRunner(ModelRunnerBase):
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
+        xm.mark_step()
         xm.wait_device_ops()
         model = ModelWrapperV1(model)
         # TODO(xw32): turn on dynamo.
@@ -469,110 +645,6 @@ class TPUModelRunner(ModelRunnerBase):
             logger.info(f"xw32 TPUModelRunner.dummy_run. before calling self.model, {input_ids.shape=}, {position_ids.shape=}")
             self.model(input_ids, position_ids, None, kv_caches)
             logger.info(f"xw32 TPUModelRunner.dummy_run. after calling self.model")
-
-        # old code begins. TODO(xw32): delete
-        # exec_mode = ExecutionMode(exec_mode)
-        # if exec_mode.is_prefill():
-        #     seq_len = (seq_len + 15) // 16 * 16
-        #     token_ids = torch.zeros((num_tokens, seq_len),
-        #                             dtype=torch.int32,
-        #                             device=self.device)
-        #     position_ids = torch.zeros((num_tokens, seq_len),
-        #                                dtype=torch.int32,
-        #                                device=self.device)
-        #     slot_mapping = torch.zeros((num_tokens, seq_len),
-        #                                dtype=torch.int64,
-        #                                device=self.device)
-        #     if exec_mode == ExecutionMode.PREFILL:
-        #         attn_metadata = PallasMetadata(
-        #             num_prefills=num_tokens,
-        #             num_prefill_tokens=num_tokens * seq_len,
-        #             num_decode_tokens=0,
-        #             slot_mapping=slot_mapping,
-        #             multi_modal_placeholder_index_maps=None,
-        #             enable_kv_scales_calculation=True,
-        #             block_tables=None,
-        #             context_lens=None,
-        #             effective_query_lens=None,
-        #         )
-
-        #     else:  # PREFIX_PREFILL
-        #         context_lens = torch.ones((num_tokens, ),
-        #                                   dtype=torch.int32,
-        #                                   device=self.device)
-
-        #         block_tables = torch.zeros(
-        #             (num_tokens, self.max_num_blocks_per_req),
-        #             dtype=torch.int32,
-        #             device=self.device)
-
-        #         effective_query_lens = torch.ones_like(context_lens)
-
-        #         attn_metadata = PallasMetadata(
-        #             num_prefills=num_tokens,
-        #             num_prefill_tokens=num_tokens * seq_len,
-        #             num_decode_tokens=0,
-        #             slot_mapping=slot_mapping,
-        #             multi_modal_placeholder_index_maps=None,
-        #             enable_kv_scales_calculation=True,
-        #             block_tables=block_tables,
-        #             context_lens=context_lens,
-        #             effective_query_lens=effective_query_lens,
-        #         )
-        # else:
-        #     assert seq_len == 1
-        #     token_ids = torch.zeros((num_tokens, seq_len),
-        #                             dtype=torch.int32,
-        #                             device=self.device)
-        #     position_ids = torch.zeros((num_tokens, seq_len),
-        #                                dtype=torch.int32,
-        #                                device=self.device)
-        #     slot_mapping = torch.zeros((num_tokens, seq_len),
-        #                                dtype=torch.int64,
-        #                                device=self.device)
-        #     block_tables = torch.zeros(
-        #         (num_tokens, self.max_num_blocks_per_req),
-        #         dtype=torch.int32,
-        #         device=self.device)
-        #     context_lens = torch.ones((num_tokens, ),
-        #                               dtype=torch.int32,
-        #                               device=self.device)
-        #     attn_metadata = PallasMetadata(
-        #         num_prefills=0,
-        #         num_prefill_tokens=0,
-        #         num_decode_tokens=num_tokens * seq_len,
-        #         slot_mapping=slot_mapping,
-        #         multi_modal_placeholder_index_maps=None,
-        #         enable_kv_scales_calculation=True,
-        #         block_tables=block_tables,
-        #         context_lens=context_lens,
-        #     )
-
-        # # NOTE(woosuk): There are two stages of compilation: torch.compile and
-        # # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
-        # # overhead by reusing the FX graph for different shapes.
-        # # However, the XLA graph will still require static shapes and needs to
-        # # be re-compiled for every different shapes. This overhead is inevitable
-        # # in the first run, but can be skipped afterwards as we cache the XLA
-        # # graphs in the disk (VLLM_XLA_CACHE_PATH).
-        # if exec_mode.is_prefill():
-        #     # Prefll
-        #     torch._dynamo.mark_dynamic(token_ids, 1)
-        #     torch._dynamo.mark_dynamic(position_ids, 1)
-        #     torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
-        # else:
-        #     # Decode
-        #     torch._dynamo.mark_dynamic(token_ids, 0)
-        #     torch._dynamo.mark_dynamic(position_ids, 0)
-        #     torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
-        #     torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
-        #     torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
-
-        # # TODO: Remove the attn_metadata above
-        # with set_forward_context(None, self.vllm_config):
-        #     assert self.model is not None
-        #     self.model(token_ids, position_ids, None, kv_caches)
-        # old code ends
 
     def capture_model(self) -> None:
         """Compile the model."""

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -35,8 +37,9 @@ class PallasAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
+        # TODO(xw32): remove the following 2 lines because the main doesn't have it.
+        # if block_size % 16 != 0:
+        #     raise ValueError("Block size must be a multiple of 16.")
         return (num_kv_heads, num_blocks, block_size, head_size)
 
     @staticmethod

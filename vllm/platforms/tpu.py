@@ -34,7 +34,8 @@ class TpuPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if selected_backend != _Backend.PALLAS:
+        if (selected_backend != _Backend.PALLAS
+                and selected_backend != _Backend.PALLAS_VLLM_V1):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if use_v1:
@@ -46,7 +47,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        raise NotImplementedError
+        return "tpu"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -114,3 +115,7 @@ class TpuPlatform(Platform):
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on TPU.")
         return False
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.tpu_communicator.TpuCommunicator"  # noqa
