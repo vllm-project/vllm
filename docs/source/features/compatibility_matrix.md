@@ -255,7 +255,7 @@ Check the ❌ with links to see tracking issue for unsupported feature/hardware 
 - * <abbr title="Multimodal Inputs">mm</abbr>
   * ✅
   * [❌](gh-pr:8348)
-  * ✅
+  * [❌](gh-pr:4194)
   * ❔
   * ❔
   * ✅
