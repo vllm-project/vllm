@@ -39,6 +39,10 @@ from torch.distributed import Backend, ProcessGroup
 
 import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 import vllm.envs as envs
+
+if envs.VLLM_USE_V1:
+    import vllm.v1.distributed.kv_transfer.kv_transfer_agent as kv_transfer
+
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import direct_register_custom_op, supports_custom_op
@@ -1071,10 +1075,8 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     if vllm_config.kv_transfer_config is None:
         return
 
-    if all([
-            vllm_config.kv_transfer_config.need_kv_parallel_group, _KV_TRANSFER
-            is None
-    ]):
+    if all([vllm_config.kv_transfer_config.kv_connector, _KV_TRANSFER
+            is None]):
         _KV_TRANSFER = kv_transfer.KVTransferAgent(
             rank=get_world_group().rank,
             local_rank=get_world_group().local_rank,

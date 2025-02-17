@@ -12,7 +12,8 @@ import torch.nn as nn
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed.parallel_state import get_pp_group, graph_capture
+from vllm.distributed.parallel_state import (get_kv_transfer_group,
+                                             get_pp_group, graph_capture)
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -864,6 +865,50 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def need_recv_kv(self, attn_metadata, kv_caches) -> bool:
+        """Check if we need to receive kv-cache from the other worker.
+        We need to receive KV when
+            1. current vLLM instance is KV cache consumer/decode vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+            
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+        if self.vllm_config.kv_transfer_config is None:
+            return False
+
+        is_prefill_run = attn_metadata.num_actual_tokens > 1
+
+        # # check if the current run is profiling
+        is_profile_run = (kv_caches[0].numel() == 0)
+        return (self.vllm_config.kv_transfer_config.is_kv_consumer
+                and not is_profile_run) and is_prefill_run
+
+    def need_send_kv(self, attn_metadata, kv_caches) -> bool:
+        """Check if we need to send kv-cache to the other worker.
+        We need to send KV when
+            1. current vLLM instance is KV cache producer/prefill vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+            
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+
+        if self.vllm_config.kv_transfer_config is None:
+            return False
+
+        # check if the current run is profiling
+        is_profile_run = (kv_caches[0].numel() == 0)
+        # check if the current run is prefill
+        is_prefill_run = attn_metadata.num_actual_tokens > 1
+
+        return (self.vllm_config.kv_transfer_config.is_kv_producer
+                and not is_profile_run) and is_prefill_run
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -919,19 +964,45 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             positions = self.positions[:num_input_tokens]
 
+        bypass_model_exec = False
+        # print("vllm config!!!!!!!!", self.vllm_config.kv_transfer_config)
+        if self.need_recv_kv(attn_metadata, self.kv_caches):
+            print("needing to receive kv")
+            hidden_states, bypass_model_exec = \
+                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+                    self.model,
+                    input_ids,
+                    kv_caches=self.kv_caches,
+                    attn_metadata=attn_metadata,
+                )
+            print("received hidden states", hidden_states.shape,
+                  self.kv_caches[0].shape)
+
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                kv_caches=self.kv_caches,
-                attn_metadata=None,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-            )
+        if bypass_model_exec is False:
+            with set_forward_context(attn_metadata, self.vllm_config):
+                hidden_states = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    kv_caches=self.kv_caches,
+                    attn_metadata=None,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
         if not get_pp_group().is_last_rank:
             return hidden_states
+        if self.need_send_kv(attn_metadata, self.kv_caches):
+            get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                # model_executable is used to know which layer the current
+                # worker is working on, so that we can send KV for only those
+                # layers.
+                self.model,
+                input_ids,
+                self.kv_caches,
+                hidden_states,
+                attn_metadata,
+            )
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
