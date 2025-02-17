@@ -135,3 +135,7 @@ class XPUPlatform(Platform):
             logger.warning("Unknown device name %s, always use float16",
                            device_name)
             return False
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
