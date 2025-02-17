@@ -1332,11 +1332,11 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         decoder_prompt = self.create_decoder_prompt(prompt, mm_data)
         if isinstance(decoder_prompt, str):
             decoder_prompt_ids = encode_tokens(tokenizer,
-                                               prompt,
+                                               decoder_prompt,
                                                add_special_tokens=False)
         else:
-            decoder_prompt = decode_tokens(tokenizer, prompt)
             decoder_prompt_ids = decoder_prompt
+            decoder_prompt = decode_tokens(tokenizer, decoder_prompt)
 
         mm_inputs = MultiModalEncDecInputs(
             encoder_prompt=encoder_inputs["prompt"],

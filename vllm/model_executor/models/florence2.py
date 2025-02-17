@@ -825,6 +825,13 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
             prompt_token_ids = prompt
         return [pad_token_id] * num_images + prompt_token_ids
 
+    def create_decoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        return [2]
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -832,11 +839,7 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            pad_token = [self.info.get_hf_config().pad_token_id]
             processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
-            input_ids_without_pad_token = processed_outputs["input_ids"].squeeze(0).tolist()
-            input_ids = pad_token + input_ids_without_pad_token
-            processed_outputs["input_ids"] = torch.tensor(input_ids).unsqueeze(0)
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
