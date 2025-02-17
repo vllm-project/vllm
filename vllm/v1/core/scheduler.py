@@ -337,7 +337,7 @@ class Scheduler:
             self._make_cached_request_data(
                 req,
                 num_scheduled_tokens[req.request_id],
-                scheduled_spec_decode_tokens.get(req.request_id, []),
+                len(scheduled_spec_decode_tokens.get(req.request_id, ())),
                 req_to_new_block_ids[req.request_id],
                 resumed_from_preemption=True,
             ) for req in scheduled_resumed_reqs
@@ -346,7 +346,7 @@ class Scheduler:
             self._make_cached_request_data(
                 req,
                 num_scheduled_tokens[req.request_id],
-                scheduled_spec_decode_tokens.get(req.request_id, []),
+                len(scheduled_spec_decode_tokens.get(req.request_id, ())),
                 req_to_new_block_ids[req.request_id],
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
@@ -374,15 +374,14 @@ class Scheduler:
         self,
         request: Request,
         num_scheduled_tokens: int,
-        scheduled_spec_token_ids: List[int],
+        num_scheduled_spec_tokens: int,
         new_block_ids: List[int],
         resumed_from_preemption: bool,
     ) -> "CachedRequestData":
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         num_computed_tokens = request.num_computed_tokens
-        num_spec_tokens = len(scheduled_spec_token_ids)
-        num_regular_tokens = num_scheduled_tokens - num_spec_tokens
+        num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
         new_token_ids = request.all_token_ids[
             num_computed_tokens:num_computed_tokens + num_regular_tokens]
         req_data = self._cached_reqs_data.get(request.request_id)
