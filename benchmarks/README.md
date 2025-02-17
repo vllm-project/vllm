@@ -3,6 +3,7 @@
 ## Downloading the ShareGPT dataset
 
 You can download the ShareGPT dataset by running:
+
 ```bash
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 ```
@@ -20,6 +21,7 @@ unzip coco/train2017.zip -d coco/
 ```
 
 ## Run the Benchmarking client
+
 ```bash
 pip install datasets
 python benchmarks/benchmark_serving.py \
@@ -32,11 +34,13 @@ python benchmarks/benchmark_serving.py \
 ```
 
 for example:
+
 ```bash
 python3 benchmark_serving.py --backend vllm --model meta-llama/Llama-3.2-3B-Instruct --dataset-name sharegpt --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json --profile --num-prompts 2
 ```
 
 ## Example Output (as of `v0.7.1`)
+
 ```
 ============ Serving Benchmark Result ============
 Successful requests:                     5
