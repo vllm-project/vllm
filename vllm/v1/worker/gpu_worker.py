@@ -2,7 +2,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 import torch.distributed
@@ -241,6 +241,9 @@ class Worker(WorkerBase):
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def swap_blocks(self, h2d_map: Dict[int, int], d2h_map: Dict[int, int]):
+        self.model_runner.swap_blocks(h2d_map, d2h_map)
 
 
 def init_worker_distributed_environment(

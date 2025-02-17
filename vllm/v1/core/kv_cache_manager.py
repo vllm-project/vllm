@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections import defaultdict
-from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -22,6 +22,7 @@ class KVCacheManager:
         self,
         block_size: int,
         num_gpu_blocks: int,
+        num_cpu_blocks: int,
         max_model_len: int,
         sliding_window: Optional[int] = None,
         enable_caching: bool = True,
@@ -30,6 +31,7 @@ class KVCacheManager:
     ) -> None:
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
+        self.num_cpu_blocks = num_cpu_blocks
         self.max_model_len = max_model_len
         self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
         self.sliding_window = sliding_window
@@ -49,10 +51,16 @@ class KVCacheManager:
         self.num_preallocate_tokens = num_preallocate_tokens
         self.num_preallocate_blocks = cdiv(num_preallocate_tokens, block_size)
 
-        # A Block pool of all kv-cache blocks.
+        # A Block pool of all gpu kv-cache blocks.
         self.block_pool: List[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
+        # A block pool of all cpu kv-cache blocks.
+        self.cpu_block_pool: List[KVCacheBlock] = [
+            KVCacheBlock(idx) for idx in range(num_cpu_blocks)
+        ]
+        # The next possible available cpu block id for swapping.
+        self.next_available_cpu_block_id = 0
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
@@ -69,6 +77,10 @@ class KVCacheManager:
         # block tables are append-only.
         self.cached_block_hash_to_block: Dict[BlockHashType, Dict[
             int, KVCacheBlock]] = defaultdict(dict)
+        # {block_hash: cpu block}. Cached cpu blocks are evicted gpu blocks.
+        # Unlike the gpu counter part, it has no duplicate blocks.
+        self.cached_block_hash_to_cpu_block: Dict[BlockHashType,
+                                                  KVCacheBlock] = {}
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -79,8 +91,8 @@ class KVCacheManager:
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
-        self.req_to_block_hashes: DefaultDict[
-            str, List[BlockHashType]] = defaultdict(list)
+        self.req_to_block_hashes: DefaultDict[str, List[BlockHashType]] = (
+            defaultdict(list))
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -88,6 +100,16 @@ class KVCacheManager:
         # data for reempted ones.
         self.num_cached_block: Dict[str, int] = defaultdict(int)
         self.prefix_cache_stats = PrefixCacheStats()
+
+        # The following swap maps are accumulated over a scheduling step.
+        # Then they are "flushed" as part of the scheduler output.
+        # CPU block ID -> GPU block ID
+        self.step_h2d_swap_map: Dict[int, int] = {}
+        # GPU block ID -> CPU block ID
+        self.step_d2h_swap_map: Dict[int, int] = {}
+        # CPU blocks in use in this scheduling step i.e. source block for
+        # swap-in and destination block for swap-out.
+        self.step_cpu_block_in_use: Set[int] = set()
 
     @property
     def usage(self) -> float:
@@ -110,7 +132,8 @@ class KVCacheManager:
         return stats
 
     def get_computed_blocks(
-            self, request: Request) -> Tuple[List[KVCacheBlock], int]:
+        self, request: Request
+    ) -> Tuple[List[KVCacheBlock], List[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -119,14 +142,16 @@ class KVCacheManager:
 
         Returns:
             A tuple containing:
-                - A list of blocks that are computed for the request.
-                - The number of computed tokens.
+                - A list of gpu blocks that are computed for the request.
+                - A list of cpu blocks that are computed for the request.
+                - The number of computed tokens including gpu and cpu blocks.
         """
         if not self.enable_caching:
             # Prefix caching is disabled.
-            return [], 0
+            return [], [], 0
 
         computed_blocks = []
+        computed_cpu_blocks = []
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
@@ -139,8 +164,12 @@ class KVCacheManager:
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
+            # NOTE: Order matters here, since a block might reside both in gpu
+            # and cpu cache, we check cpu cache only if gpu cache is a miss.
             if cached_block := self._get_cached_block(block_hash):
                 computed_blocks.append(cached_block)
+            elif cached_cpu_block := self._get_cached_cpu_block(block_hash):
+                computed_cpu_blocks.append(cached_cpu_block)
             else:
                 break
 
@@ -151,14 +180,16 @@ class KVCacheManager:
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
         # `block_size`.
-        num_computed_tokens = len(computed_blocks) * self.block_size
-        return computed_blocks, num_computed_tokens
+        num_computed_tokens = (len(computed_blocks) +
+                               len(computed_cpu_blocks)) * self.block_size
+        return computed_blocks, computed_cpu_blocks, num_computed_tokens
 
     def allocate_slots(
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[List[KVCacheBlock]] = None
+        new_computed_blocks: Optional[List[KVCacheBlock]] = None,
+        new_computed_cpu_blocks: Optional[List[KVCacheBlock]] = None,
     ) -> Optional[List[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -168,17 +199,19 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
+            new_computed_cpu_blocks: A list of new computed cpu blocks just
+                hitting the prefix caching.
 
         Blocks layout:
-        -----------------------------------------------------------------------
-        | < computed > | < new computed > |    < new >    | < pre-allocated > |
-        -----------------------------------------------------------------------
-        |                  < required >                   |
-        --------------------------------------------------
-        |                    < full >                  |
+        ----------------------------------------------------------------------
+        | < computed > | < new computed gpu:cpu > | < new > | < pre-alloced > |
+        ----------------------------------------------------------------------
+        |                  < required >                     |
+        ----------------------------------------------------
+        |                    < full >                   |
         ------------------------------------------------
-                                          | <new full> |
-                                          --------------
+                                           | <new full> |
+                                           --------------
         The following *_blocks are illustrated in this layout.
 
         Returns:
@@ -188,14 +221,18 @@ class KVCacheManager:
             raise ValueError("num_tokens must be greater than 0")
 
         new_computed_blocks = new_computed_blocks or []
+        new_computed_cpu_blocks = new_computed_cpu_blocks or []
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
-        num_computed_tokens = (request.num_computed_tokens +
-                               len(new_computed_blocks) * self.block_size)
-        num_required_blocks = cdiv(num_computed_tokens + num_tokens,
-                                   self.block_size)
+        total_tokens = (
+            request.num_computed_tokens +
+            (len(new_computed_blocks) + len(new_computed_cpu_blocks)) *
+            self.block_size + num_tokens)
+        num_required_blocks = cdiv(total_tokens, self.block_size)
         req_blocks = self.req_to_blocks[request.request_id]
+        # New blocks needed, including GPU blocks for CPU cache hits
+        # that need to be swapped in.
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -246,15 +283,24 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
+        # Swap in the cpu blocks. Metadata update happens in
+        # cache_full_blocks below.
+        assert (len(new_computed_cpu_blocks) < len(new_blocks)
+                if new_computed_blocks else True)
+        self.step_h2d_swap_map.update({
+            cpu_block.block_id: new_block.block_id
+            for cpu_block, new_block in zip(new_computed_cpu_blocks,
+                                            new_blocks)
+        })
+        self.step_cpu_block_in_use.update(
+            {cpu_block.block_id
+             for cpu_block in new_computed_cpu_blocks})
+
         num_cached_blocks = self.num_cached_block[request.request_id]
-        # Speculated tokens might be rejected in the future, so we does
-        # not cache any speculated tokens. We only cache blocks with
-        # generated (accepted) tokens.
-        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
-            request.spec_token_ids)) // self.block_size
+        num_full_blocks_after_append = (
+            total_tokens - len(request.spec_token_ids)) // self.block_size
         new_full_blocks = req_blocks[
             num_cached_blocks:num_full_blocks_after_append]
-
         if new_full_blocks:
             self._cache_full_blocks(
                 request=request,
@@ -262,9 +308,11 @@ class KVCacheManager:
                 # The new full blocks are the full blocks that are not computed.
                 full_blocks=new_full_blocks,
                 prev_block=(req_blocks[num_cached_blocks -
-                                       1] if num_cached_blocks > 0 else None))
+                                       1] if num_cached_blocks > 0 else None),
+            )
         self.num_cached_block[
             request.request_id] = num_full_blocks_after_append
+
         return new_blocks
 
     def free(self, request: Request) -> None:
@@ -304,7 +352,9 @@ class KVCacheManager:
         if num_used_blocks > 0:
             logger.warning(
                 "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks)
+                "blocks (%d) are not freed yet",
+                num_used_blocks,
+            )
             return False
 
         # Remove all hashes so that no new blocks will hit.
@@ -367,6 +417,12 @@ class KVCacheManager:
                 break
         return num_common_blocks
 
+    def end_schedule_step(self) -> None:
+        """A callback hook that is called when a scheduling step ends."""
+        self.step_h2d_swap_map.clear()
+        self.step_d2h_swap_map.clear()
+        self.step_cpu_block_in_use.clear()
+
     def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
@@ -391,7 +447,7 @@ class KVCacheManager:
 
             # If the block is cached, evict it.
             if self.enable_caching:
-                self._maybe_evict_cached_block(curr_block)
+                self._maybe_evict_cached_block(curr_block, swap_out=True)
 
             curr_block.incr_ref()
             ret.append(curr_block)
@@ -399,19 +455,64 @@ class KVCacheManager:
 
         return ret
 
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+    def _get_new_cpu_block(self) -> Optional[KVCacheBlock]:
+        """Get a new cpu block from the cpu block pool, evict
+        it from the cpu cache if it is cached.
+
+        TODO(meng): currently we use a simple round-robin strategy
+        to get a new cpu block. Implement LRU.
+
+        Returns:
+            A new cpu block, or None if all cpu blocks are used.
+        """
+        if len(self.step_cpu_block_in_use) == len(self.cpu_block_pool):
+            return None
+
+        while self.next_available_cpu_block_id in self.step_cpu_block_in_use:
+            self.next_available_cpu_block_id = (
+                self.next_available_cpu_block_id + 1) % len(
+                    self.cpu_block_pool)
+
+        target_cpu_block_id = self.next_available_cpu_block_id
+        self.next_available_cpu_block_id = (self.next_available_cpu_block_id +
+                                            1) % len(self.cpu_block_pool)
+
+        # Evict the cpu block if it is cached.
+        block_hash = self.cpu_block_pool[target_cpu_block_id].block_hash
+        if block_hash is not None:
+            del self.cached_block_hash_to_cpu_block[block_hash]
+            self.cpu_block_pool[target_cpu_block_id].reset_hash()
+
+        return self.cpu_block_pool[target_cpu_block_id]
+
+    def _maybe_evict_cached_block(self,
+                                  block: KVCacheBlock,
+                                  swap_out: bool = False) -> bool:
         """
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
-        metadata and evict it from the cache.
+        metadata and evict it from the cache. Optionally, we can swap out the
+        block to cpu cache.
 
         Args:
             block: The block to evict.
+            swap_out: Whether to swap out the block to cpu cache.
 
         Returns:
             True if the block is evicted, False otherwise.
         """
         block_hash = block.block_hash
         if block_hash and block_hash in self.cached_block_hash_to_block:
+            if (swap_out
+                    and block_hash not in self.cached_block_hash_to_cpu_block
+                    and (target_cpu_block := self._get_new_cpu_block())):
+                target_cpu_block_id = target_cpu_block.block_id
+                self.step_d2h_swap_map[block.block_id] = target_cpu_block_id
+                self.step_cpu_block_in_use.add(target_cpu_block_id)
+                self.cpu_block_pool[
+                    target_cpu_block_id].block_hash = block_hash
+                self.cached_block_hash_to_cpu_block[block_hash] = (
+                    self.cpu_block_pool[target_cpu_block_id])
+
             block.reset_hash()
             del self.cached_block_hash_to_block[block_hash][block.block_id]
 
@@ -437,6 +538,18 @@ class KVCacheManager:
                 self.cached_block_hash_to_block[block_hash].keys())[0]
             return self.cached_block_hash_to_block[block_hash][first_block_id]
         return None
+
+    def _get_cached_cpu_block(
+            self, block_hash: BlockHashType) -> Optional[KVCacheBlock]:
+        """Get a cached cpu block by the block hash, or None if cache miss.
+
+        Args:
+            block_hash: The hash value of the block.
+
+        Returns:
+            The cached cpu block if it exists, or None.
+        """
+        return self.cached_block_hash_to_cpu_block.get(block_hash, None)
 
     def _touch(self, blocks: List[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
