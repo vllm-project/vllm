@@ -242,7 +242,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
 
     # params JSON used for disaggregated prefilling and KVCache sharing
-    kv_transfer_params_json: Optional[Union[str, dict]] = None
+    kv_transfer_params: Optional[Union[str, dict]] = None
 
     # doc: begin-chat-completion-sampling-params
     best_of: Optional[int] = None
@@ -472,7 +472,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # Create KVTransferParams based on input from request
         kv_transfer_params = KVTransferParams.from_optional(
-            input_json=self.kv_transfer_params_json)
+            input_json=self.kv_transfer_params)
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -666,7 +666,7 @@ class CompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
 
     # params JSON used for disaggregated prefilling and KVCache sharing
-    kv_transfer_params_json: Optional[Union[str, dict]] = None
+    kv_transfer_params: Optional[Union[str, dict]] = None
 
     # doc: begin-completion-sampling-params
     use_beam_search: bool = False
@@ -843,7 +843,7 @@ class CompletionRequest(OpenAIBaseModel):
 
         # Create KVTransferParams based on input from request
         kv_transfer_params = KVTransferParams.from_optional(
-            input_json=self.kv_transfer_params_json)
+            input_json=self.kv_transfer_params)
 
         return SamplingParams.from_optional(
             n=self.n,

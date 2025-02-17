@@ -103,7 +103,7 @@ class KVTransferParams(
             kv_transfer_params_dict = input_json
         else:
             raise ValueError(
-                "The provided kv_transfer_params_json is not a valid JSON "
+                "The provided kv_transfer_params is not a valid JSON "
                 "string or dictionary")
 
         # Items of kv_transfer_params_dict should not be nested list
