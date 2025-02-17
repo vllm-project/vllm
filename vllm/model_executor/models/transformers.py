@@ -134,10 +134,8 @@ class TransformersModel(nn.Module, SupportsQuant):
         super().__init__()
         logger.info("Using Transformers backend.")
 
-        model_config = vllm_config.model_config
+        config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
-
-        config = model_config.hf_config
 
         self.config = config
         self.vocab_size = config.vocab_size
