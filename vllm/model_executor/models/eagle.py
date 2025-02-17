@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -17,6 +18,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .utils import maybe_prefix
+
+logger = init_logger(__name__)
 
 
 class DummyInputLayerNorm(nn.Module):
@@ -190,8 +193,8 @@ class EAGLE(nn.Module):
                                             default_weight_loader)
                     weight_loader(self.fc.bias, loaded_weight)
                 else:
-                    raise ValueError("Found bias in the loaded weights "
-                                     "but the model config doesn't have bias")
+                    logger.warning_once("Found bias in the loaded weights but "
+                                        "the model config doesn't have bias.")
             elif name.startswith("model.lm_head.") or name.startswith(
                     "model.model."):
                 model_weights[name.split("model.", 1)[-1]] = loaded_weight
@@ -200,12 +203,21 @@ class EAGLE(nn.Module):
             else:
                 model_weights[f"model.{name}"] = loaded_weight
 
-        lm_head_weight = model_weights.pop("lm_head.weight")
+        if "lm_head.weight" in model_weights:
+            lm_head_weight = model_weights.pop("lm_head.weight")
 
-        if self.token_map is not None and\
-            lm_head_weight.shape[0] > self.token_map.shape[0]:
+            if self.token_map is not None and\
+                lm_head_weight.shape[0] > self.token_map.shape[0]:
 
-            lm_head_weight = lm_head_weight[self.token_map]
+                lm_head_weight = lm_head_weight[self.token_map]
+
+        else:
+            # NOTE(Shangming): initialize the placeholder for lm_head weight.
+            lm_head_weight = torch.zeros(
+                self.lm_head.org_vocab_size,
+                self.lm_head.embedding_dim,
+                dtype=self.config.torch_dtype,
+            )
 
         weight_loader = getattr(self.lm_head.weight, "weight_loader",
                                 default_weight_loader)
