@@ -965,7 +965,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             positions = self.positions[:num_input_tokens]
 
         bypass_model_exec = False
-        # print("vllm config!!!!!!!!", self.vllm_config.kv_transfer_config)
         if self.need_recv_kv(attn_metadata, self.kv_caches):
             print("needing to receive kv")
             hidden_states, bypass_model_exec = \
