@@ -398,7 +398,7 @@ class OpenAIServingCompletion(OpenAIServing):
             assert prompt_token_ids is not None
             self._clean_prompt_logprobs(final_res.prompt_logprobs)
             prompt_logprobs = final_res.prompt_logprobs
-            
+
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
