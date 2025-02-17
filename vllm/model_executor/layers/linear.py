@@ -320,6 +320,9 @@ class ColumnParallelLinear(LinearBase):
             weight_loader=(
                 self.weight_loader_v2 if self.quant_method.__class__.__name__
                 in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+
+        #print("linear.py !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  self.quant_method: " + str(self.quant_method) + "  weight_scale_inv shape: " + str(self.weight_scale_inv.shape) + " self.input_size = " + str(self.input_size) + " self.output_partition_sizes = " + str(self.output_partition_sizes) + " self.output_size = " + str(self.output_size))
+
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
@@ -626,6 +629,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          param: BasevLLMParameter,
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[int] = None):
+#        print("linear.py At the begining of loader_v2 @@@@@@@@@@@@@@@@@@@@@@@ param shape: " + str(param.shape) + " loaded_weight shape: " + str(loaded_weight.shape))
+
         if loaded_shard_id is None:
             if isinstance(param, PerTensorScaleParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight,
@@ -659,6 +664,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         else:
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
+
+#        print("linear.py Before load_merged_column_weight @@@@@@@@@@@@@@@@@@@@@@@ param shape: " + str(param.shape) + " loaded_weight shape: " + str(loaded_weight.shape))
 
         param.load_merged_column_weight(loaded_weight=loaded_weight,
                                         shard_id=loaded_shard_id,

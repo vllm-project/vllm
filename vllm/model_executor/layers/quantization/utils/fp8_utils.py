@@ -91,6 +91,15 @@ def pad_block_fp8_weight_naive(weight, weight_scale, block_size):
     return weight, orig_M, orig_N
 
 
+def dynamic_quant(data):
+    scale = ((torch.abs(data)).max(dim=1).values + 1e-8) / 240.0 #torch.finfo(torch.float8_e4m3fn).max
+    scale = scale.unsqueeze(-1)
+#    data = data / scale
+    data_fp8 = torch.ops.hpu.cast_to_fp8_v2(data, 1.0 / scale, False, False, torch.float8_e4m3fn)[0]
+#    data_fp8 = data.to(torch.float8_e4m3fn)
+    return data_fp8, scale.float()
+
+
 def dequant_block_fp8_weight_naive(weight, weight_scale, block_size, dtype, original_M, original_N):
 
     assert len(block_size) == 2
@@ -122,7 +131,7 @@ def dequant_block_fp8_weight_naive(weight, weight_scale, block_size, dtype, orig
     return dequant_weight
 
 
-def apply_block_fp8_linear_hpu(
+def apply_block_fp8_linear_hpu_dequant(
     input: torch.Tensor,
     weight: torch.Tensor,
     block_size: List[int],
@@ -140,6 +149,46 @@ def apply_block_fp8_linear_hpu(
     output_shape = [*input.shape[:-1], original_M]
     dequant_weight = dequant_block_fp8_weight_naive(weight, weight_scale, block_size, input_2d.dtype, original_M, original_N)
     output = torch.nn.functional.linear(input_2d, dequant_weight, bias=None)
+    if bias is not None:
+        output = output + bias
+    return output.to(dtype=input.dtype).view(*output_shape)
+
+
+def apply_block_fp8_linear_hpu_dynamic(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    # View input as 2D matrix for fp8 methods
+    input_2d = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+
+    x_fp8, x_scale = dynamic_quant(input_2d)
+
+    '''    
+    if torch.distributed.get_rank() == 0:
+        print("!!!!!!!!!!!! Original input max: " + str(input_2d.max()) + "  min: " + str(input_2.min()))
+        print("!!!!!!!!!!!! FP8 GEMM input max: " + str(x_fp8.max()) + "  min: " + str(x_fp8.min()))
+        print("!!!!!!!!!!!! FP8 GEMM input scale max: " + str(x_scale.max()) + "  min: " + str(x_scale.min()))
+        print("!!!!!!!!!!!! FP8 GEMM weight max: " + str(weight.max()) + "  min: " + str(weight.min()))
+        print("!!!!!!!!!!!! FP8 GEMM weight scale max: " + str(weight_scale.max()) + "  min: " + str(weight_scale.min()))
+    '''
+
+    output = torch.ops.hpu.fp8_gemm_v2(
+        x_fp8,
+        False,
+        weight,
+        True,
+        None,
+        torch.bfloat16,
+        x_scale,
+        weight_scale,
+        None,
+        False
+    )
+#    print("!!!!!!!!!!!!! FP8 GEMM output: " + str(output.cpu()))
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)

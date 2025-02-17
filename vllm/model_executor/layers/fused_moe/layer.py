@@ -228,12 +228,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # w2_list_slice = [w2_list[i].weight.squeeze() for i in range(min_expert, max_expert)]
             w13_list_slice = [layer.w13_weight[j].squeeze().clone() for j in range(min_expert, max_expert)]
             w2_list_slice = [layer.w2_weight[j].squeeze().clone() for j in range(min_expert, max_expert)]
-            # print(f"w13_list_slice[0].shape: {w13_list_slice[0].shape}, device: {w13_list_slice[0].device}, dtype: {w13_list_slice[0].dtype}")
-            # print(f"w2_list_slice[0].shape: {w2_list_slice[0].shape}, device: {w2_list_slice[0].device}, dtype: {w2_list_slice[0].dtype}")
-            # print(f"hidden_states.shape: {x.shape}, device: {x.device}, dtype: {x.dtype}")
-            # print(f"topk_ids.shape: {topk_ids.shape}, device: {topk_ids.device}, dtype: {topk_ids.dtype}")
-            # print(f"topk_weights.shape: {topk_weights.shape}, device: {topk_weights.device}, dtype: {topk_weights.dtype}")
-            # print(f"min_expert: {min_expert}, max_expert: {max_expert}")
             final_hidden_states += torch.ops.hpu.mixture_of_experts(hidden_states=x,
                                          expert_routing_table=topk_ids.to(torch.int64),
                                          router_weights=topk_weights.to(x.dtype),
@@ -243,9 +237,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                          activation="silu",
                                          experts_min=min_expert,
                                          experts_max=max_expert - 1)
-            # print(f"final_hidden_states.shape: {final_hidden_states.shape}, device: {final_hidden_states.device}, dtype: {final_hidden_states.dtype}")
             htorch.core.mark_step()
-            # print(f"done mark step {i}")
         return final_hidden_states.view(-1, x.shape[1])
 
     def forward_cpu(
@@ -435,6 +427,7 @@ class FusedMoE(torch.nn.Module):
             :param tp_rank: tensor parallel rank
             :param load_full_w2: whether or not the w2 loaded should be sharded.
         """
+#        print("laery.py ?????????????? _load_model_weight_or_group_weight_scale expert_data shape: " + str(expert_data.shape) + " loaded_weight shape: " + str(loaded_weight.shape) + " shard_dim = " +str(shard_dim))
         if shard_id == "w2":
             # In the case where we have actorder/g_idx, we do not partition the
             # w2 scales, as indicated by `load_full` argument, for all tp cases
@@ -455,8 +448,9 @@ class FusedMoE(torch.nn.Module):
     def _load_per_channel_weight_scale(self, expert_data: torch.Tensor,
                                        shard_dim: int, shard_id: str,
                                        loaded_weight: torch.Tensor,
-                                       tp_rank: int):
+                                       tp_rank: int, expert_id: int):
         # for per channel weight quantization
+#        print("layer.py ?????????????? _load_per_channel_weight_scale expert_data shape: " + str(expert_data.shape) + " loaded_weight shape: " + str(loaded_weight.shape) + " shard_dim = " +str(shard_dim))
         if shard_id == "w2":
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
@@ -464,7 +458,8 @@ class FusedMoE(torch.nn.Module):
                            shard_dim=shard_dim,
                            loaded_weight=loaded_weight,
                            expert_data=expert_data,
-                           tp_rank=tp_rank)
+                           tp_rank=tp_rank,
+                           expert_id=expert_id)
 
     def _load_w13(self,
                   expert_data: torch.Tensor,
@@ -474,6 +469,7 @@ class FusedMoE(torch.nn.Module):
                   tp_rank: int,
                   expert_id: Optional[int] = None):
 
+#        print("laery.py ?????????????? _load_w13 expert_data shape: " + str(expert_data.shape) + " loaded_weight shape: " + str(loaded_weight.shape) + " shard_dim = " +str(shard_dim) + " shard_id = " + str(shard_id))
         orig_exp_data = expert_data.view(expert_data.size())
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
@@ -488,6 +484,8 @@ class FusedMoE(torch.nn.Module):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+
+#        print("laery.py ?????????????? _load_w13 After Narrow expert_data shape: " + str(expert_data.shape) + " loaded_weight shape: " + str(loaded_weight.shape))
         expert_data.copy_(loaded_weight)
 
         if is_hpu:
@@ -506,6 +504,7 @@ class FusedMoE(torch.nn.Module):
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Narrow parameter and load.
+#        print("laery.py ?????????????? _load_w2 expert_data shape: " + str(expert_data.shape) + " loaded_weight shape: " + str(loaded_weight.shape) + " shard_dim = " +str(shard_dim))
         shard_size = expert_data.shape[shard_dim]
         if not load_full:
             loaded_weight = loaded_weight.narrow(shard_dim,
@@ -618,7 +617,8 @@ class FusedMoE(torch.nn.Module):
                     shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
-                    tp_rank=tp_rank)
+                    tp_rank=tp_rank,
+                    expert_id=expert_id)
             elif quant_method in [
                     FusedMoeWeightScaleSupported.GROUP.value,
                     FusedMoeWeightScaleSupported.BLOCK.value,

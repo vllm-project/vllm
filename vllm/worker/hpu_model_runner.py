@@ -695,6 +695,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
             .create_input_mapper(self.model_config)
 
+        self.skip_warmup = True
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
                                           'false').lower() == 'true'
 
@@ -2303,11 +2304,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         **execute_model_kwargs,
                         selected_token_indices=sampling_metadata.
                         selected_token_indices)
-                    if warmup_mode == True:
-                        torch.hpu.synchronize()
-                        import torch.distributed as dist
-                        if dist.is_initialized():
-                            dist.barrier()
+
                 if self.lora_config:
                     LoraMask.setLoraMask(
                         lora_logits_mask.index_select(

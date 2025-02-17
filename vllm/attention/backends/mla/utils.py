@@ -272,12 +272,15 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     weight = layer.weight.T  # standardize to (output, input)
                 else:
                     weight = layer.weight
-                _, weight_scale_group_shape = \
-                    get_scale_group_shapes_for_fp8(layer)
+                
                 scales = get_scales(layer)
-
-                return scaled_dequantize(weight, scales,
-                                         weight_scale_group_shape)
+                if len(scales.shape) > 1:
+                    _, weight_scale_group_shape = \
+                        get_scale_group_shapes_for_fp8(layer)
+                    return scaled_dequantize(weight, scales,
+                                             weight_scale_group_shape)
+                else:
+                    return weight.to(torch.float32) * scales.unsqueeze(1) 
             else:
                 return layer.weight
 

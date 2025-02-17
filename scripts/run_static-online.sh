@@ -4,12 +4,12 @@ in_len=1024
 out_len=1024
 multi_step=1
 total_len=$((in_len + out_len))
-bs=96
-num_prompts=300
-request_rate=1
+bs=8
+num_prompts=32
+request_rate=8
 gpu_utils=0.9
 ep_size=1
-moe_n_slice=4
+moe_n_slice=8
 log_name="static-online-gaudi3-${gpu_utils}util-TPparallel${tp_parrallel}-EP${ep_size}-loop${moe_n_slice}moegroups-multistep${multi_step}_nprompt${num_prompts}_rrate${request_rate}_bs${bs}_i${in_len}_o${out_len}"
 
 VLLM_DECODE_BLOCK_BUCKET_MIN=$((in_len * bs / 128))
@@ -17,11 +17,12 @@ VLLM_DECODE_BLOCK_BUCKET_MAX=$((total_len * bs / 128 + 128))
 
 # model="/data/models/DeepSeek-R1/"
 # tokenizer="/data/models/DeepSeek-R1/"
-model="/data/models/DeepSeek-R1/"
-tokenizer="/data/models/DeepSeek-R1/"
+model="/data/DeepSeek-R1-G2/"
+tokenizer="/data/DeepSeek-R1-G2/"
 model_name="DeepSeek-R1"
 
 HABANA_VISIBLE_DEVICES="ALL" \
+VLLM_SKIP_WARMUP="true" \
 VLLM_MOE_N_SLICE=${moe_n_slice} \
 VLLM_EP_SIZE=${ep_size} \
 VLLM_MLA_DISABLE_REQUANTIZATION=1 \

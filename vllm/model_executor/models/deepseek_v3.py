@@ -54,10 +54,6 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-import habana_frameworks.torch as htorch
-
-from vllm.platforms import current_platform
-is_hpu = current_platform.is_hpu()
 
 class DeepseekV3MLP(nn.Module):
 
@@ -86,6 +82,8 @@ class DeepseekV3MLP(nn.Module):
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
+
+        #print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< dsv3 **************************** self.gate_up_proj scale1 shape: " + str(self.gate_up_proj.weight_scale_inv.shape) + "  hidden_size = " + str(hidden_size) + "  intermediate_size = " + str(intermediate_size))
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -133,7 +131,7 @@ class DeepseekV3MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
+            reduce_results=True if self.ep_size > 1 else False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -153,8 +151,9 @@ class DeepseekV3MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                reduce_results=False if self.ep_size == 1 else True,
             )
+
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, hidden_dim = hidden_states.shape
@@ -164,12 +163,13 @@ class DeepseekV3MoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+        hidden_states = hidden_states.reshape(batch_size, seq_len, hidden_dim)
         final_hidden_states = self.experts(
-            hidden_states=hidden_states.view(batch_size, seq_len, hidden_dim),
+            hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
-        if self.tp_size > 1:
+        if self.ep_size == 1 and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
@@ -655,16 +655,11 @@ class DeepseekV3Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        if is_hpu:
-            htorch.core.mark_step()
-
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i - self.start_layer],
                                             attn_metadata, residual)
-            if is_hpu:
-                htorch.core.mark_step()
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -797,6 +792,7 @@ class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
+                #print("dsv3.py ************* name: " + str(name) + "  param shape: " + str(param.shape) + " loaded weight shape: " + str(loaded_weight.shape) + " shard_id = " + str(shard_id))
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
