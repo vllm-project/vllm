@@ -118,6 +118,11 @@ upload_to_buildkite() {
   $BUILDKITE_AGENT_COMMAND artifact upload "$RESULTS_FOLDER/*"
 }
 
+clear_torch_compile_cache() {
+  # https://github.com/vllm-project/vllm/issues/13392
+  rm -rf ~/.cache/vllm/torch_compile_cache
+}
+
 run_latency_tests() {
   # run latency tests using `benchmark_latency.py`
   # $1: a json file specifying latency test cases
@@ -150,6 +155,8 @@ run_latency_tests() {
       echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
     fi
+
+    clear_torch_compile_cache
 
     latency_command="python3 benchmark_latency.py \
       --output-json $RESULTS_FOLDER/${test_name}.json \
@@ -208,6 +215,8 @@ run_throughput_tests() {
       echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
     fi
+
+    clear_torch_compile_cache
 
     throughput_command="python3 benchmark_throughput.py \
       --output-json $RESULTS_FOLDER/${test_name}.json \
@@ -278,6 +287,8 @@ run_serving_tests() {
       echo "Server model and client model must be the same. Skip testcase $test_name."
       continue
     fi
+
+    clear_torch_compile_cache
 
     server_command="python3 \
       -m vllm.entrypoints.openai.api_server \
