@@ -55,7 +55,7 @@ class JinaAIServingRerank(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        model_name = request.model
+        model_name = self._get_model_name(request.model)
         request_id = f"rerank-{self._base_request_id(raw_request)}"
         truncate_prompt_tokens = request.truncate_prompt_tokens
         query = request.query
