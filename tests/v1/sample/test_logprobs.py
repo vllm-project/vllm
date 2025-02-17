@@ -14,7 +14,7 @@ from vllm import SamplingParams
 
 from ...conftest import VllmRunner
 
-MODEL = "meta-llama/Llama-3.2-1B"
+MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 DTYPE = "half"
 
 

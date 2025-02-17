@@ -59,7 +59,8 @@ ignore = [
     "UP032",
     # Python 3.8 typing
     "UP006", "UP035",
-
+    # Can remove once 3.10+ is the minimum Python version
+    "UP007",
 ]
 
 [tool.mypy]
@@ -92,7 +93,7 @@ exclude = [
 
 [tool.codespell]
 ignore-words-list = "dout, te, indicies, subtile, ElementE"
-skip = "./tests/models/fixtures,./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
+skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build/*,vllm/third_party/*"
 
 [tool.isort]
 use_parentheses = true
