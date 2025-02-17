@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -12,8 +12,9 @@ class SamplingMetadata:
     temperature: torch.Tensor
     all_greedy: bool
     all_random: bool
-    rejection_sampling: bool
-    spec_token_ids: List[List[int]]
+
+    # The list will empty if no requests have spec tokens.
+    spec_token_ids: List[Sequence[int]]
 
     top_p: Optional[torch.Tensor]
     top_k: Optional[torch.Tensor]

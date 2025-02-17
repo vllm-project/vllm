@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-import itertools
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, cast
+from typing import (TYPE_CHECKING, Dict, List, Optional, Sequence, Set, Tuple,
+                    cast)
 
 import numpy as np
 import torch
@@ -79,6 +79,7 @@ class InputBatch:
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
@@ -232,7 +233,11 @@ class InputBatch:
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
+        # Number of token ids in token_ids_cpu.
+        # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
+        # Number of tokens without spec decode tokens.
+        self.num_tokens_no_spec[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(req_index, request.block_ids)
@@ -383,6 +388,8 @@ class InputBatch:
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens]
             self.num_tokens[empty_index] = num_tokens
+            self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
+                last_req_index]
             self.num_prompt_tokens[empty_index] = self.num_prompt_tokens[
                 last_req_index]
             self.num_computed_tokens_cpu[
@@ -425,8 +432,6 @@ class InputBatch:
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()
 
-
-#         req_id_to_spec_token_ids: Dict[str, List[int]],
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         copy_slice(self.temperature_cpu_tensor, self.temperature, num_reqs)
@@ -455,28 +460,10 @@ class InputBatch:
         else:
             prompt_token_ids = None
 
-        spec_token_ids: List[List[int]] = []
-        rejection_sampling = False
-        for req_id in itertools.islice(self.req_ids, num_reqs):
-            # Currently we create a tensor for output_token_ids from scratch
-            # at each step. However, for the penalties computation what we
-            # need is stats about the token ids present in the output. This
-            # stats can be maintained incrementally instead of computing it
-            # from scratch at each step.
-            # TODO - Replace this with incremental update to output token
-            # statistics.
-            req_spec_token_ids = req_id_to_spec_token_ids.get(req_id, ())
-            spec_token_ids.append(req_spec_token_ids)
-            if req_spec_token_ids:
-                # If any of the requests have speculated tokens, set the
-                # flag to True.
-                rejection_sampling = True
-
         return SamplingMetadata(
             temperature=self.temperature[:num_reqs],
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            rejection_sampling=rejection_sampling,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
             min_p=None if self.no_min_p else self.min_p[:num_reqs],
@@ -487,11 +474,19 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(List[List[int]], self.req_output_token_ids),
-            spec_token_ids=spec_token_ids,
+            spec_token_ids=[],
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
         )
+
+    def set_spec_token_ids_in_sampling_metadata(
+            self, req_id_to_spec_token_ids: Dict[str, Sequence[int]]):
+        self.sampling_metadata.spec_token_ids.clear()
+        if req_id_to_spec_token_ids:
+            for req_id in self.req_ids:
+                spec_token_ids = req_id_to_spec_token_ids.get(req_id, ())
+                self.sampling_metadata.spec_token_ids.append(spec_token_ids)
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
         max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()

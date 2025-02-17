@@ -82,14 +82,15 @@ def _construct_expected_sampling_metadata(
         top_p[index_in_input_batch] = req.sampling_params.top_p
         min_p[index_in_input_batch] = req.sampling_params.min_p
         temperature[index_in_input_batch] = req.sampling_params.temperature
-        min_tokens[index_in_input_batch] = req.sampling_params.min_tokens
+        min_tokens[index_in_input_batch] = (
+            req.sampling_params.min_tokens,
+            req.sampling_params.all_stop_token_ids)
         logit_bias[index_in_input_batch] = req.sampling_params.logit_bias
     return SamplingMetadata(
         temperature=torch.tensor(temperature, dtype=torch.float,
                                  device=device),
         all_greedy=False,
         all_random=True,
-        rejection_sampling=False,
         top_p=None if all(x == 1.0 for x in top_p) else torch.tensor(
             top_p, dtype=torch.float, device=device),
         top_k=None if all(x == 0 for x in top_k) else torch.tensor(

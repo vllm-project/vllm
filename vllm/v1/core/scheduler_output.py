@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Set, Tuple
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
@@ -95,7 +95,7 @@ class SchedulerOutput:
     # req_id -> spec_token_ids
     # If a request does not have any spec decode tokens, it will not be
     # included in the dictionary.
-    scheduled_spec_decode_tokens: Dict[str, List[int]]
+    scheduled_spec_decode_tokens: Dict[str, Sequence[int]]
     # req_id -> encoder input indices that need processing.
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.

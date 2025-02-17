@@ -29,7 +29,6 @@ def create_sampling_metadata(spec_tokens: List[List[int]]) -> SamplingMetadata:
         temperature=0.0,
         all_greedy=True,
         all_random=False,
-        rejection_sampling=True,
         spec_token_ids=spec_tokens,
         top_p=None,
         top_k=None,

@@ -2,7 +2,7 @@
 
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -116,6 +117,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
+        # Set up speculative decoding.
+        self.use_spec_decode = False
+        if self.speculative_config:
+            # TODO: find a better way to check if we are using ngram.
+            assert self.speculative_config.ngram_prompt_lookup_min, \
+                    "Currently, only ngram spec decode is supported in V1."
+            self.drafter = NgramProposer()
+            self.use_spec_decode = True
+
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
@@ -150,7 +160,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
-        # self.intermediate_tensors  # Set after load_model
+        # None in the first PP rank. The rest are set after load_model.
+        self.intermediate_tensors: Optional[IntermediateTensors] = None
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -364,6 +375,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.token_ids_cpu[
                 req_index,
                 start_token_index:end_token_index] = req_data.new_token_ids
+            self.input_batch.num_tokens_no_spec[req_index] = end_token_index
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
                 req_id, [])
@@ -706,9 +718,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mrope_pos_ptr += completion_part_len
 
     def _calc_spec_decode_metadata(
-            self,
-            scheduler_output: "SchedulerOutput",
-            cu_num_tokens: np.ndarray,
+        self,
+        scheduler_output: "SchedulerOutput",
+        cu_num_tokens: np.ndarray,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Get the number of spec decode tokens for each request.
         num_reqs = self.input_batch.num_reqs
@@ -898,6 +910,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
         else:
+            assert intermediate_tensors is not None
+            assert self.intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                self.intermediate_tensors[k][:num_input_tokens].copy_(
+                    v[:num_input_tokens], non_blocking=True)
             intermediate_tensors = IntermediateTensors({
                 k: v[:num_input_tokens]
                 for k, v in self.intermediate_tensors.items()
@@ -922,9 +939,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
+        # Update the sampling metadata with any spec decode tokens from the
+        # scheduler.
+        self.input_batch.set_spec_token_ids_in_sampling_metadata(
+            scheduler_output.scheduled_spec_decode_tokens)
+
         # Sample the next token and get logprobs if needed.
-        # sampling_metadata = self._prepare_sampling(
-        #     batch_changed, scheduler_output.scheduled_spec_decode_tokens)  TODO
         sampling_metadata = self.input_batch.sampling_metadata
         sampler_output = self.model.sample(
             logits=logits,
@@ -973,14 +993,49 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for seq in sampled_token_ids[valid_mask].split(gen_lens)
             ]
 
+        if not self.use_spec_decode:
+            spec_token_ids = None
+        else:
+            spec_token_ids = self.generate_draft_token_ids(
+                valid_sampled_token_ids)
+
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
+
+    def generate_draft_token_ids(
+        self,
+        sampled_token_ids: List[List[int]],
+    ) -> List[Sequence[int]]:
+        # TODO(woosuk): Optimize.
+        draft_token_ids: List[Sequence[int]] = []
+        for i, sampled_ids in enumerate(sampled_token_ids):
+            num_sampled_ids = len(sampled_ids)
+            if not num_sampled_ids:
+                # Skip speculative decoding.
+                draft_token_ids.append(())
+                continue
+
+            # Add sampled_token_ids to token_ids_cpu.
+            start_idx = self.input_batch.num_tokens_no_spec[i]
+            end_idx = start_idx + num_sampled_ids
+            self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
+            drafter_output = self.drafter.propose(
+                self.input_batch.token_ids_cpu[i, :end_idx],
+                self.speculative_config.ngram_prompt_lookup_min,
+                self.speculative_config.num_speculative_tokens,
+            )
+            if drafter_output is None or len(drafter_output) == 0:
+                draft_token_ids.append(())
+            else:
+                draft_token_ids.append(drafter_output.tolist())
+        return draft_token_ids
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1090,7 +1145,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
         else:
-            if not hasattr(self, "intermediate_tensors"):
+            if self.intermediate_tensors is None:
                 self.intermediate_tensors = (
                     self.model.make_empty_intermediate_tensors(
                         batch_size=self.max_num_tokens,

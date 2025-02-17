@@ -2,7 +2,8 @@
 
 import time
 from collections import deque
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import (Deque, Dict, Iterable, List, Optional, Sequence, Set,
+                    Tuple, Union)
 
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
@@ -120,7 +121,7 @@ class Scheduler:
         scheduled_encoder_inputs: Dict[str, List[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
-        scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
+        scheduled_spec_decode_tokens: Dict[str, Sequence[int]] = {}
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -195,8 +196,13 @@ class Scheduler:
                                              request.num_computed_tokens -
                                              request.num_tokens)
                 if num_scheduled_spec_tokens > 0:
+                    if isinstance(request.spec_token_ids, list):
+                        del request.spec_token_ids[num_scheduled_spec_tokens:]
+                    else:
+                        request.spec_token_ids = request.spec_token_ids[
+                            :num_scheduled_spec_tokens]
                     scheduled_spec_decode_tokens[request.request_id] = (
-                        request.spec_token_ids[:num_scheduled_spec_tokens])
+                        request.spec_token_ids)
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -474,6 +480,7 @@ class Scheduler:
         model_runner_output: "ModelRunnerOutput",
     ) -> EngineCoreOutputs:
         sampled_token_ids = model_runner_output.sampled_token_ids
+        spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -530,13 +537,9 @@ class Scheduler:
                         self.encoder_cache_manager.free_encoder_input(
                             request, input_id)
 
-            if request.num_computed_tokens >= request.num_tokens:
-                # Clear the spec tokens as the request has generated
-                # a new token. Here, We assume all spec tokens are verified
-                # if we perform speculative decoding for this request.
-                # Therefore, we can clear all spec tokens after
-                # the generation step.
-                request.clear_spec_tokens()
+            # Add newly generated spec token ids to the request.
+            if spec_token_ids is not None:
+                request.spec_token_ids = spec_token_ids[req_index]
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
