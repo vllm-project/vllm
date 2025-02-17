@@ -69,8 +69,8 @@ class LogitBiasLogitsProcessor:
 
 @lru_cache(maxsize=32)
 def _get_logit_bias_logits_processor(
-    logit_bias_index: Optional[Union[Tuple[int], Tuple[str]]],
-    logit_bias_value: Optional[Tuple[float]],
+    logit_bias_index: Union[Tuple[int], Tuple[str]],
+    logit_bias_value: Tuple[float],
     vocab_size: int,
     dtype: Union[str, torch.dtype],
 ) -> LogitsProcessor:
