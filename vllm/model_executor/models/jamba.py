@@ -612,5 +612,6 @@ class JambaForSequenceClassification(JambaForCausalLM):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # TODO: The reward weights themselves have float32 accuracy data, we
         # would like to load them in fp32 to get that extra precision.
+        weights = [(name, tensor.to(torch.float32)) for name, tensor in weights]
         super().load_weights(weights)
-        self.score = self.score.float()
+        self.score = self.score.to(torch.float32)
