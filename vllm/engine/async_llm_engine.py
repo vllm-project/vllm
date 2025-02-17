@@ -23,7 +23,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.executor.executor_base import ExecutorBase
 from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
-from vllm.kv_transfer_params import KVTransferParams
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
@@ -438,7 +437,6 @@ class _AsyncLLMEngine(LLMEngine):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> None:
         ...
@@ -453,7 +451,6 @@ class _AsyncLLMEngine(LLMEngine):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> None:
         ...
@@ -471,7 +468,6 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request: Optional[LoRARequest] = None,
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-            kv_transfer_params: Optional[KVTransferParams] = None,
             priority: int = 0,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
@@ -523,7 +519,6 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
-            kv_transfer_params=kv_transfer_params,
             priority=priority,
         )
 
@@ -861,7 +856,6 @@ class AsyncLLMEngine(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> Coroutine[None, None, AsyncGenerator[Union[
             RequestOutput, PoolingRequestOutput], None]]:
@@ -877,7 +871,6 @@ class AsyncLLMEngine(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> Coroutine[None, None, AsyncGenerator[Union[
             RequestOutput, PoolingRequestOutput], None]]:
@@ -896,7 +889,6 @@ class AsyncLLMEngine(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
         *,
         inputs: Optional[PromptType] = None,  # DEPRECATED
@@ -929,7 +921,6 @@ class AsyncLLMEngine(EngineClient):
             lora_request=lora_request,
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
-            kv_transfer_params=kv_transfer_params,
             priority=priority,
         )
 
@@ -943,7 +934,6 @@ class AsyncLLMEngine(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
@@ -961,8 +951,6 @@ class AsyncLLMEngine(EngineClient):
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
-            kv_transfer_params: The KVCache transfer parameters to use
-                for generation, if any.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
 
@@ -1022,7 +1010,6 @@ class AsyncLLMEngine(EngineClient):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
-                    kv_transfer_params=kv_transfer_params,
                     priority=priority,
             ):
                 yield LLMEngine.validate_output(output, RequestOutput)

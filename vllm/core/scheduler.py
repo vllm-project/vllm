@@ -1380,7 +1380,6 @@ class Scheduler:
                     computed_block_nums=common_computed_block_nums,
                     encoder_seq_data=encoder_seq_data,
                     cross_block_table=cross_block_table,
-                    kv_transfer_params=seq_group.kv_transfer_params,
                     state=seq_group.state,
                     token_type_ids=seq_group.token_type_ids,
                     # `multi_modal_data` will only be present for the 1st comm

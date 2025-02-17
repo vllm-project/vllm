@@ -38,7 +38,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
-from vllm.kv_transfer_params import KVTransferParams
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -442,7 +441,6 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
@@ -458,7 +456,6 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
@@ -475,7 +472,6 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
@@ -495,8 +491,6 @@ class MQLLMEngineClient(EngineClient):
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
-            kv_transfer_params: The KVCache transfer parameters to use
-                for generation, if any.
             priority: Priority of the request (lower means earlier handling).
                 Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
@@ -508,8 +502,7 @@ class MQLLMEngineClient(EngineClient):
 
         return self._process_request(prompt, sampling_params, request_id,
                                      lora_request, trace_headers,
-                                     prompt_adapter_request,
-                                     kv_transfer_params, priority)
+                                     prompt_adapter_request, priority)
 
     @overload
     def encode(
@@ -592,7 +585,6 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
             PoolingRequestOutput, None]]:
@@ -646,7 +638,6 @@ class MQLLMEngineClient(EngineClient):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
-                    kv_transfer_params=kv_transfer_params,
                     priority=priority,
                 ))
 

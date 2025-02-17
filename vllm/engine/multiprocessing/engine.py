@@ -269,7 +269,6 @@ class MQLLMEngine:
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
                 prompt_adapter_request=request.prompt_adapter_request,
-                kv_transfer_params=request.kv_transfer_params,
                 priority=request.priority)
 
             if self.log_requests:

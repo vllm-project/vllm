@@ -14,8 +14,8 @@ from typing import Set, Tuple, Union
 import msgspec
 import torch
 
+from vllm.distributed.kv_transfer.kv_transfer_params import KVTransferParams
 from vllm.inputs import SingletonInputs, SingletonInputsAdapter
-from vllm.kv_transfer_params import KVTransferParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
@@ -639,8 +639,6 @@ class SequenceGroup:
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
-        kv_transfer_params: The KVCache transfer parameters to use for
-            disaggregated prefilling and KVCache sharing.
         priority: User-defined priority of the request.
     """
 
@@ -656,7 +654,6 @@ class SequenceGroup:
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> None:
         self.request_id = request_id
@@ -681,7 +678,6 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
-        self.kv_transfer_params = kv_transfer_params
         self.priority = priority
 
         self.cached_request_output = None
@@ -989,6 +985,12 @@ class SequenceGroupMetadata(
                     self.seq_data.values())).get_len()
             else:
                 self.token_chunk_size = 1
+
+        # Init KVTransferParams from SamplingParams, if exist.
+        if self.sampling_params is not None:
+            if hasattr(self.sampling_params, "kv_transfer_params"):
+                self.kv_transfer_params = self.sampling_params.kv_transfer_params
+
 
     @property
     def lora_int_id(self) -> int:

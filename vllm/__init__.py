@@ -14,7 +14,6 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.llm import LLM
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType, TextPrompt, TokensPrompt
-from vllm.kv_transfer_params import KVTransferParams
 from vllm.model_executor.models import ModelRegistry
 from vllm.outputs import (ClassificationOutput, ClassificationRequestOutput,
                           CompletionOutput, EmbeddingOutput,
@@ -62,5 +61,4 @@ __all__ = [
     "AsyncEngineArgs",
     "initialize_ray_cluster",
     "PoolingParams",
-    "KVTransferParams",
 ]

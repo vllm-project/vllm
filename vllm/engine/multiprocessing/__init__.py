@@ -9,7 +9,6 @@ from typing_extensions import deprecated
 
 from vllm import PoolingParams
 from vllm.inputs import PromptType
-from vllm.kv_transfer_params import KVTransferParams
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -36,7 +35,6 @@ class RPCProcessRequest:
     lora_request: Optional[LoRARequest] = None
     trace_headers: Optional[Mapping[str, str]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
-    kv_transfer_params: Optional[KVTransferParams] = None
     priority: int = 0
 
     @overload
@@ -48,7 +46,6 @@ class RPCProcessRequest:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> None:
         ...
@@ -64,7 +61,6 @@ class RPCProcessRequest:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
         priority: int = 0,
     ) -> None:
         ...
@@ -81,7 +77,6 @@ class RPCProcessRequest:
             lora_request: Optional[LoRARequest] = None,
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-            kv_transfer_params: Optional[KVTransferParams] = None,
             priority: int = 0,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
@@ -99,7 +94,6 @@ class RPCProcessRequest:
         self.lora_request = lora_request
         self.trace_headers = trace_headers
         self.prompt_adapter_request = prompt_adapter_request
-        self.kv_transfer_params = kv_transfer_params
         self.priority = priority
 
 

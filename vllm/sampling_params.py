@@ -10,6 +10,7 @@ import msgspec
 from pydantic import BaseModel
 from typing_extensions import Annotated
 
+from vllm.distributed.kv_transfer.kv_transfer_params import KVTransferParams
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 
@@ -166,6 +167,8 @@ class SamplingParams(
         allowed_token_ids: If provided, the engine will construct a logits
             processor which only retains scores for the given token ids.
             Defaults to None.
+        kv_transfer_params: The KVCache transfer parameters to use for
+            disaggregated prefilling and KVCache sharing.
     """
 
     n: int = 1
@@ -210,6 +213,9 @@ class SamplingParams(
     logit_bias: Optional[Dict[int, float]] = None
     allowed_token_ids: Optional[List[int]] = None
 
+    # Fields used to conduct KVCache transfer for disaggregated prefilling
+    kv_transfer_params: Optional[KVTransferParams] = None
+
     @staticmethod
     def from_optional(
         n: Optional[int] = 1,
@@ -241,6 +247,7 @@ class SamplingParams(
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None,
         allowed_token_ids: Optional[List[int]] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             logit_bias = {
@@ -280,6 +287,7 @@ class SamplingParams(
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
+            kv_transfer_params=kv_transfer_params,
         )
 
     def __post_init__(self) -> None:
@@ -489,7 +497,8 @@ class SamplingParams(
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
-            f"guided_decoding={self.guided_decoding})")
+            f"guided_decoding={self.guided_decoding}, "
+            f"kv_transfer_params={self.kv_transfer_params})")
 
 
 class BeamSearchParams(

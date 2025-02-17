@@ -30,7 +30,6 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
-from vllm.kv_transfer_params import KVTransferParams
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -234,13 +233,6 @@ class OpenAIServingChat(OpenAIServing):
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
-                # Create KVTransferParams based on input from request
-                kv_transfer_params = KVTransferParams(
-                    prefix_prompt_ids=request.prefix_prompt_ids,
-                    kvcache_load_keys=request.kvcache_load_keys,
-                    kvcache_store_keys=request.kvcache_store_keys,
-                )
-
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
                         prompt=engine_prompt,
@@ -248,28 +240,15 @@ class OpenAIServingChat(OpenAIServing):
                         params=sampling_params,
                     )
                 else:
-                    # Note(shangming): v1 does not support KV transfer yet.
-                    if isinstance(self.engine_client, AsyncLLM):
-                        generator = self.engine_client.generate(
-                            engine_prompt,
-                            sampling_params,
-                            request_id,
-                            lora_request=lora_request,
-                            trace_headers=trace_headers,
-                            prompt_adapter_request=prompt_adapter_request,
-                            priority=request.priority,
-                        )
-                    else:
-                        generator = self.engine_client.generate(
-                            engine_prompt,
-                            sampling_params,
-                            request_id,
-                            lora_request=lora_request,
-                            trace_headers=trace_headers,
-                            prompt_adapter_request=prompt_adapter_request,
-                            kv_transfer_params=kv_transfer_params,
-                            priority=request.priority,
-                        )
+                    generator = self.engine_client.generate(
+                        engine_prompt,
+                        sampling_params,
+                        request_id,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        prompt_adapter_request=prompt_adapter_request,
+                        priority=request.priority,
+                    )
 
                 generators.append(generator)
         except ValueError as e:

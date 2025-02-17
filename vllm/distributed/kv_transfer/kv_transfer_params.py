@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Any, List, Optional
+from typing import List, Optional, Union
 
+import json
 import msgspec
 
 
 # Helper function to check if all elements in a list are integers or None
-def valid_prefix_prompt_ids(lst: List[Any]) -> bool:
+def valid_prefix_prompt_ids(lst: Union[List[int], List[List[int]]]) -> bool:
     return (all(isinstance(x, int) for x in lst) or all(x is None for x in lst)
             or all(
                 isinstance(x, list) and all(isinstance(i, int) for i in x)
@@ -16,7 +17,7 @@ def valid_prefix_prompt_ids(lst: List[Any]) -> bool:
 
 
 # Helper function to check if all elements in a list are strings or None
-def valid_kvcache_keys(lst: List[Any]) -> bool:
+def valid_kvcache_keys(lst: Union[List[str], List[List[str]]]) -> bool:
     return (all(isinstance(x, str) for x in lst) or all(x is None for x in lst)
             or all(
                 isinstance(x, list) and all(isinstance(i, str) for i in x)
@@ -24,6 +25,26 @@ def valid_kvcache_keys(lst: List[Any]) -> bool:
             or all(x is None or
                    (isinstance(x, list) and all(isinstance(i, str) for i in x))
                    for x in lst))
+
+
+def verify_input_from_optional(input_dict: dict) -> None:
+    if 'prefix_prompt_ids' in input_dict:
+        prefix_prompt_ids = input_dict['prefix_prompt_ids']
+        if not all(isinstance(x, int) for x in prefix_prompt_ids):
+            raise ValueError(f"prefix_prompt_ids: {prefix_prompt_ids} "
+                             "should be a list of integers.")
+
+    if 'kvcache_load_keys' in input_dict:
+        kvcache_load_keys = input_dict['kvcache_load_keys']
+        if not all(isinstance(x, str) for x in kvcache_load_keys):
+            raise ValueError(f"kvcache_load_keys: {kvcache_load_keys} "
+                             "should be a list of strings.")
+
+    if 'kvcache_store_keys' in input_dict:
+        kvcache_store_keys = input_dict['kvcache_store_keys']
+        if not all(isinstance(x, str) for x in kvcache_store_keys):
+            raise ValueError(f"kvcache_store_keys: {kvcache_store_keys} "
+                             "should be a list of strings.")
 
 
 class KVTransferParams(
@@ -41,9 +62,9 @@ class KVTransferParams(
         kvcache_store_keys: If provided, then it contains the keys of the
             KVCache that need to be send.
     """
-    prefix_prompt_ids: Optional[Any] = None
-    kvcache_load_keys: Optional[Any] = None
-    kvcache_store_keys: Optional[Any] = None
+    prefix_prompt_ids: Optional[Union[List[int], List[List[int]]]] = None
+    kvcache_load_keys: Optional[Union[List[str], List[List[str]]]] = None
+    kvcache_store_keys: Optional[Union[List[str], List[List[str]]]] = None
 
     def __post_init__(self):
         self._verify_args()
@@ -69,3 +90,23 @@ class KVTransferParams(
                 and valid_kvcache_keys(self.kvcache_store_keys)):
             raise ValueError(
                 f"kvcache_store_keys: {self.kvcache_store_keys} is not valid.")
+
+    @classmethod
+    def from_optional(cls, input_json: Optional[Union[str, dict]]):
+
+        if input_json is None:
+            return None
+
+        if isinstance(input_json, str):
+            kv_transfer_params_dict = json.loads(input_json)
+        elif isinstance(input_json, dict):
+            kv_transfer_params_dict = input_json
+        else:
+            raise ValueError(
+                "The provided kv_transfer_params_json is not a valid JSON "
+                "string or dictionary")
+
+        # Items of kv_transfer_params_dict should not be nested list
+        verify_input_from_optional(kv_transfer_params_dict)
+
+        return cls(**kv_transfer_params_dict)

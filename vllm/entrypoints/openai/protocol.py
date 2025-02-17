@@ -12,6 +12,7 @@ from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import Annotated
 
+from vllm.distributed.kv_transfer.kv_transfer_params import KVTransferParams
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
@@ -240,10 +241,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
 
-    # kv transfer params
-    prefix_prompt_ids: Optional[List[int]] = None
-    kvcache_load_keys: Optional[List[str]] = None
-    kvcache_store_keys: Optional[List[str]] = None
+    # params JSON used for disaggregated prefilling and KVCache sharing
+    kv_transfer_params_json: Optional[Union[str, dict]] = None
 
     # doc: begin-chat-completion-sampling-params
     best_of: Optional[int] = None
@@ -471,6 +470,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             backend=self.guided_decoding_backend,
             whitespace_pattern=self.guided_whitespace_pattern)
 
+        # Create KVTransferParams based on input from request
+        kv_transfer_params = KVTransferParams.from_optional(
+            input_json=self.kv_transfer_params_json,
+        )
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -498,7 +502,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
-            logit_bias=self.logit_bias)
+            logit_bias=self.logit_bias,
+            kv_transfer_params=kv_transfer_params)
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
@@ -661,10 +666,8 @@ class CompletionRequest(OpenAIBaseModel):
     top_p: Optional[float] = None
     user: Optional[str] = None
 
-    # kv transfer params
-    prefix_prompt_ids: Optional[Union[List[int], List[List[int]]]] = None
-    kvcache_load_keys: Optional[Union[List[str], List[List[str]]]] = None
-    kvcache_store_keys: Optional[Union[List[str], List[List[str]]]] = None
+    # params JSON used for disaggregated prefilling and KVCache sharing
+    kv_transfer_params_json: Optional[Union[str, dict]] = None
 
     # doc: begin-completion-sampling-params
     use_beam_search: bool = False
@@ -839,6 +842,11 @@ class CompletionRequest(OpenAIBaseModel):
             backend=self.guided_decoding_backend,
             whitespace_pattern=self.guided_whitespace_pattern)
 
+        # Create KVTransferParams based on input from request
+        kv_transfer_params = KVTransferParams.from_optional(
+            input_json=self.kv_transfer_params_json,
+        )
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -867,7 +875,8 @@ class CompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids)
+            allowed_token_ids=self.allowed_token_ids,
+            kv_transfer_params=kv_transfer_params)
 
     @model_validator(mode="before")
     @classmethod

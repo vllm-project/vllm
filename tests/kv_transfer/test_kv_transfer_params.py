@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the KVTransferParams class.
 """
-from vllm import KVTransferParams
+from vllm.distributed.kv_transfer.kv_transfer_params import KVTransferParams
 
 
 def test_all_none():
