@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Mapping, Optional, Type, Union
+from typing import Dict, List, Mapping, Optional, Tuple, Type, Union
 
 from typing_extensions import TypeVar
 
@@ -23,7 +23,6 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParallelSamplingRequestManager
 from vllm.v1.engine.processor import Processor
-from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
@@ -50,8 +49,9 @@ class LLMEngine:
         self.cache_config = vllm_config.cache_config
 
         # Parallel sampling infra
-        self.parallel_parent_reqs: Dict[str,ParallelSamplingRequestManager]={}
-        self.parallel_child_reqs: Dict[str,str]={}
+        self.parallel_parent_reqs: Dict[str,
+                                        ParallelSamplingRequestManager] = {}
+        self.parallel_child_reqs: Dict[str, Tuple[int, str]] = {}
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -109,7 +109,10 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     def get_num_unfinished_requests(self) -> int:
-        return self.output_processor.get_num_unfinished_requests()
+        num_core_reqs = self.output_processor.get_num_unfinished_requests()
+        num_child_reqs = self._num_parallel_sampling_child_requests()
+        num_parent_reqs = self._num_parallel_sampling_requests()
+        return num_core_reqs + num_parent_reqs - num_child_reqs
 
     def has_unfinished_requests(self) -> bool:
         return self.output_processor.has_unfinished_requests()
@@ -159,14 +162,14 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
         req_mgr = ParallelSamplingRequestManager(request_id, params)
-        self.parallel_parent_reqs[request_id]=req_mgr
+        self.parallel_parent_reqs[request_id] = req_mgr
         n = req_mgr.n
 
         # Add n child requests with unique request IDs and n=1
         for idx in range(n):
             c_params = req_mgr.get_child_sampling_params(idx)
             c_request_id = req_mgr.get_child_request_id(idx)
-            self.parallel_child_reqs[c_request_id]=(idx,request_id)
+            self.parallel_child_reqs[c_request_id] = (idx, request_id)
             self._add_request(request_id=c_request_id,
                               prompt=prompt,
                               params=c_params,
@@ -202,17 +205,17 @@ class LLMEngine:
         self.engine_core.add_request(request)
 
     def _aggregate_parallel_sampling_outputs(
-            self,
-            outputs: EngineCoreOutputs,
-    )->List[RequestOutput]:
-        agg_outputs=[]
-        for c_out in outputs.outputs:
-            c_req_id=c_out.request_id
-            if cdx_req_id := self.parallel_child_reqs.get(c_req_id,None):
-                (cdx,req_id)=cdx_req_id
+        self,
+        outputs: List[RequestOutput],
+    ) -> List[RequestOutput]:
+        agg_outputs = []
+        for c_out in outputs:
+            c_req_id = c_out.request_id
+            if cdx_req_id := self.parallel_child_reqs.get(c_req_id, None):
+                (cdx, req_id) = cdx_req_id
                 # Update parallel sampling request
-                req_mgr=self.parallel_parent_reqs[req_id]
-                if out := req_mgr._process_output(c_out,cdx):
+                req_mgr = self.parallel_parent_reqs[req_id]
+                if out := req_mgr._process_output(c_out, cdx):
                     # Return parent request output if complete;
                     # cleanup parent request
                     agg_outputs.append(out)
@@ -224,15 +227,16 @@ class LLMEngine:
                 agg_outputs.append(c_out)
         return agg_outputs
 
-    def _is_any_parallel_sampling(self)->bool:
-        return len(self.parallel_parent_reqs)>0
+    def _num_parallel_sampling_requests(self) -> int:
+        return len(self.parallel_parent_reqs)
+
+    def _num_parallel_sampling_child_requests(self) -> int:
+        return len(self.parallel_child_reqs)
 
     def step(self) -> List[RequestOutput]:
 
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()
-        if self._is_any_parallel_sampling():
-            outputs=self._aggregate_parallel_sampling_outputs(outputs)
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(
@@ -241,7 +245,11 @@ class LLMEngine:
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
-        return processed_outputs.request_outputs
+        if self._num_parallel_sampling_requests() > 0:
+            return self._aggregate_parallel_sampling_outputs(
+                processed_outputs.request_outputs)
+        else:
+            return processed_outputs.request_outputs
 
     def get_model_config(self):
         return self.model_config
