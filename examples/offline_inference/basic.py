@@ -2,18 +2,19 @@
 
 from vllm import LLM, SamplingParams
 
+# TODO(xw32): should remove the change in this file before merging the PR.
 # Sample prompts.
 prompts = [
     "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
+    # "The president of the United States is",
+    # "The capital of France is",
+    # "The future of AI is",
 ]
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+sampling_params = SamplingParams()  #temperature=0.8, top_p=0.95)
 
 # Create an LLM.
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="Qwen/Qwen2-1.5B-Instruct", max_model_len=512, max_num_seqs=16)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
