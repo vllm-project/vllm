@@ -48,6 +48,13 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
 
+PromptsArgType=Union[Union[PromptType, Sequence[PromptType]],
+                            Optional[Union[str, List[str]]]]
+SamplingParamsArgType=Optional[Union[SamplingParams,
+                                        Sequence[SamplingParams]]]
+LoRARequestArgType=Optional[Union[List[LoRARequest], LoRARequest]]
+PriorityArgType=Optional[List[int]]
+
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -189,6 +196,8 @@ class LLM:
         Note: if enforce_eager is unset (enforce_eager is None)
         it defaults to False.
         '''
+
+        self._v1=envs.VLLM_USE_V1
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
@@ -377,17 +386,15 @@ class LLM:
     )
     def generate(
         self,
-        prompts: Union[Union[PromptType, Sequence[PromptType]],
-                       Optional[Union[str, List[str]]]] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        Sequence[SamplingParams]]] = None,
+        prompts: PromptsArgType = None,
+        sampling_params: SamplingParamsArgType = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        lora_request: LoRARequestArgType = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
-        priority: Optional[List[int]] = None,
+        priority: PriorityArgType = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -455,8 +462,22 @@ class LLM:
                 **guided_options_request)
 
         if sampling_params is None:
-            # Use default sampling params.
+            # Use default sampling params. Note: n=1 by default
             sampling_params = self.get_default_sampling_params()
+        elif self._v1:
+            # V1 engine only: break out parallel sampling
+            # requests into `n` child requests
+            (
+                prompts,
+                sampling_params,
+                lora_request,
+                priority,
+            ) = self._build_parallel_sampling_batch(
+                prompts,
+                sampling_params,
+                lora_request,
+                priority
+            )
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
@@ -467,7 +488,28 @@ class LLM:
             priority=priority)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
+
+        if self._v1:
+            # V1 engine only: aggregate parallel sampling child request
+            # outputs into parent request outputs
+            outputs = self._process_parallel_sampling_outputs(outputs)
+
         return self.engine_class.validate_outputs(outputs, RequestOutput)
+
+    def _build_parallel_sampling_batch(
+        self,
+        prompts: PromptsArgType,
+        sampling_params: SamplingParamsArgType,
+        lora_request: LoRARequestArgType,
+        priority: PriorityArgType,
+    ) -> Tuple[PromptsArgType,SamplingParamsArgType,
+               LoRARequestArgType,PriorityArgType]:
+        pass
+        
+    def _process_parallel_sampling_outputs(
+        outputs: List[RequestOutput]
+    )->List[RequestOutput]:
+        if self._
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
