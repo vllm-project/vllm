@@ -107,7 +107,7 @@ __device__ void paged_attention_kernel(
     const float* __restrict__ attn_bias,  // [num_seqs, num_heads, max_seq_len]
     const int padded_max_seq_len,         // Avoid recomputing from seq_lens.
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
-    const float k_scale, const float v_scale, const int tp_rank,
+    const float* k_scale, const float* v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   const int seq_idx = blockIdx.y;
@@ -155,6 +155,21 @@ __device__ void paged_attention_kernel(
   const int kv_head_idx = head_idx / num_queries_per_kv;
   const float alibi_slope =
       alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
+  // TODO check if indexing still makes sense
+  // seq_len indexes on 'max_seq_lens' dim,
+  // it's like renaming dim you get attn_bias: seq_len x num_kv_heads x seq_len
+  // TODO each seq can have different len (seq_lens) but only one bias!!
+  // NOTE (NickLucche) `max_seq_len` bias values for current sequence and current head
+  const float* attn_bias_vec =
+      attn_bias == nullptr
+          ? nullptr
+          : attn_bias + seq_idx * num_heads * num_seq_blocks * BLOCK_SIZE +
+                head_idx * num_seq_blocks * BLOCK_SIZE;
+          // : attn_bias + seq_idx * num_kv_heads * num_seq_blocks * BLOCK_SIZE +
+  // const float* attn_bias_vec = attn_bias == nullptr
+  //  ? nullptr
+  //  : attn_bias + seq_idx * num_kv_heads * seq_len +
+  //  kv_head_idx * seq_len;
 
   // NOTE (NickLucche) `max_seq_len` (padded) bias values for current sequence
   // and current head.
@@ -295,7 +310,7 @@ __device__ void paged_attention_kernel(
           Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
               k_ptr + offset1 * BLOCK_SIZE * x + offset2);
           k_vecs[j] = fp8::scaled_convert<K_vec, Quant_vec, KV_DTYPE>(
-              k_vec_quant, k_scale);
+              k_vec_quant, *k_scale);
         }
       }
 
@@ -427,7 +442,7 @@ __device__ void paged_attention_kernel(
               *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
           // Vector conversion from V_quant_vec to V_vec.
           v_vec = fp8::scaled_convert<V_vec, V_quant_vec, KV_DTYPE>(v_quant_vec,
-                                                                    v_scale);
+                                                                    *v_scale);
         }
         if (block_idx == num_seq_blocks - 1) {
           // NOTE(woosuk): When v_vec contains the tokens that are out of the
@@ -527,7 +542,7 @@ __global__ void paged_attention_v1_kernel(
     const float* __restrict__ attn_bias,
     const int padded_max_seq_len,  // Avoid recomputing from seq_lens.
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
-    const float k_scale, const float v_scale, const int tp_rank,
+    const float* k_scale, const float* v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
@@ -565,7 +580,7 @@ __global__ void paged_attention_v2_kernel(
     const float* __restrict__ attn_bias,
     const int padded_max_seq_len,  // Avoid recomputing from seq_lens.
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
-    const float k_scale, const float v_scale, const int tp_rank,
+    const float* k_scale, const float* v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,

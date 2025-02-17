@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -69,8 +70,8 @@ class PagedAttention:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
     ) -> None:
         ops.reshape_and_cache(
             key,
@@ -96,8 +97,8 @@ class PagedAttention:
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
         attn_bias: Optional[torch.Tensor],
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -208,8 +209,8 @@ class PagedAttention:
         alibi_slopes: Optional[torch.Tensor],
         attn_bias: Optional[torch.Tensor],
         sliding_window: Optional[int],
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         assert attn_bias is None, "Bias for prefix not yet enabled"

@@ -20,7 +20,8 @@ if not current_platform.is_rocm():
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
-MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
+# MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
+MAX_SEQ_LEN = 16
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
@@ -31,6 +32,7 @@ DTYPES = [
 ] if not current_platform.is_rocm() else [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
+# TODO fix different num of heads
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 
 # This should be sync with get_supported_head_sizes() in
@@ -142,6 +144,10 @@ def test_paged_attention(
     seed: int,
     device: str,
 ) -> None:
+    # num_heads = (2, 2)
+    # num_seqs = 2
+    # head_size = 32
+    
     if ((kv_cache_dtype == "fp8" and head_size % 16)
             or (version == "rocm" and head_size not in (64, 128))):
         pytest.skip()
@@ -209,6 +215,7 @@ def test_paged_attention(
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
+    # print("BIAS", attn_bias)
     if version == "v1":
         ops.paged_attention_v1(
             output,
@@ -227,6 +234,7 @@ def test_paged_attention(
             k_scale,
             v_scale,
         )
+        # print("\nOUT", output)
 
         opcheck(torch.ops._C.paged_attention_v1,
                 (output, query, key_cache, value_cache, num_kv_heads, scale,
@@ -236,6 +244,7 @@ def test_paged_attention(
                       and block_size == BLOCK_SIZES[0]))
 
     elif version in ("v2", "rocm"):
+        assert False
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape

@@ -124,6 +124,9 @@ class InputPreprocessor:
         '''
 
         bos_token_id = self.get_bos_token_id()
+        if bos_token_id is None:
+            # TODO do I have to make another config to set pad id as bos? T5 has no bos..pad is used in transformers too
+            bos_token_id = 0
         assert bos_token_id is not None
         return [bos_token_id]
 

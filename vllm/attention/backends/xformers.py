@@ -292,7 +292,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 def _get_attn_bias(
     attn_metadata: XFormersMetadata,
     attn_type: str,
-) -> Optional[AttentionBias]:
+) -> Optional[List[AttentionBias]]:
     '''
     Extract appropriate attention bias from attention metadata
     according to attention type.
@@ -555,6 +555,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
+                # TODO this should be forwarded when splitting prefill/decode_meta
+                _set_attn_bias(prefill_meta, _get_attn_bias(attn_metadata, attn_type), attn_type)
                 out = self._run_memory_efficient_xformers_forward(
                     query, key, value, prefill_meta, attn_type=attn_type)
                 assert out.shape == output[:num_prefill_query_tokens].shape
@@ -583,7 +585,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
-                    prefill_meta.attn_bias,
+                    _get_attn_bias(attn_metadata, attn_type),
                     self.sliding_window,
                     layer._k_scale,
                     layer._v_scale,
@@ -601,6 +603,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
 
+            attn_bias = _get_attn_bias(attn_metadata, attn_type)
+            if attn_bias:
+                attn_bias = attn_bias[0]
+                # print("Bias shape", attn_bias.shape)
             output[num_prefill_query_tokens:] = PagedAttention.forward_decode(
                 decode_query,
                 key_cache,
@@ -612,9 +618,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                # TODO (NickLucche) cross_attn_bias not needed for T5-like
-                # models, abstract bias selection if needed.
-                decode_meta.attn_bias,
+                attn_bias,
                 layer._k_scale,
                 layer._v_scale,
             )
@@ -666,6 +670,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # Set attention bias if not provided. This typically happens at
         # the very attention layer of every iteration.
         # FIXME(woosuk): This is a hack.
+        # FIXME this is None should be rel pos encoding
         attn_bias = _get_attn_bias(attn_metadata, attn_type)
         if attn_bias is None:
             if self.alibi_slopes is None:
@@ -722,15 +727,23 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                                              attn_metadata.seq_lens)
 
             _set_attn_bias(attn_metadata, attn_bias, attn_type)
+        
+        # if isinstance(attn_bias[0], torch.Tensor):
+        #     print("IS THIS WORKING PREFILL shape", [b.shape for b in attn_bias])
+        #     print("IS THIS WORKING PREFILL stride", [b.stride() for b in attn_bias])
+        #     print("QUERY shape", query.shape, key.shape)
 
         # No alibi slopes.
         # TODO(woosuk): Too many view operations. Let's try to reduce
         # them in the future for code readability.
-        if self.alibi_slopes is None:
+        # TODO refactor custom attn bias must not go here
+        if self.alibi_slopes is None and len(attn_bias)==1:
             # Add the batch dimension.
             query = query.unsqueeze(0)
             key = key.unsqueeze(0)
             value = value.unsqueeze(0)
+            # if isinstance(attn_bias[0], torch.Tensor):
+            #     print("RUNNING SINGLE ATTN BIAS VERSION WITH", attn_bias[0].shape)
             out = xops.memory_efficient_attention_forward(
                 query,
                 key,
@@ -739,15 +752,16 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 p=0.0,
                 scale=self.scale)
             return out.view_as(original_query)
+        
 
         # Attention with alibi slopes.
         # FIXME(woosuk): Because xformers does not support dynamic sequence
         # lengths with custom attention bias, we process each prompt one by
         # one. This is inefficient, especially when we have many short prompts.
-        assert attn_metadata.seq_lens is not None
         output = torch.empty_like(original_query)
+        seq_lens = attn_metadata.encoder_seq_lens if attn_type == AttentionType.ENCODER else attn_metadata.seq_lens
         start = 0
-        for i, seq_len in enumerate(attn_metadata.seq_lens):
+        for i, seq_len in enumerate(seq_lens):
             end = start + seq_len
             out = xops.memory_efficient_attention_forward(
                 query[None, start:end],
