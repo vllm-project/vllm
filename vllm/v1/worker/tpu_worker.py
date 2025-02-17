@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
+from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -127,7 +127,6 @@ class TPUWorker:
             runner_kv_caches,
             num_tokens=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
-            exec_mode=ExecutionMode.PREFILL,
         )
 
         # Synchronize before measuring the memory usage.
