@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 import platform
 import random
@@ -11,8 +13,10 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.utils import FlexibleArgumentParser
 else:
     VllmConfig = None
+    FlexibleArgumentParser = None
 
 logger = init_logger(__name__)
 
@@ -30,8 +34,10 @@ class _Backend(enum.Enum):
     TORCH_SDPA = enum.auto()
     OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
+    TRITON_MLA = enum.auto()
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
+    PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
@@ -139,7 +145,8 @@ class Platform:
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool) -> str:
+                             block_size: int, use_v1: bool,
+                             use_mla: bool) -> str:
         """Get the attention backend class of a device."""
         return ""
 
@@ -180,6 +187,11 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        """Get the uuid of a device, e.g. the PCI bus ID."""
+        raise NotImplementedError
+
+    @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """Get the total memory of a device in bytes."""
         raise NotImplementedError
@@ -202,16 +214,33 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def seed_everything(cls, seed: int) -> None:
+    def seed_everything(cls, seed: Optional[int] = None) -> None:
         """
         Set the seed of each random module.
         `torch.manual_seed` will set seed on all devices.
 
         Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
         """
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
+    @classmethod
+    def pre_register_and_update(cls,
+                                parser: Optional[FlexibleArgumentParser] = None
+                                ) -> None:
+        """
+        Do some pre-registeration or update action for the current platform.
+
+        This function is called before global VllmConfig is initialized or cli
+        arguments are parsed. It's used for out-of-tree platforms to register or
+        update the configuration.
+
+        For example, the out-of-tree quantization config can be imported and
+        registered here dynamically.
+        """
+        pass
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -292,6 +321,13 @@ class Platform:
         Return the punica wrapper for current platform.
         """
         raise NotImplementedError
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        """
+        Get device specific communicator class for distributed communication.
+        """
+        return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
 
 class UnspecifiedPlatform(Platform):

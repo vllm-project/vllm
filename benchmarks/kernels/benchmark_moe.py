@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import time
 from datetime import datetime
@@ -343,9 +345,13 @@ class BenchmarkWorker:
         op_config = get_moe_configs(num_experts, shard_intermediate_size // 2,
                                     dtype_str)
         if op_config is None:
-            config = get_default_config(num_tokens, num_experts,
-                                        shard_intermediate_size, hidden_size,
-                                        topk, dtype_str)
+            config = get_default_config(num_tokens,
+                                        num_experts,
+                                        shard_intermediate_size,
+                                        hidden_size,
+                                        topk,
+                                        dtype_str,
+                                        is_marlin=False)
         else:
             config = op_config[min(op_config.keys(),
                                    key=lambda x: abs(x - num_tokens))]
@@ -536,7 +542,11 @@ if __name__ == "__main__":
     parser.add_argument("--model",
                         type=str,
                         default="mistralai/Mixtral-8x7B-Instruct-v0.1")
-    parser.add_argument("--tp-size", "-tp", type=int, default=2)
+    parser.add_argument("--tp-size",
+                        "-tp",
+                        "--tensor-parallel-size",
+                        type=int,
+                        default=2)
     parser.add_argument("--dtype",
                         type=str,
                         choices=["auto", "fp8_w8a8", "int8_w8a16"],

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
 It tests chunked prefill. Chunked prefill can be enabled by
@@ -7,7 +8,6 @@ prefill requests are chunked.
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
 import os
-from contextlib import nullcontext
 
 import pytest
 
@@ -19,7 +19,7 @@ from ..utils import multi_gpu_test
 
 MODELS = [
     "facebook/opt-125m",
-    "meta-llama/Llama-3.2-1B",
+    "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
 
@@ -91,7 +91,7 @@ def test_models_distributed(
 ) -> None:
     override_backend_env_variable(monkeypatch, attention_backend)
 
-    if (model == "meta-llama/Llama-2-7b-hf"
+    if (model == "meta-llama/Llama-3.2-1B-Instruct"
             and distributed_executor_backend == "ray"):
         # test ray adag
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
@@ -220,7 +220,7 @@ def test_with_prefix_caching(
     Checks exact match decode with and without prefix caching
     with chunked prefill enabled.
     """
-    model = "meta-llama/Llama-2-7b-chat-hf"
+    model = "meta-llama/Llama-3.2-1B-Instruct"
     # The common prompt has 142 tokens with Llama-2 tokenizer.
     common_prompt = "You are a helpful AI assistant " * 20
     unique_prompts = [
@@ -232,7 +232,6 @@ def test_with_prefix_caching(
 
     max_num_batched_tokens = max_num_seqs = chunk_size
     outputs = {}  # type: ignore
-    check_result = True
     for enable in (True, False):
         with vllm_runner(
                 model,
@@ -244,25 +243,17 @@ def test_with_prefix_caching(
                 enforce_eager=enforce_eager,
                 max_num_seqs=max_num_seqs,
         ) as vllm_model:
-            # It should fail when prefix caching is enable and chunk
-            # size is not a multiple of block size (16).
-            should_fail = chunk_size % 16 != 0 and enable
-            check_result &= not should_fail
             outputs[enable] = []
-            # Send the request one-by-one to ensure the cache is populated.
-            with pytest.raises(ValueError) if should_fail else nullcontext():
-                for prompt in full_prompts:
-                    outputs[enable] += vllm_model.generate_greedy([prompt],
-                                                                  max_tokens)
+            for prompt in full_prompts:
+                outputs[enable] += vllm_model.generate_greedy([prompt],
+                                                              max_tokens)
 
-    # Check results only if we did not expect a failure.
-    if check_result:
-        check_outputs_equal(
-            outputs_0_lst=outputs[False],
-            outputs_1_lst=outputs[True],
-            name_0="w/o prefix caching",
-            name_1="with prefix caching",
-        )
+    check_outputs_equal(
+        outputs_0_lst=outputs[False],
+        outputs_1_lst=outputs[True],
+        name_0="w/o prefix caching",
+        name_1="with prefix caching",
+    )
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])

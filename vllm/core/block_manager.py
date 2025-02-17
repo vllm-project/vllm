@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A block manager that manages token blocks."""
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence

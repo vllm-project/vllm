@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from importlib.util import find_spec
 from typing import Any, Dict, List, Optional
@@ -18,6 +20,7 @@ class NeuronQuantConfig(QuantizationConfig):
         dequant_dtype: str = "f16",
         quantize_method: str = "vector_dynamic",
     ) -> None:
+        super().__init__()
         self.quant_dtype = os.getenv("NEURON_QUANT_DTYPE", "s8")
         if self.quant_dtype not in SUPPORTED_QUANT_DTYPE_LIST:
             raise ValueError(

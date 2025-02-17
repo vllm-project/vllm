@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 import time
 from collections import Counter as collectionsCounter
@@ -432,6 +434,7 @@ class LLMEngine:
     @classmethod
     def _get_executor_cls(cls,
                           engine_config: VllmConfig) -> Type[ExecutorBase]:
+        # distributed_executor_backend must be set in VllmConfig.__post_init__
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
         # Initialize the cluster and specify the executor class.
@@ -441,30 +444,29 @@ class LLMEngine:
                     "distributed_executor_backend must be a subclass of "
                     f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
-        elif engine_config.parallel_config.world_size > 1:
-            if distributed_executor_backend == "ray":
-                from vllm.executor.ray_distributed_executor import (
-                    RayDistributedExecutor)
-                executor_class = RayDistributedExecutor
-            elif distributed_executor_backend == "mp":
-                from vllm.executor.mp_distributed_executor import (
-                    MultiprocessingDistributedExecutor)
-                assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
-                    "multiprocessing distributed executor backend does not "
-                    "support VLLM_USE_RAY_SPMD_WORKER=1")
-                executor_class = MultiprocessingDistributedExecutor
-            elif distributed_executor_backend == "uni":
-                # JAX-style, single-process, multi-device executor.
-                from vllm.executor.uniproc_executor import UniProcExecutor
-                executor_class = UniProcExecutor
-            elif distributed_executor_backend == "external_launcher":
-                # executor with external launcher
-                from vllm.executor.uniproc_executor import (  # noqa
-                    ExecutorWithExternalLauncher)
-                executor_class = ExecutorWithExternalLauncher
-        else:
+        elif distributed_executor_backend == "ray":
+            from vllm.executor.ray_distributed_executor import (
+                RayDistributedExecutor)
+            executor_class = RayDistributedExecutor
+        elif distributed_executor_backend == "mp":
+            from vllm.executor.mp_distributed_executor import (
+                MultiprocessingDistributedExecutor)
+            assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
+                "multiprocessing distributed executor backend does not "
+                "support VLLM_USE_RAY_SPMD_WORKER=1")
+            executor_class = MultiprocessingDistributedExecutor
+        elif distributed_executor_backend == "uni":
+            # JAX-style, single-process, multi-device executor.
             from vllm.executor.uniproc_executor import UniProcExecutor
             executor_class = UniProcExecutor
+        elif distributed_executor_backend == "external_launcher":
+            # executor with external launcher
+            from vllm.executor.uniproc_executor import (  # noqa
+                ExecutorWithExternalLauncher)
+            executor_class = ExecutorWithExternalLauncher
+        else:
+            raise ValueError("unrecognized distributed_executor_backend: "
+                             f"{distributed_executor_backend}")
         return executor_class
 
     @classmethod

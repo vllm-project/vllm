@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -15,7 +17,7 @@ class ExpertsInt8Config(QuantizationConfig):
     """Config class for Int8 experts quantization."""
 
     def __init__(self) -> None:
-        pass
+        super().__init__()
 
     @classmethod
     def get_name(cls) -> str:

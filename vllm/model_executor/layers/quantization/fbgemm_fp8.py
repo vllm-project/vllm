@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -27,6 +29,7 @@ class FBGEMMFp8Config(QuantizationConfig):
     """Config class for FBGEMM Fp8."""
 
     def __init__(self, ignore_list: List[str], input_scale_ub: float):
+        super().__init__()
         self.ignore_list = ignore_list if ignore_list else []
         self.input_scale_ub = input_scale_ub
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 NOTE: This API server is used only for demonstrating usage of AsyncEngine
 and simple performance benchmarks. It is not intended for production use.
@@ -126,6 +127,7 @@ async def run_server(args: Namespace,
 
     shutdown_task = await serve_http(
         app,
+        sock=None,
         host=args.host,
         port=args.port,
         log_level=args.log_level,

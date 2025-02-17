@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from itertools import accumulate, product
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import pytest
 import torch
@@ -22,7 +24,21 @@ CUDA_DEVICES = [
 ]
 
 
+def _get_flat_tensor_shape(batch_size: int, seq_len: int, num_heads: int,
+                           head_size: int) -> tuple[int, ...]:
+    return (batch_size, seq_len, num_heads * head_size)
+
+
+def _get_batch_tensor_shape(batch_size: int, seq_len: int, num_heads: int,
+                            head_size: int) -> tuple[int, ...]:
+    return (batch_size, seq_len, num_heads, head_size)
+
+
+TENSORS_SHAPES_FN = [_get_batch_tensor_shape, _get_flat_tensor_shape]
+
+
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
+@pytest.mark.parametrize("tensor_shape_fn", TENSORS_SHAPES_FN)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("seq_len", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -34,6 +50,7 @@ CUDA_DEVICES = [
 @torch.inference_mode()
 def test_rotary_embedding(
     is_neox_style: bool,
+    tensor_shape_fn: Callable[[int, int, int, int], tuple[int]],
     batch_size: int,
     seq_len: int,
     num_heads: int,
@@ -53,13 +70,11 @@ def test_rotary_embedding(
     if rotary_dim is None:
         rotary_dim = head_size
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style)
-    rope = rope.to(dtype=dtype)
+    rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
-    query = torch.randn(batch_size,
-                        seq_len,
-                        num_heads * head_size,
-                        dtype=dtype)
+    query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
+    query = torch.randn(query_shape, dtype=dtype)
     key = torch.randn_like(query)
 
     # NOTE(woosuk): The reference implementation should be executed first
@@ -78,6 +93,7 @@ def test_rotary_embedding(
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
+@pytest.mark.parametrize("tensor_shape_fn", TENSORS_SHAPES_FN)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("seq_len", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -89,6 +105,7 @@ def test_rotary_embedding(
 @torch.inference_mode()
 def test_batched_rotary_embedding(
     is_neox_style: bool,
+    tensor_shape_fn: Callable[[int, int, int, int], tuple[int]],
     batch_size: int,
     seq_len: int,
     num_heads: int,
@@ -108,13 +125,11 @@ def test_batched_rotary_embedding(
         "rope_type": "linear",
         "factor": (1, )
     })
-    rope = rope.to(dtype=dtype)
+    rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
-    query = torch.randn(batch_size,
-                        seq_len,
-                        num_heads * head_size,
-                        dtype=dtype)
+    query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
+    query = torch.randn(query_shape, dtype=dtype)
     key = torch.randn_like(query)
 
     # NOTE(woosuk): The reference implementation should be executed first
@@ -169,7 +184,7 @@ def test_batched_rotary_embedding_multi_lora(
         "rope_type": "linear",
         "factor": tuple(scaling_factors)
     })
-    rope = rope.to(dtype=dtype)
+    rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
     query = torch.randn(batch_size,
