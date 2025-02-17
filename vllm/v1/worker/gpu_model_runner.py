@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -116,6 +117,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches: List[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+
+        # Set up speculative decoding.
+        self.use_spec_decode = False
+        if self.speculative_config:
+            # TODO: find a better way to check if we are using ngram.
+            assert self.speculative_config.ngram_prompt_lookup_min, \
+                    "Currently, only ngram spec decode is supported in V1."
+            self.drafter = NgramProposer()
+            self.use_spec_decode = True
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
@@ -367,6 +377,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.token_ids_cpu[
                 req_index,
                 start_token_index:end_token_index] = req_data.new_token_ids
+            self.input_batch.num_tokens_no_spec[req_index] = end_token_index
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
                 req_id, [])
@@ -1009,14 +1020,50 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for seq in sampled_token_ids[valid_mask].split(gen_lens)
             ]
 
+        if not self.use_spec_decode:
+            spec_token_ids = None
+        else:
+            spec_token_ids = self.generate_draft_token_ids(
+                valid_sampled_token_ids)
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
+
+    def generate_draft_token_ids(
+        self,
+        sampled_token_ids: List[List[int]],
+    ) -> List[List[int]]:
+        # TODO(woosuk): Optimize.
+        num_reqs = len(sampled_token_ids)
+        draft_token_ids: List[List[int]] = []
+        for i in range(num_reqs):
+            if len(sampled_token_ids[i]) == 0:
+                # Skip speculative decoding.
+                draft_token_ids.append([])
+                continue
+
+            # Add sampled_token_ids to token_ids_cpu.
+            start_idx = self.input_batch.num_tokens_no_spec[i]
+            end_idx = start_idx + len(sampled_token_ids[i])
+            self.input_batch.token_ids_cpu[
+                i, start_idx:end_idx] = sampled_token_ids[i]
+            drafter_output = self.drafter.propose(
+                self.input_batch.token_ids_cpu[i, :end_idx],
+                self.speculative_config.ngram_prompt_lookup_min,
+                self.speculative_config.num_speculative_tokens,
+            )
+            if drafter_output is None or len(drafter_output) == 0:
+                draft_token_ids.append([])
+            else:
+                draft_token_ids.append(drafter_output.tolist())
+        return draft_token_ids
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

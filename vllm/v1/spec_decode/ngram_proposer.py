@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from typing import List, Optional
 
-from vllm.v1.utils import ConstantList
+import numpy as np
 
 
 class NgramProposer:
@@ -9,8 +9,12 @@ class NgramProposer:
     def __init__(self):
         pass
 
-    def propose(self, context_token_ids: ConstantList[int], n: int,
-                k: int) -> Optional[List[int]]:
+    def propose(
+        self,
+        context_token_ids: np.ndarray,
+        n: int,
+        k: int,
+    ) -> Optional[np.ndarray]:
         """Proposes the next sequence of tokens based on n-gram pattern 
         matching in the context. The function finds matches of the last n 
         tokens in the previous context, and returns k tokens that followed 
@@ -25,8 +29,8 @@ class NgramProposer:
                the maximum amount of tokens until the end.
         
         Returns:
-            List[int]: The sequence of tokens that followed 
-                       the matched n-gram in the context.
+            np.ndarray: The sequence of tokens that followed 
+                        the matched n-gram in the context.
             None: If no matching n-gram pattern is found.
         
         Example:
@@ -66,9 +70,12 @@ class NgramProposer:
         return lps
 
     @staticmethod
-    def _find_subarray_kmp(context_token_ids: ConstantList[int], n: int,
-                           k: int) -> Optional[List[int]]:
-        context_len = len(context_token_ids)
+    def _find_subarray_kmp(
+        context_token_ids: np.ndarray,
+        n: int,
+        k: int,
+    ) -> Optional[np.ndarray]:
+        context_len = context_token_ids.shape[0]
         assert n > 0
 
         pattern = context_token_ids[-n:]
