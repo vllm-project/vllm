@@ -293,7 +293,8 @@ def _chunk_scan_fwd_kernel(
             dA_cs_m_boundary = tl.load(
                 dA_cumsum_ptr +
                 (pid_m * BLOCK_SIZE_M + c_off - 1) * stride_dA_cs_csize,
-                mask=(pid_m * BLOCK_SIZE_M + c_off - 1) > -1,
+                mask=(((pid_m * BLOCK_SIZE_M + c_off - 1) > -1)
+                      and ((pid_m * BLOCK_SIZE_M + c_off) < chunk_size)),
                 other=0.0).to(tl.float32)
 
     if HAS_SEQ_IDX:
@@ -463,7 +464,10 @@ def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
         p += (s % chunk_size > 0)
 
         # get the dimensions
-        _s, _e = s // chunk_size + p, e // chunk_size + p + 1
+        # - the + 1 for _e is to shift the boundary by one chunk
+        # - this shifting is not needed if chunk_size divides e
+        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
+                                                             > 0)
 
         # adjust inidces and offsets
         chunk_indices[_s:_e] -= p
