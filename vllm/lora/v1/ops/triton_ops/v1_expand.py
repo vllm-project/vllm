@@ -198,7 +198,7 @@ def _v1_expand(
     BLOCK_M = kernel_config['block_m']
     BLOCK_N = kernel_config['block_n']
     BLOCK_K = kernel_config['block_k']
-    EVEN_K = K % BLOCK_K == 0
+    EVEN_K = K % BLOCK_K == 0  # type: ignore
 
     if inputs.dtype == torch.float32 and lora_b_weights[0].dtype in [
             torch.float16,

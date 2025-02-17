@@ -161,7 +161,7 @@ def _v1_shrink(
     BLOCK_K = kernel_config['block_k']
     SPLIT_K = kernel_config['split_k']
 
-    EVEN_K = K % (BLOCK_K * SPLIT_K) == 0
+    EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
     MAX_LORAS = lora_ids.size(0)
 
     # TODO (varun): This grid formulation maximizes parallelization at the
