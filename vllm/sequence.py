@@ -987,10 +987,9 @@ class SequenceGroupMetadata(
                 self.token_chunk_size = 1
 
         # Init KVTransferParams from SamplingParams, if exist.
-        if self.sampling_params is not None:
-            if hasattr(self.sampling_params, "kv_transfer_params"):
-                self.kv_transfer_params = self.sampling_params.kv_transfer_params
-
+        if self.sampling_params is not None and hasattr(
+                self.sampling_params, "kv_transfer_params"):
+            self.kv_transfer_params = self.sampling_params.kv_transfer_params
 
     @property
     def lora_int_id(self) -> int:
