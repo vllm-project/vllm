@@ -309,6 +309,7 @@ def test_stop_via_update_from_output():
         },
         sampled_token_ids=[[10, 42, 12],
                            [13, 14]],  # First request hits stop token
+        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={})
 
@@ -356,6 +357,7 @@ def test_stop_via_update_from_output():
         },
         sampled_token_ids=[[10, 11, 12],
                            [13]],  # First request exceeds max_tokens
+        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={})
 
@@ -396,6 +398,7 @@ def test_stop_via_update_from_output():
         req_ids=[requests[0].request_id],
         req_id_to_index={requests[0].request_id: 0},
         sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
+        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={})
 
