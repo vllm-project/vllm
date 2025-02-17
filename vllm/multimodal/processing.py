@@ -1300,6 +1300,14 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         """Create input prompt for the encoder."""
         raise NotImplementedError
 
+    def create_decoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        """Create input prompt for the decoder."""
+        return prompt
+
     def apply(
         self,
         prompt: Union[str, list[int]],
@@ -1320,17 +1328,15 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             hf_processor_mm_kwargs,
         )
 
-        # We assumed the decoder prompt text is copied from
-        # the original encoder prompt without extra process
         tokenizer = self.info.get_tokenizer()
-        if isinstance(prompt, str):
-            decoder_prompt = prompt
+        decoder_prompt = self.create_decoder_prompt(prompt, mm_data)
+        if isinstance(decoder_prompt, str):
             decoder_prompt_ids = encode_tokens(tokenizer,
                                                prompt,
                                                add_special_tokens=False)
         else:
             decoder_prompt = decode_tokens(tokenizer, prompt)
-            decoder_prompt_ids = prompt
+            decoder_prompt_ids = decoder_prompt
 
         mm_inputs = MultiModalEncDecInputs(
             encoder_prompt=encoder_inputs["prompt"],

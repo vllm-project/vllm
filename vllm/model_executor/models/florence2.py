@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from einops import rearrange
+from PIL.Image import Image
 from transformers import PretrainedConfig, BatchFeature
 
 from vllm.attention import AttentionMetadata
@@ -815,7 +816,7 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         data = mm_data.get("image", [])
-        num_images = 1
+        num_images = 1 if isinstance(data, Image) else len(data)
         pad_token_id = self.info.get_hf_config().pad_token_id
         if isinstance(prompt, str):
             tokenizer = self.info.get_tokenizer()
