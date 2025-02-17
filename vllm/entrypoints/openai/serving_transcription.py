@@ -4,7 +4,7 @@ import io
 from collections.abc import AsyncGenerator
 import time
 from math import ceil
-from typing import AsyncGenerator, Final, Optional, Union, cast
+from typing import AsyncGenerator, Final, Optional, Tuple, Union, cast
 
 from fastapi import Request
 
@@ -14,7 +14,7 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage, ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
     TranscriptionResponse, TranscriptionResponseStreamChoice,
-    TranscriptionResponseVerbose, TranscriptionStreamResponse, UsageInfo)
+    TranscriptionStreamResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
@@ -177,7 +177,7 @@ class OpenAIServingTranscription(OpenAIServing):
         self,
         request: TranscriptionRequest,
         audio_data: bytes,
-    ) -> PromptType:
+    ) -> Tuple[PromptType, float]:
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
@@ -226,7 +226,7 @@ class OpenAIServingTranscription(OpenAIServing):
     async def create_transcription(
         self, audio_data: bytes, request: TranscriptionRequest,
         raw_request: Request
-    ) -> Union[TranscriptionResponse, TranscriptionResponseVerbose,
+    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None],
                ErrorResponse]:
         """Transcription API similar to OpenAI's API.
 
