@@ -19,7 +19,6 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
-from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.platforms import current_platform
 
 EMBEDDING_MODULES = {
@@ -114,19 +113,17 @@ def create_packed_lora(
 
 def test_replace_submodules(dist_init, dummy_model):
     model = dummy_model
-    model.supported_lora_modules = ["dense1", "layer1.dense2"]
     model.packed_modules_mapping = {}
     manager = LoRAModelManager(
         model, 1, 1, 1,
         LoRAConfig(max_lora_rank=8, max_cpu_loras=8, max_loras=8),
         torch.device(DEVICES[0]))
     model = manager.model
-
     assert isinstance(model.get_submodule("dense1"),
                       ColumnParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense1"),
                       ColumnParallelLinearWithLoRA)
-    assert isinstance(model.get_submodule("dense2"), RowParallelLinear)
+    assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense2"),
                       RowParallelLinearWithLoRA)
 
@@ -134,7 +131,10 @@ def test_replace_submodules(dist_init, dummy_model):
 @pytest.mark.parametrize("device", DEVICES)
 def test_lora_model_manager(dist_init, dummy_model, device):
     model = dummy_model
-    model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
+    model.embedding_modules = {"lm_head": "lm_head"}
+    model.packed_modules_mapping = {}
+    model.embedding_modules = {}
+    model.embedding_padding_modules = []
     model.packed_modules_mapping = {}
     model_lora1 = create_lora(1,
                               model, ["layer1.dense1", "dense2", "lm_head"],
@@ -195,7 +195,7 @@ def test_lora_model_manager(dist_init, dummy_model, device):
 @pytest.mark.parametrize("device", DEVICES)
 def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
     model = dummy_model
-    model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
+    model.embedding_modules = {"lm_head": "lm_head"}
     model.packed_modules_mapping = {}
     model_lora1 = create_lora(1,
                               model, ["layer1.dense1", "dense2", "lm_head"],
@@ -289,7 +289,7 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
     model = dummy_model
-    model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
+    model.embedding_modules = {"lm_head": "lm_head"}
     model.packed_modules_mapping = {}
     model_lora1 = create_lora(1,
                               model, ["layer1.dense1", "dense2", "lm_head"],
@@ -572,7 +572,6 @@ def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
 @pytest.mark.parametrize("device", DEVICES)
 def test_packed_loras(dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
-    model.supported_lora_modules = ["gate_up_proj"]
     model.packed_modules_mapping = {
         "gate_up_proj": [
             "gate_proj",

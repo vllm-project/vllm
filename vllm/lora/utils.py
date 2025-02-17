@@ -171,7 +171,24 @@ def is_regex_target_modules(load_modules: Union[str, List[str]],
     return False
 
 
+def check_lora_embedding(model: nn.Module) -> None:
+    """
+    This function ensures that the model has the attributes `embedding_modules`
+    and `embedding_padding_modules`. If these attributes do not exist, they are
+    initialized to an empty dictionary and an empty list, respectively. The 
+    purpose of doing this is to ensure compatibility with subsequent LoRA 
+    processing logic.
+    """
+    if not hasattr(model, "embedding_modules"):
+        model.embedding_modules = {}
+    if not hasattr(model, "embedding_padding_modules"):
+        model.embedding_padding_modules = []
+
+
 def get_supported_lora_modules(model: nn.Module) -> List[str]:
+    """
+    In vLLM, all linear layers support LoRA.
+    """
     supported_lora_modules: Set[str] = set()
     # step1: traverse the model to get all the linear subfixes.
     for name, module in model.named_modules():

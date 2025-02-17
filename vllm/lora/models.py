@@ -25,7 +25,8 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
-from vllm.lora.utils import (from_layer, from_layer_logits_processor,
+from vllm.lora.utils import (check_lora_embedding, from_layer,
+                             from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
@@ -333,7 +334,7 @@ class LoRAModelManager(AdapterModelManager):
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
         super().__init__(model)
-
+        check_lora_embedding(self.model)
         self.supported_lora_modules = get_supported_lora_modules(self.model)
         if lora_config.long_lora_scaling_factors:
             # We need to replace rotary emb layer to do batch computation
