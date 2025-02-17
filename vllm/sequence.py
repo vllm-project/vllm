@@ -1137,6 +1137,9 @@ class IntermediateTensors:
     def __setitem__(self, key: str, value: torch.Tensor):
         self.tensors[key] = value
 
+    def items(self):
+        return self.tensors.items()
+
     def __len__(self):
         return len(self.tensors)
 
