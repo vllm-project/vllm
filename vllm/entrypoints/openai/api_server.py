@@ -258,7 +258,7 @@ async def build_async_engine_client_from_engine_args(
 
 async def validate_json_request(raw_request: Request):
     content_type = raw_request.headers.get("content-type", "").lower()
-    media_type = content_type.split(",")[0]
+    media_type = content_type.split(";")[0]
     if media_type != "application/json":
         raise HTTPException(
             status_code=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
