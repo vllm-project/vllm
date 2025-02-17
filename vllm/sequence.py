@@ -986,7 +986,7 @@ class SequenceGroupMetadata(
             else:
                 self.token_chunk_size = 1
 
-        # Init KVTransferParams from SamplingParams, if exist.
+        # Init KVTransferParams from SamplingParams, if exists.
         if self.sampling_params is not None and hasattr(
                 self.sampling_params, "kv_transfer_params"):
             self.kv_transfer_params = self.sampling_params.kv_transfer_params
