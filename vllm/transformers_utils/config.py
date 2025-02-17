@@ -492,10 +492,9 @@ def get_sentence_transformer_tokenizer_config(model: str,
             if encoder_dict:
                 break
 
-    if Path(model).exists():
-        return None
-
     if not encoder_dict:
+        if Path(model).exists():
+            return None
         try:
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
