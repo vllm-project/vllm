@@ -90,20 +90,24 @@ def bgmv_kernel(bT: int, bL: int, idx_ref, inp_ref, lora_ref, out_ref, acc_ref,
 def bgmv(inputs: jax.Array, lora: jax.Array, idxs: jax.Array):
     T, D = inputs.shape
     N, _, L, _ = lora.shape
+    
+    # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU register
+    L1 = L
+    if L < 128 or L % 128 != 0:
+        L1 = (L // 128 + 1) * 128
+        lora = jnp.pad(lora, ((0,0), (0,0), (0,L1-L), (0,0)))
 
-    # TODO: Tune
-    # Also figure out how to make bT % 128 instead of bL,
-    # or pick block sizes based off dims
+    # TODO: Tune these
     bT = 8
     bL = 128
     bD = 128
 
     return pl.pallas_call(kernel=functools.partial(bgmv_kernel, bT, bL),
-                          out_shape=jax.ShapeDtypeStruct((T, L),
+                          out_shape=jax.ShapeDtypeStruct((T, L1),
                                                          dtype=inputs.dtype),
                           grid_spec=pltpu.PrefetchScalarGridSpec(
                               num_scalar_prefetch=1,
-                              grid=(T // bT, L // bL, D // bD),
+                              grid=(T // bT, L1 // bL, D // bD),
                               in_specs=[
                                   pl.BlockSpec((bT, bD),
                                                lambda i, j, k, block_idx:
@@ -121,11 +125,11 @@ def bgmv(inputs: jax.Array, lora: jax.Array, idxs: jax.Array):
                           compiler_params=pltpu.TPUCompilerParams(
                               dimension_semantics=("parallel", "parallel",
                                                    "arbitrary")),
-                          interpret=True)(idxs, inputs, lora)
+                          interpret=True)(idxs, inputs, lora)[:, :L]
 
 
 if __name__ == "__main__":
-    T, D, L, N = 128, 3072, 128, 8
+    T, D, L, N = 16, 3072, 8, 8
     inputs, lora, idxs, ref_output = create_debug_tensors(T, D, L, N)
     print(idxs)
     # breakpoint()
