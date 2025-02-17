@@ -13,6 +13,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+from vllm.error_report import dump_engine_exception
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
@@ -35,6 +36,14 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_S = 2.5
 
 
+class ModelExecutionV1Error(RuntimeError):
+    scheduler_output: SchedulerOutput
+
+    def __init__(self, *args, scheduler_output):
+        super().__init__(*args)
+        self.scheduler_output = scheduler_output
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -46,6 +55,7 @@ class EngineCore:
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
+        self.config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
@@ -162,7 +172,15 @@ class EngineCore:
             self.propose_tokens()
 
         scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
+        try:
+            output = self.model_executor.execute_model(scheduler_output)
+        except BaseException as err:
+            err = ModelExecutionV1Error(
+                f"Model execution failure,"
+                f"reason: {repr(err)}",
+                scheduler_output=scheduler_output)
+            dump_engine_exception(err, self.config, 1)
+            raise err
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
         return engine_core_outputs

@@ -208,6 +208,14 @@ class LoraNotSupportedWorkerBase(WorkerBase):
         raise ValueError(f"{type(self)} does not support LoRA")
 
 
+class ModelExecutionError(RuntimeError):
+    model_input: BroadcastableModelInput
+
+    def __init__(self, *args, model_input):
+        super().__init__(*args)
+        self.model_input = model_input
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkerInput:
     """Local inputs to each worker. May contain device-specific data. These
@@ -414,15 +422,20 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     and self.observability_config.collect_model_execute_time):
                 orig_model_execute_time = intermediate_tensors.tensors.get(
                     "model_execute_time", torch.tensor(0)).item()
-
-        output = self.model_runner.execute_model(
-            model_input=model_input,
-            kv_caches=self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None,
-            intermediate_tensors=intermediate_tensors,
-            num_steps=num_steps,
-            **kwargs,
-        )
+        try:
+            output = self.model_runner.execute_model(
+                model_input=model_input,
+                kv_caches=self.kv_cache[worker_input.virtual_engine]
+                if self.kv_cache is not None else None,
+                intermediate_tensors=intermediate_tensors,
+                num_steps=num_steps,
+                **kwargs,
+            )
+        except BaseException as err:
+            raise ModelExecutionError(
+                f"Model execution failure,"
+                f"reason: {repr(err)}",
+                model_input=model_input) from err
 
         model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
@@ -472,13 +485,19 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         kwargs = extract_previous_hidden_states(execute_model_req)
 
-        return self.model_runner.execute_model(
-            model_input=model_input,
-            kv_caches=self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None,
-            intermediate_tensors=intermediate_tensors,
-            **kwargs,
-        )
+        try:
+            return self.model_runner.execute_model(
+                model_input=model_input,
+                kv_caches=self.kv_cache[worker_input.virtual_engine]
+                if self.kv_cache is not None else None,
+                intermediate_tensors=intermediate_tensors,
+                **kwargs,
+            )
+        except BaseException as err:
+            raise ModelExecutionError(
+                f"Model execution failure,"
+                f"reason: {repr(err)}",
+                model_input=model_input) from err
 
 
 class WorkerWrapperBase:
