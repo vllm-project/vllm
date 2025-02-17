@@ -44,7 +44,9 @@ class SimpleConnector(KVConnectorBase):
             logger.info(
                 "Initializing PyNcclConfig under kv_transfer_config %s",
                 self.config)
-
+        else:
+            raise NotImplementedError(
+                "Only PyNcclConnector is supported for now.")
         self.lookup_buffer_size = self.config.kv_buffer_size
 
         self.producer_buffer: Optional[SimpleBuffer] = None
@@ -145,7 +147,7 @@ class SimpleConnector(KVConnectorBase):
         head_size = int(hidden_size / num_attention_heads)
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
-        # FIXME(Kuntai): This assume that all requests are prefill.
+        # FIXME: This assume that all requests are prefill.
         for idx, slen in enumerate(seq_lens):
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
@@ -199,7 +201,7 @@ class SimpleConnector(KVConnectorBase):
         start_pos_list = []
 
         # enumerate different requests
-        # FIXME(Kuntai): This impl assumes that all requests are prefill.
+        # FIXME: This impl assumes that all requests are prefill.
         for idx, slen in enumerate(seq_lens):
 
             start_pos = sum(seq_lens[:idx])
@@ -281,7 +283,7 @@ class SimpleConnector(KVConnectorBase):
         if self.config.kv_connector == "PyNcclConnector":
             self.producer_signal_pipe.close()
             self.consumer_signal_pipe.close()
-        elif self.config.kv_connector == "MooncakeConnector":
-            # MooncakePipe reuses data_pipe for signal_pipe, so we only have to
-            # close the data_pipe.
-            pass
+        else:
+            raise NotImplementedError(
+                "Only PyNcclConnector is supported for now.")
+        logger.info("SimpleConnector closed.")

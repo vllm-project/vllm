@@ -43,8 +43,3 @@ KVConnectorFactory.register_connector(
     "PyNcclConnector",
     "vllm.v1.distributed.kv_transfer.kv_connector.simple_connector",
     "SimpleConnector")
-
-# KVConnectorFactory.register_connector(
-#     "MooncakeConnector",
-#     "vllm.distributed.kv_transfer.kv_connector.simple_connector",
-#     "SimpleConnector")
