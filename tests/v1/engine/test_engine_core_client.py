@@ -63,7 +63,7 @@ def loop_until_done(client: EngineCoreClient, outputs: Dict):
 async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
 
     while True:
-        engine_core_outputs = await client.get_output_async().outputs
+        engine_core_outputs = (await client.get_output_async()).outputs
 
         if len(engine_core_outputs) == 0:
             break
@@ -148,7 +148,6 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
         client.abort_requests([request.request_id])
 
 
-@fork_new_process_for_each_test
 @pytest.mark.asyncio
 async def test_engine_core_client_asyncio(monkeypatch):
 
