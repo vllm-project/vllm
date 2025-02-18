@@ -692,10 +692,10 @@ class VllmRunner:
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
+        load_format: Optional[LoadFormat] = None,
         **kwargs,
     ) -> None:
-        load_format = LoadFormat.AUTO
-        if model_name in MODELS_ON_S3:
+        if model_name in MODELS_ON_S3 and not load_format:
             model_name = (f"s3://vllm-ci-model-weights/"
                           f"{model_name.split('/')[-1]}")
             load_format = LoadFormat.RUNAI_STREAMER

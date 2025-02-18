@@ -46,7 +46,8 @@ def glob(s3=None,
     """
     if s3 is None:
         s3 = boto3.client("s3")
-    path = path + "/" if not path.endswith("/") else path
+    if not path.endswith("/"):
+        path = path + "/"
     bucket_name, _, paths = list_files(s3,
                                        path=path,
                                        allow_pattern=allow_pattern)
@@ -142,8 +143,9 @@ class S3Model:
             ignore_pattern: A list of patterns of which files not to pull.
 
         """
-        s3_model_path = s3_model_path + "/" if not s3_model_path.endswith(
-            "/") else s3_model_path
+        if not s3_model_path.endswith("/"):
+            s3_model_path = s3_model_path + "/"
+
         bucket_name, base_dir, files = list_files(self.s3, s3_model_path,
                                                   allow_pattern,
                                                   ignore_pattern)

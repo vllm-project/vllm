@@ -15,7 +15,7 @@ def test_gpu_memory_profiling():
     # any gpu setup.
 
     # Set up engine args to build a worker.
-    engine_args = EngineArgs(model="s3://vllm-ci-model-weights/distilgpt2",
+    engine_args = EngineArgs(model="facebook/opt-125m",
                              dtype="half",
                              load_format="dummy")
     engine_config = engine_args.create_engine_config()
