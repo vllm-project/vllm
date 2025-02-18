@@ -1,22 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
 def main(args: dict):
+    # Pop arguments not used by LLM
+    max_tokens = args.pop("max_tokens")
+    temperature = args.pop("temperature")
+    top_p = args.pop("top_p")
+    top_k = args.pop("top_k")
     chat_template_path = args.pop("chat_template_path")
 
-    # Create a sampling params object.
-    sampling_params = SamplingParams(
-        max_tokens=args.pop("max_tokens"),
-        temperature=args.pop("temperature"),
-        top_p=args.pop("top_p"),
-        top_k=args.pop("top_k"),
-    )
-
-    # Create an LLM.
+    # Create an LLM
     llm = LLM(**args)
+
+    # Create sampling params object
+    sampling_params = llm.get_default_sampling_params()
+    if max_tokens is not None:
+        sampling_params.max_tokens = max_tokens
+    if temperature is not None:
+        sampling_params.temperature = temperature
+    if top_p is not None:
+        sampling_params.top_p = top_p
+    if top_k is not None:
+        sampling_params.top_k = top_k
 
     def print_outputs(outputs):
         for output in outputs:
@@ -60,7 +68,7 @@ def main(args: dict):
 
     # A chat template can be optionally supplied.
     # If not, the model will use its default chat template.
-    if chat_template_path:
+    if chat_template_path is not None:
         with open(chat_template_path) as f:
             chat_template = f.read()
 
@@ -75,17 +83,16 @@ def main(args: dict):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser()
     # Add engine args
-    ea_group = parser.add_argument_group("Engine arguments")
-    EngineArgs.add_cli_args(ea_group)
-    ea_group.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    enging_group = parser.add_argument_group("Engine arguments")
+    EngineArgs.add_cli_args(enging_group)
+    enging_group.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
     # Add sampling params
-    sp = SamplingParams()
-    sp_group = parser.add_argument_group("Sampling parameters")
-    sp_group.add_argument("--max-tokens", type=int, default=sp.max_tokens)
-    sp_group.add_argument("--temperature", type=float, default=sp.temperature)
-    sp_group.add_argument("--top-p", type=float, default=sp.top_p)
-    sp_group.add_argument("--top-k", type=int, default=sp.top_k)
+    sampling_group = parser.add_argument_group("Sampling parameters")
+    sampling_group.add_argument("--max-tokens", type=int)
+    sampling_group.add_argument("--temperature", type=float)
+    sampling_group.add_argument("--top-p", type=float)
+    sampling_group.add_argument("--top-k", type=int)
     # Add example params
-    parser.add_argument("--chat-template-path", type=str, default=None)
+    parser.add_argument("--chat-template-path", type=str)
     args: dict = vars(parser.parse_args())
     main(args)

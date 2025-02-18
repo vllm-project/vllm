@@ -40,7 +40,7 @@ In the scripts that support passing arguments, you can experiment with the follo
 
 ### Default generation config
 
-The `--generation-config` argument specifies where the generation config will be loaded from. If set to ‘auto’, the generation config will be loaded from model path. If set to a folder path, the generation config will be loaded from the specified folder path. If it is not provided, vLLM defaults will be used.
+The `--generation-config` argument specifies where the generation config will be loaded from when calling `LLM.get_default_sampling_params()`. If set to ‘auto’, the generation config will be loaded from model path. If set to a folder path, the generation config will be loaded from the specified folder path. If it is not provided, vLLM defaults will be used.
 
 > If max_new_tokens is specified in generation config, then it sets a server-wide limit on the number of output tokens for all requests.
 
