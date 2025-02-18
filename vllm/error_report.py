@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+
 import enum
 import json
-from typing import Union
+from typing import Any, Dict, Union
 
 import torch
 
@@ -48,7 +49,7 @@ def prepare_object_to_dump(obj):
         }
 
     elif isinstance(obj, NewRequestData):
-        obj_dict = {'class': type(obj).__name__}
+        obj_dict: Dict[str, Any] = {'class': type(obj).__name__}
         for k, v in obj.__dict__.items():
             if k == 'prompt_token_ids':
                 obj_dict['prompt_token_ids_len'] = len(v)
@@ -80,9 +81,10 @@ def prepare_object_to_dump(obj):
 def dump_engine_exception(err: BaseException,
                           config: VllmConfig,
                           engine_version: int,
-                          stats: Stats = None,
+                          stats: Union[Stats, None] = None,
                           use_cached_outputs: Union[bool, None] = None,
-                          execute_model_req: ExecuteModelRequest = None):
+                          execute_model_req: Union[ExecuteModelRequest,
+                                                   None] = None):
 
     assert engine_version == 0 or engine_version == 1
 
