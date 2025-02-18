@@ -1990,7 +1990,8 @@ class LLMEngine:
             processor = get_local_guided_decoding_logits_processor(
                 guided_params=guided_decoding,
                 tokenizer=tokenizer,
-                model_config=self.model_config)
+                model_config=self.model_config,
+                speculative_config=self.speculative_config)
             if processor:
                 logits_processors.append(processor)
 

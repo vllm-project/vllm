@@ -7,7 +7,7 @@ import copy
 import json
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
 from transformers import PreTrainedTokenizerFast
@@ -27,7 +27,7 @@ from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, SpeculativeConfig
     from vllm.sampling_params import GuidedDecodingParams
 
 
@@ -36,11 +36,14 @@ def get_local_xgrammar_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
+        speculative_config: Optional[SpeculativeConfig],
         max_threads: int = 8):
-    config = GrammarConfig.from_guided_params(guided_params=guided_params,
-                                              model_config=model_config,
-                                              tokenizer=tokenizer,
-                                              max_threads=max_threads)
+    config = GrammarConfig.from_guided_params(
+        guided_params=guided_params,
+        model_config=model_config,
+        speculative_config=speculative_config,
+        tokenizer=tokenizer,
+        max_threads=max_threads)
     return XGrammarLogitsProcessor(config)
 
 
@@ -164,16 +167,20 @@ class GrammarConfig:
     json_object: bool | None = None
     max_threads: int = 8
     tokenizer_data: TokenizerData | None = None
+    num_lookahead_slots: int | None = None
 
     @classmethod
     def from_guided_params(cls,
                            guided_params: GuidedDecodingParams,
                            model_config: ModelConfig,
+                           speculative_config: Optional[SpeculativeConfig],
                            tokenizer: PreTrainedTokenizer,
                            max_threads: int = 8) -> GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
         tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
+        num_lookahead_slots = (speculative_config.num_lookahead_slots
+                               if speculative_config else None)
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
@@ -193,7 +200,8 @@ class GrammarConfig:
                        vocab_size=model_config.hf_text_config.vocab_size,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
-                       tokenizer_data=tokenizer_data)
+                       tokenizer_data=tokenizer_data,
+                       num_lookahead_slots=num_lookahead_slots)
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -220,7 +228,8 @@ class GrammarConfig:
                        vocab_size=model_config.hf_text_config.vocab_size,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
-                       tokenizer_data=tokenizer_data)
+                       tokenizer_data=tokenizer_data,
+                       num_lookahead_slots=num_lookahead_slots)
         elif guided_params.json_object:
             return cls(
                 json_object=True,
@@ -228,6 +237,7 @@ class GrammarConfig:
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
+                num_lookahead_slots=num_lookahead_slots,
             )
         elif guided_params.choice:
             choice_str = GrammarConfig.choice_as_grammar(guided_params.choice)
@@ -242,6 +252,7 @@ class GrammarConfig:
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
+                num_lookahead_slots=num_lookahead_slots,
             )
         else:
             raise ValueError(
@@ -273,7 +284,7 @@ class XGrammarLogitsProcessor:
     matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
     batch_size: int = field(default=1)
     prefilled: bool = field(default=False)
-    num_processed_tokens: int = field(default=0)
+    num_processed_tokens: list[int] = field(default_factory=list)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
@@ -286,7 +297,7 @@ class XGrammarLogitsProcessor:
         self.batch_size = 1
         self.token_bitmask = None  # type: ignore[assignment]
         self.prefilled = False
-        self.num_processed_tokens = 0
+        self.num_processed_tokens = []
 
     def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
@@ -308,33 +319,34 @@ class XGrammarLogitsProcessor:
             self._ensure_ctx()
 
         if len(self.matchers) == 0:
-            num_draft_tokens = 5
+            max_rollback_tokens = (self.config.num_lookahead_slots +
+                                   1 if self.config.num_lookahead_slots else 0)
             self.matchers = [
-                xgr.GrammarMatcher(self.ctx, max_rollback_tokens=num_draft_tokens+2) for _ in range(self.batch_size)
+                xgr.GrammarMatcher(self.ctx,
+                                   max_rollback_tokens=max_rollback_tokens)
+                for _ in range(self.batch_size)
             ]
+            self.num_processed_tokens = [0 for _ in range(self.batch_size)]
             self.token_bitmask = xgr.allocate_token_bitmask(
                 self.batch_size, self.config.vocab_size)
-        
-        if self.prefilled and self.num_processed_tokens >= len(input_ids) and self.num_processed_tokens > 0:
-            diff = self.num_processed_tokens - len(input_ids) + 1
-            print("xgrammar, diff:", diff, self.num_processed_tokens, len(input_ids))
-            self.num_processed_tokens -= diff
-            for i, matcher in enumerate(self.matchers):
-                # if not matcher.is_terminated():
+
+        for i in range(len(self.matchers)):
+            if self.num_processed_tokens[i] > 0 and self.num_processed_tokens[
+                    i] >= len(input_ids):
+                diff = self.num_processed_tokens[i] - len(input_ids) + 1
+                self.num_processed_tokens[i] -= diff
                 self.matchers[i].rollback(diff)
-        else:
-            print("xgrammar", self.num_processed_tokens, len(input_ids))
 
         if not self.prefilled or len(input_ids) == 0:
             # Have not sampled a token yet
             self.prefilled = True
-        else:            
+        else:
             for i, matcher in enumerate(self.matchers):
                 if not matcher.is_terminated():
-                    self.num_processed_tokens += 1
+                    self.num_processed_tokens[i] += 1
                     sampled_token = input_ids[-1]
-                    assert self.matchers[i].accept_token(sampled_token), f"token {sampled_token} not accepted"
-
+                    assert self.matchers[i].accept_token(
+                        sampled_token), f"token {sampled_token} not accepted"
 
         for i, matcher in enumerate(self.matchers):
             if not matcher.is_terminated():
@@ -355,11 +367,14 @@ class XGrammarLogitsProcessor:
         # Note: In this method, if the tensors have different dimensions
         # on CPU device fails, but on GPU it runs without error. Hence the
         # unsqueeze above for scores, to match the token bitmask shape
-        
-        # xgr.apply_token_bitmask_inplace(
-        #     scores, self.token_bitmask.to(scores.device, non_blocking=True))
+
+        # Non-blocking copy leads to incorrect behaviour for speculative
+        # decoding
+        is_speculative_decoding = not self.config.num_lookahead_slots
         xgr.apply_token_bitmask_inplace(
-            scores, self.token_bitmask.to(scores.device, non_blocking=False))
+            scores,
+            self.token_bitmask.to(scores.device,
+                                  non_blocking=is_speculative_decoding))
         if device_type != "cuda":
             scores = scores.to(dtype).to(device_type).squeeze()
 
