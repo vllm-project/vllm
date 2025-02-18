@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, List, NamedTuple, Optional, Tuple
@@ -8,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
                                         KVCacheTensor)
+from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -26,6 +28,68 @@ class BlockHashType(NamedTuple):
     token_ids: Tuple[int, ...]
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
+
+
+class PrefixCachingMetrics:
+    """Metrics for prefix caching with a hit rate of the most recent N requests.
+
+    Args:
+        interval: The number of the most recent requests to aggregate.
+            Defaults to 1000.
+    """
+
+    def __init__(self, interval: int = 1000):
+        self.interval = interval
+        # The current aggregated values.
+        self.aggregated_requests = 0
+        self.aggregated_query_total = 0
+        self.aggregated_query_hit = 0
+        # A deque of (requests, queries, hits) for the most recent requests.
+        self.query_queue: deque[Tuple[int, int, int]] = deque()
+
+    def observe(self, stats: PrefixCacheStats):
+        """Observe the prefix caching for a set of requests.
+
+        This function is called with information gathered when new requests
+        are being scheduled and are looking for computed blocks.
+
+        When there are more than `interval` requests, the oldest set of
+        requestsare removed from the metrics.
+
+        Args:
+            stats: The prefix cache stats.
+        """
+        # reset_prefix_cache was invoked before the current update.
+        # Reset the metrics before aggregating the current stats.
+        if stats.reset:
+            self.reset()
+
+        # Update the metrics.
+        self.query_queue.append((stats.requests, stats.queries, stats.hits))
+        self.aggregated_requests += stats.requests
+        self.aggregated_query_total += stats.queries
+        self.aggregated_query_hit += stats.hits
+
+        # Remove the oldest stats if the number of requests exceeds.
+        if self.aggregated_requests > self.interval:
+            old_requests, old_queries, old_hits = self.query_queue.popleft()
+            self.aggregated_requests -= old_requests
+            self.aggregated_query_total -= old_queries
+            self.aggregated_query_hit -= old_hits
+
+    def reset(self):
+        """Reset the metrics."""
+        self.aggregated_requests = 0
+        self.aggregated_query_total = 0
+        self.aggregated_query_hit = 0
+        self.query_queue.clear()
+
+    @property
+    def hit_rate(self) -> float:
+        """Calculate the hit rate for the past N requests."""
+        if self.aggregated_query_total == 0:
+            return 0.0
+        return self.aggregated_query_hit / self.aggregated_query_total
 
 
 @dataclass
@@ -424,7 +488,8 @@ def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
 
 def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
                                       kv_cache_spec: KVCacheSpec,
-                                      available_memory: int) -> KVCacheConfig:
+                                      available_memory: int,
+                                      num_layers: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model with one type of KV cache.
     Divide the available memory equally among all layers.
@@ -433,6 +498,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         vllm_config: The global VllmConfig
         kv_cache_spec: The kv cache spec of the model
         available_memory: Memory available for KV cache in bytes.
+        num_layers: The number of layers in the model.
 
     Returns:
         The generated KVCacheConfig
@@ -442,7 +508,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     assert len(page_sizes) == 1
     page_size = page_sizes.pop()
 
-    num_blocks = int(available_memory // page_size // len(kv_cache_spec))
+    num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
 
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
@@ -472,25 +538,36 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     return kv_cache_config
 
 
-def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
-                        available_memory: int) -> KVCacheConfig:
+def get_kv_cache_configs(vllm_config: VllmConfig,
+                         kv_cache_specs: List[KVCacheSpec],
+                         available_memory: int) -> List[KVCacheConfig]:
     """
     Generates the KV cache configuration for a model
     TODO: support hybrid models with more than one type of KV cache.
 
     Args:
         vllm_config: The global VllmConfig
-        kv_cache_spec: The kv cache spec of the model
+        kv_cache_specs: The kv cache specs of the model
         available_memory: Memory available for KV cache in bytes.
 
     Returns:
-        The generated KVCacheConfig
+        The generated KVCacheConfigs
     """
-    check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
-    if is_kv_cache_type_uniform(kv_cache_spec):
-        # KV cache of all layers are the same, which is true for most models.
-        # Allocate the same amount of memory for each layer.
-        return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
-                                                 available_memory)
-    else:
-        raise NotImplementedError
+    # Use the max number of layers to conservatively determine
+    # the number of blocks.
+    num_layers = max(len(kv_cache_spec) for kv_cache_spec in kv_cache_specs)
+    kv_cache_configs = []
+    for kv_cache_spec in kv_cache_specs:
+        check_enough_kv_cache_memory(vllm_config, kv_cache_spec,
+                                     available_memory)
+        if is_kv_cache_type_uniform(kv_cache_spec):
+            # KV cache of all layers are the same, which is true for
+            # most models. Allocate the same amount of memory for
+            # each layer.
+            kv_cache_configs.append(
+                _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
+                                                  available_memory,
+                                                  num_layers))
+        else:
+            raise NotImplementedError
+    return kv_cache_configs
