@@ -20,6 +20,7 @@ except ImportError:
     xgr_installed = False
     pass
 
+from vllm.envs import VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE
 from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
                                                        grammar_is_likely_lark)
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
@@ -291,7 +292,10 @@ class XGrammarLogitsProcessor:
         if self.ctx is None:
             compiler = GrammarCompilerCache.get_compiler(self.config)
             if self.config.json_str is not None:
-                self.ctx = compiler.compile_json_schema(self.config.json_str)
+                any_whitespace = not VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE
+                self.ctx = compiler\
+                    .compile_json_schema(self.config.json_str,
+                                         any_whitespace=any_whitespace)
             elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
             elif self.config.json_object:

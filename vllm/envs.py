@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
+    VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
@@ -580,6 +581,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # models the alignment is already naturally aligned to 256 bytes.
     "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
     lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
+
+    # If set, set `any_whitespace=False` when creating grammar for JSON schema
+    # with xgrammar.
+    # This might be useful when using Mistral models with JSON schema that
+    # can generate endless space for guided decoding.
+    "VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE", "0"))),
 
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
