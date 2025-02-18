@@ -912,6 +912,13 @@ class EngineArgs:
             'arrival deciding any ties).')
 
         parser.add_argument(
+            '--scheduler-cls',
+            default=EngineArgs.scheduler_cls,
+            help='The scheduler class to use. "vllm.core.scheduler.Scheduler" '
+            'is the default scheduler. Can be a class directly or the path to '
+            'a class of form "mod.custom_class".')
+
+        parser.add_argument(
             '--override-neuron-config',
             type=json.loads,
             default=None,
