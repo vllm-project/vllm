@@ -9,8 +9,7 @@ import torch
 import torch.distributed
 
 from vllm.logger import init_logger
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig)
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
@@ -81,12 +80,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        speculative_config: SpeculativeConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -94,12 +88,10 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         world_size: int = 1,
         is_driver_worker: bool = False,
     ) -> None:
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.speculative_config = speculative_config
+        WorkerBase.__init__(self, vllm_config=vllm_config)
+        self.local_rank = local_rank
+        self.rank = rank
+        self.distributed_init_method = distributed_init_method
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -114,22 +106,18 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             from vllm.worker.neuron_model_runner import NeuronModelRunner
             from vllm.worker.multi_step_neuron_model_runner import MultiStepNeuronModelRunner
             if self.speculative_config is not None:
-                self.model_runner = MultiStepNeuronModelRunner(
-	                model_config, parallel_config, scheduler_config,
-	                device_config, speculative_config)
+                self.model_runner = MultiStepNeuronModelRunner(vllm_config=vllm_config)
             else:
                 self.model_runner: NeuronModelRunner = NeuronModelRunner(
-                    model_config, parallel_config, scheduler_config, device_config)
+                    vllm_config=vllm_config)
         elif neuron_framework == NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE:
             from vllm.worker.neuronx_distributed_model_runner import NeuronxDistributedModelRunner
             from vllm.worker.multi_step_neuronx_distributed_model_runner import MultiStepNeuronModelRunner
             if self.speculative_config is not None:
-                self.model_runner = MultiStepNeuronModelRunner(
-                    model_config, parallel_config, scheduler_config,
-                    device_config, speculative_config)
+                self.model_runner = MultiStepNeuronModelRunner(vllm_config=vllm_config)
             else:
                 self.model_runner: NeuronxDistributedModelRunner = NeuronxDistributedModelRunner(
-                    model_config, parallel_config, scheduler_config, device_config)
+                    vllm_config=vllm_config)
         else:
             raise NotImplementedError(
                 f"Specified framework as {os.environ.get('VLLM_NEURON_FRAMEWORK')}," +
