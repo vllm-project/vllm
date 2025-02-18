@@ -745,7 +745,7 @@ def get_requirements() -> list[str]:
         # if machine() == "aarch64" and system() == "Linux":
         #     requirements = _read_requirements("requirements/cuda-aarch64.txt")
         # if machine() == "ppc64le":
-        #     requirements = _read_requirements("requirements-ppcle64.txt")
+        #     requirements = _read_requirements("requirements/ppcle64.txt")
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
     else:

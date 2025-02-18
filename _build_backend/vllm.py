@@ -53,7 +53,7 @@ def _read_requirements(file: str):
 
 def _get_requires_for_build_extensions() -> list[str]:
     """ returns the requirements for extensions builds"""
-    return _read_requirements("requirements-build.txt")
+    return _read_requirements("requirements/build.txt")
 
 
 def _get_requires_for_basic_build() -> list[str]:
@@ -102,14 +102,33 @@ def _check_for_env_var(key: str, expected_value: str, strict: bool = False):
     )
 
 
+def _check_for_extra_index_url(expected_value: str, strict: bool = False):
+    """Print a warning when the env var's value doesn't match the expected value.
+
+    When strict is set to True, raises SetupError instead of warning.
+    """
+    has_uv = which("uv")
+    if has_uv:
+        _check_for_env_var("UV_EXTRA_INDEX_URL", expected_value, strict=strict)
+        # need to match pip's index behaviour,
+        # see https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes
+        _check_for_env_var("UV_INDEX_STRATEGY",
+                           "unsafe-best-match",
+                           strict=strict)
+    else:
+        _check_for_env_var("PIP_EXTRA_INDEX_URL",
+                           expected_value,
+                           strict=strict)
+
+
 def get_requires_for_build_wheel(config_settings=None) -> list[str]:
     """ Dynamically computes the wheel build requirements based on VLLM_TARGET_DEVICE
 
-    torch versions here will have to be kept in sync with the corresponding `requirements-<device>.txt` files.`
+    torch versions here will have to be kept in sync with the corresponding `requirements/<device>.txt` files.`
     """
     requirements_extras: list[str] = []
 
-    if VLLM_TARGET_DEVICE == "cpu" or VLLM_TARGET_DEVICE == "openvino":
+    if VLLM_TARGET_DEVICE == "cpu":
         from platform import machine
 
         if machine() == "ppc64le":
