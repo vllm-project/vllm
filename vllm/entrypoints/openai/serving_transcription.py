@@ -140,6 +140,7 @@ ISO639_1_OTHER_LANGS = {
     "bo": "Tibetan",
 }
 
+# TODO A better way to load supported language
 LANG_ID_TO_LANG_TOKEN = {
     "whisper-v3": {
         50259: "<|en|>",
@@ -284,9 +285,12 @@ class OpenAIServingTranscription(OpenAIServing):
         request: TranscriptionRequest,
         raw_request: Request,
     ) -> str:
+        """Detects the language of the audio data.
+        Refer: https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
+        """
         # TODO language should be optional and can be guessed.
-        # For now we default to en. See
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
+        # Temporary fix to support audio with unknown languages;
+        # a more robust and general solution will be implemented in the future.
 
         if request.language:
             if request.language in ISO639_1_SUPPORTED_LANGS:
@@ -309,6 +313,7 @@ class OpenAIServingTranscription(OpenAIServing):
 
         default_lang_token = "<|en|>"
 
+        # TODO: this mappping should be dynamice mapping once vllm core supports language dictionary
         if (
             "v3" in self.model_config.model.lower()
             and self.model_config.hf_config.model_type.lower() == "whisper"
@@ -342,16 +347,11 @@ class OpenAIServingTranscription(OpenAIServing):
             request_id,
         )
 
-        try:
-            async for result in result_generator:
-                lang_id = result.outputs[0].token_ids[0]
-                lang_token = id2token[lang_id]
-                break
-            return lang_token
-        except Exception as e:  # catch other exception during generation
-            logger.error(f"An error occurred during language detection: {e}")
-
-        return default_lang_token  # This line should not be reachable.
+        async for result in result_generator:
+            lang_id = result.outputs[0].token_ids[0]
+            lang_token = id2token[lang_id]
+            break
+        return lang_token
 
     async def _preprocess_transcription(
         self, audio_data: bytes, request: TranscriptionRequest, raw_request: Request
@@ -428,7 +428,6 @@ class OpenAIServingTranscription(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        # TODO cmpl->transcription?
         request_id = f"trsc-{self._base_request_id(raw_request)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
