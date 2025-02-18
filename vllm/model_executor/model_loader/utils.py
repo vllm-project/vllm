@@ -47,22 +47,31 @@ def resolve_transformers_fallback(model_config: ModelConfig,
     for i, arch in enumerate(architectures):
         if arch == "TransformersModel":
             continue
-        custom_module = None
-        auto_map = getattr(model_config.hf_config, "auto_map", None)
-        if auto_map is not None and "AutoModel" in auto_map:
-            custom_module = get_class_from_dynamic_module(
-                model_config.hf_config.auto_map["AutoModel"],
-                model_config.model)
+        auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
+                                           None) or dict()
+        # Make sure that config class is always initialized before model class,
+        # otherwise the model class won't be able to access the config class,
+        # the expected auto_map should have correct order like:
+        # "auto_map": {
+        #     "AutoConfig": "<your-repo-name>--<config-name>",
+        #     "AutoModel": "<your-repo-name>--<config-name>",
+        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
+        # },
+        auto_modules = {
+            name: get_class_from_dynamic_module(module, model_config.model)
+            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
+        }
+        custom_model_module = auto_modules.get("AutoModel")
         # TODO(Isotr0py): Further clean up these raises.
         # perhaps handled them in _ModelRegistry._raise_for_unsupported?
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
-            if not is_transformers_impl_compatible(arch, custom_module):
+            if not is_transformers_impl_compatible(arch, custom_model_module):
                 raise ValueError(
                     f"The Transformers implementation of {arch} is not "
                     "compatible with vLLM.")
             architectures[i] = "TransformersModel"
         if model_config.model_impl == ModelImpl.AUTO:
-            if not is_transformers_impl_compatible(arch, custom_module):
+            if not is_transformers_impl_compatible(arch, custom_model_module):
                 raise ValueError(
                     f"{arch} has no vLLM implementation and the Transformers "
                     "implementation is not compatible with vLLM.")
