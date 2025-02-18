@@ -115,24 +115,23 @@ class ServingScores(OpenAIServing):
         async for i, res in result_generator:
             embeddings[i] = res
 
-        emb_texts_1 = embeddings[:len(texts_1)]
-        emb_texts_2 = embeddings[len(texts_1):]
+        emb_texts_1: List[PoolingRequestOutput] = []
+        emb_texts_2: List[PoolingRequestOutput] = []
+
+        for i in range(0, len(texts_1)):
+            assert (emb := embeddings[i]) is not None
+            emb_texts_1.append(emb)
+
+        for i in range(len(texts_1), len(embeddings)):
+            assert (emb := embeddings[i]) is not None
+            emb_texts_2.append(emb)
 
         if len(emb_texts_1) == 1:
             emb_texts_1 = emb_texts_1 * len(emb_texts_2)
 
-        embeds_1: List[PoolingRequestOutput] = []
-        embeds_2: List[PoolingRequestOutput] = []
-
-        for emb_1, emb_2 in zip(emb_texts_1, emb_texts_2):
-            assert emb_1 is not None
-            assert emb_2 is not None
-            embeds_1.append(emb_1)
-            embeds_2.append(emb_2)
-
         final_res_batch = _cosine_similarity(tokenizer=tokenizer,
-                                             embed_1=embeds_1,
-                                             embed_2=embeds_2)
+                                             embed_1=emb_texts_1,
+                                             embed_2=emb_texts_2)
 
         return final_res_batch
 
