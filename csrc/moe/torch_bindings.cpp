@@ -31,6 +31,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                         Tensor! num_tokens_post_pad) -> ()");
   m.impl("sgl_moe_align_block_size", torch::kCUDA, &sgl_moe_align_block_size);
 
+  m.def(
+      "moe_wna16_gemm(Tensor input, Tensor! output, Tensor b_qweight, "
+      "Tensor b_scales, Tensor? b_qzeros, "
+      "Tensor? topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_pad, "
+      "int top_k, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, "
+      "int bit) -> Tensor");
+
+  m.impl("moe_wna16_gemm", torch::kCUDA, &moe_wna16_gemm);
+
 #ifndef USE_ROCM
   m.def(
       "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
