@@ -48,10 +48,15 @@ class LLMEngine:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
-        # Parallel sampling infra
+        # Bookkeeping for parallel sampling requests
+        # - parent req ID -> parent request manager
         self.parallel_parent_reqs: Dict[str,
                                         ParallelSamplingRequestManager] = {}
+        # - child req ID -> (child req index, parent req ID)
         self.parallel_child_reqs: Dict[str, Tuple[int, str]] = {}
+        # - flag to reset parallel sampling bookkeeping logic
+        #   between engine runs
+        self._do_reset_parallel_sampling = False
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -127,6 +132,12 @@ class LLMEngine:
         self.engine_core.abort_requests(request_ids)
         self.output_processor.abort_requests(request_ids)
 
+    def _reset_parallel_sampling(self) -> None:
+        """Reset parallel sampling logic"""
+        self.parallel_parent_reqs.clear()
+        self.parallel_child_reqs.clear()
+        self._do_reset_parallel_sampling = False
+
     def add_request(
         self,
         request_id: str,
@@ -138,6 +149,8 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        if self._do_reset_parallel_sampling:
+            self._reset_parallel_sampling()
         _add_request = (self._add_request if params is None
                         or isinstance(params, PoolingParams) or params.n == 1
                         else self._add_request_parallel_sampling)
@@ -163,10 +176,8 @@ class LLMEngine:
     ) -> None:
         req_mgr = ParallelSamplingRequestManager(request_id, params)
         self.parallel_parent_reqs[request_id] = req_mgr
-        n = req_mgr.n
-
         # Add n child requests with unique request IDs and n=1
-        for idx in range(n):
+        for idx in range(req_mgr.n):
             c_params = req_mgr.get_child_sampling_params(idx)
             c_request_id = req_mgr.get_child_request_id(idx)
             self.parallel_child_reqs[c_request_id] = (idx, request_id)
@@ -234,6 +245,12 @@ class LLMEngine:
         return len(self.parallel_child_reqs)
 
     def step(self) -> List[RequestOutput]:
+        num_parallel_reqs = self._num_parallel_sampling_requests()
+
+        # Ensure that parallel sampling logic gets reset after the
+        # engine finishes processing this batch
+        self._do_reset_parallel_sampling = (True if num_parallel_reqs > 0 else
+                                            self._do_reset_parallel_sampling)
 
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()
@@ -245,11 +262,11 @@ class LLMEngine:
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
-        if self._num_parallel_sampling_requests() > 0:
-            return self._aggregate_parallel_sampling_outputs(
-                processed_outputs.request_outputs)
+        request_outputs = processed_outputs.request_outputs
+        if num_parallel_reqs > 0 and len(request_outputs) > 0:
+            return self._aggregate_parallel_sampling_outputs(request_outputs)
         else:
-            return processed_outputs.request_outputs
+            return request_outputs
 
     def get_model_config(self):
         return self.model_config
