@@ -23,11 +23,22 @@ GUIDED_DECODING_BACKENDS = [
 ]
 
 
-@pytest.fixture(scope="module")
-def llm():
+@pytest.fixture(scope="module", params=["regular", "speculative"])
+def llm(request):
+
+    def get_llm_kwargs(mode: str):
+        if mode == "regular":
+            return {}
+        return {
+            # the model with fixed vocabulary size
+            "speculative_model": "tugstugi/Qwen2.5-Coder-0.5B-QwQ-draft",
+            "num_speculative_tokens": 3,
+        }
+
+    test_llm_kwargs = get_llm_kwargs(request.param)
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME, max_model_len=1024, seed=0)
+    llm = LLM(model=MODEL_NAME, max_model_len=1024, seed=0, **test_llm_kwargs)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
