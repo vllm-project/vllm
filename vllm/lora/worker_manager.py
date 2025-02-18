@@ -133,7 +133,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # For NotFoundError
             raise ValueError(
                 f"Loading lora {lora_request.lora_name} failed: No adapter "
-                f"found for {lora_path}") from e
+                f"found for {lora_request.lora_path}") from e
         except Exception as e:
             # For BadRequestError
             raise e
