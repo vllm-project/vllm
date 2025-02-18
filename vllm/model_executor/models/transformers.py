@@ -24,7 +24,7 @@ from transformers import AutoModel, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, DeviceConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide, get_pp_indices
 from vllm.logger import init_logger
@@ -141,12 +141,13 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
         super().__init__()
         logger.info("Using Transformers backend.")
 
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        device_config = vllm_config.device_config
-        quant_config = vllm_config.quant_config
+        config: PretrainedConfig = vllm_config.model_config.hf_config
+        cache_config: CacheConfig = vllm_config.cache_config
+        device_config: DeviceConfig = vllm_config.device_config
+        quant_config: QuantizationConfig = vllm_config.quant_config
 
         self.config = config
+        self.cache_config = cache_config
         self.device_config = device_config
         self.quant_config = quant_config
 
@@ -179,8 +180,7 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
                 ))
 
         # Attention layers
-        self.attention_instances = self.create_attention_instances(
-            config, cache_config, quant_config=quant_config)
+        self.attention_instances = self.create_attention_instances()
 
         # Output embeddings
         if not isinstance(getattr(self, "lm_head", None), PPMissingLayer):
@@ -291,26 +291,24 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
 
         _tensor_parallel(self.model)
 
-    def create_attention_instances(
-        self,
-        config: PretrainedConfig,
-        cache_config: CacheConfig = None,
-    ) -> dict[int, Attention]:
+    def create_attention_instances(self) -> dict[int, Attention]:
         """
         Create `Attention` instances to inform KV cache allocation.
         """
+        num_heads = divide(self.config.num_attention_heads, self.tp_size)
+        num_kv_heads = divide(self.config.num_key_value_heads, self.tp_size)
         start, end = get_pp_indices(self.config.num_hidden_layers,
                                     self.pp_rank, self.pp_size)
         return {
             i:
             Attention(
-                num_heads=divide(config.num_attention_heads, self.tp_size),
-                head_size=config.head_dim,
+                num_heads=num_heads,
+                head_size=self.config.head_dim,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_flash_attention_forward
-                scale=config.head_dim**-0.5,
-                num_kv_heads=divide(config.num_key_value_heads, self.tp_size),
-                cache_config=cache_config,
+                scale=self.config.head_dim**-0.5,
+                num_kv_heads=num_kv_heads,
+                cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 prefix=f"{i}.attn")
             for i in range(start, end)
