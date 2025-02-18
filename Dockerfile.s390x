@@ -1,0 +1,151 @@
+# Base UBI image for s390x architecture
+ARG BASE_UBI_IMAGE_TAG=9.5-1736404155
+ARG PYTHON_VERSION=3.12
+FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
+
+# Install basic dependencies
+ARG PYTHON_VERSION
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+RUN microdnf -y update && microdnf install -y \
+    python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel \
+    && microdnf clean all
+
+WORKDIR /workspace
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# Install development utilities
+RUN microdnf install -y \
+    which procps findutils tar vim git gcc g++ make patch make cython cargo zlib-devel \
+    libjpeg-turbo-devel libtiff-devel libpng-devel libwebp-devel freetype-devel harfbuzz-devel \
+    openssl-devel openblas openblas-devel wget autoconf automake libtool && \
+    microdnf clean all
+
+# Python Installation
+FROM base as python-install
+ARG PYTHON_VERSION
+
+ENV VIRTUAL_ENV=/opt/vllm
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+RUN microdnf install -y \
+    python${PYTHON_VERSION}-devel  && \
+    python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && pip install --no-cache -U pip wheel uv && microdnf clean all
+
+# Upgrade pip and install base tools
+RUN python -m pip install -U pip wheel uv cmake setuptools
+
+# Install Rust
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
+    . "$HOME/.cargo/env"
+
+FROM python-install as pyarrow
+
+# Build Apache Arrow
+WORKDIR /tmp
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/uv \
+    git clone https://github.com/apache/arrow.git && \
+    cd arrow/cpp && \
+    mkdir release && cd release && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DARROW_PYTHON=ON \
+          -DARROW_PARQUET=ON \
+          -DARROW_ORC=ON \
+          -DARROW_FILESYSTEM=ON \
+          -DARROW_WITH_LZ4=ON \
+          -DARROW_WITH_ZSTD=ON \
+          -DARROW_WITH_SNAPPY=ON \
+          -DARROW_JSON=ON \
+          -DARROW_CSV=ON \
+          -DARROW_DATASET=ON \
+          -DPROTOBUF_PROTOC_EXECUTABLE=/usr/bin/protoc \
+          -DARROW_DEPENDENCY_SOURCE=BUNDLED \
+          .. && \
+    make -j$(nproc) && \
+    make install && \
+    cd ../../python && \
+    export PYARROW_PARALLEL=4 && \
+    export ARROW_BUILD_TYPE=release && \
+    python -m pip install -r requirements-build.txt && \
+    python setup.py build_ext --build-type=$ARROW_BUILD_TYPE --bundle-arrow-cpp bdist_wheel
+
+
+# Install numactl (needed for numa.h dependency)
+WORKDIR /tmp
+RUN curl -LO https://github.com/numactl/numactl/archive/refs/tags/v2.0.16.tar.gz && \
+    tar -xvzf v2.0.16.tar.gz && \
+    cd numactl-2.0.16 && \
+    ./autogen.sh && \
+    ./configure && \
+    make && \
+    make install
+
+# Set include path
+ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
+
+FROM pyarrow as python-dependecies
+# Copy vLLM source
+COPY . /workspace/vllm
+WORKDIR /workspace/vllm
+
+# Check git repository integrity if enabled
+ARG GIT_REPO_CHECK=0
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
+
+# Install dependencies, including PyTorch and Apache Arrow
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/uv \
+    pip install -v \
+        'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
+         /tmp/arrow/python/dist/*.whl  \
+        --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
+        -r requirements-cpu.txt
+
+#Clean up build files for arrow
+RUN rm -rf /tmp/arrow
+
+# Install torchvision
+ARG TORCH_VISION_VERSION=v0.20.1
+WORKDIR /tmp
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/uv \
+    git clone https://github.com/pytorch/vision.git && \
+    cd vision && \
+    git checkout $TORCH_VISION_VERSION && \
+    python setup.py bdist_wheel && \
+    uv pip install dist/*.whl
+
+# Final build stage
+FROM python-dependecies as vllm-cpu
+ARG PYTHON_VERSION
+
+# Set correct library path for torch and numactl
+ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:$LD_LIBRARY_PATH"
+
+WORKDIR /workspace/vllm
+
+# Build and install vllm
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/uv \
+    VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
+    uv pip install dist/*.whl && \
+    rm -rf dist
+
+# setup non-root user for vllm
+RUN umask 002 && \
+    useradd --uid 2000 --gid 0 vllm && \
+    mkdir -p /home/vllm && \
+    chmod g+rwx /home/vllm /usr/src /workspace
+
+COPY LICENSE /licenses/vllm.md
+COPY examples/*.jinja /app/data/template/
+
+USER 2000
+WORKDIR /home/vllm
+
+# Set the default entrypoint
+ENTRYPOINT ["/opt/vllm/bin/python", "-m", "vllm.entrypoints.openai.api_server"]
