@@ -23,12 +23,12 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from functools import partial
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
+                    Optional, Set, Tuple, TypedDict, Union)
 
 import torch
-import torch.types
 from torch import nn
+from transformers import BatchFeature
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.whisper.modeling_whisper import (
     ACT2FN, WHISPER_ATTENTION_CLASSES, WhisperConfig, WhisperEncoder)
@@ -37,22 +37,20 @@ from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.multimodal.parse import (ModalityData, ModalityDataItems,
-                                   MultiModalDataItems, MultiModalDataParser,
-                                   VideoItem)
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        PromptReplacement)
+from vllm.multimodal.parse import (AudioItem, DictEmbeddingItems, ModalityData,
+                                   ModalityDataItems, MultiModalDataItems,
+                                   MultiModalDataParser)
+from vllm.multimodal.processing import PromptReplacement
 from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .minicpmv import (MiniCPMV2_6, MiniCPMVDummyInputsBuilder,
-                       MiniCPMVEmbeddingItems, MiniCPMVMultiModalDataParser,
-                       MiniCPMVMultiModalProcessor, MiniCPMVProcessingInfo)
+                       MiniCPMVMultiModalDataParser,
+                       MiniCPMVMultiModalProcessor, MiniCPMVProcessingInfo,
+                       _minicpmv_field_config)
 from .utils import AutoWeightsLoader, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
-
-MiniCPMOEmbeddingItems = MiniCPMVEmbeddingItems
 
 
 class MiniCPMOAudioFeatureInputs(TypedDict):
@@ -103,28 +101,52 @@ MiniCPMOAudioInputs = Union[MiniCPMOAudioFeatureInputs,
                             MiniCPMOAudioEmbeddingInputs]
 
 
-class MiniCPMOAudioEmbeddingItems(MiniCPMOEmbeddingItems):
+def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    audio_num_slices = hf_inputs.get("audio_num_slices", torch.empty(0))
 
-    def __init__(self, data: Dict) -> None:
-        super().__init__(data, "audio")
-        audio_embeds = self.data.get("audio_embeds", None)
-        if audio_embeds is None:
-            raise ValueError("Incorrect type of video_embeds",
-                             "Got type: None")
-        self.data["audio_embeds"] = audio_embeds
+    return dict(
+        **_minicpmv_field_config(hf_inputs),
+        audio_features=MultiModalFieldConfig.flat_from_sizes(
+            "audio", audio_num_slices),
+        audio_feature_lens=MultiModalFieldConfig.flat_from_sizes(
+            "audio", audio_num_slices),
+        audio_num_slices=MultiModalFieldConfig.batched("audio"),
+        audio_orders_in_mm_data=MultiModalFieldConfig.batched("audio"),
+        audio_embeds=MultiModalFieldConfig.flat_from_sizes(
+            "audio", audio_num_slices),
+    )
 
-    def get(self, index: int) -> object:
-        return self.data["audio_embeds"][index]
+
+class MiniCPMOAudioEmbeddingItems(DictEmbeddingItems):
+
+    def __init__(
+        self,
+        data: Mapping[str, torch.Tensor],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
+    ) -> None:
+        super().__init__(
+            data,
+            modality="image",
+            required_fields={"audio_embeds"},
+            fields_factory=fields_factory,
+        )
 
 
 class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
 
     def _parse_audio_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
+        data: Union[dict[str, torch.Tensor], ModalityData[AudioItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return MiniCPMOAudioEmbeddingItems(data)
+            return MiniCPMOAudioEmbeddingItems(
+                data,
+                fields_factory=_minicpmo_field_config,
+            )
+
         return super()._parse_audio_data(data)
 
 
@@ -167,6 +189,10 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     def get_max_audio_chunks_with_most_features(self) -> int:
         return 30
 
+    def get_max_audio_tokens(self) -> int:
+        return self.get_max_audio_tokens_per_chunk(
+        ) * self.get_max_audio_chunks_with_most_features()
+
     def get_audio_len_by_num_chunks(self, num_chunks: int) -> int:
         sampling_rate = self.get_default_audio_sampling_rate()
         # exclude <audio> </audio>
@@ -194,7 +220,8 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         return num_frames
 
 
-class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder):
+class MiniCPMODummyInputsBuilder(
+        MiniCPMVDummyInputsBuilder[MiniCPMOProcessingInfo]):
 
     def get_dummy_processor_inputs(
             self, seq_len: int, mm_counts: Mapping[str,
@@ -222,8 +249,7 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder):
 
 
 class MiniCPMOMultiModalProcessor(
-        MiniCPMVMultiModalProcessor,
-        BaseMultiModalProcessor[MiniCPMOProcessingInfo]):
+        MiniCPMVMultiModalProcessor[MiniCPMOProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return MiniCPMOMultiModalDataParser(
@@ -369,21 +395,10 @@ class MiniCPMOMultiModalProcessor(
 
     def _get_mm_fields_config(
         self,
-        hf_inputs,
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        audio_num_slices = hf_inputs.get("audio_num_slices", torch.empty(0))
-
-        return dict(
-            **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
-            audio_features=MultiModalFieldConfig.flat_from_sizes(
-                "audio", audio_num_slices),
-            audio_feature_lens=MultiModalFieldConfig.flat_from_sizes(
-                "audio", audio_num_slices),
-            audio_num_slices=MultiModalFieldConfig.batched("audio"),
-            audio_orders_in_mm_data=MultiModalFieldConfig.batched("audio"),
-            audio_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "audio", audio_num_slices))
+        return _minicpmo_field_config(hf_inputs)
 
 
 class MultiModalProjector(nn.Module):
@@ -406,7 +421,7 @@ class MultiModalProjector(nn.Module):
 
 class MiniCPMWhisperEncoderLayer(nn.Module):
 
-    def __init__(self, config: WhisperConfig, layer_idx: int = None):
+    def __init__(self, config: WhisperConfig, layer_idx: int):
         super().__init__()
         self.embed_dim = config.d_model
         self.self_attn = WHISPER_ATTENTION_CLASSES[
