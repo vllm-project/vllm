@@ -699,6 +699,8 @@ class VllmRunner:
             model_name = (f"s3://vllm-ci-model-weights/"
                           f"{model_name.split('/')[-1]}")
             load_format = LoadFormat.RUNAI_STREAMER
+        if not load_format:
+            load_format = LoadFormat.AUTO
         self.model = LLM(
             model=model_name,
             task=task,
