@@ -199,7 +199,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import accumulate
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Tuple,
-                    Type)
+                    Type, TypeVar)
 
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
@@ -209,8 +209,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
-                                              AttentionState, MLAAttentionImpl,
-                                              T)
+                                              AttentionState, MLAAttentionImpl)
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            get_flash_attn_version,
@@ -721,6 +720,9 @@ class MLACommonMetadata(AttentionMetadata):
                                    seq_lens=self.seq_lens_tensor,
                                    slot_mapping=self.slot_mapping,
                                    block_tables=self.block_tables)
+
+
+T = TypeVar("T", bound=MLACommonMetadata)
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
@@ -1268,12 +1270,15 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         assert prefill_metadata.context_chunk_cu_seq_lens is not None
         assert prefill_metadata.context_chunk_starts is not None
         assert prefill_metadata.context_chunk_max_seq_lens is not None
-        # assert prefill_metadata.block_tables is not None
         assert prefill_metadata.context_lens_tensor is not None
 
         output = None
         iters = len(prefill_metadata.context_chunk_seq_tot)
-        assert hasattr(attn_metadata, "chunked_prefill_workspace")
+
+        # Fetch from attn_metadata directly, since it late bound by
+        # MLAAttentionState, grabbing it directly `attn_metadata` can avoid
+        # any weirdness around prefill_metadata caching
+        assert attn_metadata.chunked_prefill_workspace is not None
         workspace = attn_metadata.chunked_prefill_workspace
 
         for i in range(iters):
@@ -1345,9 +1350,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: T,
+        attn_metadata: MLACommonMetadata,
     ) -> torch.Tensor:
-        assert isinstance(attn_metadata, MLACommonMetadata)
 
         prefill_metadata = attn_metadata.prefill_metadata
         assert prefill_metadata is not None

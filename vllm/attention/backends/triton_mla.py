@@ -80,12 +80,14 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                         dtype=q.dtype,
                         device=q.device)
 
+        num_kv_splits = 4  # TODO: heuristic
+
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
             (
                 B,
                 self.num_heads,
-                4,  #attn_metadata.num_kv_splits,
+                num_kv_splits,
                 # NOTE(lucas) idk why the +1 is here but sglang has it so we
                 # just mirror that
                 self.kv_lora_rank + 1,
@@ -100,16 +102,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
         # Run MQA
-        decode_attention_fwd(
-            q,
-            kv_c_and_k_pe_cache,
-            kv_c_cache,
-            o,
-            decode_meta.block_tables,
-            decode_meta.seq_lens_tensor,
-            attn_logits,
-            4,
-            self.scale,  #attn_metadata.num_kv_splits
-            PAGE_SIZE)
+        decode_attention_fwd(q, kv_c_and_k_pe_cache, kv_c_cache, o,
+                             decode_meta.block_tables,
+                             decode_meta.seq_lens_tensor, attn_logits,
+                             num_kv_splits, self.scale, PAGE_SIZE)
 
         return self._v_up_proj_and_o_proj(o)
