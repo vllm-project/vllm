@@ -13,8 +13,8 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev
-# Remove sccache    
-RUN python3 -m pip install --upgrade pip && pip install setuptools_scm
+# Remove sccache
+RUN python3 -m pip install --upgrade pip
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
@@ -38,10 +38,9 @@ FROM fetch_vllm AS build_vllm
 ARG USE_CYTHON
 # Build vLLM
 RUN cd vllm \
-    && python3 -m pip install -r requirements-rocm.txt \
-    && python3 setup.py clean --all  \
+    && python3 -m pip install build \
     && if [ ${USE_CYTHON} -eq "1" ]; then python3 setup_cython.py build_ext --inplace; fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist
+    && VLLM_TARGET_DEVICE=rocm python3 -m build --wheel --outdir=dist -v
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
@@ -116,4 +115,3 @@ ENV TOKENIZERS_PARALLELISM=false
 ENV HIP_FORCE_DEV_KERNARG=1
 
 CMD ["/bin/bash"]
-
