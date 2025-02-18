@@ -13,6 +13,7 @@ auto_awq
 bnb
 gguf
 int4
+inc
 int8
 fp8
 quantized_kvcache
