@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
+from vllm.v1.guided_decoding import Grammar
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -297,6 +298,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                grammar=new_req_data.grammar,
+                grammar_bitmask=new_req_data.grammar_bitmask,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -390,6 +393,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
 
+            # Fill the bitmask
+            if (req_id in scheduler_output.guided_decoding_request_ids
+                    and req_state.grammar is not None):
+                if not req_state.grammar.prefilled:
+                    req_state.grammar.prefilled = True
+                else:
+                    token_idx = scheduler_output.num_scheduled_tokens[
+                        req_id] - 1
+                    if not req_state.grammar.matcher.is_terminated():
+                        assert req_state.grammar_bitmask is not None
+                        req_state.grammar.fill_bitmask(
+                            req_state.grammar_bitmask, token_idx)
+
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
         batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
@@ -415,9 +431,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.refresh_sampling_metadata()
 
     def _prepare_inputs(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> Tuple[FlashAttentionMetadata, torch.Tensor]:
+        self, scheduler_output: "SchedulerOutput"
+    ) -> Tuple[FlashAttentionMetadata, torch.Tensor, Optional[torch.Tensor]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -426,6 +441,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
+
+        # Prepare bitmasks for guided decoding
+        # OPTIMIZATION: We shouldn't copy over
+        # the bitmask like this multiple times
+        bitmask: Optional[torch.Tensor] = None
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -436,6 +456,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_scheduled_tokens[i] = num_tokens
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
+            if req_id in scheduler_output.guided_decoding_request_ids:
+                bitmask = self.requests[req_id].grammar_bitmask
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -582,7 +604,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return attn_metadata, logits_indices
+        # NOTE(woosuk): Due to chunked prefills, the batch may contain partial
+        # requests. While we should not sample any token from these partial
+        # requests, we do so for simplicity. We will ignore the sampled
+        # tokens from the partial requests.
+        # TODO: Support prompt logprobs.
+        logits_indices = query_start_loc[1:] - 1
+
+        return attn_metadata, logits_indices, bitmask
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -871,7 +900,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        attn_metadata, logits_indices, bitmask = self._prepare_inputs(
+            scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -941,6 +971,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+
+        # Apply guided decoding bitmasks if present
+        if bitmask is not None:
+            Grammar.apply_bitmask(logits,
+                                  bitmask.to(self.device, non_blocking=True))
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.get_sampling_metadata(
@@ -1334,7 +1369,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
-            kv_cache_config: Configuration for the KV cache, including the KV 
+            kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
         if len(kv_cache_config.groups) > 1:
@@ -1366,10 +1401,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
-        Generates the KVCacheSpec by parsing the kv cache format from each 
+        Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
         Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
 

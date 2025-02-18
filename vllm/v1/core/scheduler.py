@@ -112,6 +112,7 @@ class Scheduler:
         scheduled_resumed_reqs: List[Request] = []
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
+        guided_decoding_request_ids: Set[str] = set()
 
         req_to_new_block_ids: Dict[str, List[int]] = {}
         num_scheduled_tokens: Dict[str, int] = {}
@@ -134,10 +135,14 @@ class Scheduler:
                 req_index += 1
                 continue
 
-            num_new_tokens = (request.num_tokens_with_spec -
-                              request.num_computed_tokens)
+            num_new_tokens = request.num_tokens - request.num_computed_tokens
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
+
+            if request.status == RequestStatus.WAITING_FOR_FSM:
+                # wait for grammar to be ready
+                req_index += 1
+                continue
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
@@ -225,6 +230,19 @@ class Scheduler:
 
                 request = self.waiting[0]
 
+                if request.use_guided_decoding:
+                    guided_decoding_request_ids.add(request.request_id)
+
+                if request.status == RequestStatus.WAITING_FOR_FSM:
+                    if request.grammar and request.is_grammar_ready:
+                        request.status = RequestStatus.WAITING
+                        request.grammar.prefilled = True
+                    else:
+                        # Skip this request but keep in the queue
+                        self.waiting.popleft()
+                        self.waiting.append(request)
+                        continue
+                #
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if self.lora_config and request.lora_request:
@@ -281,7 +299,7 @@ class Scheduler:
                 self.waiting.popleft()
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
-                if request.status == RequestStatus.WAITING:
+                if RequestStatus.is_waiting(request.status):
                     scheduled_new_reqs.append(request)
                     self.request_scheduled(request, scheduled_timestamp)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -367,7 +385,7 @@ class Scheduler:
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-        )
+            guided_decoding_request_ids=guided_decoding_request_ids)
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -543,6 +561,26 @@ class Scheduler:
             stopped = False
             new_logprobs = None
             new_token_ids: List[int] = []
+
+            # Handle guided decoding FSM advancement if applicable
+            if (request.use_guided_decoding and request.grammar
+                    and request.is_grammar_ready
+                    and not request.grammar.prefilled):
+                index = model_runner_output.req_id_to_index.get(req_id)
+                if index is not None:
+                    # TODO - fix spec decode + structured output compatibility
+                    if len(sampled_token_ids[index]) > 1:
+                        logger.error("Structured output does not currently "
+                                     "support more than one token at a time. "
+                                     "Expect undefined behavior. This may be"
+                                     " caused by spec decode + structured "
+                                     "output.")
+                    token_id = sampled_token_ids[index][0]
+                    # accept token will also advance the FSM
+                    can_accept_token = request.grammar.accept_token(token_id)
+                    if not can_accept_token:
+                        self._free_request(request)
+                        continue
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:

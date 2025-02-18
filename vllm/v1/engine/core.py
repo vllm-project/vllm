@@ -24,6 +24,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -72,6 +73,9 @@ class EngineCore:
         # Setup MM Input Mapper.
         self.mm_input_cache_server = MMInputCacheServer(
             vllm_config.model_config)
+
+        self.guided_decoding_manager = GuidedDecodingManager(
+            vllm_config=vllm_config)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -129,15 +133,14 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
+        if req.use_guided_decoding:
+            # Start grammar compilation asynchronously
+            self.guided_decoding_manager.should_cache(req)
 
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
         """Abort requests from the scheduler."""
-
-        # TODO: The scheduler doesn't really need to know the
-        # specific finish reason, TBD whether we propagate that
-        # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
@@ -148,8 +151,13 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
+        # Calculate bitmasks for all active requests
+        self.calculate_grammar_bitmasks()
+
         scheduler_output = self.scheduler.schedule()
+
         output = self.model_executor.execute_model(scheduler_output)
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
         return engine_core_outputs
@@ -210,6 +218,18 @@ class EngineCore:
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
+
+    def calculate_grammar_bitmasks(self):
+        for req in self.guided_decoding_manager.requests:
+
+            # Check if grammar is ready in cache
+            grammar = self.guided_decoding_manager.grammar_cache.get(
+                req.guided_decoding_key)
+            if grammar is not None:
+                req.grammar = grammar
+                req.allocate_grammar_bitmask(
+                    1, self.guided_decoding_manager.vocab_size)
+                continue
 
     def add_lora(self, lora_request: LoRARequest) -> None:
         self.model_executor.add_lora(lora_request)
