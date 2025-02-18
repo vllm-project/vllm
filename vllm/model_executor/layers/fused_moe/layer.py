@@ -538,7 +538,7 @@ class FusedMoE(torch.nn.Module):
         if is_hpu:
             # from vllm_hpu_extension.ops import DynamicFusedMOE
             # self.hpu_fused_moe = DynamicFusedMOE(self.num_experts)
-            self._need_init_dynamic_fused_moe_lst = False
+            self._need_init_dynamic_fused_moe_lst = True
 
 
         self.scoring_func = scoring_func
@@ -588,11 +588,11 @@ class FusedMoE(torch.nn.Module):
                 max_expert = (i + 1) * n_expert_slice
                 # rank_debug(f"i:{i}, num_experts:{num_experts} loading experts from {min_expert} to {max_expert}, layer.w13_weight.shape : {layer.w13_weight.shape}")
                 w13_list_slice = [
-                    layer.w13_weight[j].clone()
+                    layer.w13_weight[j]
                     for j in range(min_expert, max_expert)
                 ]
                 w2_list_slice = [
-                    layer.w2_weight[j].clone()
+                    layer.w2_weight[j]
                     for j in range(min_expert, max_expert)
                 ]
                 for index in range(len(w13_list_slice)):
