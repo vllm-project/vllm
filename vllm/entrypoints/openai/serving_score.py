@@ -29,7 +29,7 @@ from vllm.utils import make_async, merge_async_iterators
 logger = init_logger(__name__)
 
 
-class OpenAIServingScores(OpenAIServing):
+class ServingScores(OpenAIServing):
 
     def __init__(
         self,
@@ -65,12 +65,10 @@ class OpenAIServingScores(OpenAIServing):
                                     executor=self._tokenizer_executor)
 
         tokenization_kwargs = tokenization_kwargs or {}
-        tokenized_prompts = [
-            tokenize_async(t, **tokenization_kwargs) for t in input_texts
-        ]
+        tokenized_prompts = await asyncio.gather(
+            *(tokenize_async(t, **tokenization_kwargs) for t in input_texts))
 
-        for tok_result, input_text in zip(
-                await asyncio.gather(*tokenized_prompts), input_texts):
+        for tok_result, input_text in zip(tokenized_prompts, input_texts):
 
             text_token_prompt = \
                 self._validate_input(
@@ -176,13 +174,11 @@ class OpenAIServingScores(OpenAIServing):
                                     executor=self._tokenizer_executor)
 
         tokenization_kwargs = tokenization_kwargs or {}
-        tokenized_prompts = [
-            tokenize_async(text=t1, text_pair=t2, **tokenization_kwargs)
-            for t1, t2 in input_pairs
-        ]
+        tokenized_prompts = await asyncio.gather(
+            *(tokenize_async(text=t1, text_pair=t2, **tokenization_kwargs)
+              for t1, t2 in input_pairs))
 
-        for prompt_inputs, (t1, t2) in zip(
-                await asyncio.gather(*tokenized_prompts), input_pairs):
+        for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
 
             request_prompt = f"{t1}{tokenizer.sep_token}{t2}"
 

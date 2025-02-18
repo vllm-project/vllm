@@ -8,7 +8,7 @@ from vllm.entrypoints.openai.protocol import RerankResponse
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "BAAI/bge-reranker-base"
-DTYPE = "half"
+DTYPE = "bfloat16"
 
 
 @pytest.fixture(scope="module")
