@@ -1,0 +1,4 @@
+--pre
+--extra-index-url=https://pip.repos.neuron.amazonaws.com
+torch-neuronx >= 2.5.0
+neuronx-cc==2.16.345.0

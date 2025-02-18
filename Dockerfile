@@ -47,6 +47,7 @@ WORKDIR /workspace
 # install runtime dependencies
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
+COPY requirements-torch-cuda.txt requirements-torch-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
 
