@@ -45,12 +45,14 @@ class OpenAIServingCompletion(OpenAIServing):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        fim_encoder: Optional[str] = None,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         fim_encoder=fim_encoder)
         diff_sampling_param = self.model_config.get_diff_sampling_param()
         if diff_sampling_param:
             logger.info(
@@ -105,6 +107,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 request,
                 tokenizer,
                 request.prompt,
+                request.suffix,
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
@@ -326,6 +329,9 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
+                    if finish_reason and request.echo and request.suffix:
+                        delta_text += request.suffix
+
                     chunk = CompletionStreamResponse(
                         id=request_id,
                         created=created_time,
@@ -393,6 +399,8 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompt_tokens = 0
         num_generated_tokens = 0
 
+        suffix = "" if request.suffix is None else request.suffix
+
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -416,7 +424,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     if request.max_tokens == 0:
                         token_ids = prompt_token_ids
                         out_logprobs = prompt_logprobs
-                        output_text = prompt_text
+                        output_text = prompt_text + suffix
                     else:
                         token_ids = [*prompt_token_ids, *output.token_ids]
 
@@ -430,7 +438,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 *output.logprobs,
                             ]
 
-                        output_text = prompt_text + output.text
+                        output_text = prompt_text + output.text + suffix
                 else:
                     token_ids = output.token_ids
                     out_logprobs = output.logprobs
