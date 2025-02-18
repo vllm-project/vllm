@@ -49,12 +49,6 @@ def maybe_backend_fallback(
                            "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
 
-        # xgrammar doesn't support regex, fallback to outlines
-        if guided_params.regex is not None:
-            logger.warning("xgrammar does not support regex guided decoding. "
-                           "Falling back to use outlines instead.")
-            guided_params.backend = "outlines"
-
         # xgrammar doesn't support some JSON schema features
         elif (guided_params.json is not None
               and has_xgrammar_unsupported_json_features(guided_params.json)):
