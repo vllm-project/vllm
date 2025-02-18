@@ -52,6 +52,14 @@ class LogitsProcessor(nn.Module):
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
         parallel_config = get_current_vllm_config().parallel_config
+        speculative_config = get_current_vllm_config().speculative_config
+        # print("Spec config: ", speculative_config)
+        # print("Model config: ", get_current_vllm_config().model_config.model)
+        self.is_draft_model = False
+        if speculative_config:
+            model = get_current_vllm_config().model_config.model
+            draft_model = speculative_config.draft_model_config.model
+            self.is_draft_model = model == draft_model
         self.use_all_gather = current_platform.is_tpu() \
             or envs.VLLM_USE_V1 \
             or parallel_config.distributed_executor_backend == "external_launcher" # noqa
@@ -83,8 +91,7 @@ class LogitsProcessor(nn.Module):
 
             # Apply logits processors (if any).
             if sampling_metadata is not None:
-                logits = _apply_logits_processors(logits, sampling_metadata)
-
+                logits = _apply_logits_processors(logits, sampling_metadata, self.is_draft_model)
         return logits
 
     def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
@@ -144,6 +151,7 @@ def _prune_hidden_states(
 def _apply_logits_processors(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    is_draft_model: bool,
 ) -> torch.Tensor:
     found_logits_processors = False
     logits_processed = 0
@@ -160,7 +168,7 @@ def _apply_logits_processors(
                 logits_row = logits[logits_row_idx]
                 past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
                 prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
-
+                print(is_draft_model, past_tokens_ids)
                 if _logits_processor_threadpool is not None:
                     logits_row_ids_and_logits_row_futures.append(
                         (logits_row_idx,
@@ -196,4 +204,5 @@ def _apply_logits_processors_single_seq(logits_row, logits_processors,
                                           logits_row)
         else:
             logits_row = logits_processor(past_tokens_ids, logits_row)
+    # print("Token id:", torch.argmax(logits_row))
     return logits_row

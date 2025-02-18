@@ -273,6 +273,7 @@ class XGrammarLogitsProcessor:
     matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
     batch_size: int = field(default=1)
     prefilled: bool = field(default=False)
+    num_processed_tokens: int = field(default=0)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
@@ -285,6 +286,7 @@ class XGrammarLogitsProcessor:
         self.batch_size = 1
         self.token_bitmask = None  # type: ignore[assignment]
         self.prefilled = False
+        self.num_processed_tokens = 0
 
     def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
@@ -306,20 +308,33 @@ class XGrammarLogitsProcessor:
             self._ensure_ctx()
 
         if len(self.matchers) == 0:
+            num_draft_tokens = 5
             self.matchers = [
-                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
+                xgr.GrammarMatcher(self.ctx, max_rollback_tokens=num_draft_tokens+2) for _ in range(self.batch_size)
             ]
             self.token_bitmask = xgr.allocate_token_bitmask(
                 self.batch_size, self.config.vocab_size)
+        
+        if self.prefilled and self.num_processed_tokens >= len(input_ids) and self.num_processed_tokens > 0:
+            diff = self.num_processed_tokens - len(input_ids) + 1
+            print("xgrammar, diff:", diff, self.num_processed_tokens, len(input_ids))
+            self.num_processed_tokens -= diff
+            for i, matcher in enumerate(self.matchers):
+                # if not matcher.is_terminated():
+                self.matchers[i].rollback(diff)
+        else:
+            print("xgrammar", self.num_processed_tokens, len(input_ids))
 
-        if not self.prefilled:
+        if not self.prefilled or len(input_ids) == 0:
             # Have not sampled a token yet
             self.prefilled = True
-        else:
+        else:            
             for i, matcher in enumerate(self.matchers):
                 if not matcher.is_terminated():
+                    self.num_processed_tokens += 1
                     sampled_token = input_ids[-1]
-                    assert self.matchers[i].accept_token(sampled_token)
+                    assert self.matchers[i].accept_token(sampled_token), f"token {sampled_token} not accepted"
+
 
         for i, matcher in enumerate(self.matchers):
             if not matcher.is_terminated():
@@ -340,8 +355,11 @@ class XGrammarLogitsProcessor:
         # Note: In this method, if the tensors have different dimensions
         # on CPU device fails, but on GPU it runs without error. Hence the
         # unsqueeze above for scores, to match the token bitmask shape
+        
+        # xgr.apply_token_bitmask_inplace(
+        #     scores, self.token_bitmask.to(scores.device, non_blocking=True))
         xgr.apply_token_bitmask_inplace(
-            scores, self.token_bitmask.to(scores.device, non_blocking=True))
+            scores, self.token_bitmask.to(scores.device, non_blocking=False))
         if device_type != "cuda":
             scores = scores.to(dtype).to(device_type).squeeze()
 

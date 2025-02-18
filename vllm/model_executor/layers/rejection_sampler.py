@@ -110,6 +110,11 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             self._raise_if_incorrect_input(target_with_bonus_probs,
                                            draft_token_ids, bonus_token_ids,
                                            draft_probs)
+        
+        print("target_with_bonus_probs:", target_with_bonus_probs)
+        print("draft_probs:", draft_probs)
+        print("bonus_token_ids:", bonus_token_ids)
+        print("draft_token_ids:", draft_token_ids)
 
         batch_size, k, _ = draft_probs.shape
 
@@ -281,6 +286,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         batch_indices = torch.arange(batch_size,
                                      device=target_probs.device)[:, None]
         probs_indicies = torch.arange(k, device=target_probs.device)
+        print(torch.nonzero((target_probs > 0)))
 
         # shape [batch_size, k]
         selected_draft_probs = draft_probs[batch_indices, probs_indicies,
@@ -292,10 +298,12 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         uniform_rand = self._create_uniform_samples(seeded_seqs, batch_size,
                                                     k - 1, target_probs.device)
-
+        
+        print(selected_target_probs, selected_draft_probs)
         capped_ratio = torch.minimum(
             selected_target_probs / selected_draft_probs,
             torch.full((1, ), 1, device=target_probs.device))
+        print("capped_ratio: ", capped_ratio)
         accepted = uniform_rand < capped_ratio
 
         return accepted
