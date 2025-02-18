@@ -11,6 +11,7 @@ from tests.v1.engine.utils import (NUM_PROMPT_LOGPROBS_UNDER_TEST,
                                    STOP_STRINGS,
                                    DummyOutputProcessorTestVectors,
                                    MockEngineCore)
+from vllm.config import _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -40,8 +41,11 @@ def _ref_convert_id_to_token(
     [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
 def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                                     dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
-                                       log_stats=False)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer_group,
+        log_stats=False,
+        intial_incremental_detokenization_offset=
+        _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens)
 
@@ -380,8 +384,11 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                             num_sample_logprobs: Optional[int],
                             num_prompt_logprobs: Optional[int],
                             dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
-                                       log_stats=False)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer_group,
+        log_stats=False,
+        intial_incremental_detokenization_offset=
+        _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
         generated_logprobs_raw=None if num_sample_logprobs is None else
@@ -478,8 +485,11 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
 def test_stop_string(include_stop_str_in_output: bool,
                      num_sample_logprobs: Optional[int],
                      num_prompt_logprobs: Optional[int], dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
-                                       log_stats=False)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer_group,
+        log_stats=False,
+        intial_incremental_detokenization_offset=
+        _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
         generated_logprobs_raw=dummy_test_vectors.generation_logprobs
@@ -602,8 +612,11 @@ def test_stop_string(include_stop_str_in_output: bool,
 
 
 def test_iteration_stats(dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
-                                       log_stats=True)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer_group,
+        log_stats=True,
+        intial_incremental_detokenization_offset=
+        _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET)
     engine_core = MockEngineCore(dummy_test_vectors.generation_tokens)
     engine_core_timestamp = time.monotonic()
 

@@ -244,7 +244,9 @@ class LLMEngine:
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
-            self.detokenizer = Detokenizer(self.tokenizer)
+            self.detokenizer = Detokenizer(
+                self.tokenizer, vllm_config.model_config.
+                intial_incremental_detokenization_offset)
             tokenizer_group = self.get_tokenizer_group()
         else:
             self.tokenizer = None
