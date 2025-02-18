@@ -5,8 +5,9 @@ from typing import Any, Dict, List, Optional, Type
 import torch
 
 from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.backends.mla.common import (MLACommonBackend, MLACommonImpl,
-                                               MLACommonMetadata)
+from vllm.attention.backends.mla.common import (MLACommonBackend,
+                                                MLACommonImpl,
+                                                MLACommonMetadata)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 
 

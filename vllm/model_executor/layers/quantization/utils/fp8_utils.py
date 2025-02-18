@@ -184,7 +184,7 @@ def _per_token_group_quant_fp8(
     row = g_id // groups_per_row
     row_g_id = g_id % groups_per_row
 
-    y_ptr +=  (row * y_row_stride) + (row_g_id * group_size)
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
     y_s_ptr += g_id
 
@@ -232,7 +232,7 @@ def _per_token_group_quant_fp8_colmajor(
     row = g_id // groups_per_row
     row_g_id = g_id % groups_per_row
 
-    y_ptr +=  (row * y_row_stride) + (row_g_id * group_size)
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
 
     # Convert g_id the flattened block coordinate to 2D so we can index
