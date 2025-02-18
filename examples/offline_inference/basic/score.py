@@ -10,7 +10,8 @@ def main(args: Namespace):
     # Sample prompts.
     text_1 = "What is the capital of France?"
     texts_2 = [
-        "The capital of Brazil is Brasilia.", "The capital of France is Paris."
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
     ]
 
     # Create an LLM.
