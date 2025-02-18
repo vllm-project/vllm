@@ -91,6 +91,7 @@ class EngineArgs:
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
+    hf_config_path: Optional[str] = None
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
@@ -259,6 +260,12 @@ class EngineArgs:
             help='Name or path of the huggingface tokenizer to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
+            "--hf-config-path",
+            type=nullable_str,
+            default=None,
+            help='Name or path of the huggingface config to use. '
+            'If unspecified, model name or path will be used.')
+        parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
             help='Skip initialization of tokenizer and detokenizer.')
@@ -272,7 +279,7 @@ class EngineArgs:
         parser.add_argument(
             '--code-revision',
             type=nullable_str,
-            default=None,
+            default=EngineArgs.hf_config_path,
             help='The specific revision to use for the model code on '
             'Hugging Face Hub. It can be a branch name, a tag name, or a '
             'commit id. If unspecified, will use the default version.')
@@ -1038,6 +1045,7 @@ class EngineArgs:
     def create_model_config(self) -> ModelConfig:
         return ModelConfig(
             model=self.model,
+            hf_config_path=self.hf_config_path,
             task=self.task,
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
