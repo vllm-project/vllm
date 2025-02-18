@@ -25,7 +25,7 @@ You can also monitor the number of preemption requests through Prometheus metric
 
 ## Chunked Prefill
 
-vLLM supports an experimental feature - chunked prefill. Chunked prefill enables chunking large prefills into smaller chunks and batching them together with decode requests.
+vLLM supports an experimental feature: chunked prefill. Chunked prefill enables large prefills to be chunked into smaller chunks and batched together with decode requests.
 
 You can enable the feature by specifying `--enable-chunked-prefill` in the command line or setting `enable_chunked_prefill=True` in the LLM constructor.
 
