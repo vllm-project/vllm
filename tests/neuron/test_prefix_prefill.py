@@ -207,16 +207,13 @@ def test_contexted_kv_attention(
 
     device = xm.xla_device()
 
-    compiler_flags = [
-        "--model-type=transformer -O1",
-        "--internal-hlo2tensorizer-options='--verify-hlo'",
-        "--retry_failed_compilation",
-    ]
-    compiler_flags_str = " ".join(compiler_flags)
-    os.environ["NEURON_CC_FLAGS"] = compiler_flags_str
+    os.environ["NEURON_CC_FLAGS"] = (
+        " --model-type=transformer -O1 --retry_failed_compilation "
+        " --internal-hlo2tensorizer-options='--verify-hlo' ")
 
     torch.manual_seed(0)
     torch.set_printoptions(sci_mode=False)
+    torch.set_default_device("cpu")
 
     min_ctx_len = 32
     max_ctx_len = 1024
@@ -394,9 +391,9 @@ def test_contexted_kv_attention(
 
     # transform block table
     active_block_table = get_active_block_tables(
-        block_table,
-        torch.tensor(query_lens),
-        torch.tensor(seq_lens),
+        block_table.cpu(),
+        torch.tensor(query_lens).cpu(),
+        torch.tensor(seq_lens).cpu(),
         block_size,
         num_active_blocks,
     )
