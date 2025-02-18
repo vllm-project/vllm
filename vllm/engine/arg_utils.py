@@ -189,6 +189,7 @@ class EngineArgs:
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
 
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
@@ -1244,7 +1245,8 @@ class EngineArgs:
             multi_step_stream_outputs=self.multi_step_stream_outputs,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
-            policy=self.scheduling_policy)
+            policy=self.scheduling_policy,
+            scheduler_cls=self.scheduler_cls)
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
