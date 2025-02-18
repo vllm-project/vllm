@@ -143,7 +143,7 @@ class InputBatch:
             device="cpu",
             pin_memory=pin_memory)
         self.frequency_penalties_cpu = \
-                self.frequency_penalties_cpu_tensor.numpy()
+            self.frequency_penalties_cpu_tensor.numpy()
         self.frequency_penalties_reqs: Set[str] = set()
 
         # Presence penalty related data structures
@@ -168,7 +168,7 @@ class InputBatch:
             device="cpu",
             pin_memory=pin_memory)
         self.repetition_penalties_cpu = \
-                self.repetition_penalties_cpu_tensor.numpy()
+            self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: Set[str] = set()
 
         self.min_tokens: List[int] = [0] * max_num_reqs
@@ -195,6 +195,10 @@ class InputBatch:
 
         self.logit_bias: List[Optional[Dict[int,
                                             float]]] = [None] * max_num_reqs
+
+        self.has_allowed_token_ids: List[bool] = [False] * max_num_reqs
+        self.allowed_token_ids_mask: torch.Tensor = torch.zeros(
+            max_num_reqs, self.vocab_size, dtype=torch.bool, device=device)
 
     def add_request(
         self,
@@ -270,6 +274,17 @@ class InputBatch:
         if sampling_params.logit_bias is not None:
             self.logit_bias[req_index] = sampling_params.logit_bias
 
+        if sampling_params.allowed_token_ids:
+            # NOTE(houseroad): put the check here since no vocab_size info
+            # available in vllm/sampling_params.py
+            if not all(0 <= tid < self.vocab_size
+                       for tid in sampling_params.allowed_token_ids):
+                raise ValueError(
+                    "allowed_token_ids contains out-of-vocab token id")
+            self.has_allowed_token_ids[req_index] = True
+            self.allowed_token_ids_mask[req_index][
+                sampling_params.allowed_token_ids] = True
+
         # Add request lora ID
         if request.lora_request:
             lora_id = request.lora_request.lora_int_id
@@ -311,6 +326,8 @@ class InputBatch:
             self.request_lora_mapping[req_index] = 0
 
         self.logit_bias[req_index] = None
+        self.has_allowed_token_ids[req_index] = False
+        self.allowed_token_ids_mask[req_index].fill_(False)
         return req_index
 
     def clear(self) -> None:
@@ -331,6 +348,8 @@ class InputBatch:
         self.lora_id_to_lora_request.clear()
         self.lora_id_to_request_ids.clear()
         self.logit_bias = [None] * self.max_num_reqs
+        self.has_allowed_token_ids = [False] * self.max_num_reqs
+        self.allowed_token_ids_mask.fill_(False)
 
     def condense(self, empty_req_indices: List[int]) -> None:
         if self.num_reqs == 0:
@@ -390,6 +409,11 @@ class InputBatch:
                 last_req_index]
 
             self.logit_bias[empty_index] = self.logit_bias[last_req_index]
+
+            self.has_allowed_token_ids[
+                empty_index] = self.has_allowed_token_ids[last_req_index]
+            self.allowed_token_ids_mask[
+                empty_index] = self.allowed_token_ids_mask[last_req_index]
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
@@ -473,6 +497,8 @@ class InputBatch:
             stop_token_ids=self.stop_token_ids[:self.num_reqs],
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:self.num_reqs],
+            has_allowed_token_ids=self.has_allowed_token_ids[:self.num_reqs],
+            allowed_token_ids_mask=self.allowed_token_ids_mask[:self.num_reqs],
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
