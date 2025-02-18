@@ -27,13 +27,13 @@ static __device__ __forceinline__ void moe_q(
     token_offs[i / nwarps] = sorted_token_ids[col_dst_0 + threadIdx.y + i];
     token_ids[i / nwarps] = token_offs[i / nwarps] / top_k;
   }
-  const int exp_idx = expert_ids[blockIdx.x];
+  const int exp_idx = expert_ids[blockIdx.y];
 
-  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 &&
-      threadIdx.y == 0) {
+  if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 3 &&
+      threadIdx.y == 1) {
     printf(
         "running kernel for expert id %d, row_dst %d \
-              blocks per warp %d \n",
+blocks per warp %d \n",
         exp_idx, row_dst_0, blocks_per_warp);
     for (int i = 0; i < mmq_x; i += nwarps) {
       printf("%d tok id %d, tok offset %d \n", i / nwarps,
