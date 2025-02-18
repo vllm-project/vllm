@@ -20,7 +20,7 @@ MODEL_CONFIGS = [
         "tensor_parallel_size": 1,
     },
     {
-        "model": "mistralai/Mistral-7B=B-Instruct-v0.1",
+        "model": "mistralai/Mistral-7B-Instruct-v0.1",
         "enforce_eager": True,
         "gpu_memory_utilization": 0.95,
         "max_model_len": 64,

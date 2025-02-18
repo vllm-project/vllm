@@ -35,8 +35,7 @@ def test_empty_seq_group():
        for empty seq group list"""
 
     model_runner = _create_model_runner(
-        "s3://vllm-ci-model-weights/bart-base",
-        load_format="runai_streamer",
+        "facebook/bart-base",
         seed=0,
         dtype="float16",
         max_num_batched_tokens=100000,
@@ -95,8 +94,7 @@ def test_prepare_prompt(batch_size):
     '''
 
     model_runner = _create_model_runner(
-        "s3://vllm-ci-model-weights/bart-base",
-        load_format="runai_streamer",
+        "facebook/bart-base",
         seed=0,
         dtype="float16",
         max_num_batched_tokens=100000,
@@ -288,8 +286,7 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
     '''
 
     model_runner = _create_model_runner(
-        "s3://vllm-ci-model-weights/bart-base",
-        load_format="runai_streamer",
+        "facebook/bart-base",
         seed=0,
         dtype="float16",
         max_num_batched_tokens=100000,
@@ -492,8 +489,7 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     for varying input batch sizes.
     """
     model_runner = _create_model_runner(
-        "s3://vllm-ci-model-weights/bart-base",
-        load_format="runai_streamer",
+        "facebook/bart-base",
         seed=0,
         dtype="float16",
         max_num_batched_tokens=100000,

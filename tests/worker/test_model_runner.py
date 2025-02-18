@@ -26,8 +26,7 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
 
 def test_deepseek_mla_attn_backend_module():
     model_runner = _create_model_runner(
-        "s3://vllm-ci-model-weights/DeepSeek-V2-Lite-Chat",
-        load_format="runai_streamer",
+        "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
         trust_remote_code=True,
         enable_chunked_prefill=False,
     )
@@ -37,8 +36,7 @@ def test_deepseek_mla_attn_backend_module():
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_prompt(batch_size):
     model_runner = _create_model_runner(
-        "s3://vllm-ci-model-weights/distilgpt2",
-        load_format="runai_streamer",
+        "facebook/opt-125m",
         max_num_batched_tokens=100000,
         max_num_seqs=100000,
         enable_chunked_prefill=False,
@@ -152,8 +150,7 @@ def test_prepare_prompt(batch_size):
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_decode_cuda_graph(batch_size):
     model_runner = _create_model_runner(
-        "s3://vllm-ci-model-weights/distilgpt2",
-        load_format="runai_streamer",
+        "facebook/opt-125m",
         seed=0,
         dtype="float16",
         enforce_eager=False,
@@ -263,8 +260,7 @@ def test_prepare_decode_cuda_graph(batch_size):
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output."""
     model_runner = _create_model_runner(
-        "s3://vllm-ci-model-weights/distilgpt2",
-        load_format="runai_streamer",
+        "facebook/opt-125m",
         seed=0,
         dtype="float16",
         enforce_eager=False,
@@ -309,8 +305,7 @@ def distributed_init():
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     model_runner = _create_model_runner(
-        "s3://vllm-ci-model-weights/distilgpt2",
-        load_format="runai_streamer",
+        "facebook/opt-125m",
         seed=0,
         dtype="float16",
         enforce_eager=enforce_eager,

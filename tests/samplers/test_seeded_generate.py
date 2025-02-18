@@ -12,7 +12,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.model_executor.utils import set_random_seed
 
-MODEL = "distilbert/distilgpt2"
+MODEL = "facebook/opt-125m"
 RANDOM_SEEDS = list(range(5))
 
 
