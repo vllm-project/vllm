@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Derived from T5 implementation posted on HuggingFace; license below:
 #
 # coding=utf-8
@@ -178,6 +179,9 @@ class T5Attention(nn.Module):
             config.relative_attention_max_distance
         self.d_model = config.d_model
         self.key_value_proj_dim = config.d_kv
+        assert cache_config
+        # Alternatively we can get it from kv_cache size in fwd.
+        self.block_size = cache_config.block_size
 
         # Partition heads across multiple tensor parallel GPUs.
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -318,10 +322,6 @@ class T5Attention(nn.Module):
     ) -> torch.Tensor:
         # TODO auto-selection of xformers backend when t5 is detected
         assert isinstance(attn_metadata, XFormersMetadata)
-        is_profile_run = kv_cache.numel() == 0
-        if not is_profile_run:
-            # TODO xformers only
-            block_size = kv_cache.shape[2] // self.inner_dim
         num_seqs = len(
             attn_metadata.seq_lens) if attn_metadata.seq_lens else len(
                 attn_metadata.encoder_seq_lens)
@@ -348,10 +348,9 @@ class T5Attention(nn.Module):
             # No custom attention bias must be set when running cross attn.
             assert attn_bias is None
 
-        # FIXME should be enabled on profiling run to assess memory of bias.
-        # TODO NOT compatible with CP here (as all encoder-decoder models),
+        # Not compatible with CP here (as all encoder-decoder models),
         # as it assumes homogeneous batch (prefills or decodes).
-        elif self.has_relative_attention_bias and not is_profile_run:
+        elif self.has_relative_attention_bias:
             assert attn_bias is None  # to be recomputed
             # Self-attention. Compute T5 relative positional encoding.
             # The bias term is computed on longest sequence in batch. Biases
@@ -399,8 +398,8 @@ class T5Attention(nn.Module):
                 # padding/alignment to `block_size` is required. Expected
                 # number of queries is always 1 (MQA not supported).
                 seq_len = attn_metadata.max_decode_seq_len
-                block_aligned_seq_len = (seq_len + block_size -
-                                         1) // block_size * block_size
+                block_aligned_seq_len = (seq_len + self.block_size - 1
+                                         ) // self.block_size * self.block_size
 
                 # TODO bf16 bias support in PagedAttention.
                 position_bias = self.compute_bias(
@@ -415,7 +414,7 @@ class T5Attention(nn.Module):
             # NOTE Assign bias term on metadata based on attn type:
             # ENCODER->`encoder_attn_bias`, DECODER->`attn_bias`.
             _set_attn_bias(attn_metadata, attn_bias, self.attn_type)
-        elif not self.has_relative_attention_bias and not is_profile_run:
+        elif not self.has_relative_attention_bias:
             # Encoder/Decoder Self-Attention Layer, attn bias already cached.
             assert attn_bias is not None
 
@@ -657,6 +656,11 @@ class T5Model(nn.Module):
             encoder_hidden_states=encoder_hidden_states,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata)
+
+        # When capturing CUDA Graph
+        attn_metadata.attn_bias = None
+        attn_metadata.encoder_attn_bias = None
+        attn_metadata.cross_attn_bias = None
         return decoder_outputs
 
 
