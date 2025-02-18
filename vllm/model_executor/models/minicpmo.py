@@ -23,8 +23,8 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from functools import partial
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
+                    Optional, Set, Tuple, TypedDict, Union)
 
 import torch
 from torch import nn
@@ -122,13 +122,16 @@ class MiniCPMOAudioEmbeddingItems(DictEmbeddingItems):
     def __init__(
         self,
         data: Mapping[str, torch.Tensor],
-        fields_config: Mapping[str, MultiModalFieldConfig],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
     ) -> None:
         super().__init__(
             data,
             modality="image",
-            fields_config=fields_config,
             required_fields={"audio_embeds"},
+            fields_factory=fields_factory,
         )
 
 
@@ -141,7 +144,7 @@ class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
         if isinstance(data, dict):
             return MiniCPMOAudioEmbeddingItems(
                 data,
-                fields_config=_minicpmo_field_config(data),
+                fields_factory=_minicpmo_field_config,
             )
 
         return super()._parse_audio_data(data)

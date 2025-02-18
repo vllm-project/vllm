@@ -42,7 +42,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 ### Transformers fallback
 
-After the merge of <gh-pr:11330>, `vllm` can fallback to models that are available in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
+`vllm` can fallback to models that are available in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
 
 To check if the backend is `transformers`, you can simply do this:
 
@@ -56,9 +56,13 @@ If it is `TransformersModel` then it means it's based on `transformers`!
 
 #### Supported features
 
-##### LORA and quantization
+##### Quantization
 
-Both are not supported yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
+Transformers fallback has supported most of available quantization in vLLM (except GGUF). See [Quantization page](#quantization-index) for more information about supported quantization in vllm.
+
+##### LoRA
+
+LoRA hasn't supported on transformers fallback yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
 
 Usually `transformers` model load weights via the `load_adapters` API, that depends on PEFT. We need to work a bit to either use this api (for now this would result in some weights not being marked as loaded) or replace modules accordingly.
 
@@ -726,7 +730,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.
   *
   * ✅︎
-  * \*
+  * ✅︎\*
 - * `Idefics3ForConditionalGeneration`
   * Idefics3
   * T + I
@@ -869,7 +873,7 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{note}
-H2O-VL series models will be available in V1 once we support backends other than FlashAttention.
+`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
 :::
 
 :::{note}
@@ -936,6 +940,26 @@ The following table lists those that are tested in vLLM.
   * `MrLight/dse-qwen2-2b-mrl-v1`
   *
   * ✅︎
+:::
+
+#### Transcription (`--task transcription`)
+
+Speech2Text models trained specifically for Automatic Speech Recognition.
+
+:::{list-table}
+:widths: 25 25 25 5 5
+:header-rows: 1
+
+- * Architecture
+  * Models
+  * Example HF Models
+  * [LoRA](#lora-adapter)
+  * [PP](#distributed-serving)
+- * `Whisper`
+  * Whisper-based
+  * `openai/whisper-large-v3-turbo`
+  * 🚧
+  * 🚧
 :::
 
 _________________
