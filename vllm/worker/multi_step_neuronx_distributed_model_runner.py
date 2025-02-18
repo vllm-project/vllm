@@ -7,7 +7,7 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors
 from vllm.worker.neuronx_distributed_model_runner import NeuronxDistributedModelRunner
 
-class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
+class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
 
     def __init__(
         self,
@@ -31,10 +31,17 @@ class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
+        sampling_params = torch.tensor([[
+            seq_group.sampling_params.top_k,
+            seq_group.sampling_params.top_p,
+            seq_group.sampling_params.temperature,
+        ] for seq_group in model_input.sampling_metadata.seq_groups])
+
         logits = self.model(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             input_block_ids=model_input.input_block_ids,
+            sampling_params=sampling_params,
             **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                         device=self.device),
         )
