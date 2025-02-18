@@ -878,6 +878,10 @@ class ModelConfig:
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         if is_transformer:
+            # Handle minimax model
+            if hasattr(self.hf_config, "attn_type_list"):
+                # 1 represents flash attention and 0 represents linear attention
+                return sum(t == 1 for t in self.hf_config.attn_type_list)
             # Handle the basic case first
             return end - start if attn_block_type else 0
         elif self.is_attention_free:
