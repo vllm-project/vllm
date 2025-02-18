@@ -538,7 +538,7 @@ class FusedMoE(torch.nn.Module):
         if is_hpu:
             # from vllm_hpu_extension.ops import DynamicFusedMOE
             # self.hpu_fused_moe = DynamicFusedMOE(self.num_experts)
-            self._need_init_dynamic_fused_moe_lst = True
+            self._need_init_dynamic_fused_moe_lst = False
 
 
         self.scoring_func = scoring_func
