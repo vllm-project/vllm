@@ -26,6 +26,7 @@ RUN apt-get update -y && \
 
 WORKDIR /workspace/vllm
 COPY requirements-xpu.txt /workspace/vllm/requirements-xpu.txt
+COPY requirements-torch-xpu.txt /workspace/vllm/requirements-torch-xpu.txt
 COPY requirements-common.txt /workspace/vllm/requirements-common.txt
 
 

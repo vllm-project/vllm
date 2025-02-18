@@ -18,7 +18,6 @@ COPY . /workspace/vllm
 
 # build vLLM with OpenVINO backend
 RUN --mount=type=cache,target=/root/.cache/pip \
-    PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" \
     VLLM_TARGET_DEVICE="openvino" \
     python3 -m pip install -v /workspace/vllm/
 

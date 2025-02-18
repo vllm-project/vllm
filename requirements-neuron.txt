@@ -1,12 +1,12 @@
 # Common dependencies
 -r requirements-common.txt
 
+-r requirements-torch-neuron.txt
+
 # Dependencies for Neuron devices
 --pre
 --extra-index-url=https://pip.repos.neuron.amazonaws.com
 transformers-neuronx >= 0.13.0
-torch-neuronx >= 2.5.0
-neuronx-cc==2.16.345.0
 fastapi
 ninja
 tokenizers

@@ -1,0 +1,2 @@
+torch == 2.5.1; platform_machine != "aarch64"
+--pre --extra-index-url https://download.pytorch.org/whl/nightly/cu126 torch==2.7.0.dev20250121+cu126; platform_system == "Linux" and platform_machine == "aarch64"

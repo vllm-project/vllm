@@ -50,6 +50,7 @@ WORKDIR /workspace
 # install runtime dependencies
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
+COPY requirements-torch-cuda.txt requirements-torch-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements-cuda.txt
 

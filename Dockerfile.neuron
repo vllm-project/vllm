@@ -20,11 +20,11 @@ ARG APP_MOUNT=/workspace
 VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}/vllm
 
-COPY requirements-build.txt /app/vllm/
-COPY requirements-neuron.txt /app/vllm/
-COPY requirements-common.txt /app/vllm/
+COPY requirements-build.txt ./
+COPY requirements-torch-neuron.txt ./
+COPY requirements-neuron.txt ./
+COPY requirements-common.txt ./
 
-ENV PIP_EXTRA_INDEX_URL=https://pip.repos.neuron.amazonaws.com
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt && \
     python3 -m pip install -U -r requirements-neuron.txt
