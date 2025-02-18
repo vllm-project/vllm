@@ -404,11 +404,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 permuted_weights=True,
                 activation="silu",
             )
-            logger.debug(
-                f"final_hidden_states.shape: {final_hidden_states.shape}, device: {final_hidden_states.device}, dtype: {final_hidden_states.dtype}"
-            )
+            # logger.debug(
+            #     f"final_hidden_states.shape: {final_hidden_states.shape}, device: {final_hidden_states.device}, dtype: {final_hidden_states.dtype}"
+            # )
             htorch.core.mark_step()
-            logger.debug(f"done mark step {i}")
+            # logger.debug(f"done mark step {i}")
         return final_hidden_states.view(-1, x.shape[1])
 
 
@@ -606,7 +606,7 @@ class FusedMoE(torch.nn.Module):
                 setattr(_temp_expert_group.MoeOp, "experts_min", min_expert)
                 setattr(_temp_expert_group.MoeOp, "experts_max", max_expert - 1)
                 setattr(self, f"_temp_expert_group_{i}", _temp_expert_group)
-                logger.debug(f"set _temp_expert_group_{i}")
+                # logger.debug(f"set _temp_expert_group_{i}")
                 htorch.core.mark_step()
                 
     def _load_per_tensor_weight_scale(self, shard_id: str,
