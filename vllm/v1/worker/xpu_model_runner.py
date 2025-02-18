@@ -95,7 +95,7 @@ class XPUModelRunner(GPUModelRunner):
         self.kv_caches: List[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
-
+        self.use_spec_decode = False
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
