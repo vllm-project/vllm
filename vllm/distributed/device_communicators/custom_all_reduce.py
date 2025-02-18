@@ -13,6 +13,7 @@ from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
+from vllm.distributed.device_communicators.rocm_wrapper import RocmLibrary
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -22,7 +23,7 @@ try:
     ops.meta_size()
     custom_ar = True
 except Exception:
-    # For AMD GPUs and CPUs
+    # For CPUs
     custom_ar = False
 
 logger = init_logger(__name__)
@@ -68,10 +69,13 @@ class CustomAllreduce:
         """
         self._IS_CAPTURING = False
         self.disabled = True
+        ops.meta_size()
 
         if not custom_ar:
             # disable because of missing custom allreduce library
             # e.g. in a non-cuda environment
+            logger.warning("Custom allreduce is disabled because "
+                           "of missing custom allreduce library")
             return
 
         self.group = group
@@ -129,10 +133,8 @@ class CustomAllreduce:
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        assert current_platform.is_cuda()
-        from vllm.platforms.cuda import CudaPlatform
-        cuda_platform: CudaPlatform = current_platform
-        full_nvlink = cuda_platform.is_full_nvlink(physical_device_ids)
+        assert current_platform.is_cuda() or current_platform.is_rocm()
+        full_nvlink = current_platform.is_full_nvlink(physical_device_ids)
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
@@ -142,7 +144,7 @@ class CustomAllreduce:
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
-        if not _can_p2p(rank, world_size):
+        if not current_platform.is_rocm() and not _can_p2p(rank, world_size):
             logger.warning(
                 "Custom allreduce is disabled because your platform lacks "
                 "GPU P2P capability or P2P test failed. To silence this "
@@ -154,7 +156,8 @@ class CustomAllreduce:
         # Meta data composes of two parts: meta data for synchronization and a
         # temporary buffer for storing intermediate allreduce results.
         self.meta_ptrs = self.create_shared_buffer(ops.meta_size() + max_size,
-                                                   group=group)
+                                                   group=group,
+                                                   uncached=True)
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
         self.buffer_ptrs = self.create_shared_buffer(max_size, group=group)
@@ -175,16 +178,26 @@ class CustomAllreduce:
         ops.register_buffer(self._ptr, self.buffer_ptrs)
 
     @staticmethod
-    def create_shared_buffer(
-            size_in_bytes: int,
-            group: Optional[ProcessGroup] = None) -> List[int]:
+    def create_shared_buffer(size_in_bytes: int,
+                             group: Optional[ProcessGroup] = None,
+                             uncached: Optional[bool] = False) -> List[int]:
         """
         Creates a shared buffer and returns a list of pointers
         representing the buffer on all processes in the group.
+        uncached - meta data buffers need to be "uncached" for signal on MI200
         """
-        lib = CudaRTLibrary()
-        pointer = lib.cudaMalloc(size_in_bytes)
-        handle = lib.cudaIpcGetMemHandle(pointer)
+        if current_platform.is_rocm():
+            lib = RocmLibrary()  # type: ignore
+            if uncached:
+                pointer = lib.hipMallocUncached(size_in_bytes)  # type: ignore
+            else:
+                pointer = lib.hipMalloc(size_in_bytes)  # type: ignore
+            handle = lib.hipIpcGetMemHandle(pointer)  # type: ignore
+        else:
+            lib = CudaRTLibrary()  # type: ignore
+            pointer = lib.cudaMalloc(size_in_bytes)  # type: ignore
+            handle = lib.cudaIpcGetMemHandle(pointer)  # type: ignore
+
         world_size = dist.get_world_size(group=group)
         rank = dist.get_rank(group=group)
         handles = [None] * world_size
@@ -195,19 +208,26 @@ class CustomAllreduce:
             if i == rank:
                 pointers.append(pointer.value)  # type: ignore
             else:
-                pointers.append(
-                    lib.cudaIpcOpenMemHandle(h).value)  # type: ignore
-
+                if current_platform.is_rocm():
+                    pointers.append(
+                        lib.hipIpcOpenMemHandle(h).value)  # type: ignore
+                else:
+                    pointers.append(
+                        lib.cudaIpcOpenMemHandle(h).value)  # type: ignore
         return pointers
 
     @staticmethod
     def free_shared_buffer(pointers: List[int],
                            group: Optional[ProcessGroup] = None,
-                           rank: Optional[int] = None) -> None:
+                           rank: Optional[int] = 0) -> None:
         if rank is None:
             rank = dist.get_rank(group=group)
-        lib = CudaRTLibrary()
-        lib.cudaFree(ctypes.c_void_p(pointers[rank]))
+        if current_platform.is_rocm():
+            lib = RocmLibrary()  # type: ignore
+            lib.hipFree(ctypes.c_void_p(pointers[rank]))  # type: ignore
+        else:
+            lib = CudaRTLibrary()  # type: ignore
+            lib.cudaFree(ctypes.c_void_p(pointers[rank]))  # type: ignore
 
     @contextmanager
     def capture(self):
@@ -282,6 +302,7 @@ class CustomAllreduce:
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
         """The main allreduce API that provides support for cuda graph."""
         # When custom allreduce is disabled, this will be None.
+        print(f"CA is disabled: {self.disabled}")
         if self.disabled or not self.should_custom_ar(input):
             return None
         if self._IS_CAPTURING:
