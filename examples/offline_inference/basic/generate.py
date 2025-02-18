@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from argparse import Namespace
-
-from utils import add_sampling_params_args, del_sampling_params_args
-
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 
 
-def main(args: Namespace):
+def main(args: dict):
     # Sample prompts.
     prompts = [
         "Hello, my name is",
@@ -19,15 +15,14 @@ def main(args: Namespace):
 
     # Create a sampling params object.
     sampling_params = SamplingParams(
-        max_tokens=args.max_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
+        max_tokens=args.pop("max_tokens"),
+        temperature=args.pop("temperature"),
+        top_p=args.pop("top_p"),
+        top_k=args.pop("top_k"),
     )
-    args = del_sampling_params_args(args)
 
     # Create an LLM.
-    llm = LLM(**vars(args))
+    llm = LLM(**args)
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)
@@ -40,9 +35,16 @@ def main(args: Namespace):
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser()
-    parser = EngineArgs.add_cli_args(parser)
-    parser = add_sampling_params_args(parser)
-    # Set example specific arguments
-    parser.set_defaults(model="facebook/opt-125m")
-    args = parser.parse_args()
+    # Add engine args
+    ea_group = parser.add_argument_group("Engine arguments")
+    EngineArgs.add_cli_args(ea_group)
+    ea_group.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    # Add sampling params
+    sp = SamplingParams()
+    sp_group = parser.add_argument_group("Sampling parameters")
+    sp_group.add_argument("--max-tokens", type=int, default=sp.max_tokens)
+    sp_group.add_argument("--temperature", type=float, default=sp.temperature)
+    sp_group.add_argument("--top-p", type=float, default=sp.top_p)
+    sp_group.add_argument("--top-k", type=int, default=sp.top_k)
+    args: dict = vars(parser.parse_args())
     main(args)
