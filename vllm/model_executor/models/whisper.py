@@ -6,7 +6,8 @@ from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
 
 import torch
 from torch import nn
-from transformers import BatchFeature, WhisperConfig, WhisperProcessor, WhisperFeatureExtractor
+from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
+                          WhisperProcessor)
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
@@ -26,7 +27,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
-from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import (MultiModalDataDict, MultiModalDataItems,
+                                   MultiModalDataParser)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement)
@@ -576,19 +578,21 @@ class WhisperProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
-    
-    def get_hf_processor(self, sampling_rate: Optional[int] = None) -> WhisperProcessor:
+
+    def get_hf_processor(self,
+                         sampling_rate: Optional[int] = None
+                         ) -> WhisperProcessor:
         return self.ctx.get_hf_processor(WhisperProcessor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": 1}
-    
+
     def get_feature_extractor(self) -> WhisperFeatureExtractor:
         hf_processor = self.get_hf_processor()
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
-    
+
     def get_max_audio_tokens(self) -> int:
         return self.get_hf_config().max_source_positions
 
@@ -624,26 +628,26 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         )
 
 
-class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
+class WhisperMultiModalProcessor(
+        EncDecMultiModalProcessor[WhisperProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
-    
+
     def create_encoder_prompt(
         self,
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         return [0]
-    
+
     def _call_hf_processor(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # TODO(Isotr0py): clean up this method
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
             mm_data = dict(audio=mm_data.pop("audios"))
@@ -651,29 +655,22 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
                 **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
-            processed_outputs = super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=mm_data,
-                mm_kwargs=mm_kwargs,
-            )
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+        if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
-        else:
-            processed_outputs = super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=mm_data,
-                mm_kwargs=mm_kwargs,
-            )
         return processed_outputs
-    
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            input_features=MultiModalFieldConfig.batched("audio"),
-        )
-    
+        return dict(input_features=MultiModalFieldConfig.batched("audio"), )
+
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
@@ -780,7 +777,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             if not isinstance(input_features, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of audio features. "
                                  f"Got type: {type(input_features)}")
-            input_features = torch.cat([feat.to(self.dtype) for feat in input_features])
+            input_features = torch.cat(
+                [feat.to(self.dtype) for feat in input_features])
 
         return WhisperAudioInputs(input_features=input_features)
 
