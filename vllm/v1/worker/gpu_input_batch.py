@@ -422,6 +422,7 @@ class InputBatch:
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
+        # Trim lists to the batch size.
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
@@ -486,6 +487,7 @@ class InputBatch:
                                        Sequence[int]]) -> SamplingMetadata:
         self.sampling_metadata.spec_token_ids.clear()
         if req_id_to_spec_token_ids:
+            # Set the new spec token ids in the cached sampling metadata.
             for req_id in self.req_ids:
                 spec_token_ids = req_id_to_spec_token_ids.get(req_id, ())
                 self.sampling_metadata.spec_token_ids.append(spec_token_ids)

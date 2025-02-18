@@ -196,13 +196,8 @@ class Scheduler:
                                              request.num_computed_tokens -
                                              request.num_tokens)
                 if num_scheduled_spec_tokens > 0:
-                    if isinstance(request.spec_token_ids, list):
-                        del request.spec_token_ids[num_scheduled_spec_tokens:]
-                    else:
-                        request.spec_token_ids = (
-                            request.spec_token_ids[:num_scheduled_spec_tokens])
                     scheduled_spec_decode_tokens[request.request_id] = (
-                        request.spec_token_ids)
+                        request.spec_token_ids[:num_scheduled_spec_tokens])
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
