@@ -4,45 +4,39 @@ The `LLM` class provides the primary Python interface for doing offline inferenc
 
 ## Usage
 
-All the following examples include an argument parser, which you can use to pass any compatible arguments to the `LLM` instance.
-
-The chat and generate examples also accept the sampling parameters: `max_tokens`, `temperature`, `top_p` and `top_k`.
-
-Try running the script with `--help` for a list of all available arguments.
-
-### Chat
+The first script in this example shows the most basic usage of vLLM. If you are new to Python and vLLM, you should start here.
 
 ```bash
-python examples/offline_inference/basic/chat.py
+python examples/offline_inference/basic/basic.py
 ```
 
-### Classify
+The rest of the scripts include an [argument parser](https://docs.python.org/3/library/argparse.html), which you can use to pass any arguments that are compatible with [`LLM`](https://docs.vllm.ai/en/latest/api/offline_inference/llm.html). Try running the script with `--help` for a list of all available arguments.
 
 ```bash
 python examples/offline_inference/basic/classify.py
 ```
 
-### Embed
-
 ```bash
 python examples/offline_inference/basic/embed.py
 ```
-
-### Generate
-
-```bash
-python examples/offline_inference/basic/generate.py
-```
-
-### Score
 
 ```bash
 python examples/offline_inference/basic/score.py
 ```
 
+The chat and generate scripts also accept the [sampling parameters](https://docs.vllm.ai/en/latest/api/inference_params.html#sampling-parameters): `max_tokens`, `temperature`, `top_p` and `top_k`.
+
+```bash
+python examples/offline_inference/basic/chat.py
+```
+
+```bash
+python examples/offline_inference/basic/generate.py
+```
+
 ## Features
 
-Since the examples support passing arguments to the `LLM` instance, you can use them to experiment with the following features.
+In the scripts that support passing arguments, you can experiment with the following features.
 
 ### Default generation config
 
