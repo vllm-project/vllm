@@ -32,7 +32,7 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         """Ray distributed executor supports pipeline parallelism,
         meaning that it allows PP size batches to be executed concurrently.
         """
-        return 1  #self.vllm_config.parallel_config.pipeline_parallel_size
+        return self.parallel_config.pipeline_parallel_size
 
     def execute_model(
         self,
