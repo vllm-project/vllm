@@ -28,6 +28,8 @@ from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
 
+AnyFuture = Union[asyncio.Future[Any], Future[Any]]
+
 
 class EngineCoreClient(ABC):
     """
@@ -208,8 +210,7 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
-        self.utility_results: Dict[int, Union[asyncio.Future[Any],
-                                              Future]] = {}
+        self.utility_results: Dict[int, AnyFuture] = {}
 
     def shutdown(self):
         """Clean up background resources."""
@@ -220,9 +221,7 @@ class MPClient(EngineCoreClient):
 
 
 def _process_utility_output(output: UtilityOutput,
-                            utility_results: Dict[int,
-                                                  Union[asyncio.Future[Any],
-                                                        Future]]):
+                            utility_results: Dict[int, AnyFuture]):
     """Set the result from a utility method in the waiting future"""
     future = utility_results.pop(output.call_id)
     if output.failure_message is not None:
@@ -275,16 +274,15 @@ class SyncMPClient(MPClient):
         msg = (request_type.value, self.encoder.encode(request))
         self.input_socket.send_multipart(msg, copy=False)
 
-    def _call_utility(self, method: str, *args, unary: bool = False) -> Any:
+    def _call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
-        if not unary:
-            future: Future[Any] = Future()
-            self.utility_results[call_id] = future
+        future: Future[Any] = Future()
+        self.utility_results[call_id] = future
 
         self._send_input(EngineCoreRequestType.UTILITY,
-                         (call_id, method, args, unary))
+                         (call_id, method, args))
 
-        return None if unary else future.result()
+        return future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
@@ -357,18 +355,14 @@ class AsyncMPClient(MPClient):
         if self.outputs_queue is None:
             await self._start_output_queue_task()
 
-    async def _call_utility_async(self,
-                                  method: str,
-                                  *args,
-                                  unary: bool = False) -> Any:
+    async def _call_utility_async(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
-        if not unary:
-            future = asyncio.get_running_loop().create_future()
-            self.utility_results[call_id] = future
+        future = asyncio.get_running_loop().create_future()
+        self.utility_results[call_id] = future
         await self._send_input(EngineCoreRequestType.UTILITY,
-                               (call_id, method, args, unary))
+                               (call_id, method, args))
 
-        return None if unary else await future
+        return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been

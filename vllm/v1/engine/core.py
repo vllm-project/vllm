@@ -363,7 +363,7 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
-            call_id, method_name, args, unary = request
+            call_id, method_name, args = request
             output = UtilityOutput(call_id)
             try:
                 method = getattr(self, method_name)
@@ -373,9 +373,8 @@ class EngineCoreProc(EngineCore):
                 logger.exception("Invocation of %s method failed", method_name)
                 output.failure_message = (f"Call to {method_name} method"
                                           f" failed: {str(e)}")
-            if not unary:
-                self.output_queue.put_nowait(
-                    EngineCoreOutputs(utility_output=output))
+            self.output_queue.put_nowait(
+                EngineCoreOutputs(utility_output=output))
 
     @staticmethod
     def _convert_msgspec_args(method, args):
@@ -384,6 +383,7 @@ class EngineCoreProc(EngineCore):
         if not args:
             return args
         arg_types = signature(method).parameters.values()
+        assert len(args) <= len(arg_types)
         return tuple(
             msgspec.convert(v, type=p.annotation) if isclass(p.annotation)
             and issubclass(p.annotation, msgspec.Struct)
