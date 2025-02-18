@@ -149,8 +149,12 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        """Add request."""
         if self._do_reset_parallel_sampling:
+            # Reset parallel sampling logic between
+            # LLM.generate() calls
             self._reset_parallel_sampling()
+        # Handle parallel sampling requests differently.
         _add_request = (self._add_request if params is None
                         or isinstance(params, PoolingParams) or params.n == 1
                         else self._add_request_parallel_sampling)
@@ -174,16 +178,16 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        """Add request, `n>1`"""
         req_mgr = ParallelSamplingRequestManager(request_id, params)
         self.parallel_parent_reqs[request_id] = req_mgr
-        # Add n child requests with unique request IDs and n=1
+        # Add n child requests with unique request IDs & random seeds and n=1
         for idx in range(req_mgr.n):
-            c_params = req_mgr.get_child_sampling_params(idx)
             c_request_id = req_mgr.get_child_request_id(idx)
             self.parallel_child_reqs[c_request_id] = (idx, request_id)
             self._add_request(request_id=c_request_id,
                               prompt=prompt,
-                              params=c_params,
+                              params=req_mgr.get_child_sampling_params(idx),
                               arrival_time=arrival_time,
                               lora_request=lora_request,
                               trace_headers=trace_headers,
@@ -201,7 +205,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
-
+        """Add request, `n=1`"""
         # 1) Process raw inputs into the request.
         request = self.processor.process_inputs(request_id, prompt, params,
                                                 arrival_time, lora_request,
@@ -219,19 +223,36 @@ class LLMEngine:
         self,
         outputs: List[RequestOutput],
     ) -> List[RequestOutput]:
+        """Build parallel sampling request outputs.
+        
+        Extract child request outputs, aggregate them
+        into parent request output, and return parent
+        output when complete.
+
+        Do not modify `n=1` requests.
+
+        Args:
+          outputs: step request outputs. Mix of child request
+                   outputs & `n=1` request outputs.
+
+        Return:
+          List of parallel sampling parent request outputs &
+          unmodified `n=1` request outputs passed-thru from input.
+        """
         agg_outputs = []
         for c_out in outputs:
             c_req_id = c_out.request_id
             if cdx_req_id := self.parallel_child_reqs.get(c_req_id, None):
+                # For each parallel sampling child request output:
                 (cdx, req_id) = cdx_req_id
-                # Update parallel sampling request
                 req_mgr = self.parallel_parent_reqs[req_id]
+                # Update parallel sampling request
                 if out := req_mgr._process_output(c_out, cdx):
                     # Return parent request output if complete;
-                    # cleanup parent request
+                    # cleanup parent request bookkeeping.
                     agg_outputs.append(out)
                     del self.parallel_parent_reqs[req_id]
-                # Cleanup child request
+                # Cleanup child request bookkeeping.
                 del self.parallel_child_reqs[c_req_id]
             else:
                 # Not a parallel sampling request output
@@ -264,6 +285,7 @@ class LLMEngine:
 
         request_outputs = processed_outputs.request_outputs
         if num_parallel_reqs > 0 and len(request_outputs) > 0:
+            # Process parallel sampling child request outputs
             return self._aggregate_parallel_sampling_outputs(request_outputs)
         else:
             return request_outputs

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
+from typing import List, Optional, Tuple
 
 import pytest
 
@@ -16,56 +17,78 @@ DTYPE = "half"
     # Prefix caching
     params=[False, True])
 def vllm_model(vllm_runner, request):
+    """VllmRunner test fixture parameterized by APC."""
+    enable_prefix_caching = request.param[0]
     with vllm_runner(
             MODEL,
             dtype=DTYPE,
-            max_logprobs=7,
-            # Very small number of batched tokens to ensure
-            # that we test chunking.
-            max_num_batched_tokens=16,
-            max_num_seqs=16,
             max_model_len=128,
             enforce_eager=True,
-            enable_prefix_caching=request.param,
+            enable_prefix_caching=enable_prefix_caching,
             gpu_memory_utilization=0.5,
     ) as vllm_model:
+        # VllmRunner instance is cleaned up after test.
         yield vllm_model
 
 
-def _get_test_sampling_params(prompt_lst):
+def _get_test_sampling_params(
+    prompt_list: List[str],
+    seed: Optional[int] = None,
+) -> Tuple[List[SamplingParams], List[int]]:
+    """Generate random sampling params for a batch."""
 
     def get_mostly_n_gt1() -> int:
-        """Mostly n>1, sometimes n=1"""
+        """Mostly n \in [2,20], ~1/3 n=1"""
         x = random.randint(0, 28)
         if x < 10:
             return 1
         else:
             return x - 8
 
-    n_list = [get_mostly_n_gt1() for _ in range(len(prompt_lst))]
-    return [SamplingParams(temperature=0.8, top_p=0.95, n=n)
-            for n in n_list], n_list
+    n_list = [get_mostly_n_gt1() for _ in range(len(prompt_list))]
+    # High temperature to maximize the chance of unique completions
+    return [
+        SamplingParams(temperature=0.95, top_p=0.95, n=n, seed=seed)
+        for n in n_list
+    ], n_list
 
 
-def test_parallel_sampling(monkeypatch, vllm_model, example_prompts):
+def test_parallel_sampling(monkeypatch, vllm_model, example_prompts) -> None:
+    """Test passes if parallel sampling `n>1` yields `n` uniques completions.
+    
+    Args:
+      monkeypatch: test fixture for modifying text env, scoped to the test.
+      vllm_model: VllmRunner instance under test.
+      example_prompt: test fixture providing prompts for testing.
+    """
     monkeypatch.setenv("VLLM_USE_V1", "1")
+    # Generate batch sampling params
     sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
+    # Process requests
     model: LLM = vllm_model.model
     outputs = model.generate(example_prompts, sampling_params_list)
+
+    # Validate each request response
     for out, n in zip(outputs, n_list):
-        unique_texts = set()
-        # Correct number of completions
+        completion_counts = {}
+        # Assert correct number of completions
         assert len(out.outputs) == n, (
             f"{len(out.outputs)} completions; {n} expected.")
         for idx in range(n):
             comp = out.outputs[idx]
-            # Correct completion indices
+            # Assert correct completion indices
             assert comp.index == idx, (f"Index {comp.index}; expected {idx}.")
-            unique_texts.add(comp.text)
-        # Unique completions
-        assert len(unique_texts) == n, (
-            f"{len(unique_texts)} unique completions; expected"
-            f" {n}.")
+            text = comp.text
+            completion_counts[text] = completion_counts.get(text, 0) + 1
+        # Assert unique completions
+        if len(completion_counts) != n:
+            repeats = {
+                txt: num
+                for (txt, num) in completion_counts.items() if num > 1
+            }
+            raise AssertionError(
+                f"{len(completion_counts)} unique completions; expected"
+                f" {n}. Repeats: {repeats}")
 
 
 def test_llm_engine_refuses_prompt_logprobs_with_apc(monkeypatch):
