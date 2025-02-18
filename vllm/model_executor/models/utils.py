@@ -686,7 +686,7 @@ class QKVCrossParallelLinear(torch.nn.Module):
             skip_bias_add=skip_bias_add,
             params_dtype=params_dtype,
             prefix=f"{prefix}.q_proj_decoder")
-        self.kv_size = total_num_kv_heads * head_size
+
         self.proj["kv_proj_encoder"] = QKVParallelLinear(
             hidden_size=hidden_size,
             head_size=head_size,
@@ -697,6 +697,9 @@ class QKVCrossParallelLinear(torch.nn.Module):
             skip_bias_add=skip_bias_add,
             params_dtype=params_dtype,
             prefix=f"{prefix}.kv_proj_encoder")
+
+        # `kv_proj_encoder.num_kv_heads` accounts for sharding with tp>1.
+        self.kv_size = self.kv_proj_encoder.num_kv_heads * head_size
 
         if bias:
             self.bias = torch.nn.Parameter()

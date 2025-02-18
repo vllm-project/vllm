@@ -798,14 +798,15 @@ class MllamaTextCrossAttention(nn.Module):
         self.config = config
         self.pipeline_parallel_rank = get_pp_group().rank_in_group
         self.tensor_parallel_size = get_tp_group().world_size
-        self.num_heads = self.config.num_attention_heads
+        self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+
         self.num_local_heads = self.num_heads // self.tensor_parallel_size
-        self.num_key_value_heads = self.config.num_key_value_heads
         self.num_local_key_value_heads = \
             self.num_key_value_heads // self.tensor_parallel_size
-        self.dropout = config.dropout
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
+
         self.layer_idx = layer_idx
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.q_local_size = self.num_local_heads * self.head_dim
@@ -820,6 +821,7 @@ class MllamaTextCrossAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+
         self.o_proj = RowParallelLinear(
             self.num_heads * self.head_dim,
             self.hidden_size,
