@@ -18,12 +18,17 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
+from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata)
+from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -103,7 +108,7 @@ class TPUModelRunner:
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = scheduler_config.max_num_seqs
+        self.max_num_reqs = _get_padded_batch_size(scheduler_config.max_num_seqs)
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
@@ -114,8 +119,36 @@ class TPUModelRunner:
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
 
-        self.model: Optional[nn.Module] = None
+        # Multi-modal data support
+        self.input_registry = INPUT_REGISTRY
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.uses_mrope = model_config.uses_mrope
 
+        if self.is_multimodal_model:
+            # NOTE: Initialized client is only used for processing dummy
+            # multimodal data into multimodal kwargs for GPU memory profiling.
+            # Only applicable to multimodal models with legacy input mapper.
+            self.mm_input_mapper_profiling = MMInputCacheClient(
+                self.model_config)
+            self.mm_input_mapper_profiling.use_cache = False
+
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
+
+        # Lazy initialization
+        self.model: Optional[nn.Module] = None
+        # KV caches for forward pass
+        self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        # req_id -> (input_id -> encoder_output)
+        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+
+
+        # Request states.
+        self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
@@ -123,17 +156,9 @@ class TPUModelRunner:
             max_num_blocks_per_req=self.max_num_blocks_per_req,
             device=self.device,
             pin_memory=self.pin_memory,
-            vocab_size=self.model_config.get_vocab_size(),
+            vocab_size=model_config.get_vocab_size(),
         )
 
-        # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
-
-        # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
-
-        # KV caches for forward pass
-        self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
         # Cached torch/numpy tensors
         self.num_swaps = 2
@@ -184,6 +209,8 @@ class TPUModelRunner:
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
 
+        # TODO: Support M-RoPE (e.g, Qwen2-VL)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -198,7 +225,7 @@ class TPUModelRunner:
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-
+            self.encoder_cache.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -210,6 +237,14 @@ class TPUModelRunner:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
                 removed_req_indices.append(req_index)
+
+        # Free the cached encoder outputs.
+        for req_id, input_id in scheduler_output.free_encoder_input_ids:
+            encoder_outputs = self.encoder_cache.get(req_id)
+            if encoder_outputs is not None:
+                encoder_outputs.pop(input_id, None)
+                if not encoder_outputs:
+                    self.encoder_cache.pop(req_id, None)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -579,6 +614,94 @@ class TPUModelRunner:
                           input_positions=input_positions,
                           attn_metadata=attn_metadata)
 
+    def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        if not scheduled_encoder_inputs:
+            return
+
+        # Batch the multi-modal inputs.
+        mm_inputs: List[MultiModalKwargs] = []
+        req_input_ids: List[Tuple[str, int]] = []
+        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+            for input_id in encoder_input_ids:
+                mm_inputs.append(req_state.mm_inputs[input_id])
+                req_input_ids.append((req_id, input_id))
+
+        # Batch mm inputs as much as we can: if a request in the batch has
+        # multiple modalities or a different modality than the previous one,
+        # we process it separately to preserve item order.
+        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
+        # in the same batch while still being able to benefit from batching
+        # multimodal inputs. The proper solution should be reordering the
+        # encoder outputs.
+        grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_inputs)
+
+        encoder_outputs = []
+        for grouped_mm_inputs in grouped_mm_inputs_list:
+            batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
+                                                           device=self.device)
+
+            # Run the encoder.
+            # `curr_group_outputs` is either of the following:
+            # 1. A tensor of shape (num_items, feature_size, hidden_size)
+            # in case feature_size is fixed across all multimodal items.
+            # 2. A list or tuple (length: num_items) of tensors, each of shape
+            # (feature_size, hidden_size) in case the feature size is dynamic
+            # depending on the input multimodal items.
+            curr_group_outputs = self.model.get_multimodal_embeddings(
+                **batched_mm_inputs)
+
+            for output in curr_group_outputs:
+                encoder_outputs.append(output)
+
+        # Cache the encoder outputs.
+        for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
+            if req_id not in self.encoder_cache:
+                self.encoder_cache[req_id] = {}
+            self.encoder_cache[req_id][input_id] = output
+
+    def _gather_encoder_outputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> List[torch.Tensor]:
+        encoder_outputs: List[torch.Tensor] = []
+        num_reqs = self.input_batch.num_reqs
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
+            req_state = self.requests[req_id]
+            num_computed_tokens = req_state.num_computed_tokens
+            mm_positions = req_state.mm_positions
+            for i, pos_info in enumerate(mm_positions):
+                start_pos = pos_info["offset"]
+                num_encoder_tokens = pos_info["length"]
+
+                # The encoder output is needed if the two ranges overlap:
+                # [num_computed_tokens,
+                #  num_computed_tokens + num_scheduled_tokens) and
+                # [start_pos, start_pos + num_encoder_tokens)
+                if start_pos >= num_computed_tokens + num_scheduled_tokens:
+                    # The encoder output is not needed in this step.
+                    break
+                if start_pos + num_encoder_tokens <= num_computed_tokens:
+                    # The encoder output is already processed and stored
+                    # in the decoder's KV cache.
+                    continue
+
+                start_idx = max(num_computed_tokens - start_pos, 0)
+                end_idx = min(
+                    num_computed_tokens - start_pos + num_scheduled_tokens,
+                    num_encoder_tokens)
+                assert start_idx < end_idx
+                assert req_id in self.encoder_cache
+                assert i in self.encoder_cache[req_id]
+                encoder_output = self.encoder_cache[req_id][i]
+                encoder_outputs.append(encoder_output[start_idx:end_idx])
+        return encoder_outputs
+
     @torch.no_grad()
     def execute_model(
         self,
@@ -586,6 +709,13 @@ class TPUModelRunner:
     ) -> ModelRunnerOutput:
         # Update cached state
         self._update_states(scheduler_output)
+
+        if self.is_multimodal_model:
+            # Run the multimodal encoder if any.
+            self._execute_encoder(scheduler_output)
+            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        else:
+            encoder_outputs = []
 
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
@@ -617,14 +747,39 @@ class TPUModelRunner:
                                                    num_scheduled_tokens)
                 is_first = False
 
+            if self.is_multimodal_model:
+                # NOTE(woosuk): To unify token ids and soft tokens (vision
+                # embeddings), we always use embeddings (rather than token ids)
+                # as input to the multimodal model, even when the input is text.
+                input_ids = prompt_data.input_tokens
+                if encoder_outputs:
+                    inputs_embeds = self.model.get_input_embeddings(
+                        input_ids, encoder_outputs)
+                else:
+                    inputs_embeds = self.model.get_input_embeddings(input_ids)
+                # TODO(woosuk): Avoid the copy. Optimize.
+                # self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+                # inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                input_ids = None
+            else:
+                # For text-only models, we use token ids as input.
+                # While it is possible to use embeddings as input just like the
+                # multimodal models, it is not desirable for performance since
+                # then the embedding layer is not included in the CUDA graph.
+                input_ids = prompt_data.input_tokens
+                inputs_embeds = None
+
             # Run forward pass
             with set_forward_context(prompt_data.attn_metadata,
                                      self.vllm_config):
                 assert self.model is not None
-                selected_token_ids = self.model(prompt_data.input_tokens,
-                                                prompt_data.input_positions,
-                                                prompt_data.attn_metadata,
-                                                self.kv_caches)
+                selected_token_ids = self.model(
+                    input_ids=input_ids,
+                    positions=prompt_data.input_positions,
+                    attn_metadata=prompt_data.attn_metadata,
+                    kv_caches=self.kv_caches,
+                    inputs_embeds=inputs_embeds,
+                )
 
             # In parallel to TPU execution, prepare the next iteration
             if i < num_prompts - 1:
@@ -660,10 +815,13 @@ class TPUModelRunner:
             with set_forward_context(decode_data.attn_metadata,
                                      self.vllm_config):
                 assert self.model is not None
-                selected_token_ids = self.model(decode_data.input_tokens,
-                                                decode_data.input_positions,
-                                                decode_data.attn_metadata,
-                                                self.kv_caches)
+                selected_token_ids = self.model(
+                    input_ids=decode_data.input_tokens,
+                    positions=decode_data.input_positions,
+                    attn_metadata=decode_data.attn_metadata,
+                    kv_caches=self.kv_caches,
+                    inputs_embeds=None,
+                )
 
             # Transfer sampled tokens from TPU to CPU
             decode_token_ids_cpu = selected_token_ids.cpu()
@@ -816,6 +974,9 @@ class TPUModelRunner:
                 block_tables=block_tables,
                 context_lens=context_lens,
             )
+        
+        # TODO: Run with embeddings
+        inputs_embeds = None
 
         # NOTE(woosuk): There are two stages of compilation: torch.compile and
         # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
@@ -839,7 +1000,13 @@ class TPUModelRunner:
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
-            self.model(token_ids, position_ids, attn_metadata, kv_caches)
+            self.model(
+                input_ids=token_ids, 
+                positions=position_ids, 
+                kv_caches=kv_caches, 
+                attn_metadata=attn_metadata, 
+                inputs_embeds=inputs_embeds,
+            )
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -961,23 +1128,22 @@ class ModelWrapperV1(nn.Module):
 
     def forward(
         self,
-        token_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
         Args:
-            token_ids: The input token IDs of shape [batch_size, seq_len].
-            position_ids: The input position IDs of shape [batch_size, seq_len].
-            attn_metadata: The Pallas attention metadata.
-            input_lens: The actual input lengths of shape [batch_size].
-            t: The sampling temperature of shape [batch_size].
-            p: The top-p probability of shape [batch_size].
-            num_samples: Number of samples to draw from each logits vector.
+            input_ids: The input token IDs of shape [batch_size, seq_len].
+            positions: The input position IDs of shape [batch_size, seq_len].
             kv_caches: The key and value caches. They can be None during the
                 memory profiling at initialization.
+            attn_metadata: The Pallas attention metadata.
+            inputs_embeds: The input embeddings of shape [batch_size, seq_len,
+                hidden_size]. It is used for multimodal models.
         """
         # Skip this in memory profiling at initialization.
         if attn_metadata is not None and kv_caches[0][0].numel() > 0:
@@ -1002,10 +1168,11 @@ class ModelWrapperV1(nn.Module):
 
         assert self.model is not None
         hidden_states = self.model(
-            token_ids,
-            position_ids,
-            kv_caches,
-            attn_metadata,
+            input_ids=input_ids,
+            positions=positions,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+            inputs_embeds=inputs_embeds,
         )
 
         hidden_states = hidden_states.flatten(0, 1)
@@ -1015,6 +1182,12 @@ class ModelWrapperV1(nn.Module):
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
         argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
         return argmax_token_ids
+
+    def get_multimodal_embeddings(self, *args, **kwargs):
+        return self.model.get_multimodal_embeddings(*args, **kwargs)
+
+    def get_input_embeddings(self, *args, **kwargs):
+        return self.model.get_input_embeddings(*args, **kwargs)
 
 
 def swap_positions(b: InputBatch, id_1, id_2):
