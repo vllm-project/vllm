@@ -190,7 +190,7 @@ class MultiModalProfiler(Generic[_I]):
 
         # V0 does not support chunked prefill.
         if (total_len > seq_len and not envs.VLLM_USE_V1) or is_encoder_data:
-            if total_len > seq_len:
+            if total_len > seq_len and not is_encoder_data:
                 logger.warning(
                     "The context length (%d) of the model is too short "
                     "to hold the multi-modal embeddings in the worst case "
