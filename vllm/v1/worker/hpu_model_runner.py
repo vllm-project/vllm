@@ -1016,6 +1016,7 @@ class HPUModelRunner:
         prefill_attn_metadata = []
         prefill_logits_indices = []
         block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
+        use_prefix_caching = self.cache_config.enable_prefix_caching
 
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
@@ -1062,9 +1063,10 @@ class HPUModelRunner:
                 # Else, we'll break on first batch size that fits token budget.
                 if not self.padding_aware_scheduling or can_schedule:
                     break
-            context_lens = self.input_batch.num_computed_tokens_cpu[
-                batch_idx:batch_idx + num_prefills]
-            use_prefix_caching = any(context_lens)
+            context_lens = torch.zeros(padded_batch_size, dtype=torch.int32,device='cpu')
+            if use_prefix_caching:
+                self.input_batch.num_computed_tokens_cpu[
+                    batch_idx:batch_idx + num_prefills]
             # TODO(kzawora): this is an ugly hack for prefix caching, remove
             # that once batch padding works properly (idk why it doesn't)
             if use_prefix_caching:
@@ -1122,6 +1124,7 @@ class HPUModelRunner:
                 #slot_mapping[i, prompt_len:] = _PAD_SLOT_ID # no need to
                 # sanitize - buffer is pre-filled with _PAD_SLOT_IDs
             slot_mapping = slot_mapping.long()
+            #import pdb; pdb.set_trace()
 
             logits_indices = torch.zeros(padded_batch_size,
                                          dtype=torch.int32,
@@ -1204,7 +1207,6 @@ class HPUModelRunner:
             # ATTN_METADATA.
             prefill_attn_metadata.append(attn_metadata)
             batch_idx += num_prefills
-
         return PrefillInputData(request_ids=prefill_request_ids,
                                 prompt_lens=prefill_prompt_lens,
                                 token_ids=prefill_token_ids,
@@ -1267,20 +1269,21 @@ class HPUModelRunner:
                                                          self.block_size))
         # NOTE(kzawora): the "-1" is what causes this entire thing to work
         # properly and have good accuracy - why? beats me...
-        block_offsets = (padded_index - 1) % self.block_size
+        block_offsets = (padded_index-1) % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
         # Set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
         slot_mapping = slot_mapping[:padded_batch_size]
         slot_mapping[num_decodes:] = _PAD_SLOT_ID
-
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
         context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
         num_blocks = np.ceil(context_lens / self.block_size).astype(
             np.int32).tolist()
         block_tables_list = []
         for i, n in enumerate(num_blocks):
-            block_tables_list.append(block_table_cpu_tensor[i, :n].tolist())
+            seq_block_table = block_table_cpu_tensor[i, :n].tolist()
+            assert len(seq_block_table) == n
+            block_tables_list.append(seq_block_table)
 
         # CONTEXT_LENS [batch_size]
         #context_lens = (positions.reshape(-1) + 1)
@@ -1344,20 +1347,23 @@ class HPUModelRunner:
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = []
+        num_prompt_tokens = []
         for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens.append(num_tokens)
-
+            seq_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            seq_num_prompt_tokens = self.input_batch.num_prompt_tokens[idx]
+            num_scheduled_tokens.append(seq_num_scheduled_tokens)
+            num_prompt_tokens.append(seq_num_prompt_tokens)
             # NOTE: assert that all the decodes are "decodes".
             if idx < num_decodes:
-                assert num_tokens == 1
-
+                assert seq_num_scheduled_tokens == 1
+        prefill_num_tokens = num_scheduled_tokens if self.cache_config.enable_prefix_caching else num_prompt_tokens
         return (
             self._prepare_prefill_inputs(num_prefills, num_decodes,
-                                         num_scheduled_tokens, bucketing),
+                                         prefill_num_tokens, bucketing),
             self._prepare_decode_inputs(num_decodes, num_scheduled_tokens,
                                         bucketing),
         )
+
 
     def _seq_len(self, attn_metadata):
         return attn_metadata.slot_mapping.size(1)
@@ -1415,7 +1421,6 @@ class HPUModelRunner:
             use_graphs = self._use_graphs(batch_size, seq_len, num_blocks,
                                           is_prompt)
             additional_kwargs.update({"bypass_hpu_graphs": not use_graphs})
-            #import pdb; pdb.set_trace()
         trimmed_attn_metadata = trim_attn_metadata(attn_metadata)
         hidden_states = self.model.forward(input_ids=token_ids,
                                            positions=position_ids,
@@ -1508,7 +1513,6 @@ class HPUModelRunner:
         num_decodes = len(pd_info.decode_req_ids)
         num_prefills = len(pd_info.prompt_req_ids)
         num_reqs = num_decodes + num_prefills
-
         prefill_data, decode_data = self._prepare_inputs(
             scheduler_output,
             num_prefills,
