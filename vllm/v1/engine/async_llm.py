@@ -56,7 +56,7 @@ class AsyncLLM(EngineClient):
         self.stat_loggers: List[StatLoggerBase] = []
         if self.log_stats:
             self.stat_loggers.extend([
-                LoggingStatLogger(),
+                LoggingStatLogger(vllm_config),
                 PrometheusStatLogger(vllm_config),
             ])
 

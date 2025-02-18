@@ -126,6 +126,7 @@ class EngineArgs:
     max_num_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
+    log_stats_interval: float = 5.0
     revision: Optional[str] = None
     code_revision: Optional[str] = None
     rope_scaling: Optional[Dict[str, Any]] = None
@@ -1025,6 +1026,11 @@ class EngineArgs:
             "Different platforms may support different configs. Make sure the "
             "configs are valid for the platform you are using. The input format"
             " is like '{\"config_key\":\"config_value\"}'")
+        
+        parser.add_argument('--log-stats-interval',
+                            type=float,
+                            default=EngineArgs.log_stats_interval,
+                            help='Interval for collecting log statistics.')
         return parser
 
     @classmethod
@@ -1319,7 +1325,7 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
             collect_model_execute_time="worker" in detailed_trace_modules
             or "all" in detailed_trace_modules,
-        )
+            log_stats_interval=self.log_stats_interval)
 
         config = VllmConfig(
             model_config=model_config,
