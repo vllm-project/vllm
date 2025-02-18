@@ -591,8 +591,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
     # contiguous cache fetch will be used.
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
-    lambda: os.environ.get('VLLM_CONTIGUOUS_PA', 'true').lower(
-    ) in ("1", "true"),
+    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
+     ("1", "true"),
 }
 
 # end-env-vars-definition
