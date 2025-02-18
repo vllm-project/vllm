@@ -346,11 +346,11 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
-        if isinstance(self.vllm_config.parallel_config.scheduler_cls, str):
+        if isinstance(self.vllm_config.scheduler_config.scheduler_cls, str):
             Scheduler = resolve_obj_by_qualname(
-                self.vllm_config.parallel_config.scheduler_cls)
+                self.vllm_config.scheduler_config.scheduler_cls)
         else:
-            Scheduler = self.vllm_config.parallel_config.scheduler_cls
+            Scheduler = self.vllm_config.scheduler_config.scheduler_cls
         self.scheduler = [
             Scheduler(
                 self.scheduler_config, self.cache_config, self.lora_config,

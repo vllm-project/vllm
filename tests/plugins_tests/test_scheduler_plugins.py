@@ -24,7 +24,7 @@ def test_scheduler_plugins():
             enforce_eager=True,  # reduce test time
         )
         vllm_config = engine_args.create_engine_config()
-        vllm_config.parallel_config.scheduler_cls = DummyScheduler
+        vllm_config.scheduler_config.scheduler_cls = DummyScheduler
 
         engine = LLMEngine(vllm_config=vllm_config,
                            executor_class=UniProcExecutor,
