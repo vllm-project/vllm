@@ -6,18 +6,60 @@ requires = [
     "packaging",
     "setuptools>=61",
     "setuptools-scm>=8.0",
-    "torch == 2.4.0",
+    "torch == 2.5.1",
     "wheel",
     "jinja2",
 ]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm"
+authors = [{name = "vLLM Team"}]
+license = { "file"= "LICENSE" }
+readme = "README.md"
+description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
+classifiers = [
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+requires-python = ">=3.9"
+dynamic = [ "version", "dependencies", "optional-dependencies"]
+
+[project.urls]
+Homepage="https://github.com/vllm-project/vllm"
+Documentation="https://vllm.readthedocs.io/en/latest/"
+Slack="http://slack.vllm.ai/"
+
+[project.scripts]
+vllm = "vllm.entrypoints.cli.main:main"
+
+[tool.setuptools_scm]
+version_file = "vllm/_version.py"
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["benchmarks", "csrc", "docs", "examples", "tests*"]
+namespaces = false
+
+[tool.yapfignore]
+ignore_patterns = [
+    "build/**",
+]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80
 exclude = [
     # External file, leaving license intact
-    "examples/fp8/quantizer/quantize.py"
+    "examples/other/fp8/quantizer/quantize.py"
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -31,7 +73,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    # "UP",
+    "UP",
     # flake8-bugbear
     "B",
     # flake8-simplify
@@ -49,17 +91,19 @@ ignore = [
     "B007",
     # f-string format
     "UP032",
+    # Python 3.8 typing
+    "UP006", "UP035",
+    # Can remove once 3.10+ is the minimum Python version
+    "UP007",
 ]
 
 [tool.mypy]
-python_version = "3.8"
-
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
 
 # After fixing type errors resulting from follow_imports: "skip" -> "silent",
-# move the directory here and remove it from format.sh and mypy.yaml
+# move the directory here and remove it from tools/mypy.sh
 files = [
     "vllm/*.py",
     "vllm/adapter_commons",
@@ -67,7 +111,7 @@ files = [
     "vllm/entrypoints",
     "vllm/core",
     "vllm/inputs",
-    "vllm/logging",
+    "vllm/logging_utils",
     "vllm/multimodal",
     "vllm/platforms",
     "vllm/transformers_utils",
@@ -82,8 +126,8 @@ exclude = [
 ]
 
 [tool.codespell]
-ignore-words-list = "dout, te, indicies, subtile"
-skip = "./tests/models/fixtures,./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
+ignore-words-list = "dout, te, indicies, subtile, ElementE"
+skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build/*,vllm/third_party/*"
 
 [tool.isort]
 use_parentheses = true
@@ -92,6 +136,18 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 markers = [
     "skip_global_cleanup",
-    "core_model: run this model test in each PR instead of just daily",
-    "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
+    "core_model: enable this model test in each PR instead of only nightly",
+    "cpu_model: enable this model test in CPU tests",
+    "quant_model: run this model test under Quantized category",
+    "split: run this test as part of a split",
+    "distributed: run this test only in distributed GPU tests",
+    "skip_v1: do not run this test with v1",
+    "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
+
+[tool.pymarkdown]
+plugins.md004.style = "sublist" # ul-style
+plugins.md013.enabled = false # line-length
+plugins.md041.enabled = false # first-line-h1
+plugins.md033.enabled = false # inline-html
+plugins.md024.allow_different_nesting = true # no-duplicate-headers

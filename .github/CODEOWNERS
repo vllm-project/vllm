@@ -1,19 +1,36 @@
 # See https://help.github.com/articles/about-codeowners/
 # for more info about CODEOWNERS file
 
-/tests/async_engine @njhill @robertgshaw2-neuralmagic @simon-mo
+# This lists cover the "core" components of vLLM that require careful review
+/vllm/attention/backends/abstract.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
+/vllm/core @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
+/vllm/engine/llm_engine.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
+/vllm/executor/executor_base.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
+/vllm/worker/worker_base.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
+/vllm/worker/worker.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
+/vllm/model_executor/layers/sampler.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
+/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth
+/vllm/model_executor/guided_decoding @mgoin
+/vllm/multimodal @DarkLight1337 @ywang96
+CMakeLists.txt @tlrmchlsmth
+
+# vLLM V1
+/vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
+
+# Test ownership
+/tests/async_engine @njhill @robertgshaw2-redhat @simon-mo
 /tests/test_inputs.py @DarkLight1337 @ywang96
-/tests/entrypoints @DarkLight1337 @robertgshaw2-neuralmagic @simon-mo 
+/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @simon-mo
 /tests/models @DarkLight1337 @ywang96
 /tests/multimodal @DarkLight1337 @ywang96
-/tests/prefix_caching @comaniac @KuntaiDu 
+/tests/prefix_caching @comaniac @KuntaiDu
 /tests/spec_decode @njhill @LiuXiaoxuanPKU
-/tests/kernels @tlrmchlsmth @WoosukKwon 
-/tests/quantization @mgoin @robertgshaw2-neuralmagic
-/.buildkite/lm-eval-harness @mgoin @simon-mo 
+/tests/kernels @tlrmchlsmth @WoosukKwon
+/tests/quantization @mgoin @robertgshaw2-redhat
+/.buildkite/lm-eval-harness @mgoin @simon-mo
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/multi_step @alexm-neuralmagic @SolitaryThinker @comaniac
+/tests/multi_step @alexm-redhat @comaniac
 /tests/weight_loading @mgoin @youkaichao
 /tests/basic_correctness/test_chunked_prefill @rkooo567 @comaniac

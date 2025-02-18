@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List
 
 import openai
@@ -9,7 +11,7 @@ from vllm.multimodal.utils import encode_audio_base64, fetch_audio
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "fixie-ai/ultravox-v0_3"
+MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 TEST_AUDIO_URLS = [
     AudioAsset("winning_call").url,
 ]
@@ -25,6 +27,7 @@ def server():
         "--max-num-seqs",
         "5",
         "--enforce-eager",
+        "--trust-remote-code",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -68,17 +71,19 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
     }]
 
     # test single completion
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_tokens=10,
-                                                           logprobs=True,
-                                                           top_logprobs=5)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        logprobs=True,
+        temperature=0.0,
+        top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=202, total_tokens=212)
+        completion_tokens=10, prompt_tokens=201, total_tokens=211)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -91,7 +96,7 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -123,17 +128,19 @@ async def test_single_chat_session_audio_base64encoded(
     }]
 
     # test single completion
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_tokens=10,
-                                                           logprobs=True,
-                                                           top_logprobs=5)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        logprobs=True,
+        temperature=0.0,
+        top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=202, total_tokens=212)
+        completion_tokens=10, prompt_tokens=201, total_tokens=211)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -146,7 +153,63 @@ async def test_single_chat_session_audio_base64encoded(
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
+        temperature=0.0,
+    )
+    message = chat_completion.choices[0].message
+    assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
+async def test_single_chat_session_input_audio(
+        client: openai.AsyncOpenAI, model_name: str, audio_url: str,
+        base64_encoded_audio: Dict[str, str]):
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "input_audio",
+                "input_audio": {
+                    "data": base64_encoded_audio[audio_url],
+                    "format": "wav"
+                }
+            },
+            {
+                "type": "text",
+                "text": "What's happening in this audio?"
+            },
+        ],
+    }]
+
+    # test single completion
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        logprobs=True,
+        top_logprobs=5)
+    assert len(chat_completion.choices) == 1
+
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"
+    assert chat_completion.usage == openai.types.CompletionUsage(
+        completion_tokens=10, prompt_tokens=201, total_tokens=211)
+
+    message = choice.message
+    message = chat_completion.choices[0].message
+    assert message.content is not None and len(message.content) >= 10
+    assert message.role == "assistant"
+    messages.append({"role": "assistant", "content": message.content})
+
+    # test multi-turn dialogue
+    messages.append({"role": "user", "content": "express your result in json"})
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -178,7 +241,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
         temperature=0.0,
     )
     output = chat_completion.choices[0].message.content
@@ -188,7 +251,67 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
+        temperature=0.0,
+        stream=True,
+    )
+    chunks: List[str] = []
+    finish_reason_count = 0
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.role:
+            assert delta.role == "assistant"
+        if delta.content:
+            chunks.append(delta.content)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
+    assert chunk.choices[0].finish_reason == stop_reason
+    assert delta.content
+    assert "".join(chunks) == output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
+async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
+                                          model_name: str, audio_url: str,
+                                          base64_encoded_audio: Dict[str,
+                                                                     str]):
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "input_audio",
+                "input_audio": {
+                    "data": base64_encoded_audio[audio_url],
+                    "format": "wav"
+                }
+            },
+            {
+                "type": "text",
+                "text": "What's happening in this audio?"
+            },
+        ],
+    }]
+
+    # test single completion
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        temperature=0.0,
+    )
+    output = chat_completion.choices[0].message.content
+    stop_reason = chat_completion.choices[0].finish_reason
+
+    # test streaming
+    stream = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
         temperature=0.0,
         stream=True,
     )
@@ -213,7 +336,8 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
 async def test_multi_audio_input(client: openai.AsyncOpenAI, model_name: str,
-                                 audio_url: str):
+                                 audio_url: str,
+                                 base64_encoded_audio: Dict[str, str]):
 
     messages = [{
         "role":
@@ -226,9 +350,10 @@ async def test_multi_audio_input(client: openai.AsyncOpenAI, model_name: str,
                 }
             },
             {
-                "type": "audio_url",
-                "audio_url": {
-                    "url": audio_url
+                "type": "input_audio",
+                "input_audio": {
+                    "data": base64_encoded_audio[audio_url],
+                    "format": "wav"
                 }
             },
             {
@@ -242,7 +367,7 @@ async def test_multi_audio_input(client: openai.AsyncOpenAI, model_name: str,
         await client.chat.completions.create(
             model=model_name,
             messages=messages,
-            max_tokens=10,
+            max_completion_tokens=10,
             temperature=0.0,
         )
 

@@ -1,6 +1,7 @@
 #pragma once
 
-#include <torch/custom_class.h>
+// For TORCH_CHECK
+#include <torch/library.h>
 
 namespace vllm {
 
@@ -9,12 +10,7 @@ namespace vllm {
 //  in particular it can be used to represent sub-byte data types (something
 //  that torch.dtype currently does not support).
 //
-//  ScalarTypeTorch is a subclass of ScalarType that is compatible with
-//  TORCH_LIBRARY, making it accessible from Python as well meaning this class
-//  can be used as a argument for custom operators, helping to simplify these
-//  interfaces.
-//
-//  The type definitions on the Python side can be found in: vllm/_core_ext.pyi
+//  The type definitions on the Python side can be found in: vllm/scalar_type.py
 //  these type definitions should be kept up to date with any Python API changes
 //  here.
 //
@@ -36,7 +32,7 @@ class ScalarType {
         signed_(signed_),
         bias(bias),
         finite_values_only(finite_values_only),
-        nan_repr(nan_repr){};
+        nan_repr(nan_repr) {};
 
   static constexpr ScalarType int_(uint8_t size_bits, int32_t bias = 0) {
     return ScalarType(0, size_bits - 1, true, bias);
@@ -308,204 +304,7 @@ class ScalarType {
   }
 };
 
-// Create a TORCH_LIBRARY compatible version of ScalarType (i.e. inherit from
-//  torch::CustomClassHolder), we use multiple inheritance here since we cannot
-//  have ScalarType inherit from torch::CustomClassHolder and have a constexpr
-//  constructor at the same time (torch::CustomClassHolder does not have a
-//  constexpr destructor)
-// See also:
-// https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA
-class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
- public:
-  ScalarTypeTorch(int64_t exponent, int64_t mantissa, int64_t bias,
-                  bool _signed)
-      : ScalarType(exponent, mantissa, bias, _signed){};
-
-  ScalarTypeTorch(ScalarType type) : ScalarType(type){};
-
-  using Base = ScalarType;
-  using Self = ScalarTypeTorch;
-  using SelfPtr = c10::intrusive_ptr<Self>;
-
-  static void check_size_bits(int64_t size_bits, bool signed_) {
-    TORCH_CHECK(
-        size_bits <=
-            std::numeric_limits<decltype(std::declval<Self>().mantissa)>::max(),
-        "size_bits bit width is too large to be represented");
-  }
-
-  static void check_bias(int64_t bias) {
-    using Bias = decltype(std::declval<Self>().bias);
-    TORCH_CHECK(bias <= std::numeric_limits<Bias>::max() &&
-                    bias >= std::numeric_limits<Bias>::min(),
-                "bias too large or small to be represented");
-  }
-
-  static void check_exponent(int64_t exponent) {
-    TORCH_CHECK(
-        exponent <=
-            std::numeric_limits<decltype(std::declval<Self>().exponent)>::max(),
-        "exponent bit width is too large to be represented");
-  }
-
-  static void check_mantissa(int64_t mantissa) {
-    TORCH_CHECK(
-        mantissa <=
-            std::numeric_limits<decltype(std::declval<Self>().mantissa)>::max(),
-        "mantissa bit width is too large to be represented");
-  }
-
-  static SelfPtr int_(int64_t size_bits, c10::optional<int64_t> bias) {
-    check_size_bits(size_bits, true);
-    check_bias(bias.value_or(0));
-    return c10::make_intrusive<Self>(
-        ScalarType::int_(size_bits, bias.value_or(0)));
-  }
-
-  static SelfPtr uint(int64_t size_bits, c10::optional<int64_t> bias) {
-    check_size_bits(size_bits, true);
-    check_bias(bias.value_or(0));
-    return c10::make_intrusive<Self>(
-        ScalarType::uint(size_bits, bias.value_or(0)));
-  }
-
-  static SelfPtr float_IEEE754(int64_t exponent, int64_t mantissa) {
-    check_mantissa(mantissa);
-    check_exponent(exponent);
-    return c10::make_intrusive<Self>(
-        ScalarType::float_IEEE754(exponent, mantissa));
-  }
-
-  static SelfPtr float_(int64_t exponent, int64_t mantissa,
-                        bool finite_values_only, int64_t nan_repr) {
-    check_mantissa(mantissa);
-    check_exponent(exponent);
-    return c10::make_intrusive<Self>(ScalarType::float_(
-        exponent, mantissa, finite_values_only, NanRepr(nan_repr)));
-  }
-
-  // This needs to be implemented and throw a TypeError in order for
-  // PyTorch's opcheck to work on ops that use ScalarTypes.
-  int64_t len() const {
-    throw c10::TypeError({__func__, __FILE__, static_cast<uint32_t>(__LINE__)},
-                         "__len__ not implemented");
-    return 0;
-  }
-
-  // Serialize a ScalarType into a tuple of pairs.  Where each pair
-  // is a (fieldname, value).
-  // For simplicity, we are just going to convert to a ScalarTypeId.
-  std::tuple<std::tuple<std::string, int64_t>> obj_flatten() const {
-    return {{"ScalarType", id()}};
-  }
-
-  // Deserialize a scalar type that has been serialized by obj_flatten,
-  // ostensibly from a tuple of (member name, value) pairs, but in reality
-  // just a ScalarTypeId.
-  static SelfPtr obj_unflatten(
-      std::tuple<std::tuple<std::string, int64_t>> const& flat_type) {
-    return c10::make_intrusive<Self>(
-        from_id(std::get<1>(std::get<0>(flat_type))));
-  }
-
-  template <typename T>
-  static void bind_readonly_property(torch::class_<Self>& cls,
-                                     std::string const& name, T Base::*field) {
-    auto getter_func_helper = [field = std::move(field)](SelfPtr const& self) {
-      if constexpr (std::is_member_function_pointer_v<decltype(field)>) {
-        return (self.get()->*field)();
-      } else {
-        return self.get()->*field;
-      }
-    };
-
-    auto getter_func = [field = std::move(field),
-                        getter_func_helper = std::move(getter_func_helper)](
-                           SelfPtr const& self) {
-      auto val = getter_func_helper(self);
-      // upconvert uint8_t, int32_t etc. to int64_t for python
-      if constexpr (std::is_integral_v<T>) {
-        return static_cast<int64_t>(val);
-      } else {
-        return val;
-      }
-    };
-
-    cls.def_property(name, getter_func);
-  }
-
-  template <typename MemberFunc, typename Cls>
-  static void bind_function(torch::class_<Self>& cls, const std::string& name,
-                            MemberFunc Cls::*member) {
-    cls.def(name, [member = std::move(member)](SelfPtr const& self) {
-      return (self.get()->*member)();
-    });
-  }
-
-  template <typename Func>
-  static void bind_function(torch::class_<Self>& cls, const std::string& name,
-                            Func func) {
-    cls.def(name, func);
-  }
-
-  template <typename Func>
-  static void bind_static_function(torch::class_<Self>& cls,
-                                   const std::string& name, Func func) {
-    cls.def_static(name, func);
-  }
-
-  static void bind_class(torch::Library& lib) {
-    auto cls = lib.class_<ScalarTypeTorch>("ScalarType")
-                   .def(torch::init<int64_t, int64_t, int64_t, bool>());
-
-    // Bind Properties
-    bind_readonly_property(cls, "mantissa", &Base::mantissa);
-    bind_readonly_property(cls, "exponent", &Base::exponent);
-    bind_readonly_property(cls, "bias", &Base::bias);
-    bind_readonly_property(cls, "signed", &Base::is_signed);
-    bind_readonly_property(cls, "size_bits", &Base::size_bits);
-
-    // Bind member functions
-    bind_function(cls, "is_signed", &Base::is_signed);
-    bind_function(cls, "is_integer", &Base::is_integer);
-    bind_function(cls, "is_floating_point", &Base::is_floating_point);
-    bind_function(cls, "is_ieee_754", &Base::is_ieee_754);
-    bind_function(cls, "has_nans", &Base::has_nans);
-    bind_function(cls, "has_infs", &Base::has_infs);
-    bind_function(cls, "has_bias", &Base::has_bias);
-
-    bind_function(cls, "max", [](SelfPtr const& self) {
-      return std::visit([](auto arg) { return c10::IValue(arg); },
-                        self.get()->max());
-    });
-    bind_function(cls, "min", [](SelfPtr const& self) {
-      return std::visit([](auto arg) { return c10::IValue(arg); },
-                        self.get()->min());
-    });
-
-    bind_function(cls, "__len__", &ScalarTypeTorch::len);
-    bind_function(cls, "__str__", &Base::str);
-    bind_function(cls, "__eq__", [](SelfPtr const& self, SelfPtr const& other) {
-      return *self == *other;
-    });
-    bind_function(cls, "__repr__", [](SelfPtr const& self) {
-      return "ScalarType." + self.get()->str();
-    });
-
-    bind_function(cls, "__obj_flatten__", &ScalarTypeTorch::obj_flatten);
-    bind_static_function(cls, "__obj_unflatten__",
-                         &ScalarTypeTorch::obj_unflatten);
-
-    // Bind static functions (convenience constructors)
-    bind_static_function(cls, "int_", &ScalarTypeTorch::int_);
-    bind_static_function(cls, "uint", &ScalarTypeTorch::uint);
-    bind_static_function(cls, "float_IEEE754", &ScalarTypeTorch::float_IEEE754);
-    bind_static_function(cls, "float_", &ScalarTypeTorch::float_);
-  }
-};
-
-using ScalarTypeId = int64_t;
-using ScalarTypeTorchPtr = c10::intrusive_ptr<ScalarTypeTorch>;
+using ScalarTypeId = ScalarType::Id;
 
 // "rust style" names generally following:
 //   https://github.com/pytorch/pytorch/blob/6d9f74f0af54751311f0dd71f7e5c01a93260ab3/torch/csrc/api/include/torch/types.h#L60-L70

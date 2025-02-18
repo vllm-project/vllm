@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from dataclasses import dataclass
 from importlib.util import find_spec
@@ -7,14 +9,14 @@ import torch
 from torch import nn
 from transformers_neuronx.config import GenerationConfig
 
-from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+from vllm.config import VllmConfig
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalKwargs)
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
@@ -57,25 +59,19 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
+        vllm_config: VllmConfig,
     ):
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-
+        ModelRunnerBase.__init__(self, vllm_config)
+        model_config = self.model_config
         if model_config is not None and model_config.get_sliding_window():
             logger.warning("Sliding window is not supported on Neuron. "
                            "The model will run without sliding window.")
-        self.device_config = (device_config
-                              if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
 
         # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.multi_modal_input_mapper = self.mm_registry \
             .create_input_mapper(self.model_config)
 
         # Lazy initialization.
@@ -119,6 +115,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             raise NotImplementedError(
                 "Supports only Transformer-NeuronX based models.")
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -130,7 +129,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         input_block_ids: List[int] = []
 
         seq_lens: List[int] = []
-        multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -152,9 +151,15 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
-                # Process multi-modal data
-                mm_kwargs = self.multi_modal_input_mapper(mm_data)
-                multi_modal_inputs_list.append(mm_kwargs)
+                if self.mm_registry.has_processor(self.model_config):
+                    mm_kwargs = mm_data
+                else:
+                    mm_kwargs = self.multi_modal_input_mapper(
+                        mm_data,
+                        seq_group_metadata.mm_processor_kwargs,
+                    )
+
+                multi_modal_kwargs_list.append(mm_kwargs)
 
         max_seq_len = max(seq_lens)
         assert max_seq_len > 0
@@ -172,7 +177,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                        dtype=torch.long,
                                        device=self.device)
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         return (input_tokens, input_positions, input_block_ids, seq_lens,
                 multi_modal_kwargs)
@@ -315,13 +320,15 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")
 
-        hidden_states = self.model(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            input_block_ids=model_input.input_block_ids,
-            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
-                                         device=self.device),
-        )
+        with set_forward_context(None, self.vllm_config, 0):
+            hidden_states = self.model(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                input_block_ids=model_input.input_block_ids,
+                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
+                                             or {},
+                                             device=self.device),
+            )
 
         # Compute the logits only if the on-device sampling is turned off as
         # on-device sampling outputs the token ids.

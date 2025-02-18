@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Custom normalization layers."""
 from typing import Optional, Tuple, Union
 
@@ -7,6 +8,7 @@ import torch.nn as nn
 from vllm.model_executor.custom_op import CustomOp
 
 
+@CustomOp.register("rms_norm")
 class RMSNorm(CustomOp):
     """Root mean square normalization.
 
@@ -19,6 +21,7 @@ class RMSNorm(CustomOp):
         hidden_size: int,
         eps: float = 1e-6,
         var_hidden_size: Optional[int] = None,
+        has_weight: bool = True,
     ) -> None:
         super().__init__()
 
@@ -26,8 +29,11 @@ class RMSNorm(CustomOp):
         self.variance_epsilon = eps
         self.variance_size_override = (None if var_hidden_size == hidden_size
                                        else var_hidden_size)
+        self.has_weight = has_weight
 
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = torch.ones(hidden_size)
+        if self.has_weight:
+            self.weight = nn.Parameter(self.weight)
 
     def forward_native(
         self,
@@ -59,7 +65,9 @@ class RMSNorm(CustomOp):
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
 
         x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x.to(orig_dtype) * self.weight
+        x = x.to(orig_dtype)
+        if self.has_weight:
+            x = x * self.weight
         if residual is None:
             return x
         else:
@@ -92,6 +100,25 @@ class RMSNorm(CustomOp):
         )
         return out
 
+    def forward_hpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from vllm_hpu_extension.ops import HPUFusedRMSNorm
+        if HPUFusedRMSNorm is None:
+            return self.forward_native(x, residual)
+        if residual is not None:
+            orig_shape = x.shape
+            residual += x.view(residual.shape)
+            # Note: HPUFusedRMSNorm requires 3D tensors as inputs
+            x = HPUFusedRMSNorm.apply(residual, self.weight,
+                                      self.variance_epsilon)
+            return x.view(orig_shape), residual
+
+        x = HPUFusedRMSNorm.apply(x, self.weight, self.variance_epsilon)
+        return x
+
     def forward_xpu(
         self,
         x: torch.Tensor,
@@ -122,6 +149,7 @@ class RMSNorm(CustomOp):
         return s
 
 
+@CustomOp.register("gemma_rms_norm")
 class GemmaRMSNorm(CustomOp):
     """RMS normalization for Gemma.
 

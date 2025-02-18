@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
 It tests chunked prefill. Chunked prefill can be enabled by
@@ -7,16 +8,18 @@ prefill requests are chunked.
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
 import os
-from contextlib import nullcontext
 
 import pytest
+
+from tests.kernels.utils import override_backend_env_variable
+from vllm.platforms import current_platform
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
 from ..utils import multi_gpu_test
 
 MODELS = [
     "facebook/opt-125m",
-    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
 
@@ -28,6 +31,7 @@ MODELS = [
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
+@pytest.mark.parametrize("attention_backend", ["FLASHINFER", "FLASH_ATTN"])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -38,11 +42,15 @@ def test_models(
     chunked_prefill_token_size: int,
     enforce_eager: bool,
     tensor_parallel_size: int,
+    attention_backend: str,
+    monkeypatch,
 ) -> None:
     """
     Checks exact match decode between huggingface model and vllm runner with
     chunked prefill.
     """
+    override_backend_env_variable(monkeypatch, attention_backend)
+
     max_num_seqs = chunked_prefill_token_size
     max_num_batched_tokens = chunked_prefill_token_size
 
@@ -71,14 +79,19 @@ def test_models(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("attention_backend", ["FLASHINFER", "FLASH_ATTN"])
 def test_models_distributed(
     hf_runner,
     vllm_runner,
     example_prompts,
     model: str,
     distributed_executor_backend: str,
+    attention_backend: str,
+    monkeypatch,
 ) -> None:
-    if (model == "meta-llama/Llama-2-7b-hf"
+    override_backend_env_variable(monkeypatch, attention_backend)
+
+    if (model == "meta-llama/Llama-3.2-1B-Instruct"
             and distributed_executor_backend == "ray"):
         # test ray adag
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
@@ -191,23 +204,23 @@ def test_models_with_fp8_kv_cache(
 @pytest.mark.parametrize("max_tokens", [16])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize("chunk_size", [30, 32])
-@pytest.mark.parametrize("use_v2_block_manager", [False, True])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
+@pytest.mark.parametrize("dtype", ["half"])
 def test_with_prefix_caching(
     vllm_runner,
     max_tokens: int,
     enforce_eager: bool,
     chunk_size: int,
-    use_v2_block_manager: bool,
     tensor_parallel_size: int,
+    dtype: str,
 ) -> None:
     """
     Checks exact match decode with and without prefix caching
     with chunked prefill enabled.
     """
-    model = "meta-llama/Llama-2-7b-chat-hf"
+    model = "meta-llama/Llama-3.2-1B-Instruct"
     # The common prompt has 142 tokens with Llama-2 tokenizer.
     common_prompt = "You are a helpful AI assistant " * 20
     unique_prompts = [
@@ -219,35 +232,83 @@ def test_with_prefix_caching(
 
     max_num_batched_tokens = max_num_seqs = chunk_size
     outputs = {}  # type: ignore
-    check_result = True
     for enable in (True, False):
         with vllm_runner(
                 model,
-                dtype="half",
+                dtype=dtype,
                 max_num_batched_tokens=max_num_batched_tokens,
                 enable_chunked_prefill=True,
                 enable_prefix_caching=enable,
                 tensor_parallel_size=tensor_parallel_size,
-                use_v2_block_manager=use_v2_block_manager,
                 enforce_eager=enforce_eager,
                 max_num_seqs=max_num_seqs,
         ) as vllm_model:
-            # It should fail when prefix caching is enable and chunk
-            # size is not a multiple of block size (16).
-            should_fail = chunk_size % 16 != 0 and enable
-            check_result &= not should_fail
             outputs[enable] = []
-            # Send the request one-by-one to ensure the cache is populated.
-            with pytest.raises(ValueError) if should_fail else nullcontext():
-                for prompt in full_prompts:
-                    outputs[enable] += vllm_model.generate_greedy([prompt],
-                                                                  max_tokens)
+            for prompt in full_prompts:
+                outputs[enable] += vllm_model.generate_greedy([prompt],
+                                                              max_tokens)
 
-    # Check results only if we did not expect a failure.
-    if check_result:
-        check_outputs_equal(
-            outputs_0_lst=outputs[False],
-            outputs_1_lst=outputs[True],
-            name_0="w/o prefix caching",
-            name_1="with prefix caching",
-        )
+    check_outputs_equal(
+        outputs_0_lst=outputs[False],
+        outputs_1_lst=outputs[True],
+        name_0="w/o prefix caching",
+        name_1="with prefix caching",
+    )
+
+
+@pytest.mark.parametrize("model", ["facebook/opt-125m"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("attention_backend", ["TORCH_SDPA"])
+@pytest.mark.cpu_model
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+def test_models_cpu(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    chunked_prefill_token_size: int,
+    enforce_eager: bool,
+    attention_backend: str,
+    monkeypatch,
+) -> None:
+    test_models(
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        model,
+        dtype,
+        max_tokens,
+        chunked_prefill_token_size,
+        enforce_eager,
+        1,
+        attention_backend,
+        monkeypatch,
+    )
+
+
+@pytest.mark.parametrize("max_tokens", [16])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("chunk_size", [30, 32])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.cpu_model
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+def test_with_prefix_caching_cpu(
+    vllm_runner,
+    max_tokens: int,
+    enforce_eager: bool,
+    chunk_size: int,
+    dtype: str,
+) -> None:
+    test_with_prefix_caching(
+        vllm_runner,
+        max_tokens,
+        enforce_eager,
+        chunk_size,
+        1,
+        dtype,
+    )

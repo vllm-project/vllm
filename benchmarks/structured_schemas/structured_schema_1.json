@@ -1,0 +1,113 @@
+{
+    "$schema":
+    "https://json-schema.org/draft/2020-12/schema",
+    "title":
+    "User Profile",
+    "type":
+    "object",
+    "properties": {
+        "userId": {
+            "type": "string",
+            "description": "Unique identifier for the user."
+        },
+        "personalInfo": {
+            "type": "object",
+            "properties": {
+                "firstName": {
+                    "type": "string",
+                    "description": "The user's first name."
+                },
+                "lastName": {
+                    "type": "string",
+                    "description": "The user's last name."
+                },
+                "age": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The user's age."
+                },
+                "phoneNumbers": {
+                    "type":
+                    "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["home", "work", "mobile"],
+                                "description": "Type of phone number."
+                            },
+                            "number": {
+                                "type": "string",
+                                "pattern": "^\\+?[1-9]\\d{1,14}$",
+                                "description": "Phone number in E.164 format."
+                            }
+                        },
+                        "required": ["type", "number"]
+                    },
+                    "description":
+                    "List of phone numbers associated with the user."
+                }
+            },
+            "required": ["firstName", "lastName"]
+        },
+        "address": {
+            "type": "object",
+            "properties": {
+                "street": {
+                    "type": "string",
+                    "description": "Street address."
+                },
+                "city": {
+                    "type": "string",
+                    "description": "City name."
+                },
+                "state": {
+                    "type": "string",
+                    "description": "State or province."
+                },
+                "postalCode": {
+                    "type": "string",
+                    "pattern": "^\\d{5}(-\\d{4})?$",
+                    "description": "Postal code."
+                },
+                "country": {
+                    "type": "string",
+                    "description": "Country name."
+                }
+            },
+            "required": ["street", "city", "state", "postalCode", "country"]
+        },
+        "preferences": {
+            "type": "object",
+            "properties": {
+                "newsletterSubscribed": {
+                    "type":
+                    "boolean",
+                    "description":
+                    "Indicates if the user is subscribed to the newsletter."
+                },
+                "favoriteCategories": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "List of user's favorite categories."
+                }
+            },
+            "required": ["newsletterSubscribed"]
+        },
+        "accountStatus": {
+            "type": "string",
+            "enum": ["active", "inactive", "suspended"],
+            "description": "Current status of the user's account."
+        },
+        "registrationDate": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 formatted date-time of user registration."
+        }
+    },
+    "required":
+    ["userId", "personalInfo", "address", "accountStatus", "registrationDate"]
+}

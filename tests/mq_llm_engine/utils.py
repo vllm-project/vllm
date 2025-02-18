@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import multiprocessing
 from typing import Callable, Tuple, Union
@@ -68,7 +70,7 @@ class RemoteMQLLMEngine:
 
     async def make_client(self) -> MQLLMEngineClient:
         engine_config = self.engine_args.create_engine_config()
-        client = MQLLMEngineClient(self.ipc_path, engine_config)
+        client = MQLLMEngineClient(self.ipc_path, engine_config, self.proc.pid)
         while True:
             try:
                 await client.setup()

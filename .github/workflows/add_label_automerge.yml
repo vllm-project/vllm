@@ -8,7 +8,7 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             -   name: Add label
-                uses: actions/github-script@v6
+                uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
                 with:
                     script: |
                         github.rest.issues.addLabels({

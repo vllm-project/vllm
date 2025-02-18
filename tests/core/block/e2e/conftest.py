@@ -1,11 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Callable, Iterable, Optional
 
 import pytest
 
 from vllm import LLM
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.utils import set_random_seed
-
-from ....conftest import cleanup
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
 
         yield llm
         del llm
-        cleanup()
+        cleanup_dist_env_and_memory()
 
     for llm in generator_inner():
         yield llm

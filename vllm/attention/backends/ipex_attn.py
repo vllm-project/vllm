@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ import torch
 
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import (PagedAttention,
@@ -19,7 +21,7 @@ class IpexAttnBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ipex-attn"
+        return "IPEX"
 
     @staticmethod
     def get_impl_cls() -> Type["IpexAttnBackendImpl"]:
@@ -115,12 +117,11 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
                 "IPEX backend does not support block-sparse attention.")
-        if logits_soft_cap is not None:
-            raise ValueError("IPEX backend does not support logits_soft_cap.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -135,6 +136,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.need_mask = (self.alibi_slopes is not None
                           or self.sliding_window is not None)
+        if logits_soft_cap is None:
+            logits_soft_cap = 0
+        self.logits_soft_cap = logits_soft_cap
 
         supported_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in supported_head_sizes:
@@ -145,6 +149,11 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             raise NotImplementedError(
                 "IPEX backend does not support FP8 KV cache. "
                 "Please use xFormers backend instead.")
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "IpexAttnBackendImpl")
 
     def split_kv_cache(
         self,
@@ -164,14 +173,13 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: IpexAttnMetadata,  # type: ignore
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
 
@@ -186,12 +194,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert k_scale == 1.0 and v_scale == 1.0
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "IpexAttnBackendImpl")
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -208,8 +211,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 value_cache,
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
             )
 
         if attn_metadata.is_prompt:
@@ -239,20 +242,23 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     (num_tokens, self.num_heads, self.head_size),
                     dtype=query.dtype,
                     device=query.device)
-                ipex_ops.varlen_attention(query,
-                                          key,
-                                          value,
-                                          output,
-                                          attn_metadata.seqlen_q,
-                                          attn_metadata.seqlen_q,
-                                          attn_metadata.max_seqlen,
-                                          attn_metadata.max_seqlen,
-                                          pdropout=0.0,
-                                          softmax_scale=self.scale,
-                                          zero_tensors=False,
-                                          is_causal=True,
-                                          return_softmax=False,
-                                          gen_=None)
+                ipex_ops.varlen_attention(
+                    query,
+                    key,
+                    value,
+                    output,
+                    attn_metadata.seqlen_q,
+                    attn_metadata.seqlen_q,
+                    attn_metadata.max_seqlen,
+                    attn_metadata.max_seqlen,
+                    pdropout=0.0,
+                    softmax_scale=self.scale,
+                    zero_tensors=False,
+                    is_causal=True,
+                    return_softmax=False,
+                    gen_=None,
+                    logits_soft_cap=self.logits_soft_cap,
+                )
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
@@ -291,8 +297,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
             else:
                 # Run PagedAttention V2.
@@ -324,8 +330,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
 
             # Reshape the output tensor.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Supports AQLM compression, see https://github.com/Vahe1994/AQLM
 # and https://arxiv.org/pdf/2401.06118.pdf
 
@@ -167,6 +169,7 @@ class AQLMConfig(QuantizationConfig):
         num_codebooks: int,
         out_group_size: int,
     ) -> None:
+        super().__init__()
         self.in_group_size = in_group_size
         self.nbits_per_codebook = nbits_per_codebook
         self.num_codebooks = num_codebooks
@@ -212,9 +215,6 @@ class AQLMConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return AQLMLinearMethod(self)
         return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
 
 
 class AQLMLinearMethod(LinearMethodBase):

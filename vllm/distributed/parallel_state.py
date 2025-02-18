@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2023 The vLLM team.
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
@@ -7,7 +9,7 @@ It takes over the control of the distributed environment from PyTorch.
 The typical workflow is:
 
 - call `init_distributed_environment` to initialize the distributed environment.
-- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to 
+- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to
  initialize the model parallel groups.
 
 - any code dealing with the distributed stuff
@@ -20,23 +22,32 @@ If you only need to use the distributed environment without model/pipeline
  steps.
 """
 import contextlib
+import gc
 import pickle
 import weakref
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 from unittest.mock import patch
 
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
+import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 import vllm.envs as envs
+from vllm.distributed.device_communicators.base_device_communicator import (
+    DeviceCommunicatorBase)
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.utils import supports_custom_op
+from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
+                        supports_custom_op)
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -88,41 +99,32 @@ def _get_unique_name(name: str) -> str:
     return newname
 
 
-_groups: Dict[str, Callable[[], "GroupCoordinator"]] = {}
+_groups: Dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
 
 
 def _register_group(group: "GroupCoordinator") -> None:
-    # looks like Python 3.8 does not understand `ReferenceType`
-    _groups[group.unique_name] = weakref.ref(group)  # type: ignore
+    _groups[group.unique_name] = weakref.ref(group)
+
+
+def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group._all_reduce_out_place(tensor)
+
+
+def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    return torch.empty_like(tensor)
 
 
 if supports_custom_op():
-
-    @torch.library.custom_op("vllm::inplace_all_reduce",
-                             mutates_args=["tensor"])
-    def inplace_all_reduce(tensor: torch.Tensor, group_name: str) -> None:
-        assert group_name in _groups, f"Group {group_name} is not found."
-        group = _groups[group_name]()
-        if group is None:
-            raise ValueError(f"Group {group_name} is destroyed.")
-        group._all_reduce_in_place(tensor)
-
-    @inplace_all_reduce.register_fake
-    def _(tensor: torch.Tensor, group_name: str) -> None:
-        return
-
-    @torch.library.custom_op("vllm::outplace_all_reduce", mutates_args=[])
-    def outplace_all_reduce(tensor: torch.Tensor,
-                            group_name: str) -> torch.Tensor:
-        assert group_name in _groups, f"Group {group_name} is not found."
-        group = _groups[group_name]()
-        if group is None:
-            raise ValueError(f"Group {group_name} is destroyed.")
-        return group._all_reduce_out_place(tensor)
-
-    @outplace_all_reduce.register_fake
-    def _(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
-        return torch.empty_like(tensor)
+    direct_register_custom_op(
+        op_name="all_reduce",
+        op_func=all_reduce,
+        mutates_args=[],
+        fake_impl=all_reduce_fake,
+    )
 
 
 class GroupCoordinator:
@@ -131,9 +133,8 @@ class GroupCoordinator:
     PyTorch ProcessGroup is bound to one specific communication backend,
         e.g. NCCL, Gloo, MPI, etc.
     GroupCoordinator takes charge of all the communication operations among
-        the processes in the group. It can route the communication to
-        a specific implementation (e.g. switch allreduce implementation
-        based on the tensor size and cuda graph mode).
+        the processes in the group. It manages both CPU and device
+        communication.
     """
 
     # available attributes:
@@ -151,11 +152,8 @@ class GroupCoordinator:
     rank_in_group: int  # rank inside the group
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
-    use_pynccl: bool  # a hint of whether to use PyNccl
-    use_custom_allreduce: bool  # a hint of whether to use CustomAllreduce
-    # communicators are only created for world size > 1
-    pynccl_comm: Optional[Any]  # PyNccl communicator
-    ca_comm: Optional[Any]  # Custom allreduce communicator
+    use_device_communicator: bool  # whether to use device communicator
+    device_communicator: DeviceCommunicatorBase  # device communicator
     mq_broadcaster: Optional[Any]  # shared memory broadcaster
 
     def __init__(
@@ -163,9 +161,7 @@ class GroupCoordinator:
         group_ranks: List[List[int]],
         local_rank: int,
         torch_distributed_backend: Union[str, Backend],
-        use_pynccl: bool,
-        use_custom_allreduce: bool,
-        use_tpu_communicator: bool,
+        use_device_communicator: bool,
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
     ):
@@ -194,41 +190,26 @@ class GroupCoordinator:
         assert self.cpu_group is not None
         assert self.device_group is not None
 
+        from vllm.platforms import current_platform
+
+        # TODO: fix it for other platforms
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
         else:
             self.device = torch.device("cpu")
 
-        self.use_pynccl = use_pynccl
-        self.use_custom_allreduce = use_custom_allreduce
-        self.use_tpu_communicator = use_tpu_communicator
+        self.use_device_communicator = use_device_communicator
 
-        # lazy import to avoid documentation build error
-        from vllm.distributed.device_communicators.custom_all_reduce import (
-            CustomAllreduce)
-        from vllm.distributed.device_communicators.pynccl import (
-            PyNcclCommunicator)
-
-        self.pynccl_comm: Optional[PyNcclCommunicator] = None
-        if use_pynccl and self.world_size > 1:
-            self.pynccl_comm = PyNcclCommunicator(
-                group=self.cpu_group,
+        self.device_communicator: DeviceCommunicatorBase = None  # type: ignore
+        if use_device_communicator and self.world_size > 1:
+            device_comm_cls = resolve_obj_by_qualname(
+                current_platform.get_device_communicator_cls())
+            self.device_communicator = device_comm_cls(
+                cpu_group=self.cpu_group,
                 device=self.device,
+                device_group=self.device_group,
+                unique_name=self.unique_name,
             )
-
-        self.ca_comm: Optional[CustomAllreduce] = None
-        if use_custom_allreduce and self.world_size > 1:
-            # Initialize a custom fast all-reduce implementation.
-            self.ca_comm = CustomAllreduce(
-                group=self.cpu_group,
-                device=self.device,
-            )
-
-        from vllm.distributed.device_communicators.tpu_communicator import (
-            TpuCommunicator)
-        self.tpu_communicator: Optional[TpuCommunicator] = None
-        if use_tpu_communicator and self.world_size > 1:
-            self.tpu_communicator = TpuCommunicator(group=self.cpu_group)
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
@@ -236,6 +217,9 @@ class GroupCoordinator:
         if use_message_queue_broadcaster and self.world_size > 1:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6)
+
+        from vllm.platforms import current_platform
+        self.use_custom_op_call = current_platform.is_cuda_alike()
 
     @property
     def first_rank(self):
@@ -280,9 +264,16 @@ class GroupCoordinator:
         else:
             stream = graph_capture_context.stream
 
-        ca_comm = self.ca_comm
-        maybe_ca_context = nullcontext(
-        ) if ca_comm is None else ca_comm.capture()
+        # only cuda uses this function,
+        # so we don't abstract it into the base class
+        maybe_ca_context = nullcontext()
+        from vllm.distributed.device_communicators.cuda_communicator import (
+            CudaCommunicator)
+        if self.device_communicator is not None:
+            assert isinstance(self.device_communicator, CudaCommunicator)
+            ca_comm = self.device_communicator.ca_comm
+            if ca_comm is not None:
+                maybe_ca_context = ca_comm.capture()  # type: ignore
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -291,32 +282,7 @@ class GroupCoordinator:
             stream.wait_stream(curr_stream)
 
         with torch.cuda.stream(stream), maybe_ca_context:
-            # In graph mode, we have to be very careful about the collective
-            # operations. The current status is:
-            #     allreduce \ Mode   |  Eager  |  Graph  |
-            # --------------------------------------------
-            # custom allreduce       | enabled | enabled |
-            # PyNccl                 | disabled| enabled |
-            # torch.distributed      | enabled | disabled|
-            #
-            # Note that custom allreduce will have a runtime check, if the
-            #  tensor size is too large, it will fallback to the next
-            #  available option.
-            # In summary: When using CUDA graph, we use
-            #  either custom all-reduce kernel or pynccl. When not using
-            #  CUDA graph, we use either custom all-reduce kernel or
-            #  PyTorch NCCL. We always prioritize using custom all-reduce
-            #  kernel but fall back to PyTorch or pynccl if it is
-            #  disabled or not supported.
-            pynccl_comm = self.pynccl_comm
-            maybe_pynccl_context: Any
-            if not pynccl_comm:
-                maybe_pynccl_context = nullcontext()
-            else:
-                maybe_pynccl_context = pynccl_comm.change_state(
-                    enable=True, stream=torch.cuda.current_stream())
-            with maybe_pynccl_context:
-                yield graph_capture_context
+            yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """
@@ -330,49 +296,21 @@ class GroupCoordinator:
          coordinator.
 
         In addition, PyTorch custom ops do not support mutation or returning
-        a new tensor in the same op. So we need to figure out if the op is
-        in-place or out-of-place ahead of time.
+        a new tensor in the same op. So we always make the all-reduce operation
+        out-of-place.
         """
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
             return input_
 
-        if not supports_custom_op():
-            self._all_reduce_in_place(input_)
-            return input_
-
-        if self.tpu_communicator is not None and \
-            not self.tpu_communicator.disabled:
-            # TPU handles Dynamo with its own logic.
-            return self.tpu_communicator.all_reduce(input_)
-
-        if self.ca_comm is not None and \
-            not self.ca_comm.disabled and \
-                self.ca_comm.should_custom_ar(input_):
-            return torch.ops.vllm.outplace_all_reduce(
-                input_, group_name=self.unique_name)
+        if self.use_custom_op_call:
+            return torch.ops.vllm.all_reduce(input_,
+                                             group_name=self.unique_name)
         else:
-            torch.ops.vllm.inplace_all_reduce(input_,
-                                              group_name=self.unique_name)
-            return input_
+            return self._all_reduce_out_place(input_)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
-        ca_comm = self.ca_comm
-        assert ca_comm is not None
-        assert not ca_comm.disabled
-        out = ca_comm.custom_all_reduce(input_)
-        assert out is not None
-        return out
-
-    def _all_reduce_in_place(self, input_: torch.Tensor) -> None:
-        pynccl_comm = self.pynccl_comm
-        if (pynccl_comm is not None and not pynccl_comm.disabled):
-            pynccl_comm.all_reduce(input_)
-        elif input_.is_cpu:
-            import intel_extension_for_pytorch as ipex
-            ipex.distributed.all_reduce(input_, group=self.device_group)
-        else:
-            torch.distributed.all_reduce(input_, group=self.device_group)
+        return self.device_communicator.all_reduce(input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
@@ -382,30 +320,7 @@ class GroupCoordinator:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
-        # For TPUs, use TPU communicator.
-        tpu_comm = self.tpu_communicator
-        if tpu_comm is not None and not tpu_comm.disabled:
-            return tpu_comm.all_gather(input_, dim)
-
-        if dim < 0:
-            # Convert negative dim to positive.
-            dim += input_.dim()
-        input_size = input_.size()
-        # Allocate output tensor.
-        output_tensor = torch.empty((world_size, ) + input_size,
-                                    dtype=input_.dtype,
-                                    device=input_.device)
-        # All-gather.
-        torch.distributed.all_gather_into_tensor(output_tensor,
-                                                 input_,
-                                                 group=self.device_group)
-        # Reshape
-        output_tensor = output_tensor.movedim(0, dim)
-        output_tensor = output_tensor.reshape(input_size[:dim] +
-                                              (world_size *
-                                               input_size[dim], ) +
-                                              input_size[dim + 1:])
-        return output_tensor
+        return self.device_communicator.all_gather(input_, dim)
 
     def gather(self,
                input_: torch.Tensor,
@@ -420,26 +335,7 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if world_size == 1:
             return input_
-        assert -input_.dim() <= dim < input_.dim(), (
-            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
-        if dim < 0:
-            # Convert negative dim to positive.
-            dim += input_.dim()
-        # Allocate output tensor.
-        if self.rank_in_group == dst:
-            gather_list = [torch.empty_like(input_) for _ in range(world_size)]
-        else:
-            gather_list = None
-        # Gather.
-        torch.distributed.gather(input_,
-                                 gather_list,
-                                 dst=self.ranks[dst],
-                                 group=self.device_group)
-        if self.rank_in_group == dst:
-            output_tensor = torch.cat(gather_list, dim=dim)
-        else:
-            output_tensor = None
-        return output_tensor
+        return self.device_communicator.gather(input_, dst, dim)
 
     def broadcast(self, input_: torch.Tensor, src: int = 0):
         """Broadcast the input tensor.
@@ -781,14 +677,7 @@ class GroupCoordinator:
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
-        if dst is None:
-            dst = (self.rank_in_group + 1) % self.world_size
-
-        pynccl_comm = self.pynccl_comm
-        if pynccl_comm is not None and not pynccl_comm.disabled:
-            pynccl_comm.send(tensor, dst)
-        else:
-            torch.distributed.send(tensor, self.ranks[dst], self.device_group)
+        self.device_communicator.send(tensor, dst)
 
     def recv(self,
              size: torch.Size,
@@ -796,16 +685,7 @@ class GroupCoordinator:
              src: Optional[int] = None) -> torch.Tensor:
         """Receives a tensor from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
-        if src is None:
-            src = (self.rank_in_group - 1) % self.world_size
-
-        tensor = torch.empty(size, dtype=dtype, device=self.device)
-        pynccl_comm = self.pynccl_comm
-        if pynccl_comm is not None and not pynccl_comm.disabled:
-            pynccl_comm.recv(tensor, src)
-        else:
-            torch.distributed.recv(tensor, self.ranks[src], self.device_group)
-        return tensor
+        return self.device_communicator.recv(size, dtype, src)
 
     def destroy(self):
         if self.device_group is not None:
@@ -814,10 +694,8 @@ class GroupCoordinator:
         if self.cpu_group is not None:
             torch.distributed.destroy_process_group(self.cpu_group)
             self.cpu_group = None
-        if self.pynccl_comm is not None:
-            self.pynccl_comm = None
-        if self.ca_comm is not None:
-            self.ca_comm = None
+        if self.device_communicator is not None:
+            self.device_communicator.destroy()
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
@@ -836,9 +714,7 @@ def init_world_group(ranks: List[int], local_rank: int,
         group_ranks=[ranks],
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_pynccl=False,
-        use_custom_allreduce=False,
-        use_tpu_communicator=False,
+        use_device_communicator=False,
         group_name="world",
     )
 
@@ -847,19 +723,15 @@ def init_model_parallel_group(
     group_ranks: List[List[int]],
     local_rank: int,
     backend: str,
-    use_custom_allreduce: Optional[bool] = None,
     use_message_queue_broadcaster: bool = False,
     group_name: Optional[str] = None,
 ) -> GroupCoordinator:
-    if use_custom_allreduce is None:
-        use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=use_custom_allreduce,
-        use_tpu_communicator=True,
+        use_device_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
     )
@@ -888,9 +760,17 @@ def get_pp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
+_KV_TRANSFER: Optional[kv_transfer.KVTransferAgent] = None
+
+
+def get_kv_transfer_group() -> kv_transfer.KVTransferAgent:
+    assert _KV_TRANSFER is not None, (
+        "disaggregated KV cache transfer parallel group is not initialized")
+    return _KV_TRANSFER
+
 
 @contextmanager
-def graph_capture():
+def graph_capture(device: torch.device):
     """
     `graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that the
@@ -904,8 +784,9 @@ def graph_capture():
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
-    with get_tp_group().graph_capture() as context, get_pp_group(
-    ).graph_capture(context):
+    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    with get_tp_group().graph_capture(context), get_pp_group().graph_capture(
+            context):
         yield context
 
 
@@ -992,13 +873,6 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
-    if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
-        raise RuntimeError(
-            f"world_size ({world_size}) is not equal to "
-            f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
-            f"pipeline_model_parallel_size ({pipeline_model_parallel_size})")
-
     # Build the tensor model-parallel groups.
     num_tensor_model_parallel_groups: int = (world_size //
                                              tensor_model_parallel_size)
@@ -1028,12 +902,30 @@ def initialize_model_parallel(
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group_ranks.append(ranks)
-    # pipeline parallel does not need custom allreduce
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
-                                    use_custom_allreduce=False,
                                     group_name="pp")
+
+
+def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
+    """
+    Initialize KV cache transfer parallel group.
+    """
+
+    global _KV_TRANSFER
+
+    if vllm_config.kv_transfer_config is None:
+        return
+
+    if all([
+            vllm_config.kv_transfer_config.need_kv_parallel_group, _KV_TRANSFER
+            is None
+    ]):
+        _KV_TRANSFER = kv_transfer.KVTransferAgent(
+            rank=get_world_group().rank,
+            local_rank=get_world_group().local_rank,
+            config=vllm_config)
 
 
 def ensure_model_parallel_initialized(
@@ -1129,24 +1021,49 @@ def destroy_distributed_environment():
         torch.distributed.destroy_process_group()
 
 
-def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
+def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    if shutdown_ray:
+        import ray  # Lazy import Ray
+        ray.shutdown()
+    gc.collect()
+    from vllm.platforms import current_platform
+    if not current_platform.is_cpu():
+        torch.cuda.empty_cache()
+    try:
+        torch._C._host_emptyCache()
+    except AttributeError:
+        logger.warning(
+            "torch._C._host_emptyCache() only available in Pytorch >=2.5")
+
+
+def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
+                        source_rank: int = 0) -> List[bool]:
     """
     This is a collective operation that returns if each rank is in the same node
     as the source rank. It tests if processes are attached to the same
     memory system (shared access to shared memory).
     """
-    assert torch.distributed.get_backend(
-        pg) != torch.distributed.Backend.NCCL, (
-            "in_the_same_node_as should be tested with a non-NCCL group.")
-    # local rank inside the group
-    rank = torch.distributed.get_rank(group=pg)
-    world_size = torch.distributed.get_world_size(group=pg)
+    if isinstance(pg, ProcessGroup):
+        assert torch.distributed.get_backend(
+            pg) != torch.distributed.Backend.NCCL, (
+                "in_the_same_node_as should be tested with a non-NCCL group.")
+        # local rank inside the group
+        rank = torch.distributed.get_rank(group=pg)
+        world_size = torch.distributed.get_world_size(group=pg)
+
+        # global ranks of the processes in the group
+        ranks = torch.distributed.get_process_group_ranks(pg)
+    else:
+        rank = pg.rank
+        world_size = pg.world_size
+        ranks = list(range(world_size))
 
     # local tensor in each process to store the result
     is_in_the_same_node = torch.tensor([0] * world_size, dtype=torch.int32)
-
-    # global ranks of the processes in the group
-    ranks = torch.distributed.get_process_group_ranks(pg)
 
     magic_message = b"magic_message"
     shm = None
@@ -1157,17 +1074,21 @@ def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
                 # create a shared memory segment
                 shm = shared_memory.SharedMemory(create=True, size=128)
                 shm.buf[:len(magic_message)] = magic_message
-                torch.distributed.broadcast_object_list([shm.name],
-                                                        src=ranks[source_rank],
-                                                        group=pg)
+                if isinstance(pg, ProcessGroup):
+                    torch.distributed.broadcast_object_list(
+                        [shm.name], src=ranks[source_rank], group=pg)
+                else:
+                    pg.broadcast_obj(shm.name, src=source_rank)
                 is_in_the_same_node[rank] = 1
             else:
                 # try to open the shared memory segment
-                recv = [None]
-                torch.distributed.broadcast_object_list(recv,
-                                                        src=ranks[source_rank],
-                                                        group=pg)
-                name = recv[0]
+                if isinstance(pg, ProcessGroup):
+                    recv = [None]
+                    torch.distributed.broadcast_object_list(
+                        recv, src=ranks[source_rank], group=pg)
+                    name = recv[0]
+                else:
+                    name = pg.broadcast_obj(None, src=source_rank)
                 # fix to https://stackoverflow.com/q/62748654/9191338
                 # Python incorrectly tracks shared memory even if it is not
                 # created by the process. The following patch is a workaround.
@@ -1182,12 +1103,23 @@ def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
         if shm:
             shm.close()
 
-    torch.distributed.barrier(group=pg)
+    if isinstance(pg, ProcessGroup):
+        torch.distributed.barrier(group=pg)
+    else:
+        pg.barrier()
 
     # clean up the shared memory segment
     with contextlib.suppress(OSError):
         if rank == source_rank and shm:
             shm.unlink()
-    torch.distributed.all_reduce(is_in_the_same_node, group=pg)
 
-    return [x == 1 for x in is_in_the_same_node.tolist()]
+    if isinstance(pg, ProcessGroup):
+        torch.distributed.all_reduce(is_in_the_same_node, group=pg)
+        aggregated_data = is_in_the_same_node
+    else:
+        aggregated_data = torch.zeros_like(is_in_the_same_node)
+        for i in range(world_size):
+            rank_data = pg.broadcast_obj(is_in_the_same_node, src=i)
+            aggregated_data += rank_data
+
+    return [x == 1 for x in aggregated_data.tolist()]

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 from typing import Dict, List, Optional
 
@@ -26,7 +28,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         messages=MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
         temperature=0,
-        max_tokens=200,
+        max_completion_tokens=200,
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False)
@@ -63,7 +65,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
         model=model_name,
         messages=MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
         temperature=0,
-        max_tokens=200,
+        max_completion_tokens=200,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
         stream=True)
@@ -154,7 +156,7 @@ async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
         temperature=0,
-        max_tokens=200,
+        max_completion_tokens=200,
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False)
@@ -172,7 +174,7 @@ async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
         temperature=0,
-        max_tokens=200,
+        max_completion_tokens=200,
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,

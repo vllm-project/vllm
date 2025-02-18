@@ -1,4 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
+
+from vllm.config import CompilationLevel
 
 from ..utils import compare_two_settings
 
@@ -9,8 +13,12 @@ os.environ["VLLM_RPC_TIMEOUT"] = "30000"
 
 
 def test_custom_dispatcher():
-    compare_two_settings("google/gemma-2b",
-                         arg1=["--enforce-eager"],
-                         arg2=["--enforce-eager"],
-                         env1={"VLLM_DYNAMO_USE_CUSTOM_DISPATCHER": "0"},
-                         env2={})
+    compare_two_settings(
+        "google/gemma-2b",
+        arg1=[
+            "--enforce-eager",
+            f"-O{CompilationLevel.DYNAMO_ONCE}",
+        ],
+        arg2=["--enforce-eager", f"-O{CompilationLevel.DYNAMO_AS_IS}"],
+        env1={},
+        env2={})

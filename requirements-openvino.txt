@@ -1,8 +1,8 @@
 # Common dependencies
 -r requirements-common.txt
 
-# OpenVINO dependencies
-torch >= 2.1.2
-openvino ~= 2024.4.0
-openvino-tokenizers[transformers] ~= 2024.4.0
-optimum-intel[openvino] >= 1.19.0
+torch == 2.5.1 #  should be aligned with "common" vLLM torch version
+openvino >= 2024.4.0 # since 2024.4.0 both CPU and GPU support Paged Attention
+
+optimum @ git+https://github.com/huggingface/optimum.git # latest optimum is used to support latest transformers version
+optimum-intel[nncf] @ git+https://github.com/huggingface/optimum-intel.git # latest optimum-intel is used to support latest transformers version

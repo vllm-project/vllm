@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the AWQ Triton kernel.
 
 Run `pytest tests/kernels/test_awq_triton.py`.
@@ -7,7 +8,7 @@ import torch
 
 from vllm.model_executor.layers.quantization.awq_triton import (
     AWQ_TRITON_SUPPORTED_GROUP_SIZES, awq_dequantize_triton, awq_gemm_triton)
-from vllm.utils import seed_everything
+from vllm.platforms import current_platform
 
 device = "cuda"
 
@@ -80,7 +81,7 @@ def test_dequantize(qweight_rows, qweight_cols, group_size):
     zeros_cols = qweight_cols
     zeros_dtype = torch.int32
 
-    seed_everything(0)
+    current_platform.seed_everything(0)
 
     qweight = torch.randint(0,
                             torch.iinfo(torch.int32).max,
@@ -134,7 +135,7 @@ def test_gemm(N, K, M, splitK, group_size):
     qzeros_rows = scales_rows
     qzeros_cols = qweight_cols
 
-    seed_everything(0)
+    current_platform.seed_everything(0)
 
     input = torch.rand((input_rows, input_cols),
                        dtype=input_dtype,

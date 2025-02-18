@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 from typing import Dict, Sequence, Union
 
@@ -166,8 +168,8 @@ class Internlm2ToolParser(ToolParser):
             tool_call_arr["arguments"] = self.get_argments(tool_call_arr)
             self.prev_tool_call_arr = [tool_call_arr]
             return delta
-        except Exception as e:
-            logger.error("Error trying to handle streaming tool call: %s", e)
+        except Exception:
+            logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
                 "Skipping chunk as a result of tool streaming extraction "
                 "error")

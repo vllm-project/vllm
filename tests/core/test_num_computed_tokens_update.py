@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from tests.conftest import VllmRunner
@@ -31,7 +33,6 @@ def test_num_computed_tokens_update(num_scheduler_steps: int,
     # Make a vllm engine
     runner = VllmRunner(model_name=MODEL,
                         gpu_memory_utilization=0.7,
-                        use_v2_block_manager=True,
                         num_scheduler_steps=num_scheduler_steps,
                         enable_chunked_prefill=enable_chunked_prefill,
                         enforce_eager=enforce_eager)

@@ -1,4 +1,5 @@
-# coding=utf-8
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024 HuggingFace Inc. team. All rights reserved.
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 #
@@ -144,7 +145,7 @@ class NemotronConfig(PretrainedConfig):
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
-        head_dim = head_dim or kwargs.get("kv_channels", None)
+        head_dim = head_dim or kwargs.get("kv_channels")
         self.head_dim = head_dim if head_dim is not None else (
             hidden_size // num_attention_heads)
 
@@ -160,8 +161,8 @@ class NemotronConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
         # for backward compatibility
-        partial_rotary_factor = kwargs.get("rope_percent", None) or kwargs.get(
-            "rope_percentage", None) or partial_rotary_factor
+        partial_rotary_factor = kwargs.get("rope_percent") or kwargs.get(
+            "rope_percentage") or partial_rotary_factor
         self.partial_rotary_factor = partial_rotary_factor
         self._rope_scaling_validation()
         self.attention_bias = attention_bias
@@ -183,8 +184,8 @@ class NemotronConfig(PretrainedConfig):
         if self.rope_scaling is None:
             return
 
-        if not isinstance(self.rope_scaling,
-                          dict) or len(self.rope_scaling) != 2:
+        if not isinstance(self.rope_scaling, dict) or len(
+                self.rope_scaling) != 2:
             raise ValueError(
                 "`rope_scaling` must be a dictionary with two fields, "
                 f"`type` and `factor`, got {self.rope_scaling}")

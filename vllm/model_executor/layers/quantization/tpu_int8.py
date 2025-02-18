@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -19,6 +21,7 @@ class Int8TpuConfig(QuantizationConfig):
         self,
         activation_scheme: str = "none",
     ) -> None:
+        super().__init__()
         if activation_scheme not in ACTIVATION_SCHEMES:
             raise ValueError(
                 f"Unsupported activation scheme {activation_scheme}")
@@ -49,9 +52,6 @@ class Int8TpuConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return TPUInt8LinearMethod(self)
         return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
 
 
 class TPUInt8LinearMethod(LinearMethodBase):

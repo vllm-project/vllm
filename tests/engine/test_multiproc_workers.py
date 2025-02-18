@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -6,15 +8,14 @@ from typing import Any, List, Tuple
 
 import pytest
 
+from vllm.config import VllmConfig
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
+from vllm.worker.worker_base import WorkerWrapperBase
 
 
-class DummyWorker:
+class DummyWorkerWrapper(WorkerWrapperBase):
     """Dummy version of vllm.worker.worker.Worker"""
-
-    def __init__(self, rank: int):
-        self.rank = rank
 
     def worker_method(self, worker_input: Any) -> Tuple[int, Any]:
         sleep(0.05)
@@ -23,14 +24,15 @@ class DummyWorker:
             # simulate error case
             raise worker_input
 
-        return self.rank, input
+        return self.rpc_rank, input
 
 
 def _start_workers() -> Tuple[List[ProcessWorkerWrapper], WorkerMonitor]:
     result_handler = ResultHandler()
+    vllm_config = VllmConfig()
     workers = [
-        ProcessWorkerWrapper(result_handler, partial(DummyWorker, rank=rank))
-        for rank in range(8)
+        ProcessWorkerWrapper(result_handler, DummyWorkerWrapper, vllm_config,
+                             rank) for rank in range(8)
     ]
 
     worker_monitor = WorkerMonitor(workers, result_handler)

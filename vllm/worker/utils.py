@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 '''
 Worker-related helper functions.
 '''
@@ -12,6 +13,9 @@ def assert_enc_dec_mr_supported_scenario(
     Asserted that the provided encoder/decoder model runner instance reflects
     a supported scenario.
     '''
+
+    # Reminder: Please update docs/source/features/compatibility_matrix.md
+    # If the feature combo become valid
 
     if enc_dec_mr.cache_config.enable_prefix_caching:
         raise NotImplementedError(

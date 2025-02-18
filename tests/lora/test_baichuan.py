@@ -1,11 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List
 
 import pytest
 
 import vllm
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
-
-from .conftest import cleanup
 
 MODEL_PATH = "baichuan-inc/Baichuan-7B"
 
@@ -39,6 +40,14 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 def test_baichuan_lora(baichuan_lora_files):
@@ -80,7 +89,7 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
     output_tp1 = do_sample(llm_tp1, baichuan_lora_files, lora_id=1)
 
     del llm_tp1
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     llm_tp2 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
@@ -93,7 +102,7 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
     output_tp2 = do_sample(llm_tp2, baichuan_lora_files, lora_id=2)
 
     del llm_tp2
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     assert output_tp1 == output_tp2
 
@@ -108,6 +117,6 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
     output_tp4 = do_sample(llm_tp4, baichuan_lora_files, lora_id=2)
 
     del llm_tp4
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     assert output_tp1 == output_tp4

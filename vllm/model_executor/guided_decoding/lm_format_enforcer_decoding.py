@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import lru_cache
 from json import loads as json_loads
 from typing import Optional, Union
@@ -9,7 +11,8 @@ from lmformatenforcer.integrations.vllm import (
     build_vllm_logits_processor, build_vllm_token_enforcer_tokenizer_data)
 from transformers import PreTrainedTokenizerBase
 
-from vllm.sampling_params import GuidedDecodingParams, LogitsProcessor
+from vllm.logits_process import LogitsProcessor
+from vllm.sampling_params import GuidedDecodingParams
 
 
 def get_local_lm_format_enforcer_guided_decoding_logits_processor(
