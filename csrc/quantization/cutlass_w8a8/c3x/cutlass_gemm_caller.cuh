@@ -30,12 +30,18 @@ static inline cute::Shape<int, int, int, int> get_problem_shape(
 }
 
 template <typename GemmKernel>
-void cutlass_gemm_caller(torch::Device device,
-                         cute::Shape<int, int, int, int> prob_shape,
-                         typename GemmKernel::MainloopArguments mainloop_args,
-                         typename GemmKernel::EpilogueArguments epilogue_args) {
+void cutlass_gemm_caller(
+    torch::Device device, cute::Shape<int, int, int, int> prob_shape,
+    typename GemmKernel::MainloopArguments mainloop_args,
+    typename GemmKernel::EpilogueArguments epilogue_args,
+    typename GemmKernel::TileSchedulerArguments scheduler = {}) {
+  cutlass::KernelHardwareInfo hw_info;
   typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
-                                      prob_shape, mainloop_args, epilogue_args};
+                                      prob_shape,
+                                      mainloop_args,
+                                      epilogue_args,
+                                      hw_info,
+                                      scheduler};
 
   // Launch the CUTLASS GEMM kernel.
   using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
