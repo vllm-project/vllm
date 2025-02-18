@@ -26,7 +26,7 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        if sampling_metadata.rejection_sampling:
+        if sampling_metadata.spec_token_ids:
             if sampling_metadata.max_num_logprobs:
                 raise NotImplementedError(
                     "Rejection sampling does not support logprobs.")
@@ -104,16 +104,14 @@ class Sampler(nn.Module):
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
 
         # Apply min_p.
-        if not sampling_metadata.no_min_p:
+        if sampling_metadata.min_p is not None:
             logits = self.apply_min_p(logits, sampling_metadata.min_p)
 
         # Apply top_k and/or top_p.
         random_sampled = self.topk_topp_sampler(
             logits,
             sampling_metadata.generators,
-            sampling_metadata.no_top_k,
             sampling_metadata.top_k,
-            sampling_metadata.no_top_p,
             sampling_metadata.top_p,
         )
 
@@ -179,9 +177,10 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        apply_min_token_penalties(logits, sampling_metadata.output_token_ids,
-                                  sampling_metadata.stop_token_ids,
-                                  sampling_metadata.min_tokens)
+        if sampling_metadata.min_tokens:
+            apply_min_token_penalties(logits,
+                                      sampling_metadata.output_token_ids,
+                                      sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
             logits = apply_all_penalties(
