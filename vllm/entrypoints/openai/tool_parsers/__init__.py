@@ -9,10 +9,11 @@ from .jamba_tool_parser import JambaToolParser
 from .llama_tool_parser import Llama3JsonToolParser
 from .mistral_tool_parser import MistralToolParser
 from .pythonic_tool_parser import PythonicToolParser
+from .qwen2_tool_parser import Qwen2ToolParser
 
 __all__ = [
     "ToolParser", "ToolParserManager", "Granite20bFCToolParser",
     "GraniteToolParser", "Hermes2ProToolParser", "MistralToolParser",
     "Internlm2ToolParser", "Llama3JsonToolParser", "JambaToolParser",
-    "PythonicToolParser"
+    "PythonicToolParser", "Qwen2ToolParser"
 ]
