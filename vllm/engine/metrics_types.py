@@ -63,8 +63,8 @@ class Stats:
     max_num_generation_tokens_requests: List[int]
     max_tokens_requests: List[int]
     finished_reason_requests: List[str]
-    waiting_lora_adapters: List[str]
-    running_lora_adapters: List[str]
+    waiting_lora_adapters: Dict[str, int]
+    running_lora_adapters: Dict[str, int]
     max_lora: str
 
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None

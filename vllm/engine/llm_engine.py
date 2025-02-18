@@ -1812,8 +1812,8 @@ class LLMEngine:
             max_tokens_requests=max_tokens_requests,
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
-            waiting_lora_adapters=list(waiting_lora_adapters.keys()),
-            running_lora_adapters=list(running_lora_adapters.keys()))
+            waiting_lora_adapters=waiting_lora_adapters,
+            running_lora_adapters=running_lora_adapters)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
