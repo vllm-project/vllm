@@ -4,10 +4,11 @@ import asyncio
 import signal
 import socket
 from http import HTTPStatus
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
+from watchfiles import Change, awatch
 
 from vllm import envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
@@ -16,6 +17,19 @@ from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
 
 logger = init_logger(__name__)
+
+
+async def watch_files(paths, fun: Callable[[Change, str], None]) -> None:
+    """Watch multiple file paths asynchronously."""
+    logger.info("Watching files: %s", paths)
+    async for changes in awatch(*paths):
+        try:
+            for change, file_path in changes:
+                logger.info("File change detected: %s - %s", change.name,
+                            file_path)
+                fun(change, file_path)
+        except Exception as e:
+            logger.error("File watcher failed with error: %s", e)
 
 
 async def serve_http(app: FastAPI, sock: Optional[socket.socket],
@@ -39,9 +53,32 @@ async def serve_http(app: FastAPI, sock: Optional[socket.socket],
     server_task = loop.create_task(
         server.serve(sockets=[sock] if sock else None))
 
+    def update_ssl_cert_chain(change: Change, file_path: str) -> None:
+        logger.info("Reloading SSL certificate chain")
+        config.ssl.load_cert_chain(config.ssl_certfile, config.ssl_keyfile)
+
+    def update_ssl_ca(change: Change, file_path: str) -> None:
+        logger.info("Reloading SSL CA certificates")
+        config.ssl.load_verify_locations(config.ssl_ca_certs)
+
+    watch_ssl_cert_task = None
+    if config.ssl_keyfile and config.ssl_certfile:
+        watch_ssl_cert_task = loop.create_task(
+            watch_files([config.ssl_keyfile, config.ssl_certfile],
+                        update_ssl_cert_chain))
+
+    watch_ssl_ca_task = None
+    if config.ssl_ca_certs:
+        watch_ssl_ca_task = loop.create_task(
+            watch_files([config.ssl_ca_certs], update_ssl_ca))
+
     def signal_handler() -> None:
         # prevents the uvicorn signal handler to exit early
         server_task.cancel()
+        if watch_ssl_cert_task:
+            watch_ssl_cert_task.cancel()
+        if watch_ssl_ca_task:
+            watch_ssl_ca_task.cancel()
 
     async def dummy_shutdown() -> None:
         pass
