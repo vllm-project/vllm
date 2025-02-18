@@ -16,6 +16,7 @@ from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.config import CompilationConfig
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
                                    TaskOption)
 from vllm.engine.llm_engine import LLMEngine
@@ -284,6 +285,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> List[RequestOutput]:
@@ -300,6 +302,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> List[RequestOutput]:
@@ -316,6 +319,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> List[RequestOutput]:
@@ -333,6 +337,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> List[RequestOutput]:
@@ -350,6 +355,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> List[RequestOutput]:
@@ -365,6 +371,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> List[RequestOutput]:
@@ -385,6 +392,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
         priority: Optional[List[int]] = None,
@@ -463,6 +471,7 @@ class LLM:
             params=sampling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            control_vector_request=control_vector_request,
             guided_options=guided_options_request,
             priority=priority)
 
@@ -852,6 +861,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> List[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
         prompts.
@@ -913,7 +923,7 @@ class LLM:
             params=pooling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
-        )
+            control_vector_request=control_vector_request)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs,
@@ -1092,7 +1102,7 @@ class LLM:
             params=pooling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
-        )
+            control_vector_request=None)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         items = self.engine_class.validate_outputs(outputs,
@@ -1110,6 +1120,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> List[ScoringRequestOutput]:
         """Generate similarity scores for all pairs ``<text,text_pair>``.
 
@@ -1294,6 +1305,7 @@ class LLM:
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
+        control_vector_request: Optional[ControlVectorRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
         priority: Optional[List[int]] = None,
     ) -> None:
@@ -1333,6 +1345,7 @@ class LLM:
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
                 prompt_adapter_request=prompt_adapter_request,
+                control_vector_request=control_vector_request,
                 priority=priority[i] if priority else 0,
             )
 
@@ -1342,6 +1355,7 @@ class LLM:
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         priority: int = 0,
     ) -> None:
         request_id = str(next(self.request_counter))
@@ -1351,6 +1365,7 @@ class LLM:
             params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            control_vector_request=control_vector_request,
             priority=priority,
         )
 
