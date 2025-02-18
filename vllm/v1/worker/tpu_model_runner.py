@@ -108,7 +108,8 @@ class TPUModelRunner:
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = _get_padded_batch_size(scheduler_config.max_num_seqs)
+        self.max_num_reqs = _get_padded_batch_size(
+            scheduler_config.max_num_seqs)
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
@@ -140,12 +141,11 @@ class TPUModelRunner:
         self.encoder_cache_size = encoder_cache_size
 
         # Lazy initialization
-        self.model: Optional[nn.Module] = None
+        # self.model: nn.Module  # Set after load_model
         # KV caches for forward pass
         self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
-
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
@@ -158,7 +158,6 @@ class TPUModelRunner:
             pin_memory=self.pin_memory,
             vocab_size=model_config.get_vocab_size(),
         )
-
 
         # Cached torch/numpy tensors
         self.num_swaps = 2
@@ -974,7 +973,7 @@ class TPUModelRunner:
                 block_tables=block_tables,
                 context_lens=context_lens,
             )
-        
+
         # TODO: Run with embeddings
         inputs_embeds = None
 
@@ -1001,10 +1000,10 @@ class TPUModelRunner:
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
             self.model(
-                input_ids=token_ids, 
-                positions=position_ids, 
-                kv_caches=kv_caches, 
-                attn_metadata=attn_metadata, 
+                input_ids=token_ids,
+                positions=position_ids,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata,
                 inputs_embeds=inputs_embeds,
             )
 
