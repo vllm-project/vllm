@@ -592,7 +592,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # contiguous cache fetch will be used.
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
     lambda: os.environ.get('VLLM_CONTIGUOUS_PA', 'true').lower(
-    ) in ['1', 'true'],
+    ) in ("1", "true"),
 }
 
 # end-env-vars-definition
