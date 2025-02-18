@@ -3,7 +3,6 @@ import asyncio
 import time
 from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional, Union
 
-import torch
 from fastapi import Request
 
 from vllm.config import ModelConfig
@@ -16,6 +15,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, RerankDocument,
                                               ScoreResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.score_utils import _cosine_similarity
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -121,26 +121,18 @@ class ServingScores(OpenAIServing):
         if len(emb_text_1) == 1:
             emb_text_1 = emb_text_1 * len(emb_text_2)
 
-        scorer = torch.nn.CosineSimilarity(0)
+        embeddings_1: List[PoolingRequestOutput] = []
+        embeddings_2: List[PoolingRequestOutput] = []
 
         for emb_1, emb_2 in zip(emb_text_1, emb_text_2):
             assert emb_1 is not None
             assert emb_2 is not None
-            pair_score = scorer(emb_1.outputs.data, emb_2.outputs.data)
+            embeddings_1.append(emb_1)
+            embeddings_2.append(emb_2)
 
-            padding = []
-            if (pad_token_id := getattr(tokenizer, "pad_token_id",
-                                        None)) is not None:
-                padding = [pad_token_id]
-
-            tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
-
-            final_res_batch.append(
-                PoolingRequestOutput(
-                    request_id=f"{emb_1.request_id}_{emb_2.request_id}",
-                    outputs=pair_score,
-                    prompt_token_ids=tokens,
-                    finished=True))
+        final_res_batch = _cosine_similarity(tokenizer=tokenizer,
+                                             embed_1=embeddings_1,
+                                             embed_2=embeddings_2)
 
         return final_res_batch
 

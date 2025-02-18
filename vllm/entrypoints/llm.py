@@ -7,7 +7,6 @@ from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
                     Tuple, Type, Union, cast, overload)
 
 import cloudpickle
-import torch
 import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
@@ -25,6 +24,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
+from vllm.entrypoints.score_utils import _cosine_similarity
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -1010,40 +1010,25 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> List[ScoringRequestOutput]:
 
-        encoded_output = self.encode(
+        encoded_output: List[PoolingRequestOutput] = self.encode(
             text_1 + text_2,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request)
-        encoded_output_1 = encoded_output[0:len(text_1)]
-        encoded_output_2 = encoded_output[len(text_1):]
+
+        encoded_output_1: List[PoolingRequestOutput] = encoded_output[
+            0:len(text_1)]
+        encoded_output_2: List[PoolingRequestOutput] = encoded_output[
+            len(text_1):]
 
         if len(encoded_output_1) == 1:
             encoded_output_1 = encoded_output_1 * len(encoded_output_2)
 
-        output_pairs = [(t1, t2)
-                        for t1, t2 in zip(encoded_output_1, encoded_output_2)]
+        scores: List[PoolingRequestOutput] = []
 
-        scores = []
-        scorer = torch.nn.CosineSimilarity(0)
-
-        for embed_1, embed_2 in output_pairs:
-            pair_score = scorer(embed_1.outputs.data, embed_2.outputs.data)
-
-            if (pad_token_id := getattr(tokenizer, "pad_token_id",
-                                        None)) is not None:
-                tokens = embed_1.prompt_token_ids + [
-                    pad_token_id
-                ] + embed_2.prompt_token_ids
-            else:
-                tokens = embed_1.prompt_token_ids + embed_2.prompt_token_ids
-
-            scores.append(
-                PoolingRequestOutput(
-                    request_id=f"{embed_1.request_id}_{embed_2.request_id}",
-                    outputs=pair_score,
-                    prompt_token_ids=tokens,
-                    finished=True))
+        scores = _cosine_similarity(tokenizer=tokenizer,
+                                    embed_1=encoded_output_1,
+                                    embed_2=encoded_output_2)
 
         items = self.engine_class.validate_outputs(scores,
                                                    PoolingRequestOutput)
