@@ -21,10 +21,11 @@ ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
-ENV PIP_EXTRA_INDEX_URL=https://repo.fury.io/mgiessing
+
+# FIXME: move this to requirements-txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     RUSTFLAGS='-L /opt/conda/lib' pip install -v --prefer-binary \
-        -r requirements-cpu.txt \
+        -r requirements-ppc64le.txt \
         xformers uvloop==0.20.0
 
 RUN --mount=type=bind,source=.git,target=.git \

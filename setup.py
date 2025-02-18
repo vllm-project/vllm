@@ -591,7 +591,13 @@ def get_requirements() -> List[str]:
     elif _is_tpu():
         requirements = _read_requirements("requirements-tpu.txt")
     elif _is_cpu():
-        requirements = _read_requirements("requirements-cpu.txt")
+        from platform import machine as _machine
+
+        machine = _machine()
+        if machine == "ppc64le":
+            requirements = _read_requirements("requirements-ppcle64.txt")
+        else:
+            requirements = _read_requirements("requirements-cpu.txt")
     elif _is_xpu():
         requirements = _read_requirements("requirements-xpu.txt")
     else:
