@@ -841,6 +841,8 @@ class OpenAIServingChat(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
+        self._clean_prompt_logprobs(final_res.prompt_logprobs)
+
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,
