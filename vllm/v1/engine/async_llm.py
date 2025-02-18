@@ -155,7 +155,7 @@ class AsyncLLM(EngineClient):
                                                 priority)
 
         # 3) Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, queue)
+        self.output_processor.add_request(request, lora_request, queue)
 
         # 4) Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
