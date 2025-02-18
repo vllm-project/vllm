@@ -14,8 +14,10 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
 
+from ..conftest import MODEL_WEIGHTS_S3_BUCKET
+
 MODELS = [
-    "facebook/opt-125m",
+    "distilbert/distilgpt2",
 ]
 
 
@@ -141,8 +143,9 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
         metrics_tag_content = stat_logger.labels["model_name"]
 
     if served_model_name is None or served_model_name == []:
-        assert metrics_tag_content == model, (
-            f"Metrics tag model_name is wrong! expect: {model!r}\n"
+        actual_model_name = f"{MODEL_WEIGHTS_S3_BUCKET}/{model.split('/')[-1]}"
+        assert metrics_tag_content == actual_model_name, (
+            f"Metrics tag model_name is wrong! expect: {actual_model_name!r}\n"
             f"actual: {metrics_tag_content!r}")
     else:
         assert metrics_tag_content == served_model_name[0], (
@@ -170,7 +173,8 @@ async def test_async_engine_log_metrics_regression(
     """
     engine_args = AsyncEngineArgs(model=model,
                                   dtype=dtype,
-                                  disable_log_stats=disable_log_stats)
+                                  disable_log_stats=disable_log_stats,
+                                  load_format="runai_streamer")
     async_engine = AsyncLLMEngine.from_engine_args(engine_args)
     for i, prompt in enumerate(example_prompts):
         results = async_engine.generate(
@@ -199,7 +203,8 @@ def test_engine_log_metrics_regression(
 ) -> None:
     engine_args = EngineArgs(model=model,
                              dtype=dtype,
-                             disable_log_stats=disable_log_stats)
+                             disable_log_stats=disable_log_stats,
+                             load_format="runai_streamer")
     engine = LLMEngine.from_engine_args(engine_args)
     for i, prompt in enumerate(example_prompts):
         engine.add_request(
@@ -283,7 +288,8 @@ def test_metric_spec_decode_interval(
                              gpu_memory_utilization=0.4,
                              speculative_model=model,
                              num_speculative_tokens=k,
-                             enforce_eager=True)
+                             enforce_eager=True,
+                             load_format="runai_streamer")
 
     engine = LLMEngine.from_engine_args(engine_args)
 

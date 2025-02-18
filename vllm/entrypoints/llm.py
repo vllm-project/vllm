@@ -15,7 +15,7 @@ from typing_extensions import TypeVar, deprecated
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, LoadFormat
 from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
                                    TaskOption)
 from vllm.engine.llm_engine import LLMEngine
@@ -171,6 +171,7 @@ class LLM:
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
+        load_format: Union[LoadFormat, str] = LoadFormat.AUTO,
         enforce_eager: Optional[bool] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
@@ -234,6 +235,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
+            load_format=load_format,
             **kwargs,
         )
         # Logic to switch between engines is done at runtime instead of import
