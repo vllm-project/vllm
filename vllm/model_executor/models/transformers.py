@@ -29,6 +29,7 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide, get_pp_indices
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -39,7 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsQuant
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, maybe_prefix)
 
@@ -54,10 +55,10 @@ def vllm_flash_attention_forward(
         value: torch.Tensor,
         attention_mask: torch.Tensor,
         # Transformers kwargs
-        scaling: float = None,
+        scaling: Optional[float] = None,
         # vLLM kwargs
-        attn_metadata: AttentionMetadata = None,
-        attention_instances: dict[Attention] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+        attention_instances: Optional[dict[Attention]] = None,
         **kwargs):
     self_attn = attention_instances[module.layer_idx]
     if scaling is not None:
@@ -81,13 +82,12 @@ def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
 
 
 def replace_linear_class(
-        linear: nn.Linear,
-        style: Literal["colwise", "rowwise"],
-        quant_config=None) -> Union[ColumnParallelLinear, RowParallelLinear]:
+    linear: nn.Linear, style: Literal["colwise", "rowwise"],
+    quant_config: QuantizationConfig
+) -> Union[ColumnParallelLinear, RowParallelLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
     
-    `quant_config` is not yet supported.
     Args:
         linear (nn.Linear): `nn.Linear` to be replaced.
         style (str): Tensor parallel style of the new linear, e.g. "colwise".
@@ -103,13 +103,7 @@ def replace_linear_class(
     vllm_linear_cls = {
         "colwise": ColumnParallelLinear,
         "rowwise": RowParallelLinear,
-    }.get(style)
-
-    if vllm_linear_cls is None:
-        logger.warning(
-            "Unsupported parallel style value: %s. "
-            "This layer will not be tensor parallelized.", style)
-        return linear
+    }.get(style, ReplicatedLinear)
 
     class HFCompatibleLinear(vllm_linear_cls):
         """
@@ -123,6 +117,7 @@ def replace_linear_class(
         input_size=linear.in_features,
         output_size=linear.out_features,
         bias=linear.bias is not None,
+        quant_config=quant_config,
     )
 
 
@@ -137,7 +132,7 @@ class HFCompatiblePPMissingLayer(PPMissingLayer):
         return (super().forward(input), )
 
 
-class TransformersModel(nn.Module, SupportsPP):
+class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
@@ -180,12 +175,12 @@ class TransformersModel(nn.Module, SupportsPP):
                     config.vocab_size,
                     config.hidden_size,
                     org_num_embeddings=config.vocab_size,
-                    quant_config=None,
+                    quant_config=quant_config,
                 ))
 
         # Attention layers
         self.attention_instances = self.create_attention_instances(
-            config, cache_config, quant_config=None)
+            config, cache_config, quant_config=quant_config)
 
         # Output embeddings
         if not isinstance(getattr(self, "lm_head", None), PPMissingLayer):
@@ -193,7 +188,7 @@ class TransformersModel(nn.Module, SupportsPP):
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
@@ -300,7 +295,6 @@ class TransformersModel(nn.Module, SupportsPP):
         self,
         config: PretrainedConfig,
         cache_config: CacheConfig = None,
-        quant_config: QuantizationConfig = None,
     ) -> dict[int, Attention]:
         """
         Create `Attention` instances to inform KV cache allocation.
@@ -317,7 +311,7 @@ class TransformersModel(nn.Module, SupportsPP):
                 scale=config.head_dim**-0.5,
                 num_kv_heads=divide(config.num_key_value_heads, self.tp_size),
                 cache_config=cache_config,
-                quant_config=quant_config,
+                quant_config=self.quant_config,
                 prefix=f"{i}.attn")
             for i in range(start, end)
         }

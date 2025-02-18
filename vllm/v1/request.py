@@ -104,18 +104,6 @@ class Request:
         self._output_token_ids.extend(token_ids)
         self._all_token_ids.extend(token_ids)
 
-    def append_spec_token_ids(
-        self,
-        token_ids: Union[int, List[int]],
-    ) -> None:
-        if isinstance(token_ids, int):
-            self.spec_token_ids.append(token_ids)
-        else:
-            self.spec_token_ids.extend(token_ids)
-
-    def clear_spec_tokens(self) -> None:
-        self.spec_token_ids.clear()
-
     @property
     def num_tokens(self) -> int:
         return len(self._all_token_ids)
