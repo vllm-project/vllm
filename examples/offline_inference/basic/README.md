@@ -56,7 +56,7 @@ Try it yourself with the following argument:
 --generation-config auto
 ```
 
-###  Quantization
+### Quantization
 
 #### AQLM
 
@@ -89,16 +89,6 @@ print(hf_hub_download(repo_id, filename=filename))
 
 ```bash
 --model {local-path-printed-above} --tokenizer microsoft/Phi-3-medium-4k-instruct
-```
-
-#### Snowflake Arctic
-
-Some models, like Snowflake Arctic, require specific arguments to be run in vLLM.
-
-Try it yourself with the following arguments:
-
-```bash
---model snowflake/snowflake-arctic-instruct --quantization deepspeedfp --tensor_parallel_size 8 --trust_remote_code True
 ```
 
 ### CPU offload
