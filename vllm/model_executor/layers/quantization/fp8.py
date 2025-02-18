@@ -867,8 +867,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         padded_weights = padded_weights.transpose(0, 1)
 
         if seq_len > 1:
-            mask_weights_dtype = x.dtype if self.block_quant else torch.float32
-            mask_weights = torch.zeros((bt, total_num_experts), dtype=mask_weights_dtype, device=x.device)
+            mask_weights = torch.zeros((bt, total_num_experts), dtype=x.dtype, device=x.device)
             mask_weights.scatter_(-1, topk_ids, 1)
             mask_weights = mask_weights.transpose(0, 1)
 
@@ -886,13 +885,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 if self.block_quant:
                     current_state_static = x * mask_weight
                 else:
-                    current_state_static_scale = x_scale * mask_weight
                     current_state_static = x_fp8 * mask_weight.to(torch.float8_e4m3fn)
             else:
                 if self.block_quant:
                     current_state_static = x
                 else:
-                    current_state_static_scale = x_scale
                     current_state_static = x_fp8
 
             if self.block_quant:
@@ -905,7 +902,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     True,
                     None,
                     torch.bfloat16,
-                    current_state_static_scale,
+                    x_scale,
                     w13_scale,
                     None,
                     False,
