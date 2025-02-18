@@ -35,3 +35,15 @@ def _cosine_similarity(
                 finished=True))
 
     return scores
+
+
+def _validate_score_input_lens(
+    texts_1: Union[List[str], List[dict]],
+    texts_2: Union[List[str], List[dict]],
+):
+    if len(texts_1) > 1 and len(texts_1) != len(texts_2):
+        raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
+    if len(texts_1) == 0:
+        raise ValueError("At least one text element must be given")
+    if len(texts_2) == 0:
+        raise ValueError("At least one text_pair element must be given")

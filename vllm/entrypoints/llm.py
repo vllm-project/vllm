@@ -24,7 +24,8 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
-from vllm.entrypoints.score_utils import _cosine_similarity
+from vllm.entrypoints.score_utils import (_cosine_similarity,
+                                          _validate_score_input_lens)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -1168,12 +1169,7 @@ class LLM:
             text_2 = [text_2]
         input_text_2: List[str] = [ensure_str(t) for t in text_2]
 
-        if len(input_text_1) > 1 and len(input_text_1) != len(input_text_2):
-            raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
-        if len(input_text_1) == 0:
-            raise ValueError("At least one text element must be given")
-        if len(input_text_2) == 0:
-            raise ValueError("At least one text_pair element must be given")
+        _validate_score_input_lens(input_text_1, input_text_2)
 
         if self.llm_engine.model_config.is_cross_encoder:
             return self._cross_encoding_score(tokenizer, input_text_1,

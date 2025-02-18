@@ -15,7 +15,8 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, RerankDocument,
                                               ScoreResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.score_utils import _cosine_similarity
+from vllm.entrypoints.score_utils import (_cosine_similarity,
+                                          _validate_score_input_lens)
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -259,12 +260,8 @@ class ServingScores(OpenAIServing):
             texts_1 = [texts_1]
         if isinstance(texts_2, str):
             texts_2 = [texts_2]
-        if len(texts_1) > 1 and len(texts_1) != len(texts_2):
-            raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
-        if len(texts_1) == 0:
-            raise ValueError("At least one text element must be given")
-        if len(texts_2) == 0:
-            raise ValueError("At least one text_pair element must be given")
+
+        _validate_score_input_lens(texts_1, texts_2)
 
         if self.model_config.is_cross_encoder:
             return await self._cross_encoding_score(
