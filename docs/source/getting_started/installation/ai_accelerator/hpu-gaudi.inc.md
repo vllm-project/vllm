@@ -115,7 +115,7 @@ If you're observing the following error: `docker: Error response from daemon: Un
 - Beam search
 - LoRA adapters
 - Quantization
-- Prefill chunking (mixed-batch inferencing)
+- Prefill chunking (mixed-batch inference)
 
 ## Supported configurations
 

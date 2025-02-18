@@ -108,8 +108,8 @@ to override which format to use.
 ## Extra Parameters
 
 vLLM supports a set of parameters that are not part of the OpenAI API.
-In order to use them, you can pass them as extra parameters in the OpenAI client.
-Or directly merge them into the JSON payload if you are using HTTP call directly.
+In order to use them, you can pass them as extra parameters in the OpenAI client,
+or directly merge them into the JSON payload if you are using HTTP call directly.
 
 ```python
 completion = client.chat.completions.create(
