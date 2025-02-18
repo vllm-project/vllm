@@ -724,7 +724,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         cu_num_tokens: np.ndarray,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         # Get the number of spec decode tokens for each request.
         num_reqs = self.input_batch.num_reqs
         num_spec_decode_tokens = np.empty(num_reqs, dtype=np.int32)
@@ -942,13 +942,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
-        # Update the sampling metadata with any spec decode tokens from the
-        # scheduler.
-        self.input_batch.set_spec_token_ids_in_sampling_metadata(
-            scheduler_output.scheduled_spec_decode_tokens)
-
         # Sample the next token and get logprobs if needed.
-        sampling_metadata = self.input_batch.sampling_metadata
+        sampling_metadata = self.input_batch.get_sampling_metadata(
+            scheduler_output.scheduled_spec_decode_tokens)
         sampler_output = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,

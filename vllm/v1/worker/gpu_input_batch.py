@@ -480,13 +480,16 @@ class InputBatch:
             logit_bias=self.logit_bias[:num_reqs],
         )
 
-    def set_spec_token_ids_in_sampling_metadata(
-            self, req_id_to_spec_token_ids: Dict[str, Sequence[int]]):
+    def get_sampling_metadata(
+        self,
+        req_id_to_spec_token_ids: Dict[str,
+                                       Sequence[int]]) -> SamplingMetadata:
         self.sampling_metadata.spec_token_ids.clear()
         if req_id_to_spec_token_ids:
             for req_id in self.req_ids:
                 spec_token_ids = req_id_to_spec_token_ids.get(req_id, ())
                 self.sampling_metadata.spec_token_ids.append(spec_token_ids)
+        return self.sampling_metadata
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
         max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
