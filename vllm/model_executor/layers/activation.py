@@ -33,7 +33,7 @@ class FatreluAndMul(CustomOp):
         self.threshold = threshold
         if current_platform.is_cuda_alike():
             self.op = torch.ops._C.fatrelu_and_mul
-        elif current_platform.is_cpu():
+        elif current_platform.is_cpu() or current_platform.is_metal():
             self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
@@ -64,7 +64,7 @@ class SiluAndMul(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike() or current_platform.is_cpu() or current_platform.is_metal():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_xpu():
             from vllm._ipex_ops import ipex_ops
@@ -108,7 +108,7 @@ class MulAndSilu(CustomOp):
         elif current_platform.is_xpu():
             from vllm._ipex_ops import ipex_ops
             self.op = ipex_ops.silu_and_mul
-        elif current_platform.is_cpu():
+        elif current_platform.is_cpu() or current_platform.is_metal():
             self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
@@ -143,7 +143,7 @@ class GeluAndMul(CustomOp):
         self.approximate = approximate
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike() or current_platform.is_cpu() or current_platform.is_metal():
             if approximate == "none":
                 self.op = torch.ops._C.gelu_and_mul
             elif approximate == "tanh":
@@ -183,7 +183,7 @@ class NewGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike() or current_platform.is_cpu() or current_platform.is_metal():
             self.op = torch.ops._C.gelu_new
         elif current_platform.is_xpu():
             from vllm._ipex_ops import ipex_ops
@@ -209,7 +209,7 @@ class FastGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike() or current_platform.is_cpu() or current_platform.is_metal():
             self.op = torch.ops._C.gelu_fast
         elif current_platform.is_xpu():
             from vllm._ipex_ops import ipex_ops
@@ -234,7 +234,7 @@ class QuickGELU(CustomOp):
     # https://github.com/huggingface/transformers/blob/main/src/transformers/activations.py#L90
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike() or current_platform.is_cpu() or current_platform.is_metal():
             self.op = torch.ops._C.gelu_quick
         elif current_platform.is_xpu():
             from vllm._ipex_ops import ipex_ops

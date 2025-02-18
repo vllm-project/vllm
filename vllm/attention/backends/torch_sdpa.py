@@ -284,6 +284,7 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
     def __init__(self, input_builder: ModelInputForCPUBuilder) -> None:
         self.chunked_prefill = input_builder.chunked_prefill
         self.input_builder = input_builder
+        self._device = input_builder.device 
 
     def prepare(self):
         self.input_data = self.input_builder.input_data
@@ -295,7 +296,7 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
         prefill_query_lens = query_lens[0:input_data.num_prefills]
         slot_mapping = torch.tensor(input_data.slot_mapping,
                                     dtype=torch.long,
-                                    device="cpu")
+                                    device=self._device)
 
         # For chunked-prefill
         if self.chunked_prefill and input_data.num_prefill_tokens != 0:
@@ -303,20 +304,20 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
                 self.input_data.prefill_block_tables,
                 pad=0,
                 dtype=torch.int32,
-                device="cpu",
+                device=self._device,
             )
             query_lens_tensor = torch.tensor(prefill_query_lens,
                                              dtype=torch.int32,
-                                             device="cpu")
+                                             device=self._device)
             kv_lens_tensor = torch.tensor(prefill_seq_lens,
                                           dtype=torch.int32,
-                                          device="cpu")
+                                          device=self._device)
             query_start_loc = torch.zeros(input_data.num_prefills + 1,
                                           dtype=torch.int32,
-                                          device="cpu")
+                                          device=self._device)
             kv_start_loc = torch.zeros(input_data.num_prefills + 1,
                                        dtype=torch.int32,
-                                       device="cpu")
+                                       device=self._device)
             torch.cumsum(query_lens_tensor,
                          dim=0,
                          dtype=torch.int32,
@@ -339,20 +340,20 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
             seq_lens_tensor = torch.tensor(
                 input_data.seq_lens[input_data.num_prefills:],
                 dtype=torch.int32,
-                device="cpu",
+                device=self._device,
             )
             block_tables = make_tensor_with_pad(
                 self.input_data.decode_block_tables,
                 pad=0,
                 dtype=torch.int32,
-                device="cpu",
+                device=self._device,
             )
         else:
             block_tables = torch.tensor([])
             seq_lens_tensor = torch.tensor(
                 input_data.seq_lens[:input_data.num_prefills],
                 dtype=torch.int32,
-                device="cpu",
+                device=self._device,
             )
 
         # For multi-modal models
@@ -500,6 +501,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 PagedAttention.write_to_paged_cache(
                     key, value, key_cache, value_cache, updated_slot_mapping,
                     self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                torch.mps.synchronize()
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -576,7 +578,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 layer._k_scale,
                 layer._v_scale,
             )
-
+        torch.mps.synchronize()
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
 
