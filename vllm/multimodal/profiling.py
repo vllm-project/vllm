@@ -166,7 +166,9 @@ class MultiModalProfiler(Generic[_I]):
                 f"({set(mm_max_tokens_per_item.keys())})")
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
-        prompt_token_ids = mm_inputs["prompt_token_ids"]
+        prompt_token_ids = (
+            mm_inputs["prompt_token_ids"] if not is_encoder_data else
+            mm_inputs["encoder_prompt_token_ids"])  # type: ignore
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         total_placeholders_by_modality = {
@@ -200,11 +202,9 @@ class MultiModalProfiler(Generic[_I]):
                     "and/or reduce `mm_counts`.", seq_len, total_len,
                     total_placeholders_by_modality)
 
-            # FIXME(Isotr0py): Fix the hardcoded max tokens.
-            seq_len = 1500
-
             return DummyData(
-                seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),
+                seq_data=SequenceData.from_prompt_token_counts(
+                    (0, max(seq_len, total_len))),
                 multi_modal_data=None,
                 multi_modal_placeholders=None,
             )
