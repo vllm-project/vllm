@@ -37,3 +37,4 @@ class SamplingMetadata:
     min_tokens: Dict[int, Tuple[int, Set[int]]]
 
     logit_bias: List[Optional[Dict[int, float]]]
+    allowed_token_ids: Optional[List[int]] = None
