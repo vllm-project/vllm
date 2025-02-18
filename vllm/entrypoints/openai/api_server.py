@@ -797,7 +797,9 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
 
     resolved_chat_template = load_chat_template(args.chat_template)
-    logger.info("Using supplied chat template:\n%s", resolved_chat_template)
+    if resolved_chat_template is not None:
+        logger.info("Using supplied chat template:\n%s",
+                    resolved_chat_template)
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
