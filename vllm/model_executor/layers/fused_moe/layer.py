@@ -705,9 +705,10 @@ class FusedMoE(torch.nn.Module):
         if is_hpu:
             if VLLM_LOAD_FOR_INC:
                 return
-            else:
-                self.hpu_fused_moe.MoeOp.w13_list[expert_id].set_weight(
-                    orig_exp_data)
+            # FIXME: (Yi) add it back
+            # else:
+            #     self.hpu_fused_moe.MoeOp.w13_list[expert_id].set_weight(
+            #         orig_exp_data)
             # print(f"loaded w13 for hpu for expert_id: {expert_id}, orig_exp_data.shape: {orig_exp_data.shape}")
 
     def _load_w2(self,
@@ -732,8 +733,9 @@ class FusedMoE(torch.nn.Module):
         if is_hpu:
             if VLLM_LOAD_FOR_INC:
                 return 
-            else:
-                self.hpu_fused_moe.MoeOp.w2_list[expert_id].set_weight(expert_data)
+            # FIXME: (Yi) add it back
+            # else:
+            #     self.hpu_fused_moe.MoeOp.w2_list[expert_id].set_weight(expert_data)
             # print(f"loaded w2 for hpu for expert_id: {expert_id}, expert_data.shape: {expert_data.shape}")
 
     def _load_single_value(self, param: torch.nn.Parameter,
