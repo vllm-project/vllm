@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional
 from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum
+from functools import lru_cache
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -53,3 +54,21 @@ class NeuronPlatform(Platform):
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Neuron.")
         return False
+
+    @classmethod
+    @lru_cache
+    def is_neuronx_distributed_inference(cls) -> bool:
+        try:
+            import neuronx_distributed_inference
+        except ImportError:
+            neuronx_distributed_inference = None
+        return neuronx_distributed_inference is not None
+
+    @classmethod
+    @lru_cache
+    def is_transformers_neuronx(cls) -> bool:
+        try:
+            import transformers_neuronx
+        except ImportError:
+            transformers_neuronx = None
+        return transformers_neuronx is not None
