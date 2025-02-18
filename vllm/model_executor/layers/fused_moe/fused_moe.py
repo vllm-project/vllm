@@ -982,7 +982,7 @@ def get_config_dtype_str(dtype: torch.dtype,
     elif use_int8_w8a16:
         return "int8_w8a16"
     elif use_int4_w4a16:
-        return "int4_w8a16"
+        return "int4_w4a16"
     elif dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
         # use fp16/bfloat16 configs
