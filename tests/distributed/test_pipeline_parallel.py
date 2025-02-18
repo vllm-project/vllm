@@ -162,7 +162,7 @@ TEXT_GENERATION_MODELS = {
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
-    "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
+    "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
@@ -230,7 +230,7 @@ MULTIMODAL_MODELS = {
 TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
-    "meta-llama/Meta-Llama-3-8B",
+    "meta-llama/Llama-3.2-1B-Instruct",
     "ibm/PowerLM-3b",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
@@ -275,11 +275,11 @@ def _compare_tp(
     if load_format == "dummy":
         # Avoid OOM
         text_overrides = {
-            "num_layers": 1,
-            "num_hidden_layers": 1,
-            "num_experts": 2,
-            "num_experts_per_tok": 2,
-            "num_local_experts": 2,
+            "num_hidden_layers": 4,
+            "hidden_size": 512,
+            "intermediate_size": 800,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
         }
 
         if is_multimodal:
