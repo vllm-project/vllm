@@ -25,4 +25,4 @@ def test_lora_hotswapping():
     for _ in range(10):
         for i, req in enumerate(lora_requests):
             output = llm.generate(prompt, sampling_params=vllm.SamplingParams(max_tokens=256, temperature=0), lora_request=req)[0].outputs[0].text
-            assert output.strip()[0] == i + 1
+            assert int(output.strip()[0]) == i + 1
