@@ -1,3 +1,5 @@
+#pragma once
+
 #include "cutlass/cutlass.h"
 
 // TODO clean up the includes we no longer need
@@ -31,23 +33,36 @@ using namespace cute;
 // __global__ void print_elements(int64_t* tensor, int64_t elements) {
 //   if (threadIdx.x == 0) {
 //     for (int64_t i = 0; i < elements; ++i) {
-//       printf("%ld/%ld ", i, tensor[i]);
+//       printf("%ld ", tensor[i]);
 //     }
 //     printf("\n---\n");
 //   }
 // }
 
-namespace {
+__global__ void get_group_gemm_starts(
+    int32_t* expert_offsets, int64_t* a_offsets, int64_t* b_offsets,
+    int64_t* out_offsets, int64_t* a_scales_offsets, int64_t* b_scales_offsets,
+    const int64_t a_base_as_int, const int64_t b_base_as_int,
+    const int64_t out_base_as_int, const int64_t a_scales_base_as_int,
+    const int64_t b_scales_base_as_int, int n, int k, bool per_act_token,
+    bool per_out_ch, int64_t ab_size, int64_t c_size, int64_t acc_size) {
+  int expert_id = threadIdx.x;
+  // int num_experts = blockDim.x;
 
-template <typename Kernel>
-struct enable_sm90_or_later : Kernel {
-  template <typename... Args>
-  CUTLASS_DEVICE void operator()(Args&&... args) {
-#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
-    Kernel::operator()(std::forward<Args>(args)...);
-#endif
-  }
-};
+  int expert_offset = expert_offsets[expert_id];
+
+  a_offsets[expert_id] = a_base_as_int + expert_offset * k * ab_size;
+  b_offsets[expert_id] = b_base_as_int + expert_id * k * n * ab_size;
+  out_offsets[expert_id] = out_base_as_int + expert_offset * n * c_size;
+  a_scales_offsets[expert_id] =
+      a_scales_base_as_int +
+      (per_act_token ? expert_offset : /*expert_id*/ 0) * acc_size;
+  b_scales_offsets[expert_id] =
+      b_scales_base_as_int +
+      (per_out_ch ? n * expert_id : expert_id) * acc_size;
+}
+
+namespace {
 
 using ProblemShape =
     cutlass::gemm::GroupProblemShape<cute::Shape<int, int, int>>;
@@ -150,43 +165,34 @@ void cutlass_group_gemm_caller(
   int k_size = a_tensors.size(1);
   int n_size = out_tensors.size(1);
 
-  bool per_act_token = a_scales.numel() != groups;
+  bool per_act_token = a_scales.numel() != 1;
   bool per_out_ch = b_scales.numel() != groups;
 
-  int b_single_size = k_size * n_size * sizeof(ElementAB_Type);
-  int b_scale_single_size =
-      (per_out_ch ? out_tensors.size(1) : 1) * sizeof(ElementAccumulator);
+  auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 
-  // TODO b and b scales pointers can be computed outside this function
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
-  torch::Tensor a_ptrs_base = torch::full(
-      groups, reinterpret_cast<int64_t>(a_tensors.data_ptr()), options_int);
-  torch::Tensor out_ptrs_base = torch::full(
-      groups, reinterpret_cast<int64_t>(out_tensors.data_ptr()), options_int);
-  torch::Tensor a_scales_base = torch::full(
-      groups, reinterpret_cast<int64_t>(a_scales.data_ptr()), options_int);
 
-  torch::Tensor a_scales_offsets = torch::arange(0, groups, options_int);
+  torch::Tensor a_ptrs = torch::empty(groups, options_int);
+  torch::Tensor b_ptrs = torch::empty(groups, options_int);
+  torch::Tensor out_ptrs = torch::empty(groups, options_int);
+  torch::Tensor a_scales_ptrs = torch::empty(groups, options_int);
+  torch::Tensor b_scales_ptrs = torch::empty(groups, options_int);
 
-  torch::Tensor a_ptrs = a_ptrs_base.add(
-      expert_offsets, sizeof(ElementAB_Type) * a_tensors.size(1));
-  torch::Tensor out_ptrs = out_ptrs_base.add(
-      expert_offsets, sizeof(ElementC_Type) * out_tensors.size(1));
-
-  torch::Tensor a_scales_ptrs =
-      a_scales_base.add(per_act_token ? expert_offsets : a_scales_offsets,
-                        sizeof(ElementAccumulator));
-
-  int64_t b_tensor_base_addr = reinterpret_cast<int64_t>(b_tensors.data_ptr());
-  int64_t b_scales_base_addr = reinterpret_cast<int64_t>(b_scales.data_ptr());
-
-  torch::Tensor b_ptrs = torch::arange(
-      b_tensor_base_addr, b_tensor_base_addr + b_single_size * groups,
-      b_single_size, options_int);
-  torch::Tensor b_scales_ptrs = torch::arange(
-      b_scales_base_addr, b_scales_base_addr + b_scale_single_size * groups,
-      b_scale_single_size, options_int);
+  get_group_gemm_starts<<<1, groups, 0, stream>>>(
+      reinterpret_cast<int32_t*>(expert_offsets.data_ptr()),
+      reinterpret_cast<int64_t*>(a_ptrs.data_ptr()),
+      reinterpret_cast<int64_t*>(b_ptrs.data_ptr()),
+      reinterpret_cast<int64_t*>(out_ptrs.data_ptr()),
+      reinterpret_cast<int64_t*>(a_scales_ptrs.data_ptr()),
+      reinterpret_cast<int64_t*>(b_scales_ptrs.data_ptr()),
+      reinterpret_cast<int64_t>(a_tensors.data_ptr()),
+      reinterpret_cast<int64_t>(b_tensors.data_ptr()),
+      reinterpret_cast<int64_t>(out_tensors.data_ptr()),
+      reinterpret_cast<int64_t>(a_scales.data_ptr()),
+      reinterpret_cast<int64_t>(b_scales.data_ptr()), out_tensors.size(1),
+      a_tensors.size(1), per_act_token, per_out_ch, sizeof(ElementAB_Type),
+      sizeof(ElementC_Type), sizeof(ElementAccumulator));
 
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;
@@ -230,7 +236,6 @@ void cutlass_group_gemm_caller(
       torch::TensorOptions().dtype(torch::kUInt8).device(a_tensors.device());
   auto workspace = torch::empty(workspace_size, workspace_options);
 
-  auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
   cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
   CUTLASS_CHECK(status);
 }

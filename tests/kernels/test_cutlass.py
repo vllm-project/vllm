@@ -540,6 +540,9 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
                                 device=device,
                                 dtype=torch.int32)
 
+    if not per_act_token:
+        one_scale_a = torch.randn((1, 1), device=device, dtype=torch.float32)
+
     alignment = 16  # 128 // 8
     # For variation, each group has dimensions
     n_g = alignment * random.randint(1, 64)
@@ -560,18 +563,22 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
         # Create group-specific A and B (FP8) and output (FP16/FP32)
         a_g = to_fp8(torch.randn((m_g, k_g), device=device))
         b_g = to_fp8(torch.randn((n_g, k_g), device=device).t())
+        a_tensors.append(a_g)
+        b_tensors.append(b_g)
+
         # Set up A/B scales
-        scale_a = torch.randn((m_a_scales, 1),
-                              device=device,
-                              dtype=torch.float32)
         scale_b = torch.randn((1, n_b_scales),
                               device=device,
                               dtype=torch.float32)
-
-        a_tensors.append(a_g)
-        b_tensors.append(b_g)
-        a_scales_tensors.append(scale_a)
         b_scales_tensors.append(scale_b)
+
+        if per_act_token:
+            scale_a = torch.randn((m_a_scales, 1),
+                                  device=device,
+                                  dtype=torch.float32)
+            a_scales_tensors.append(scale_a)
+        else:
+            scale_a = one_scale_a
 
         # Compute baseline result for this group
         baseline_g = baseline_scaled_mm(a_g, b_g, scale_a, scale_b, out_dtype,
@@ -584,23 +591,22 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
     b_tensors_stacked = torch.empty((num_groups, n_g, k_g),
                                     device=device,
                                     dtype=torch.float8_e4m3fn)
+
     for g in range(num_groups):
         a_tensors_stacked[expert_offsets[g]:expert_offsets[g +
                                                            1]] = a_tensors[g]
         b_tensors_stacked[g] = b_tensors[g].t()
     b_tensors_stacked = b_tensors_stacked.transpose(1, 2)
 
-    a_scales_tensors_stacked = torch.empty(
-        (expert_offsets[num_groups] if per_act_token else num_groups, 1),
-        device=device,
-        dtype=torch.float32)
     if per_act_token:
+        a_scales_tensors_stacked = torch.empty((expert_offsets[num_groups], 1),
+                                               device=device,
+                                               dtype=torch.float32)
         for g in range(num_groups):
             a_scales_tensors_stacked[
                 expert_offsets[g]:expert_offsets[g + 1]] = a_scales_tensors[g]
     else:
-        for g in range(num_groups):
-            a_scales_tensors_stacked[g] = a_scales_tensors[g]
+        a_scales_tensors_stacked = one_scale_a
 
     b_scales_tensors_stacked = torch.empty((num_groups, n_b_scales),
                                            device=device,

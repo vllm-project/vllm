@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import pytest
 import torch
 
@@ -29,12 +30,16 @@ def run(a_q: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
 @pytest.mark.parametrize("k", [128, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_out_ch", [True, False])
 def test_cutlass_moe_no_graph(
     m: int,
     n: int,
     k: int,
     e: int,
     topk: int,
+    per_act_token: bool,
+    per_out_ch: bool,
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(
@@ -47,18 +52,28 @@ def test_cutlass_moe_no_graph(
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
 
-        a_q, a_scale = ops.scaled_fp8_quant(a)
+        a_q, a_scale = ops.scaled_fp8_quant(
+            a, use_per_token_if_dynamic=per_act_token)
+
+        n_b_scales = 2 * n if per_out_ch else 1
+        k_b_scales = k if per_out_ch else 1
 
         w1_q = torch.empty((e, 2 * n, k),
                            device="cuda",
                            dtype=torch.float8_e4m3fn)
         w2_q = torch.empty((e, k, n), device="cuda", dtype=torch.float8_e4m3fn)
-        w1_scale = torch.empty((e, 1, 1), device="cuda", dtype=torch.float32)
-        w2_scale = torch.empty((e, 1, 1), device="cuda", dtype=torch.float32)
+        w1_scale = torch.empty((e, n_b_scales, 1),
+                               device="cuda",
+                               dtype=torch.float32)
+        w2_scale = torch.empty((e, k_b_scales, 1),
+                               device="cuda",
+                               dtype=torch.float32)
 
         for expert in range(e):
-            w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(w1[expert])
-            w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(w2[expert])
+            w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(
+                w1[expert], use_per_token_if_dynamic=per_out_ch)
+            w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(
+                w2[expert], use_per_token_if_dynamic=per_out_ch)
         w1_q = w1_q.transpose(1, 2)
         w2_q = w2_q.transpose(1, 2)
         a_d = (a_q.float() * a_scale).half()
@@ -94,12 +109,16 @@ def test_cutlass_moe_no_graph(
 @pytest.mark.parametrize("k", [128, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_out_ch", [True, False])
 def test_cutlass_moe_cuda_graph(
     m: int,
     n: int,
     k: int,
     e: int,
     topk: int,
+    per_act_token: bool,
+    per_out_ch: bool,
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(
@@ -112,18 +131,28 @@ def test_cutlass_moe_cuda_graph(
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
 
-        a_q, a_scale = ops.scaled_fp8_quant(a)
+        a_q, a_scale = ops.scaled_fp8_quant(
+            a, use_per_token_if_dynamic=per_act_token)
+
+        n_b_scales = 2 * n if per_out_ch else 1
+        k_b_scales = k if per_out_ch else 1
 
         w1_q = torch.empty((e, 2 * n, k),
                            device="cuda",
                            dtype=torch.float8_e4m3fn)
         w2_q = torch.empty((e, k, n), device="cuda", dtype=torch.float8_e4m3fn)
-        w1_scale = torch.empty((e, 1, 1), device="cuda", dtype=torch.float32)
-        w2_scale = torch.empty((e, 1, 1), device="cuda", dtype=torch.float32)
+        w1_scale = torch.empty((e, n_b_scales, 1),
+                               device="cuda",
+                               dtype=torch.float32)
+        w2_scale = torch.empty((e, k_b_scales, 1),
+                               device="cuda",
+                               dtype=torch.float32)
 
         for expert in range(e):
-            w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(w1[expert])
-            w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(w2[expert])
+            w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(
+                w1[expert], use_per_token_if_dynamic=per_out_ch)
+            w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(
+                w2[expert], use_per_token_if_dynamic=per_out_ch)
         w1_q = w1_q.transpose(1, 2)
         w2_q = w2_q.transpose(1, 2)
         a_d = (a_q.float() * a_scale).half()
@@ -160,6 +189,7 @@ def test_cutlass_moe_cuda_graph(
                                    rtol=1e-2)
 
 
+@pytest.mark.skip("profiling only")
 @pytest.mark.parametrize("m", [2, 16, 32, 64, 224])
 @pytest.mark.parametrize("n", [128, 2048])
 @pytest.mark.parametrize("k", [128, 1024])
