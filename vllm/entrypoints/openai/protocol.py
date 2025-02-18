@@ -595,9 +595,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # OR that it's set to "auto"
             if data["tool_choice"] != "auto" and not isinstance(
                     data["tool_choice"], dict):
-                raise ValueError(
-                    "`tool_choice` must either be a named tool, \"auto\", "
-                    "or \"none\".")
+                raise NotImplemented("Tool choice `required` not implemented yet!")
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
