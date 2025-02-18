@@ -53,8 +53,8 @@ from vllm.utils import (DeviceMemoryProfiler, GiB_bytes, PyObjectCache,
                         is_pin_memory_available, supports_dynamo,
                         weak_ref_tensor)
 from vllm.worker.model_runner_base import (
-    ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
-    _add_attn_metadata_broadcastable_dict,
+    InputProcessingError, ModelRunnerBase, ModelRunnerInputBase,
+    ModelRunnerInputBuilderBase, _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
@@ -727,36 +727,42 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         """Add a sequence group to the builder."""
-        seq_ids = seq_group_metadata.seq_data.keys()
-        n_seqs = len(seq_ids)
-        is_prompt = seq_group_metadata.is_prompt
 
-        if is_prompt:
-            assert n_seqs == 1
-            self.decode_only = False
+        try:
+            seq_ids = seq_group_metadata.seq_data.keys()
+            n_seqs = len(seq_ids)
+            is_prompt = seq_group_metadata.is_prompt
 
-        encoder_seq_len = 0
+            if is_prompt:
+                assert n_seqs == 1
+                self.decode_only = False
 
-        if self.runner.model_config.is_encoder_decoder:
-            encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
+            encoder_seq_len = 0
 
-        inter_data = self.init_cached_inter_data(
-            request_id=seq_group_metadata.request_id,
-            seq_ids=seq_ids,
-            is_prompt=is_prompt,
-            block_tables=seq_group_metadata.block_tables,
-            computed_block_nums=seq_group_metadata.computed_block_nums,
-            reinit=True,
-            reinit_use_defaults=True,
-            encoder_seq_len=encoder_seq_len)
+            if self.runner.model_config.is_encoder_decoder:
+                encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
 
-        self.inter_data_list.append(inter_data)
+            inter_data = self.init_cached_inter_data(
+                request_id=seq_group_metadata.request_id,
+                seq_ids=seq_ids,
+                is_prompt=is_prompt,
+                block_tables=seq_group_metadata.block_tables,
+                computed_block_nums=seq_group_metadata.computed_block_nums,
+                reinit=True,
+                reinit_use_defaults=True,
+                encoder_seq_len=encoder_seq_len)
 
-        for seq_idx in range(n_seqs):
-            for per_seq_fn in self.per_seq_compute_fns:
-                per_seq_fn(inter_data, seq_idx, seq_group_metadata)
-        for per_seq_group_fn in self.per_seq_group_compute_fns:
-            per_seq_group_fn(inter_data, seq_group_metadata)
+            self.inter_data_list.append(inter_data)
+
+            for seq_idx in range(n_seqs):
+                for per_seq_fn in self.per_seq_compute_fns:
+                    per_seq_fn(inter_data, seq_idx, seq_group_metadata)
+            for per_seq_group_fn in self.per_seq_group_compute_fns:
+                per_seq_group_fn(inter_data, seq_group_metadata)
+        except Exception as e:
+            # Raise an exception that tracks the ID of the bad request
+            raise InputProcessingError(seq_group_metadata.request_id,
+                                       str(e)) from e
 
     def _use_captured_graph(self,
                             batch_size: int,
