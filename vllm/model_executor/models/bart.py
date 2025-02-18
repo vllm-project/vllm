@@ -299,7 +299,7 @@ class BartCrossAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        # TP sharding sizes is accounted for within "*Parallel" layers. 
+        # TP sharding sizes is accounted for within "*Parallel" layers.
         self.qkv_proj = QKVCrossParallelLinear(self.d_model,
                                                self.d_model //
                                                self.total_num_heads,
@@ -327,7 +327,7 @@ class BartCrossAttention(nn.Module):
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_world_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = self.num_heads # No GQA in bart
+        self.num_kv_heads = self.num_heads  # No GQA in bart
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
