@@ -246,7 +246,7 @@ class ModelConfig:
         override_generation_config: Optional[Dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
-        self.model_weights = None
+        self.model_weights = ""
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
