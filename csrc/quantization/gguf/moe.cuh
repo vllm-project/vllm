@@ -6,7 +6,7 @@ template <int qk, int qr, int qi, bool need_sum, typename block_q_t, int mmq_x,
           vec_dot_q_mul_mat_cuda_t vec_dot>
 static __device__ __forceinline__ void moe_q(
     const void* __restrict__ vx, const void* __restrict__ vy,
-    const half* __restrict__ dst, const int* __restrict__ sorted_token_ids,
+    half* __restrict__ dst, const int* __restrict__ sorted_token_ids,
     const int* __restrict__ expert_ids, const int exp_stride, const int ncols_x,
     const int nrows_x, const int ncols_y, const int nrows_y,
     const int nrows_dst, const int top_k) {

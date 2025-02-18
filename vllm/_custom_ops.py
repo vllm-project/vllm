@@ -913,6 +913,19 @@ def ggml_mul_mat_a8(
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 
+def ggml_moe_a8(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    quant_type: int,
+    row: int,
+    top_k: int,
+) -> torch.Tensor:
+    return torch.ops._C.ggml_moe_a8(X, W, sorted_token_ids, expert_ids,
+                                    quant_type, row, top_k)
+
+
 # mamba
 def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       bias_: Optional[torch.Tensor],

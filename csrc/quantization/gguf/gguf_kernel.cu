@@ -251,12 +251,9 @@ torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
 
 torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
                           torch::Tensor W,  // expert weights
-                          // torch::Tensor topk_weights,
-                          // torch::Tensor topk_ids,
                           torch::Tensor sorted_token_ids,
-                          torch::Tensor expert_ids,
-                          // torch::Tensor num_tokens_post_padded,
-                          int64_t type, int64_t row, int64_t top_k) {
+                          torch::Tensor expert_ids, int64_t type, int64_t row,
+                          int64_t top_k) {
   int col = X.sizes()[1];
   int padded = (col + 512 - 1) / 512 * 512;
   int tokens = X.sizes()[0];
