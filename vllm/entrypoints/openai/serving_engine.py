@@ -189,7 +189,8 @@ class OpenAIServing:
 
         else:
             if truncate_prompt_tokens is None:
-                encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
+                encoded = tokenizer(prompt,
+                                    add_special_tokens=add_special_tokens)
             else:
                 encoded = tokenizer(prompt,
                                     add_special_tokens=add_special_tokens,
@@ -289,12 +290,10 @@ class OpenAIServing:
         return next(
             self._tokenize_prompt_inputs(
                 request,
-                tokenizer,
-                [prompt_input],
+                tokenizer, [prompt_input],
                 truncate_prompt_tokens=truncate_prompt_tokens,
                 add_special_tokens=add_special_tokens,
-                suffix=suffix
-            ))
+                suffix=suffix))
 
     def _tokenize_prompt_inputs(
         self,
@@ -357,8 +356,7 @@ class OpenAIServing:
                 prompt=prompt_input["content"],
                 truncate_prompt_tokens=truncate_prompt_tokens,
                 add_special_tokens=add_special_tokens,
-                suffix=suffix)
-            if prompt_input["is_tokens"] is False else
+                suffix=suffix) if prompt_input["is_tokens"] is False else
             self._normalize_prompt_tokens_to_input(
                 request,
                 tokenizer,
@@ -382,8 +380,7 @@ class OpenAIServing:
             input_or_inputs,
             truncate_prompt_tokens=truncate_prompt_tokens,
             add_special_tokens=add_special_tokens,
-            suffix=suffix
-        )
+            suffix=suffix)
 
         engine_prompts = [
             TokensPrompt(prompt_token_ids=request_prompt["prompt_token_ids"])

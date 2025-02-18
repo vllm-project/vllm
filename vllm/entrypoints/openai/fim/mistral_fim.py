@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from typing import List
 
 from mistral_common.tokens.tokenizers.sentencepiece import InstructTokenizerV2

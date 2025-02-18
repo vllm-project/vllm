@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from typing import List
 
 from vllm.entrypoints.openai.fim.fim_encoder import FIMEncoder

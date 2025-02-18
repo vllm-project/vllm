@@ -910,7 +910,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
                 f"invalid FIM encoder: {args.fim} "
                 f"(chose from {{ {','.join(valid_fim_encoders)} }})")
 
-
     valid_tool_parses = ToolParserManager.tool_parsers.keys()
     if args.enable_auto_tool_choice \
         and args.tool_call_parser not in valid_tool_parses:

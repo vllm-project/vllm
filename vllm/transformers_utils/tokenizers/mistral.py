@@ -21,8 +21,6 @@ if TYPE_CHECKING:
     from mistral_common.tokens.instruct.request import FIMRequest
     from mistral_common.tokens.tokenizers.mistral import (
         MistralTokenizer as PublicMistralTokenizer)
-    from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
-                                                         Tekkenizer)
 
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 

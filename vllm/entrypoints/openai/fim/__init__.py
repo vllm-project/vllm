@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from functools import partial
 from inspect import isclass
 from typing import Callable, Dict, Iterable, Optional, Tuple, Type, Union
