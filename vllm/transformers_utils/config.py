@@ -155,8 +155,8 @@ def file_exists(
 # In offline mode the result can be a false negative
 def file_or_path_exists(model: Union[str, Path], config_name: str,
                         revision: Optional[str]) -> bool:
-    if Path(model).exists():
-        return (Path(model) / config_name).is_file()
+    if (local_path := Path(model)).exists():
+        return (local_path / config_name).is_file()
 
     # Offline mode support: Check if config file is cached already
     cached_filepath = try_to_load_from_cache(repo_id=model,
@@ -498,7 +498,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             if encoder_dict:
                 break
 
-    if not encoder_dict:
+    if not encoder_dict and not Path(model).exists():
         try:
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
