@@ -505,7 +505,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
                                          revision=revision,
                                          token=HF_TOKEN)
         except Exception as e:
-            logger.error("Error getting repo files", e)
+            logger.debug("Error getting repo files", e)
             repo_files = []
 
         for config_name in sentence_transformer_config_files:
