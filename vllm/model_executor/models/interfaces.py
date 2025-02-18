@@ -118,7 +118,7 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-    # The `embedding_module` and `embedding_padding_modules` 
+    # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[Dict[str, str]] = {}
     embedding_padding_modules: ClassVar[List[str]] = []
