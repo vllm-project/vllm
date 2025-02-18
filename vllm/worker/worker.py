@@ -202,13 +202,19 @@ class Worker(LocalOrDistributedWorkerBase):
             tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self,
+                                       other_memory_usage: int = 0
+                                       ) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
         Then, it calculate the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
+        
+        Args:
+            other_memory_usage: The other memory usage in bytes, 
+            such as the draft model in speculative decoding.
 
         .. tip::
             You may limit the usage of GPU memory
@@ -225,7 +231,8 @@ class Worker(LocalOrDistributedWorkerBase):
         # of the model.
         with memory_profiling(
                 self.baseline_snapshot,
-                weights_memory=self.model_runner.model_memory_usage) as result:
+                weights_memory=self.model_runner.model_memory_usage +
+                other_memory_usage) as result:
             self.model_runner.profile_run()
 
         self._assert_memory_footprint_increased_during_profiling()
