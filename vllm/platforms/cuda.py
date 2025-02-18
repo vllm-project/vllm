@@ -124,9 +124,8 @@ class CudaPlatformBase(Platform):
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Speculative decoding is not yet supported on VLLM V1."
-                    )
+                    parallel_config.worker_cls = \
+                            "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = \
                         "vllm.spec_decode.spec_decode_worker.create_spec_worker"
@@ -234,6 +233,10 @@ class CudaPlatformBase(Platform):
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
@@ -274,6 +277,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         return cls._get_physical_device_name(physical_device_id)
+
+    @classmethod
+    @lru_cache(maxsize=8)
+    @with_nvml_context
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
     @lru_cache(maxsize=8)
@@ -326,10 +337,10 @@ class NvmlCudaPlatform(CudaPlatformBase):
             if (len(set(device_names)) > 1
                     and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"):
                 logger.warning(
-                    "Detected different devices in the system: \n%s\nPlease"
+                    "Detected different devices in the system: %s. Please"
                     " make sure to set `CUDA_DEVICE_ORDER=PCI_BUS_ID` to "
                     "avoid unexpected behavior.",
-                    "\n".join(device_names),
+                    ", ".join(device_names),
                 )
 
 

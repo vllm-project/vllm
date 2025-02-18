@@ -40,6 +40,8 @@ def maybe_backend_fallback(
             guided_params.backend = "outlines"
 
     if guided_params.backend == "xgrammar":
+        from vllm.model_executor.guided_decoding.xgrammar_decoding import (
+            xgr_installed)
         # xgrammar only has x86 wheels for linux, fallback to outlines
         from vllm.platforms import current_platform
         if current_platform.get_cpu_architecture() is not CpuArchEnum.X86:
@@ -47,11 +49,10 @@ def maybe_backend_fallback(
                            "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
 
-        # xgrammar doesn't support regex or choice, fallback to outlines
-        if guided_params.regex is not None or guided_params.choice is not None:
-            logger.warning(
-                "xgrammar only supports json or grammar guided decoding. "
-                "Falling back to use outlines instead.")
+        # xgrammar doesn't support regex, fallback to outlines
+        if guided_params.regex is not None:
+            logger.warning("xgrammar does not support regex guided decoding. "
+                           "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
 
         # xgrammar doesn't support some JSON schema features
@@ -76,6 +77,13 @@ def maybe_backend_fallback(
                     "grammar failed to convert to GBNF. "
                     "Falling back to use outlines instead.")
                 guided_params.backend = "outlines"
+
+        # If the xgrammar module cannot be imported successfully,
+        # we should still allow users to use guided decoding with a fallback.
+        elif not xgr_installed:
+            logger.warning("xgrammar module cannot be imported successfully. "
+                           "Falling back to use outlines instead.")
+            guided_params.backend = "outlines"
 
     if (guided_params.backend == "outlines"
             and guided_params.json_object is not None):
