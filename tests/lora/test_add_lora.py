@@ -41,7 +41,7 @@ def download_and_prepare_lora_module():
     ]
     for tokenizer_file in tokenizer_files:
         del_path = Path(LORA_MODULE_DOWNLOAD_PATH) / tokenizer_file
-        del_path.unlink()
+        del_path.unlink(missing_ok=True)
 
 
 @pytest.fixture(autouse=True)
