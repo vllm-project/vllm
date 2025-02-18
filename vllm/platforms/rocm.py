@@ -5,6 +5,9 @@ from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
+from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
+                    amdsmi_get_processor_handles, amdsmi_init,
+                    amdsmi_shut_down, amdsmi_topo_get_link_type)
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -138,6 +141,30 @@ class RocmPlatform(Platform):
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
+
+    @staticmethod
+    @with_amdsmi_context
+    def is_full_nvlink(physical_device_ids: List[int]) -> bool:
+        """
+        Query if the set of gpus are fully connected by xgmi (1 hop)
+        """
+        handles = [
+            amdsmi_get_processor_handles()[i] for i in physical_device_ids
+        ]
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i < j:
+                    try:
+                        link_type = amdsmi_topo_get_link_type(
+                            handle, peer_handle)
+                        # type is 2 for XGMI
+                        if link_type["hops"] != 1 or link_type["type"] != 2:
+                            return False
+                    except AmdSmiException as error:
+                        logger.error("AMD 1 hop XGMI detection failed.",
+                                     exc_info=error)
+                        return False
+        return True
 
     @classmethod
     @with_amdsmi_context

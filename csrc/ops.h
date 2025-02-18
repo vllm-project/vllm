@@ -265,7 +265,6 @@ void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
                        const std::optional<at::Tensor>& has_initial_state,
                        bool silu_activation, int64_t pad_slot_id);
 
-#ifndef USE_ROCM
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
                       torch::Tensor& rank_data, int64_t rank, bool full_nvlink);
@@ -279,4 +278,3 @@ get_graph_buffer_ipc_meta(fptr_t _fa);
 void register_graph_buffers(fptr_t _fa,
                             const std::vector<std::vector<int64_t>>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
-#endif
