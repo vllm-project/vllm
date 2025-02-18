@@ -1382,7 +1382,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 model = _initialize_model(vllm_config=vllm_config)
 
             model_weights = model_config.model
-            if hasattr(model_config, "model_weights"):
+            if model_config.model_weights:
                 model_weights = model_config.model_weights
             model.load_weights(
                 self._get_weights_iterator(model_weights,
