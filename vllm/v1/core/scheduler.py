@@ -118,7 +118,7 @@ class Scheduler:
         num_scheduled_tokens: Dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
-        scheduled_encoder_inputs: Dict[str, List[int]] = {}
+        scheduled_encoder_inputs: Dict[str, Sequence[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: Dict[str, Sequence[int]] = {}
@@ -199,8 +199,8 @@ class Scheduler:
                     if isinstance(request.spec_token_ids, list):
                         del request.spec_token_ids[num_scheduled_spec_tokens:]
                     else:
-                        request.spec_token_ids = request.spec_token_ids[
-                            :num_scheduled_spec_tokens]
+                        request.spec_token_ids = (
+                            request.spec_token_ids[:num_scheduled_spec_tokens])
                     scheduled_spec_decode_tokens[request.request_id] = (
                         request.spec_token_ids)
 
@@ -410,7 +410,7 @@ class Scheduler:
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_budget: int,
-    ) -> Tuple[List[int], int, int]:
+    ) -> Tuple[Sequence[int], int, int]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
@@ -428,7 +428,7 @@ class Scheduler:
         decoder tokens up to just before the unschedulable encoder input.
         """
         if not request.has_encoder_inputs():
-            return [], num_new_tokens, encoder_budget
+            return (), num_new_tokens, encoder_budget
 
         encoder_inputs_to_schedule: List[int] = []
         mm_positions = request.mm_positions
@@ -573,7 +573,7 @@ class Scheduler:
                 outputs.append(
                     EngineCoreOutput(
                         request_id=req_id,
-                        new_token_ids=new_token_ids or [],
+                        new_token_ids=new_token_ids,
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,

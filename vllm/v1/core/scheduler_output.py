@@ -99,7 +99,7 @@ class SchedulerOutput:
     # req_id -> encoder input indices that need processing.
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
-    scheduled_encoder_inputs: Dict[str, List[int]]
+    scheduled_encoder_inputs: Dict[str, Sequence[int]]
     # Number of common prefix blocks for all requests.
     # This can be used for cascade attention.
     num_common_prefix_blocks: int
