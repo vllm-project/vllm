@@ -25,10 +25,35 @@ VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 VLLM_USE_PRECOMPILED = envs.VLLM_USE_PRECOMPILED
 
 
+def _read_requirements(file: str):
+    """ Reads requirements.txt files recursively descending into files included with -r
+
+    - ignores comments
+    - ignores empty lines
+    """
+    requirements: list[str] = []
+
+    with open(file) as fh:
+        for line in fh.readlines():
+            line = (
+                line.strip()  # remove newlines
+                .split("#")[0]  # remove comments
+            )
+            if not line:
+                continue
+
+            if line.startswith("-r "):  # resolve other requirements.txt files
+                requirements += _read_requirements(line.split()[1])
+                continue
+
+            requirements.append(line)
+
+    return requirements
+
+
 def _get_requires_for_build_extensions() -> list[str]:
     """ returns the requirements for extensions builds"""
-    with open("requirements-build.txt") as fh:
-        return [line.strip() for line in fh.readlines()]
+    return _read_requirements("requirements-build.txt")
 
 
 def _get_requires_for_basic_build() -> list[str]:
@@ -77,25 +102,6 @@ def _check_for_env_var(key: str, expected_value: str, strict: bool = False):
     )
 
 
-def _check_for_extra_index_url(expected_value: str, strict: bool = False):
-    """Print a warning when the env var's value doesn't match the expected value.
-
-    When strict is set to True, raises SetupError instead of warning.
-    """
-    has_uv = which("uv")
-    if has_uv:
-        _check_for_env_var("UV_EXTRA_INDEX_URL", expected_value, strict=strict)
-        # need to match pip's index behaviour,
-        # see https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes
-        _check_for_env_var("UV_INDEX_STRATEGY",
-                           "unsafe-best-match",
-                           strict=strict)
-    else:
-        _check_for_env_var("PIP_EXTRA_INDEX_URL",
-                           expected_value,
-                           strict=strict)
-
-
 def get_requires_for_build_wheel(config_settings=None) -> list[str]:
     """ Dynamically computes the wheel build requirements based on VLLM_TARGET_DEVICE
 
@@ -104,72 +110,35 @@ def get_requires_for_build_wheel(config_settings=None) -> list[str]:
     requirements_extras: list[str] = []
 
     if VLLM_TARGET_DEVICE == "cpu" or VLLM_TARGET_DEVICE == "openvino":
-        _check_for_extra_index_url("https://download.pytorch.org/whl/cpu")
+        from platform import machine
 
-        requirements_extras.append("torch==2.5.1")
-    elif VLLM_TARGET_DEVICE == "cuda":
-        from platform import machine as _machine
-
-        machine = _machine()
-        if machine == "aarch64":  # GH200
-            _check_for_extra_index_url(
-                "https://download.pytorch.org/whl/nightly/cu126")
-            requirements_extras.append("torch==2.7.0.dev20250121+cu126")
-        elif machine == "x86_64":
-            requirements_extras.append("torch==2.5.1")
+        if machine() == "ppc64le":
+            requirements_extras.extend(
+                _read_requirements("requirements/torch-ppc64le.txt"))
         else:
-            from setuptools.errors import SetupError
-            raise SetupError(f"{machine=} is not supported")
+            requirements_extras.extend(
+                _read_requirements("requirements/torch-cpu.txt"))
+    elif VLLM_TARGET_DEVICE == "cuda":
+        from platform import machine, system
 
-            requirements_extras.append("torch==2.5.1")
+        if machine() == "aarch64" and system() == "Linux":
+            requirements_extras.extend(
+                _read_requirements("requirements/torch-cuda-aarch64.txt"))
+        else:
+            requirements_extras.extend(
+                _read_requirements("requirements/torch-cuda.txt"))
     elif VLLM_TARGET_DEVICE == "rocm":
-        rocm_supported_versions = ("6.2", )
-        requested_rocm_version = os.getenv("VLLM_ROCM_VERSION")
-        if not requested_rocm_version:
-            raise RuntimeError("Set ROCM_VERSION env var. "
-                               f"Supported versions={rocm_supported_versions}")
-        if requested_rocm_version not in rocm_supported_versions:
-            raise ValueError("Invalid ROCM_VERSION. "
-                             f"Supported versions={rocm_supported_versions}")
-
-        _check_for_extra_index_url(
-            f"https://download.pytorch.org/whl/nightly/rocm{requested_rocm_version}"
-        )
-        requirements_extras.extend([
-            f"torch==2.5.1+rocm{requested_rocm_version}"
-            f"torchvision==0.20.1+rocm${requested_rocm_version}",
-        ])
+        requirements_extras.extend(
+            _read_requirements("requirements/torch-rocm.txt"))
     elif VLLM_TARGET_DEVICE == "neuron":
-        _check_for_extra_index_url(
-            expected_value="https://pip.repos.neuron.amazonaws.com")
-        requirements_extras.extend([
-            "torch-neuronx>=2.1.2",
-            "neuronx-cc==2.15.*",
-        ])
+        requirements_extras.extend(
+            _read_requirements("requirements/torch-neuron.txt"))
     elif VLLM_TARGET_DEVICE == "tpu":
-        _check_for_env_var(
-            "PIP_FIND_LINKS",
-            expected_value=
-            "https://storage.googleapis.com/libtpu-releases/index.html https://storage.googleapis.com/jax-releases/jax_nightly_releases.html https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html",
-        )
-        torch_xla_base = (
-            "https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/"
-        )
-        requirements_extras.extend([
-            "torch==2.6.0.dev20241126+cpu",
-            "torch_xla[tpu,pallas]",
-        ])
-        for python_version in ("3.11", "3.10", "3.9"):
-            pyv = python_version.replace(".", "")
-            torch_xla_version = "torch_xla-2.6.0.dev20241126"
-            req_str = f'torch_xla[tpu] @ {torch_xla_base}/{torch_xla_version}-cp{pyv}-cp{pyv}-linux_x86_64.whl ; python_version == "{python_version}"'
-            requirements_extras.append(req_str)
+        requirements_extras.extend(
+            _read_requirements("requirements/torch-tpu.txt"))
     elif VLLM_TARGET_DEVICE == "xpu":
-        requirements_extras.extend([
-            "torch @ https://intel-optimized-pytorch.s3.cn-north-1.amazonaws.com.cn/ipex_dev/xpu/torch-2.5.0a0%2Bgite84e33f-cp310-cp310-linux_x86_64.whl",
-            "intel-extension-for-pytorch @ https://intel-optimized-pytorch.s3.cn-north-1.amazonaws.com.cn/ipex_dev/xpu/intel_extension_for_pytorch-2.5.10%2Bgit9d489a8-cp310-cp310-linux_x86_64.whl",
-            "oneccl_bind_pt @ https://intel-optimized-pytorch.s3.cn-north-1.amazonaws.com.cn/ipex_dev/xpu/oneccl_bind_pt-2.5.0%2Bxpu-cp310-cp310-linux_x86_64.whl",
-        ])
+        requirements_extras.extend(
+            _read_requirements("requirements/torch-xpu.txt"))
     elif VLLM_TARGET_DEVICE == "hpu":  # noqa: SIM114
         pass
     elif VLLM_TARGET_DEVICE == "empty":
@@ -177,6 +146,16 @@ def get_requires_for_build_wheel(config_settings=None) -> list[str]:
     else:
         raise RuntimeError(
             f"Unknown runtime environment {VLLM_TARGET_DEVICE=}")
+
+    has_uv = which("uv")
+    if has_uv and any("--extra-index-url" in req
+                      for req in requirements_extras):
+        _check_for_env_var("UV_INDEX_STRATEGY",
+                           "unsafe-best-match",
+                           strict=True)
+
+    if has_uv and any("--pre" in req for req in requirements_extras):
+        _check_for_env_var("UV_PRERELEASE", "allow", strict=True)
 
     return [
         *_get_requires_for_build_extensions(),

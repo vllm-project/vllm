@@ -739,6 +739,13 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
         requirements = _read_requirements("cpu.txt")
+        # FIXME: handle other arches?
+        # from platform import machine, system
+
+        # if machine() == "aarch64" and system() == "Linux":
+        #     requirements = _read_requirements("requirements/cuda-aarch64.txt")
+        # if machine() == "ppc64le":
+        #     requirements = _read_requirements("requirements-ppcle64.txt")
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
     else:
