@@ -54,7 +54,7 @@ def _get_test_sampling_params(
 
 
 def test_parallel_sampling(monkeypatch, vllm_model, example_prompts) -> None:
-    """Test passes if parallel sampling `n>1` yields `n` uniques completions.
+    """Test passes if parallel sampling `n>1` yields `n` unique completions.
     
     Args:
       monkeypatch: test fixture for modifying text env, scoped to the test.
@@ -62,9 +62,7 @@ def test_parallel_sampling(monkeypatch, vllm_model, example_prompts) -> None:
       example_prompt: test fixture providing prompts for testing.
     """
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    # Generate batch sampling params
     sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
-    # Process requests
     model: LLM = vllm_model.model
     outputs = model.generate(example_prompts, sampling_params_list)
 
