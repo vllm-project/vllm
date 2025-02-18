@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 from functools import lru_cache
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -28,12 +27,6 @@ try:
     import vllm._rocm_C  # noqa: F401
 except ImportError as e:
     logger.warning("Failed to import from vllm._rocm_C with %r", e)
-
-if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) in ["fork", None]:
-    logger.warning("`fork` method is not supported by ROCm. "
-                   "VLLM_WORKER_MULTIPROC_METHOD is overridden to"
-                   " `spawn` instead.")
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: List[str] = []
@@ -84,6 +77,9 @@ class RocmPlatform(Platform):
             return "vllm.attention.backends.triton_mla.TritonMLABackend"
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
+        if envs.VLLM_USE_V1:
+            logger.info("Using ROCm Attention backend on V1 engine.")
+            return "vllm.v1.attention.backends.rocm_attn.ROCmAttentionBackend"
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.
@@ -102,7 +98,11 @@ class RocmPlatform(Platform):
     @classmethod
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        return torch.cuda.get_device_name(device_id)
+        # NOTE: When using V1 this function is called when overriding the
+        # engine args. Calling torch.cuda.get_device_name(device_id) here
+        # will result in the ROCm context being initialized before other
+        # processes can be created.
+        return "AMD"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -129,15 +129,30 @@ class RocmPlatform(Platform):
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                parallel_config.worker_cls = \
-                    "vllm.worker.multi_step_worker.MultiStepWorker"
+                if envs.VLLM_USE_V1:
+                    raise NotImplementedError(
+                        "Multi-step scheduling is not supported (and not "
+                        "needed) on VLLM V1. Please launch without "
+                        "--num-scheduler-steps.")
+                else:
+                    parallel_config.worker_cls = \
+                        "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
-                parallel_config.worker_cls = \
-                    "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                parallel_config.sd_worker_cls = \
-                    "vllm.worker.worker.Worker"
+                if envs.VLLM_USE_V1:
+                    raise NotImplementedError(
+                        "Speculative decoding is not yet supported on VLLM V1."
+                    )
+                else:
+                    parallel_config.worker_cls = \
+                        "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                    parallel_config.sd_worker_cls = \
+                        "vllm.worker.worker.Worker"
             else:
-                parallel_config.worker_cls = "vllm.worker.worker.Worker"
+                if envs.VLLM_USE_V1:
+                    parallel_config.worker_cls = \
+                            "vllm.v1.worker.gpu_worker.Worker"
+                else:
+                    parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -171,3 +186,7 @@ class RocmPlatform(Platform):
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(
             device)[0]
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
