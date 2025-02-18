@@ -195,6 +195,7 @@ class Scheduler:
                                              request.num_computed_tokens -
                                              request.num_tokens)
                 if num_scheduled_spec_tokens > 0:
+                    # Trim spec_token_ids list to num_scheduled_spec_tokens.
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
                         request.spec_token_ids)
