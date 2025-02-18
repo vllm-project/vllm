@@ -36,7 +36,7 @@ llm = LLM(model="meta-llama/Llama-2-7b-hf", enable_chunked_prefill=True)
 # llm = LLM(model="meta-llama/Llama-2-7b-hf", enable_chunked_prefill=True, max_num_batched_tokens=2048)
 ```
 
-By default, vLLM scheduler prioritizes prefills and does not batch prefill, and decodes to the same batch.
+By default, vLLM scheduler prioritizes prefills and does not batch prefill and decodes in the same batch.
 This policy optimizes the TTFT (time to the first token), but incurs slower ITL (inter token latency) and inefficient GPU utilization.
 
 Once chunked prefill is enabled, the policy is changed to prioritize decode requests.
