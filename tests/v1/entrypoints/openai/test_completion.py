@@ -278,7 +278,7 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
     num_completions = len(completion.choices)
     assert num_completions == n, (
         f"Num completions {num_completions} but expected {n}.")
-    completion_repeats = {}
+    completion_repeats: Dict[str, int] = {}
     for idx, choice in enumerate(completion.choices):
         # Assert correct completion index & some finish reason.
         assert choice.index == idx, (
@@ -332,19 +332,22 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     # Assert `n` completions with correct finish reasons
     assert finish_reason_count == n, (
         f"Expected {n} completions with valid indices and finish_reason.")
-    num_repeats = {}
+    completion_repeats: Dict[str, int] = {}
     for chunk in chunks:
         chunk_len = len(chunk)
         # Assert correct number of completion tokens
         assert chunk_len == max_tokens, (
             f"max_tokens={max_tokens} but chunk len is {chunk_len}.")
         text = "".join(chunk)
-        num_repeats[text] = num_repeats.get(text, 0) + 1
+        completion_repeats[text] = completion_repeats.get(text, 0) + 1
         print(text)
     # Assert `n` unique completions
-    num_unique = len(num_repeats)
+    num_unique = len(completion_repeats)
     if num_unique != n:
-        repeats = {txt: num for (txt, num) in num_repeats.items() if num > 1}
+        repeats = {
+            txt: num
+            for (txt, num) in completion_repeats.items() if num > 1
+        }
         raise AssertionError(f"{num_unique} unique completions, expected {n};"
                              f" repeats: {repeats}")
 

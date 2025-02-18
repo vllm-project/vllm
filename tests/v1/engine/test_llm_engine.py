@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pytest
 
@@ -68,7 +68,7 @@ def test_parallel_sampling(monkeypatch, vllm_model, example_prompts) -> None:
 
     # Validate each request response
     for out, n in zip(outputs, n_list):
-        completion_counts = {}
+        completion_counts: Dict[str, int] = {}
         # Assert correct number of completions
         assert len(out.outputs) == n, (
             f"{len(out.outputs)} completions; {n} expected.")
