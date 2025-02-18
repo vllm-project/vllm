@@ -1,6 +1,7 @@
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy < 2.0.0
+numba == 0.60.0 # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding.
 requests >= 2.26.0
 tqdm
 blake3
