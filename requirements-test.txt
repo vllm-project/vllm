@@ -323,6 +323,8 @@ nvidia-cusparse-cu12==12.3.1.170
     # via
     #   nvidia-cusolver-cu12
     #   torch
+nvidia-cusparselt-cu12==0.6.2
+    # via torch
 nvidia-nccl-cu12==2.21.5
     # via torch
 nvidia-nvjitlink-cu12==12.4.127
@@ -586,7 +588,7 @@ timm==1.0.11
     # via -r requirements-test.in
 tokenizers==0.21.0
     # via transformers
-torch==2.5.1
+torch==2.6.0
     # via
     #   -r requirements-test.in
     #   accelerate
@@ -601,12 +603,12 @@ torch==2.5.1
     #   torchvision
     #   vector-quantize-pytorch
     #   vocos
-torchaudio==2.5.1
+torchaudio==2.6.0
     # via
     #   -r requirements-test.in
     #   encodec
     #   vocos
-torchvision==0.20.1
+torchvision==0.21.0
     # via timm
 tqdm==4.66.6
     # via
@@ -632,7 +634,7 @@ transformers==4.48.2
     #   transformers-stream-generator
 transformers-stream-generator==0.0.5
     # via -r requirements-test.in
-triton==3.1.0
+triton==3.2.0
     # via torch
 tritonclient==2.51.0
     # via
