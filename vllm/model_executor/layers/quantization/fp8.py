@@ -252,7 +252,7 @@ class Fp8LinearMethod(LinearMethodBase):
     def add_padding_to_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
         # can benefit from tensors located far enough from one another in memory
-        if (current_platform.is_rocm() and envs.VLLM_ROCM_FP8_PADDING
+        if (envs.VLLM_ROCM_FP8_PADDING and current_platform.is_rocm()
                 and weight.stride(-1) == 1
                 and (weight.stride(-2) * weight.element_size()) % 512 == 0):
             num_pad = 256 // weight.element_size()
