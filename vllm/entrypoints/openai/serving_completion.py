@@ -19,7 +19,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              ErrorResponse,
+                                              ErrorResponse, InBandMetrics,
                                               RequestResponseMetadata,
                                               UsageInfo)
 # yapf: enable
@@ -45,12 +45,14 @@ class OpenAIServingCompletion(OpenAIServing):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        in_band_metrics: Optional[str] = None,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         in_band_metrics=in_band_metrics)
         diff_sampling_param = self.model_config.get_diff_sampling_param()
         if diff_sampling_param:
             logger.info(
@@ -61,7 +63,8 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         request: CompletionRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
+    ) -> Tuple[Union[AsyncGenerator[str, None], CompletionResponse,
+                     ErrorResponse], Optional[InBandMetrics]]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/completions/create
@@ -73,7 +76,7 @@ class OpenAIServingCompletion(OpenAIServing):
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
-            return error_check_ret
+            return error_check_ret, None
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
@@ -84,7 +87,7 @@ class OpenAIServingCompletion(OpenAIServing):
         # Return error for unsupported features.
         if request.suffix is not None:
             return self.create_error_response(
-                "suffix is not currently supported")
+                "suffix is not currently supported"), None
 
         request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
@@ -110,7 +113,7 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[RequestOutput, None]] = []
@@ -162,7 +165,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
         result_generator = merge_async_iterators(*generators)
 
@@ -186,7 +189,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 model_name,
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
-                request_metadata=request_metadata)
+                request_metadata=request_metadata), None
 
         # Non-streaming response
         final_res_batch: List[Optional[RequestOutput]] = [None] * num_prompts
@@ -206,20 +209,21 @@ class OpenAIServingCompletion(OpenAIServing):
             final_res_batch_checked = cast(List[RequestOutput],
                                            final_res_batch)
 
-            response = self.request_output_to_completion_response(
-                final_res_batch_checked,
-                request,
-                request_id,
-                created_time,
-                model_name,
-                tokenizer,
-                request_metadata,
-            )
+            (response,
+             in_band_metrics) = self.request_output_to_completion_response(
+                 final_res_batch_checked,
+                 request,
+                 request_id,
+                 created_time,
+                 model_name,
+                 tokenizer,
+                 request_metadata,
+             )
         except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
+            return self.create_error_response("Client disconnected"), None
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
@@ -230,9 +234,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 yield f"data: {response_json}\n\n"
                 yield "data: [DONE]\n\n"
 
-            return fake_stream_generator()
+            return fake_stream_generator(), None
 
-        return response
+        return response, in_band_metrics
 
     async def completion_stream_generator(
         self,
@@ -388,11 +392,13 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> CompletionResponse:
+    ) -> Tuple[CompletionResponse, Optional[InBandMetrics]]:
         choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
 
+        latest_in_band_metric: Tuple[float, InBandMetrics] = (
+            0, InBandMetrics(format=self.in_band_metrics))
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -404,6 +410,20 @@ class OpenAIServingCompletion(OpenAIServing):
                             if logprob_values.logprob == float('-inf'):
                                 logprob_values.logprob = -9999.0
             prompt_text = final_res.prompt
+            if final_res.metrics and (
+                    final_res.metrics.cpu_kv_cache_utilization is not None
+                    or final_res.metrics.gpu_kv_cache_utilization is not None):
+                in_band_metric_timestamp, in_band_metric = (
+                    final_res.metrics.last_token_time,
+                    InBandMetrics(cpu_kv_cache_utilisation=final_res.metrics.
+                                  cpu_kv_cache_utilization,
+                                  gpu_kv_cache_utilisation=final_res.metrics.
+                                  gpu_kv_cache_utilization,
+                                  format=self.in_band_metrics))
+                if not latest_in_band_metric[1] or latest_in_band_metric[
+                        0] < in_band_metric_timestamp:
+                    latest_in_band_metric = (in_band_metric_timestamp,
+                                             in_band_metric)
 
             token_ids: GenericSequence[int]
             out_logprobs: Optional[GenericSequence[Optional[Dict[int,
@@ -475,7 +495,8 @@ class OpenAIServingCompletion(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
-        )
+            # in_band_metrics=latest_in_band_metric[1] or InBandMetrics(),
+        ), latest_in_band_metric[1] or None
 
     def _create_completion_logprobs(
         self,
