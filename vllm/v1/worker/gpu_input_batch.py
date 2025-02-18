@@ -332,32 +332,12 @@ class InputBatch:
         self.logit_bias[req_index] = None
         return req_index
 
-    def clear(self) -> None:
-        self._req_ids.clear()
-        self.req_output_token_ids.clear()
-        self.req_id_to_index.clear()
-        self.greedy_reqs.clear()
-        self.random_reqs.clear()
-        self.top_p_reqs.clear()
-        self.top_k_reqs.clear()
-        self.min_p_reqs.clear()
-        self.frequency_penalties_reqs.clear()
-        self.presence_penalties_reqs.clear()
-        self.repetition_penalties_reqs.clear()
-        self.min_tokens.clear()
-        self.generators.clear()
-        self.num_logprobs.clear()
-        self.num_prompt_logprobs.clear()
-        self.request_lora_mapping.fill(0)
-        self.lora_id_to_lora_request.clear()
-        self.lora_id_to_request_ids.clear()
-        self.logit_bias = [None] * self.max_num_reqs
-
     def condense(self, empty_req_indices: List[int]) -> None:
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
-            self.clear()
+            self._req_ids.clear()
+            self.req_output_token_ids.clear()
             return
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
@@ -425,10 +405,6 @@ class InputBatch:
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
-        # num_reqs entries should be non-None
-        assert all(req_id is not None
-                   for req_id in self._req_ids), "req_ids contains None"
-
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()
 
@@ -474,22 +450,20 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(List[List[int]], self.req_output_token_ids),
-            spec_token_ids=[],
+            spec_token_ids=None,
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
         )
 
     def get_sampling_metadata(
-            self,
-            req_id_to_spec_token_ids: Dict[str,
-                                           List[int]]) -> SamplingMetadata:
-        self.sampling_metadata.spec_token_ids.clear()
-        if req_id_to_spec_token_ids:
-            # Set the new spec token ids in the cached sampling metadata.
-            for req_id in self.req_ids:
-                spec_token_ids = req_id_to_spec_token_ids.get(req_id, [])
-                self.sampling_metadata.spec_token_ids.append(spec_token_ids)
+        self,
+        req_id_to_spec_token_ids: Dict[str, List[int]],
+    ) -> SamplingMetadata:
+        # Set the new spec token ids in the cached sampling metadata.
+        self.sampling_metadata.spec_token_ids = [
+            req_id_to_spec_token_ids.get(req_id, []) for req_id in self.req_ids
+        ] if req_id_to_spec_token_ids else None
         return self.sampling_metadata
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:

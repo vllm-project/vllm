@@ -13,8 +13,8 @@ class SamplingMetadata:
     all_greedy: bool
     all_random: bool
 
-    # The list will empty if no requests have spec tokens.
-    spec_token_ids: List[List[int]]
+    # None when there are no speculated tokens.
+    spec_token_ids: Optional[List[List[int]]]
 
     top_p: Optional[torch.Tensor]
     top_k: Optional[torch.Tensor]

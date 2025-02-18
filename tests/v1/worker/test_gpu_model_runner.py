@@ -88,8 +88,7 @@ def test_update_states_new_request(model_runner):
     # new req
     scheduler_output = _schedule_new_request(req_id)
 
-    batch_changed = model_runner._update_states(scheduler_output)
-    assert batch_changed is True
+    model_runner._update_states(scheduler_output)
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
 
@@ -117,8 +116,7 @@ def test_update_states_request_finished(model_runner):
         free_encoder_input_ids=[],
     )
 
-    batch_changed = model_runner._update_states(scheduler_output)
-    assert batch_changed is True
+    model_runner._update_states(scheduler_output)
     assert not _is_req_added(model_runner, req_id)
     assert not _is_req_scheduled(model_runner, req_id)
 
