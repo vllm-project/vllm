@@ -47,8 +47,8 @@ class ServingScores(OpenAIServing):
     async def _embedding_score(
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        text_1: List[str],
-        text_2: List[str],
+        texts_1: List[str],
+        texts_2: List[str],
         request: Union[RerankRequest, ScoreRequest],
         request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -58,7 +58,7 @@ class ServingScores(OpenAIServing):
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> List[PoolingRequestOutput]:
 
-        input_texts = text_1 + text_2
+        input_texts = texts_1 + texts_2
 
         engine_prompts: List[TokensPrompt] = []
         tokenize_async = make_async(tokenizer.__call__,
@@ -115,32 +115,32 @@ class ServingScores(OpenAIServing):
         async for i, res in result_generator:
             embeddings[i] = res
 
-        emb_text_1 = embeddings[:len(text_1)]
-        emb_text_2 = embeddings[len(text_1):]
+        emb_texts_1 = embeddings[:len(texts_1)]
+        emb_texts_2 = embeddings[len(texts_1):]
 
-        if len(emb_text_1) == 1:
-            emb_text_1 = emb_text_1 * len(emb_text_2)
+        if len(emb_texts_1) == 1:
+            emb_texts_1 = emb_texts_1 * len(emb_texts_2)
 
-        embeddings_1: List[PoolingRequestOutput] = []
-        embeddings_2: List[PoolingRequestOutput] = []
+        embeds_1: List[PoolingRequestOutput] = []
+        embeds_2: List[PoolingRequestOutput] = []
 
-        for emb_1, emb_2 in zip(emb_text_1, emb_text_2):
+        for emb_1, emb_2 in zip(emb_texts_1, emb_texts_2):
             assert emb_1 is not None
             assert emb_2 is not None
-            embeddings_1.append(emb_1)
-            embeddings_2.append(emb_2)
+            embeds_1.append(emb_1)
+            embeds_2.append(emb_2)
 
         final_res_batch = _cosine_similarity(tokenizer=tokenizer,
-                                             embed_1=embeddings_1,
-                                             embed_2=embeddings_2)
+                                             embed_1=embeds_1,
+                                             embed_2=embeds_2)
 
         return final_res_batch
 
     async def _cross_encoding_score(
         self,
         tokenizer: Union[AnyTokenizer],
-        text_1: List[str],
-        text_2: List[str],
+        texts_1: List[str],
+        texts_2: List[str],
         request: Union[RerankRequest, ScoreRequest],
         request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -153,10 +153,10 @@ class ServingScores(OpenAIServing):
         request_prompts: List[str] = []
         engine_prompts: List[TokensPrompt] = []
 
-        if len(text_1) == 1:
-            text_1 = text_1 * len(text_2)
+        if len(texts_1) == 1:
+            texts_1 = texts_1 * len(texts_2)
 
-        input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
+        input_pairs = [(t1, t2) for t1, t2 in zip(texts_1, texts_2)]
 
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
@@ -222,8 +222,8 @@ class ServingScores(OpenAIServing):
 
     async def _run_scoring(
         self,
-        text_1: Union[str, list[str]],
-        text_2: Union[str, list[str]],
+        texts_1: Union[str, list[str]],
+        texts_2: Union[str, list[str]],
         request: Union[ScoreRequest, RerankRequest],
         request_id: str,
         raw_request: Optional[Request] = None,
@@ -256,22 +256,22 @@ class ServingScores(OpenAIServing):
         trace_headers = (None if raw_request is None else await
                          self._get_trace_headers(raw_request.headers))
 
-        if isinstance(text_1, str):
-            text_1 = [text_1]
-        if isinstance(text_2, str):
-            text_2 = [text_2]
-        if len(text_1) > 1 and len(text_1) != len(text_2):
+        if isinstance(texts_1, str):
+            texts_1 = [texts_1]
+        if isinstance(texts_2, str):
+            texts_2 = [texts_2]
+        if len(texts_1) > 1 and len(texts_1) != len(texts_2):
             raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
-        if len(text_1) == 0:
+        if len(texts_1) == 0:
             raise ValueError("At least one text element must be given")
-        if len(text_2) == 0:
+        if len(texts_2) == 0:
             raise ValueError("At least one text_pair element must be given")
 
         if self.model_config.is_cross_encoder:
             return await self._cross_encoding_score(
                 tokenizer=tokenizer,
-                text_1=text_1,
-                text_2=text_2,
+                texts_1=texts_1,
+                texts_2=texts_2,
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
@@ -282,8 +282,8 @@ class ServingScores(OpenAIServing):
         else:
             return await self._embedding_score(
                 tokenizer=tokenizer,
-                text_1=text_1,
-                text_2=text_2,
+                texts_1=texts_1,
+                texts_2=texts_2,
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
@@ -309,15 +309,15 @@ class ServingScores(OpenAIServing):
         request_id = f"score-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        text_1 = request.text_1
-        text_2 = request.text_2
+        texts_1 = request.text_1
+        texts_2 = request.text_2
 
         truncate_prompt_tokens = request.truncate_prompt_tokens
 
         try:
             final_res_batch = await self._run_scoring(
-                text_1,
-                text_2,
+                texts_1,
+                texts_2,
                 request,
                 request_id,
                 raw_request,
