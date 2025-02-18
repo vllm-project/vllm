@@ -669,7 +669,7 @@ class WhisperMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(input_features=MultiModalFieldConfig.batched("audio"), )
+        return dict(input_features=MultiModalFieldConfig.batched("audio"))
 
     def _get_prompt_replacements(
         self,
