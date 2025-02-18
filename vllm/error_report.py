@@ -111,9 +111,9 @@ def dump_engine_exception(err: BaseException,
             err_json = prepare_object_to_dump(err.model_input)
             logger.error("Model input for execution as JSON:")
             logger.error(json.dumps(err_json))
-        except BaseException as err:
+        except BaseException as exception:
             logger.error("Error preparing object to dump")
-            logger.error(repr(err))
+            logger.error(repr(exception))
 
     # In case we do not have a ModelExecutionError we still can
     # get information from the batch
@@ -152,6 +152,6 @@ def dump_engine_exception(err: BaseException,
                 err_json = prepare_object_to_dump(err.scheduler_output)
                 logger.error("Scheduler output for model execution as JSON:")
                 logger.error(json.dumps(err_json))
-            except BaseException as err:
+            except BaseException as exception:
                 logger.error("Error preparing object to dump")
-                logger.error(repr(err))
+                logger.error(repr(exception))
