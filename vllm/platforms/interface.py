@@ -37,6 +37,7 @@ class _Backend(enum.Enum):
     TRITON_MLA = enum.auto()
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
+    PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
@@ -320,6 +321,13 @@ class Platform:
         Return the punica wrapper for current platform.
         """
         raise NotImplementedError
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        """
+        Get device specific communicator class for distributed communication.
+        """
+        return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
 
 class UnspecifiedPlatform(Platform):
