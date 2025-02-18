@@ -49,13 +49,17 @@ def resolve_transformers_fallback(model_config: ModelConfig,
             continue
         auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
                                            None) or dict()
-        # We need to get all dynamic modules from auto_map to make sure that
-        # they're all initialized properly. Otherwise, it will raise an error
-        # due to missing relative imported dynamic modules on spawn multiproc
-        # executor.
+        # Make sure that config class is always initialized before model class,
+        # otherwise the model class won't be able to access the config class,
+        # the expected auto_map should have correct order like:
+        # "auto_map": {
+        #     "AutoConfig": "<your-repo-name>--<config-name>",
+        #     "AutoModel": "<your-repo-name>--<config-name>",
+        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
+        # },
         auto_modules = {
             name: get_class_from_dynamic_module(module, model_config.model)
-            for name, module in auto_map.items()
+            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
         }
         custom_model_module = auto_modules.get("AutoModel")
         # TODO(Isotr0py): Further clean up these raises.
