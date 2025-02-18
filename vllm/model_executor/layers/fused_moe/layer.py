@@ -586,6 +586,7 @@ class FusedMoE(torch.nn.Module):
                 _temp_expert_group = _DynamicFusedMOE(num_expert_per_group)
                 min_expert = i * n_expert_slice
                 max_expert = (i + 1) * n_expert_slice
+                # Note: clone weight will cause OoM.
                 # rank_debug(f"i:{i}, num_experts:{num_experts} loading experts from {min_expert} to {max_expert}, layer.w13_weight.shape : {layer.w13_weight.shape}")
                 w13_list_slice = [
                     layer.w13_weight[j]
@@ -703,12 +704,13 @@ class FusedMoE(torch.nn.Module):
         expert_data.copy_(loaded_weight)
 
         if is_hpu:
+            return 
+            # FIXME: (Yi) add it back
             # if VLLM_LOAD_FOR_INC:
             #     return
-            # FIXME: (Yi) add it back
             # else:
             # self.hpu_fused_moe.MoeOp.w13_list[expert_id].set_weight(orig_exp_data)
-            print(f"loaded w13 for hpu for expert_id: {expert_id}, orig_exp_data.shape: {orig_exp_data.shape}")
+            # print(f"loaded w13 for hpu for expert_id: {expert_id}, orig_exp_data.shape: {orig_exp_data.shape}")
 
     def _load_w2(self,
                  expert_data: torch.Tensor,
@@ -730,12 +732,13 @@ class FusedMoE(torch.nn.Module):
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
         if is_hpu:
+            return 
             # if VLLM_LOAD_FOR_INC:
                 # return 
             # FIXME: (Yi) add it back
             # else:
             # self.hpu_fused_moe.MoeOp.w2_list[expert_id].set_weight(expert_data)
-            print(f"loaded w2 for hpu for expert_id: {expert_id}, expert_data.shape: {expert_data.shape}")
+            # print(f"loaded w2 for hpu for expert_id: {expert_id}, expert_data.shape: {expert_data.shape}")
 
     def _load_single_value(self, param: torch.nn.Parameter,
                            loaded_weight: torch.Tensor, expert_id: int):
