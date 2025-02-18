@@ -120,11 +120,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.use_spec_decode = False
         if self.speculative_config:
+            self.use_spec_decode = True
+
             # TODO: find a better way to check if we are using ngram.
             assert self.speculative_config.ngram_prompt_lookup_min, \
                     "Currently, only ngram spec decode is supported in V1."
-            self.drafter = NgramProposer()
-            self.use_spec_decode = True
+            if get_pp_group().is_last_rank:
+                self.drafter = NgramProposer()
+                # Trigger Numba JIT compilation for N-gram proposer.
+                # This usually takes less than 1 second.
+                self.drafter.propose(
+                    np.zeros(1024, dtype=np.int32),
+                    self.speculative_config.ngram_prompt_lookup_min,
+                    self.speculative_config.num_speculative_tokens,
+                )
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
