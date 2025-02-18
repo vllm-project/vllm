@@ -78,6 +78,8 @@ class ParallelSamplingRequestManager:
                             child request.   
           index: index within `n` child    
         """
+        new_completion = child_req_output.outputs[0]
+        new_completion.index = index
         if self.request_output is None:
             # Save the first request output; reinstate
             # original request ID; metrics are not
@@ -86,10 +88,7 @@ class ParallelSamplingRequestManager:
             child_req_output.metrics = None
             self.request_output = child_req_output
         else:
-            # Aggregate additional completion into request
-            # output
-            new_completion = child_req_output.outputs[0]
-            new_completion.index = index
+            # Aggregate additional completion into request output
             # Note: will be sorted by index later
             self.request_output.outputs.append(new_completion)
 
