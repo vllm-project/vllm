@@ -59,3 +59,13 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         # When PP is used, we return a FutureWrapper immediately so that
         # the scheduler can yield to the next batch.
         return FutureWrapper(refs[0])
+
+class XPURayDistributedExecutor(RayDistributedExecutorV0, Executor):
+    """XPU Ray distributed executor without Compiled Graphs."""
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        """Ray distributed executor supports pipeline parallelism,
+        meaning that it allows PP size batches to be executed concurrently.
+        """
+        return 1
