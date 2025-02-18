@@ -142,6 +142,47 @@ def sample_definition_json_schema():
 
 
 @pytest.fixture
+def sample_enum_json_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["active", "inactive",
+                         "pending"]  # Literal values using enum
+            },
+            "priority": {
+                "type": "string",
+                "enum": ["low", "medium", "high", "critical"]
+            },
+            "category": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["bug", "feature", "improvement"]
+                    },
+                    "severity": {
+                        "type": "integer",
+                        "enum": [1, 2, 3, 4,
+                                 5]  # Enum can also contain numbers
+                    }
+                },
+                "required": ["type", "severity"]
+            },
+            "flags": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["urgent", "blocked", "needs_review", "approved"]
+                }
+            }
+        },
+        "required": ["status", "priority", "category", "flags"]
+    }
+
+
+@pytest.fixture
 def sample_guided_choice():
     return [
         "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",
