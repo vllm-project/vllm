@@ -20,4 +20,5 @@ class MistralFIMEncoder(FIMEncoder):
                 "tokenizer incompatible with 'mistral' FIM encoder")
 
     def encode_with_suffix(self, prefix: str, suffix: str) -> List[int]:
+        assert isinstance(self.tokenizer, MistralTokenizer)
         return self.tokenizer.encode_with_suffix(prefix=prefix, suffix=suffix)
