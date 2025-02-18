@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # flake8: noqa
 """Tests Model Optimizer fp8 models against ground truth generation
 Note: these tests will only pass on H100
@@ -39,6 +41,7 @@ EXPECTED_STRS_MAP = {
 @pytest.mark.skip(
     reason=
     "Prevent unstable test based on golden strings from breaking the build.")
+@pytest.mark.quant_model
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)

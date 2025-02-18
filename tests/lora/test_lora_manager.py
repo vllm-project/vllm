@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from typing import Dict, List
 
@@ -13,10 +15,12 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.models import (LoRAMapping, LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager)
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.platforms import current_platform
 
 EMBEDDING_MODULES = {
     "embed_tokens": "input_embeddings",
@@ -25,18 +29,25 @@ EMBEDDING_MODULES = {
 
 EMBEDDING_PADDING_MODULES = ["lm_head"]
 
+DEVICES = ([
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+] if current_platform.is_cuda_alike() else ["cpu"])
 
-def test_from_lora_tensors(sql_lora_files):
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_from_lora_tensors(sql_lora_files, device):
     tensors = load_file(
         os.path.join(sql_lora_files, "adapter_model.safetensors"))
     new_embeddings = load_file(
         os.path.join(sql_lora_files, "new_embeddings.safetensors"))
+
+    peft_helper = PEFTHelper.from_local_dir(sql_lora_files,
+                                            max_position_embeddings=4096)
     lora_model = LoRAModel.from_lora_tensors(
         1,
-        8,
-        16,
         tensors,
-        "cuda",
+        peft_helper=peft_helper,
+        device=device,
         embeddings=new_embeddings,
         embedding_modules=EMBEDDING_MODULES,
         embedding_padding_modules=EMBEDDING_PADDING_MODULES)
@@ -46,6 +57,8 @@ def test_from_lora_tensors(sql_lora_files):
         assert lora.lora_alpha == 16
         assert lora.lora_a is not None
         assert lora.lora_b is not None
+        assert lora.lora_a.device == torch.device(device)
+        assert lora.lora_b.device == torch.device(device)
         assert (lora.lora_a.shape[1] == lora.lora_b.shape[0]
                 ), f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         assert lora.lora_a.shape[1] == 8
@@ -60,8 +73,8 @@ def test_from_lora_tensors(sql_lora_files):
             assert lora.embeddings_tensor is None
 
 
-def create_lora(lora_id: int, model: nn.Module,
-                sub_modules: List[str]) -> LoRAModel:
+def create_lora(lora_id: int, model: nn.Module, sub_modules: List[str],
+                device: torch.device) -> LoRAModel:
     loras: Dict[str, LoRALayerWeights] = {}
     for name in sub_modules:
         w = model.get_submodule(name).weight
@@ -69,8 +82,8 @@ def create_lora(lora_id: int, model: nn.Module,
             name,
             8,
             16,
-            torch.rand([w.shape[1], 8], device="cuda"),
-            torch.rand([8, w.shape[0]], device="cuda"),
+            torch.rand([w.shape[1], 8], device=device),
+            torch.rand([8, w.shape[0]], device=device),
         )
     return LoRAModel(lora_id, 8, loras)
 
@@ -80,6 +93,7 @@ def create_packed_lora(
     model: nn.Module,
     module_name,
     replaced_module_names,
+    device: torch.device,
     empty_replaced_module_name=None,
 ) -> LoRAModel:
     w = model.get_submodule(module_name).weight
@@ -91,9 +105,9 @@ def create_packed_lora(
             replaced_module_name,
             8,
             16,
-            torch.rand([w.shape[1], 8], device="cuda"),
+            torch.rand([w.shape[1], 8], device=device),
             torch.rand([8, w.shape[0] // len(replaced_module_names)],
-                       device="cuda"),
+                       device=device),
         )
     return LoRAModel(lora_id, 8, loras)
 
@@ -104,7 +118,8 @@ def test_replace_submodules(dist_init, dummy_model):
     model.packed_modules_mapping = {}
     manager = LoRAModelManager(
         model, 1, 1, 1,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=8, max_loras=8))
+        LoRAConfig(max_lora_rank=8, max_cpu_loras=8, max_loras=8),
+        torch.device(DEVICES[0]))
     model = manager.model
 
     assert isinstance(model.get_submodule("dense1"),
@@ -116,16 +131,28 @@ def test_replace_submodules(dist_init, dummy_model):
                       RowParallelLinearWithLoRA)
 
 
-def test_lora_model_manager(dist_init, dummy_model):
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_model_manager(dist_init, dummy_model, device):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
     model.packed_modules_mapping = {}
-    model_lora1 = create_lora(1, model, ["layer1.dense1", "dense2", "lm_head"])
-    model_lora2 = create_lora(2, model, ["dense1", "dense2", "lm_head"])
-    model_lora3 = create_lora(3, model, ["dense1", "dense2", "lm_head"])
-    manager = LoRAModelManager(
-        model, 2, 2, 2,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2))
+    model_lora1 = create_lora(1,
+                              model, ["layer1.dense1", "dense2", "lm_head"],
+                              device=device)
+    model_lora2 = create_lora(2,
+                              model, ["dense1", "dense2", "lm_head"],
+                              device=device)
+    model_lora3 = create_lora(3,
+                              model, ["dense1", "dense2", "lm_head"],
+                              device=device)
+    manager = LoRAModelManager(model,
+                               2,
+                               2,
+                               2,
+                               LoRAConfig(max_lora_rank=8,
+                                          max_cpu_loras=3,
+                                          max_loras=2),
+                               device=device)
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
     assert manager.activate_adapter(1)
@@ -161,17 +188,32 @@ def test_lora_model_manager(dist_init, dummy_model):
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 2
 
+    assert manager.device == device
+    assert manager.punica_wrapper.device == device
 
-def test_lora_lru_cache_model_manager(dist_init, dummy_model):
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
     model.packed_modules_mapping = {}
-    model_lora1 = create_lora(1, model, ["layer1.dense1", "dense2", "lm_head"])
-    model_lora2 = create_lora(2, model, ["dense1", "dense2", "lm_head"])
-    model_lora3 = create_lora(3, model, ["dense1", "dense2", "lm_head"])
-    manager = LRUCacheLoRAModelManager(
-        model, 2, 2, 2,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2))
+    model_lora1 = create_lora(1,
+                              model, ["layer1.dense1", "dense2", "lm_head"],
+                              device=device)
+    model_lora2 = create_lora(2,
+                              model, ["dense1", "dense2", "lm_head"],
+                              device=device)
+    model_lora3 = create_lora(3,
+                              model, ["dense1", "dense2", "lm_head"],
+                              device=device)
+    manager = LRUCacheLoRAModelManager(model,
+                                       2,
+                                       2,
+                                       2,
+                                       LoRAConfig(max_lora_rank=8,
+                                                  max_cpu_loras=3,
+                                                  max_loras=2),
+                                       device=device)
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
     assert manager.activate_adapter(1)
@@ -238,20 +280,37 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
     with pytest.raises(ValueError):
         assert manager.pin_adapter(3)
 
+    assert manager.punica_wrapper.device == device
+    assert manager.device == device
 
-def test_lru_lora_model_manager(dist_init, dummy_model):
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lru_lora_model_manager(dist_init, dummy_model, device):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
     model = dummy_model
     model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
     model.packed_modules_mapping = {}
-    model_lora1 = create_lora(1, model, ["layer1.dense1", "dense2", "lm_head"])
-    model_lora2 = create_lora(2, model, ["dense1", "dense2", "lm_head"])
-    model_lora3 = create_lora(3, model, ["dense1", "dense2", "lm_head"])
-    model_lora4 = create_lora(4, model, ["dense1", "dense2", "lm_head"])
-    manager = LRUCacheLoRAModelManager(
-        model, 2, 2, 2,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=2, max_loras=2))
+    model_lora1 = create_lora(1,
+                              model, ["layer1.dense1", "dense2", "lm_head"],
+                              device=device)
+    model_lora2 = create_lora(2,
+                              model, ["dense1", "dense2", "lm_head"],
+                              device=device)
+    model_lora3 = create_lora(3,
+                              model, ["dense1", "dense2", "lm_head"],
+                              device=device)
+    model_lora4 = create_lora(4,
+                              model, ["dense1", "dense2", "lm_head"],
+                              device=device)
+    manager = LRUCacheLoRAModelManager(model,
+                                       2,
+                                       2,
+                                       2,
+                                       LoRAConfig(max_lora_rank=8,
+                                                  max_cpu_loras=2,
+                                                  max_loras=2),
+                                       device=device)
 
     assert all(x is None for x in manager.lora_index_to_id)
 
@@ -351,14 +410,17 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
         assert manager.remove_oldest_adapter()
 
     assert set(manager.list_adapters()) == {1}
+    assert manager.punica_wrapper.device == device
+    assert manager.device == device
 
 
+@pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
-                                          sql_lora_files):
+                                          sql_lora_files, device):
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size, lora_config, torch.device("cuda"),
+        lora_config.lora_extra_vocab_size, lora_config, device,
         EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
     worker_adapter_manager.create_lora_manager(
         llama_2_7b_model_extra_embeddings)
@@ -426,14 +488,19 @@ def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
             LoRARequest("14", 14, sql_lora_files)
         ], mapping)
 
+    assert worker_adapter_manager.device == device
+    assert (worker_adapter_manager._adapter_manager.punica_wrapper.device ==
+            device)
 
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
-                                sql_lora_files):
+                                sql_lora_files, device):
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
     worker_adapter_manager = WorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size, lora_config, torch.device("cuda"),
+        lora_config.lora_extra_vocab_size, lora_config, device,
         EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
     worker_adapter_manager.create_lora_manager(
         llama_2_7b_model_extra_embeddings)
@@ -497,8 +564,13 @@ def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
             LoRARequest("14", 14, sql_lora_files)
         ], mapping)
 
+    assert worker_adapter_manager.device == device
+    assert (worker_adapter_manager._adapter_manager.punica_wrapper.device ==
+            device)
 
-def test_packed_loras(dist_init, dummy_model_gate_up):
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_packed_loras(dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
     model.supported_lora_modules = ["gate_up_proj"]
     model.packed_modules_mapping = {
@@ -511,36 +583,49 @@ def test_packed_loras(dist_init, dummy_model_gate_up):
         1,
         model,
         module_name="gate_up_proj",
-        replaced_module_names=["gate_proj", "up_proj"])
+        replaced_module_names=["gate_proj", "up_proj"],
+        device=device)
     model_lora1 = create_packed_lora(
         2,
         model,
         module_name="gate_up_proj",
         replaced_module_names=["gate_proj", "up_proj"],
+        device=device,
         empty_replaced_module_name="gate_proj",
     )
 
-    manager = LoRAModelManager(
-        model, 2, 2, 2,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=2, max_loras=2))
+    manager = LoRAModelManager(model,
+                               2,
+                               2,
+                               2,
+                               LoRAConfig(max_lora_rank=8,
+                                          max_cpu_loras=2,
+                                          max_loras=2),
+                               device=device)
     model = manager.model
 
     assert isinstance(model.get_submodule("gate_up_proj"),
                       MergedColumnParallelLinearWithLoRA)
+    # Verify packed lora is correct
+    model_lora_clone = model_lora.clone(1)
+    model_lora_clone1 = model_lora1.clone(1)
     assert manager.add_adapter(model_lora)
     assert manager.add_adapter(model_lora1)
 
+    assert model_lora.get_lora("gate_proj") is None
+    assert model_lora.get_lora("up_proj") is None
+    assert model_lora1.get_lora("up_proj") is None
     packed_lora = model_lora.get_lora("gate_up_proj")
     assert packed_lora and isinstance(packed_lora, PackedLoRALayerWeights)
 
     torch.testing.assert_close(packed_lora.lora_a[0],
-                               model_lora.get_lora("gate_proj").lora_a)
+                               model_lora_clone.get_lora("gate_proj").lora_a)
     torch.testing.assert_close(packed_lora.lora_b[0],
-                               model_lora.get_lora("gate_proj").lora_b)
+                               model_lora_clone.get_lora("gate_proj").lora_b)
     torch.testing.assert_close(packed_lora.lora_a[1],
-                               model_lora.get_lora("up_proj").lora_a)
+                               model_lora_clone.get_lora("up_proj").lora_a)
     torch.testing.assert_close(packed_lora.lora_b[1],
-                               model_lora.get_lora("up_proj").lora_b)
+                               model_lora_clone.get_lora("up_proj").lora_b)
 
     packed_lora1 = model_lora1.get_lora("gate_up_proj")
     assert packed_lora1 and isinstance(packed_lora1, PackedLoRALayerWeights)
@@ -548,6 +633,6 @@ def test_packed_loras(dist_init, dummy_model_gate_up):
     assert packed_lora1.lora_a[0] is None
     assert packed_lora1.lora_b[0] is None
     torch.testing.assert_close(packed_lora1.lora_a[1],
-                               model_lora1.get_lora("up_proj").lora_a)
+                               model_lora_clone1.get_lora("up_proj").lora_a)
     torch.testing.assert_close(packed_lora1.lora_b[1],
-                               model_lora1.get_lora("up_proj").lora_b)
+                               model_lora_clone1.get_lora("up_proj").lora_b)

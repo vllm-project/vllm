@@ -38,9 +38,13 @@ struct Signal {
   alignas(128) FlagType peer_counter[2][kMaxBlocks][8];
 };
 
-struct __align__(16) RankData { const void* __restrict__ ptrs[8]; };
+struct __align__(16) RankData {
+  const void* __restrict__ ptrs[8];
+};
 
-struct __align__(16) RankSignals { Signal* signals[8]; };
+struct __align__(16) RankSignals {
+  Signal* signals[8];
+};
 
 // like std::array, but aligned
 template <typename T, int sz>
@@ -285,46 +289,52 @@ class CustomAllreduce {
   int world_size_;
   bool full_nvlink_;
 
-  // below are device pointers
   RankSignals sg_;
+  // Stores an map from a pointer to its peer pointters from all ranks.
   std::unordered_map<void*, RankData*> buffers_;
   Signal* self_sg_;
 
-  // stores the registered device pointers from all ranks
+  // Stores rank data from all ranks. This is mainly for cuda graph purposes.
+  // For cuda graph to work, all kernel arguments must be fixed during graph
+  // capture time. However, the peer pointers are not known during graph capture
+  // time. Therefore, during capture, we increment the rank data pointer and use
+  // that as the argument to the kernel. The kernel arguments are stored in
+  // graph_unreg_buffers_. The actual peer pointers will be filled in at the
+  // memory pointed to by the pointers in graph_unreg_buffers_ when
+  // the IPC handles are exchanged between ranks.
+  //
+  // The overall process looks like this:
+  // 1. Graph capture.
+  // 2. Each rank obtains the IPC handles for each addresses used during cuda
+  // graph capture using get_graph_buffer_ipc_meta.
+  // 3. (In Python) all gather the IPC handles.
+  // 4. Obtain the peer pointers by opening the IPC handles, and store them in
+  // the rank data array at corresponding positions.
   RankData *d_rank_data_base_, *d_rank_data_end_;
   std::vector<void*> graph_unreg_buffers_;
   // a map from IPC handles to opened IPC pointers
   std::map<IPC_KEY, char*> ipc_handles_;
 
   /**
-   * meta is a pointer to device metadata and temporary buffer for allreduce.
+   * Signals are an array of ipc-enabled buffers from all ranks.
+   * For each of the buffer, the layout is as follows:
+   * | -- sizeof(Signal) -- | ------ a few MB ----- |
+   * The first section is for allreduce synchronization, and the second section
+   * is for storing the intermediate results required by some allreduce algos.
    *
-   * There's a total of sizeof(Signal) of prefix before the actual data,
-   * so meta + 1 points to actual temporary buffer.
-   *
-   * note: this class does not own any device memory. Any required buffers
-   * are passed in from the constructor
+   * Note: this class does not own any device memory. Any required buffers
+   * are passed in from the constructor.
    */
-  CustomAllreduce(Signal* meta, void* rank_data, size_t rank_data_sz,
-                  const cudaIpcMemHandle_t* handles,
-                  const std::vector<int64_t>& offsets, int rank,
-                  bool full_nvlink = true)
+  CustomAllreduce(Signal** signals, void* rank_data, size_t rank_data_sz,
+                  int rank, int world_size, bool full_nvlink = true)
       : rank_(rank),
-        world_size_(offsets.size()),
+        world_size_(world_size),
         full_nvlink_(full_nvlink),
-        self_sg_(meta),
+        self_sg_(signals[rank]),
         d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
         d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
     for (int i = 0; i < world_size_; i++) {
-      Signal* rank_sg;
-      if (i != rank_) {
-        char* handle = open_ipc_handle(&handles[i]);
-        handle += offsets[i];
-        rank_sg = (Signal*)handle;
-      } else {
-        rank_sg = self_sg_;
-      }
-      sg_.signals[i] = rank_sg;
+      sg_.signals[i] = signals[i];
     }
   }
 
@@ -341,11 +351,10 @@ class CustomAllreduce {
     return it->second;
   }
 
-  std::pair<std::vector<uint8_t>, std::vector<int64_t>>
-  get_graph_buffer_ipc_meta() {
+  std::pair<std::string, std::vector<int64_t>> get_graph_buffer_ipc_meta() {
     auto num_buffers = graph_unreg_buffers_.size();
     auto handle_sz = sizeof(cudaIpcMemHandle_t);
-    std::vector<uint8_t> handles(handle_sz * num_buffers, 0);
+    std::string handles(handle_sz * num_buffers, static_cast<char>(0));
     std::vector<int64_t> offsets(num_buffers);
     for (int i = 0; i < num_buffers; i++) {
       auto ptr = graph_unreg_buffers_[i];
@@ -370,26 +379,22 @@ class CustomAllreduce {
           std::to_string(d_rank_data_base_ + num - d_rank_data_end_));
   }
 
-  void register_buffer(const std::vector<std::string>& handles,
-                       const std::vector<int64_t>& offsets, void* self) {
+  /**
+   * Register already-shared IPC pointers.
+   */
+  void register_buffer(void** ptrs) {
     check_rank_data_capacity();
     RankData data;
     for (int i = 0; i < world_size_; i++) {
-      if (i != rank_) {
-        char* handle = open_ipc_handle(handles[i].data());
-        handle += offsets[i];
-        data.ptrs[i] = handle;
-      } else {
-        data.ptrs[i] = self;
-      }
+      data.ptrs[i] = ptrs[i];
     }
     auto d_data = d_rank_data_base_++;
     CUDACHECK(
         cudaMemcpy(d_data, &data, sizeof(RankData), cudaMemcpyHostToDevice));
-    buffers_[self] = d_data;
+    buffers_[ptrs[rank_]] = d_data;
   }
 
-  // note: when registering graph buffers, we intentionally choose to not
+  // Note: when registering graph buffers, we intentionally choose to not
   // deduplicate the addresses. That means if the allocator reuses some
   // addresses, they will be registered again. This is to account for the remote
   // possibility of different allocation patterns between ranks. For example,
@@ -424,11 +429,13 @@ class CustomAllreduce {
   }
 
   /**
-   * This is the result after careful grid search. Using 36 blocks give the best
-   * or close to the best runtime on the devices I tried: A100, A10, A30, T4,
-   * V100. You'll notice that NCCL kernels also only take a small amount of SMs.
-   * Not quite sure the underlying reason, but my guess is that too many SMs
-   * will cause contention on NVLink bus.
+   * Performs allreduce, assuming input has already been registered.
+   *
+   * Block and grid default configs are results after careful grid search. Using
+   * 36 blocks give the best or close to the best runtime on the devices I
+   * tried: A100, A10, A30, T4, V100. You'll notice that NCCL kernels also only
+   * take a small amount of SMs. Not quite sure the underlying reason, but my
+   * guess is that too many SMs will cause contention on NVLink bus.
    */
   template <typename T>
   void allreduce(cudaStream_t stream, T* input, T* output, int size,

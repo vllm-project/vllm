@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List
 
 import openai
@@ -83,13 +85,14 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
         messages=messages,
         max_completion_tokens=10,
         logprobs=True,
+        temperature=0.0,
         top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=772, total_tokens=782)
+        completion_tokens=10, prompt_tokens=774, total_tokens=784)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -175,13 +178,14 @@ async def test_single_chat_session_image_base64encoded(
         messages=messages,
         max_completion_tokens=10,
         logprobs=True,
+        temperature=0.0,
         top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=772, total_tokens=782)
+        completion_tokens=10, prompt_tokens=774, total_tokens=784)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -195,6 +199,7 @@ async def test_single_chat_session_image_base64encoded(
         model=model_name,
         messages=messages,
         max_completion_tokens=10,
+        temperature=0.0,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0

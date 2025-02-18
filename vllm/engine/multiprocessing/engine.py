@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pickle
 import signal
 from contextlib import contextmanager
@@ -5,29 +7,25 @@ from typing import Iterator, List, Optional, Union
 
 import cloudpickle
 import zmq
-from ray.exceptions import RayTaskError
 
 from vllm import AsyncEngineArgs, SamplingParams
+from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCProcessRequest,
+                                         RPCAdapterLoadedResponse, RPCError,
+                                         RPCLoadAdapterRequest,
+                                         RPCProcessRequest,
+                                         RPCResetPrefixCacheRequest,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.envs import VLLM_USE_V1
-from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
-
-if VLLM_USE_V1:
-    from vllm.v1.engine.llm_engine import LLMEngine
-else:
-    from vllm.engine.llm_engine import LLMEngine
 
 logger = init_logger(__name__)
 
@@ -117,12 +115,10 @@ class MQLLMEngine:
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
-        engine_config = engine_args.create_engine_config()
-
+        engine_config = engine_args.create_engine_config(usage_context)
         executor_class = LLMEngine._get_executor_cls(engine_config)
 
-        use_async_sockets = (engine_config.model_config.use_async_output_proc
-                             and not VLLM_USE_V1)
+        use_async_sockets = engine_config.model_config.use_async_output_proc
 
         return cls(ipc_path=ipc_path,
                    use_async_sockets=use_async_sockets,
@@ -242,6 +238,10 @@ class MQLLMEngine:
                         self.start_profile()
                     else:
                         self.stop_profile()
+                elif isinstance(request, RPCLoadAdapterRequest):
+                    self._handle_load_adapter_request(request)
+                elif isinstance(request, RPCResetPrefixCacheRequest):
+                    self.reset_prefix_cache()
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -292,6 +292,20 @@ class MQLLMEngine:
         if self.log_requests:
             logger.info("Aborted request %s.", request.request_id)
 
+    def _handle_load_adapter_request(self, request: RPCLoadAdapterRequest):
+        try:
+            self.engine.add_lora(request.lora_request)
+        except BaseException as e:
+            # Send back an error if the adater fails to load
+            rpc_err = RPCError(request_id=request.request_id,
+                               is_engine_errored=False,
+                               exception=e)
+            self._send_outputs(rpc_err)
+            return
+        # Otherwise, send back the successful load message
+        self._send_outputs(
+            RPCAdapterLoadedResponse(request_id=request.request_id))
+
     def _health_check(self):
         # Send unhealthy if engine has already errored
         if self._errored_with is not None:
@@ -304,13 +318,23 @@ class MQLLMEngine:
             self._send_unhealthy(e)
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
-        """Send List of RequestOutput to RPCClient."""
+        """Send outputs back to the engine client. These can be:
+        - Exceptions
+        - A list of generation outputs
+        - A response from loading a lora adapter
+        """
         if outputs:
-            # RayTaskError might not pickelable here. We need to unpack the
-            # underlying exception as the real exception in the output.
-            if (isinstance(outputs, RPCError)
-                    and isinstance(outputs.exception, RayTaskError)):
-                outputs.exception = outputs.exception.cause
+            try:
+                from ray.exceptions import RayTaskError
+
+                # RayTaskError might not pickelable here. We need to unpack the
+                # underlying exception as the real exception in the output.
+                if (isinstance(outputs, RPCError)
+                        and isinstance(outputs.exception, RayTaskError)):
+                    outputs.exception = outputs.exception.cause
+            except ImportError:
+                pass
+
             output_bytes = pickle.dumps(outputs)
             self.output_socket.send_multipart((output_bytes, ), copy=False)
 
@@ -337,28 +361,31 @@ class MQLLMEngine:
             self._errored_with = e
 
     def start_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.start_profile()
-        else:
-            self.engine.model_executor._run_workers("start_profile")
+        self.engine.start_profile()
 
     def stop_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.stop_profile()
-        else:
-            self.engine.model_executor._run_workers("stop_profile")
+        self.engine.stop_profile()
+
+    def reset_prefix_cache(self) -> bool:
+        return self.engine.reset_prefix_cache()
+
+
+def signal_handler(*_) -> None:
+    raise KeyboardInterrupt("MQLLMEngine terminated")
 
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
-                  ipc_path: str):
+                  ipc_path: str, engine_alive):
+    try:
+        engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                              usage_context=usage_context,
+                                              ipc_path=ipc_path)
 
-    def signal_handler(*_) -> None:
-        # Interrupt server on sigterm
-        raise KeyboardInterrupt("MQLLMEngine terminated")
+        signal.signal(signal.SIGTERM, signal_handler)
 
-    signal.signal(signal.SIGTERM, signal_handler)
+        engine.start()
 
-    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
-                                          usage_context=usage_context,
-                                          ipc_path=ipc_path)
-    engine.start()
+    except BaseException as e:
+        logger.exception(e)
+        engine_alive.value = False
+        raise e

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -126,9 +128,6 @@ class GPTQMarlin24Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return GPTQMarlin24LinearMethod(self)
         return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
 
 
 class GPTQMarlin24LinearMethod(LinearMethodBase):

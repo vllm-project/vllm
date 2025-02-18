@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -49,9 +51,6 @@ class DeepSpeedFPConfig(QuantizationConfig):
 
     def get_linear_method(self) -> "DeepSpeedFPLinearMethod":
         return DeepSpeedFPLinearMethod(self)
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
