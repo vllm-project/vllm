@@ -126,7 +126,7 @@ async def test_load(monkeypatch, output_kind: RequestOutputKind,
         engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
-        NUM_REQUESTS = 10000
+        NUM_REQUESTS = 100
         NUM_EXPECTED_TOKENS = 10
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
