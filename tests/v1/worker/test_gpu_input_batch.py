@@ -41,7 +41,7 @@ def _remove_requests(
     for index in req_indices_to_remove:
         input_batch.remove_request(reqs[index].req_id)
         req_ids_to_remove.add(reqs[index].req_id)
-    return (req_ids_to_remove, req_indices_to_remove_list)
+    return req_ids_to_remove, req_indices_to_remove_list
 
 
 def _construct_expected_sampling_metadata(
