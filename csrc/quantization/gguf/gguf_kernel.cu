@@ -253,10 +253,9 @@ torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
                           torch::Tensor W,  // expert weights
                           torch::Tensor sorted_token_ids,
                           torch::Tensor expert_ids, int64_t type, int64_t row,
-                          int64_t top_k) {
+                          int64_t top_k, int64_t tokens) {
   int col = X.sizes()[1];
   int padded = (col + 512 - 1) / 512 * 512;
-  int tokens = X.sizes()[0];
   const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
   auto options =
       torch::TensorOptions().dtype(torch::kFloat16).device(W.device());

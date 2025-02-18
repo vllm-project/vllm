@@ -288,9 +288,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // moe kernel for GGML.
   ops.def(
-      "ggml_moe_a8(torch::Tensor X, torch::Tensor W, "
-      "torch::Tensor sorted_token_ids, torch::Tensor expert_ids, "
-      "int type, SymInt row, SymInt top_k) -> Tensor");
+      "ggml_moe_a8(Tensor X, Tensor W, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "int type, SymInt row, SymInt top_k, SymInt tokens) -> Tensor");
   ops.impl("ggml_moe_a8", torch::kCUDA, &ggml_moe_a8);
 
 #ifndef USE_ROCM

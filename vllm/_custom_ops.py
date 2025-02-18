@@ -440,6 +440,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         quant_type: int,
         row: torch.SymInt,
         top_k: torch.SymInt,
+        tokens: torch.SymInt,
     ) -> torch.Tensor:
         tokens = X.size(0)
         return torch.empty((tokens * top_k, row),
@@ -921,9 +922,10 @@ def ggml_moe_a8(
     quant_type: int,
     row: int,
     top_k: int,
+    tokens: int,
 ) -> torch.Tensor:
     return torch.ops._C.ggml_moe_a8(X, W, sorted_token_ids, expert_ids,
-                                    quant_type, row, top_k)
+                                    quant_type, row, top_k, tokens)
 
 
 # mamba
