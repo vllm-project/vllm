@@ -15,7 +15,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.ipex_attn import (IPEXAttentionBackend,
                                                   IPEXAttentionMetadata)
-from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -84,7 +84,7 @@ class XPUModelRunner(GPUModelRunner):
 
         # NOTE: Initialized input mapper is only used for processing dummy
         # multimodal data into multimodal kwargs for GPU memory profiling.
-        self.mm_input_mapper_profiling = MMInputMapperClient(self.model_config)
+        self.mm_input_mapper_profiling = MMInputCacheClient(self.model_config)
         self.mm_input_mapper_profiling.use_cache = False
 
         self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
