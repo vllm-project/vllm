@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from collections import deque
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
@@ -37,6 +36,7 @@ class Scheduler:
         self.lora_config = lora_config
         self.speculative_config = speculative_config
         self.log_stats = log_stats
+        self.vocab_size = model_config.get_vocab_size()
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -59,7 +59,7 @@ class Scheduler:
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
         # Priority queues for requests.
-        self.waiting: Deque[Request] = deque()
+        self.waiting: List[Request] = []
         self.running: List[Request] = []
         # The requests that have been scheduled and are being executed
         # by the executor.
@@ -144,6 +144,11 @@ class Scheduler:
                 req_index += 1
                 continue
 
+            if request.use_guided_decoding:
+                if request.grammar_bitmask is None:
+                    request.allocate_grammar_bitmask(1, self.vocab_size)
+                guided_decoding_request_ids.add(request.request_id)
+
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
                 self._try_schedule_encoder_inputs(request,
@@ -170,7 +175,7 @@ class Scheduler:
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
 
-                    self.waiting.appendleft(preempted_req)
+                    self.waiting.insert(0, preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt.
@@ -224,24 +229,28 @@ class Scheduler:
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
+            num_to_skip: int = 0
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                request = self.waiting[0]
+                if num_to_skip >= len(self.waiting):
+                    break
 
-                if request.use_guided_decoding:
-                    guided_decoding_request_ids.add(request.request_id)
+                request = self.waiting[num_to_skip]
 
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     if request.grammar and request.is_grammar_ready:
                         request.status = RequestStatus.WAITING
                         request.grammar.prefilled = True
-                    else:
-                        # Skip this request but keep in the queue
-                        self.waiting.popleft()
-                        self.waiting.append(request)
-                        continue
+                    num_to_skip += 1
+                    continue
+
+                if request.use_guided_decoding:
+                    if request.grammar_bitmask is None:
+                        request.allocate_grammar_bitmask(1, self.vocab_size)
+                    guided_decoding_request_ids.add(request.request_id)
+
                 #
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -296,7 +305,7 @@ class Scheduler:
                     # The request cannot be scheduled.
                     break
 
-                self.waiting.popleft()
+                self.waiting.pop(num_to_skip)
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
                 if RequestStatus.is_waiting(request.status):
@@ -416,6 +425,7 @@ class Scheduler:
                                                       new_token_ids,
                                                       new_block_ids)
             self._cached_reqs_data[request.request_id] = req_data
+        req_data.grammar_bitmask = request.grammar_bitmask
         return req_data
 
     def _try_schedule_encoder_inputs(

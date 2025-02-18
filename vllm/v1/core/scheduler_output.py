@@ -63,6 +63,7 @@ class CachedRequestData:
     new_token_ids: List[int]
     new_block_ids: List[int]
     num_computed_tokens: int
+    grammar_bitmask: Optional["torch.Tensor"]
 
     @classmethod
     def from_request(
@@ -78,6 +79,7 @@ class CachedRequestData:
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=request.num_computed_tokens,
+            grammar_bitmask=request.grammar_bitmask,
         )
 
 

@@ -392,7 +392,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_index, start_index:end_token_index] = spec_token_ids
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
-
             # Fill the bitmask
             if (req_id in scheduler_output.guided_decoding_request_ids
                     and req_state.grammar is not None):
@@ -456,8 +455,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_scheduled_tokens[i] = num_tokens
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
-            if req_id in scheduler_output.guided_decoding_request_ids:
-                bitmask = self.requests[req_id].grammar_bitmask
+            # TODO -
+            #  -- we have a bitmask per request
+            #  -- need to pull the latest bitmask out of scheduler_output
+            bitmask = self.requests[req_id].grammar_bitmask
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]

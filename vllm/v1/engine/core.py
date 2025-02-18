@@ -155,6 +155,9 @@ class EngineCore:
         self.calculate_grammar_bitmasks()
 
         scheduler_output = self.scheduler.schedule()
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            return EngineCoreOutputs(
+                outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         output = self.model_executor.execute_model(scheduler_output)
 
@@ -221,6 +224,8 @@ class EngineCore:
 
     def calculate_grammar_bitmasks(self):
         for req in self.guided_decoding_manager.requests:
+            if req.grammar_bitmask is not None:
+                continue
 
             # Check if grammar is ready in cache
             grammar = self.guided_decoding_manager.grammar_cache.get(
