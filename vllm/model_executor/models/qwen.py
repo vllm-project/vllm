@@ -354,9 +354,6 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
             "w1",
         ],
     }
-    # LoRA specific attributes
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config

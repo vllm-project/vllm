@@ -537,9 +537,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         "dense_h_to_4h": ["dense_h_to_4h"],
         "merged_proj": ["gate_proj", "dense_h_to_4h"]
     }
-    # LoRA specific attributes
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """

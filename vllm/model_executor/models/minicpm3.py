@@ -227,9 +227,5 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
         ],
     }
 
-    # LoRA specific attributes
-    # `embedding_modules` and `embedding_padding_modules`
-    # are inherited from MiniCPMForCausalLM
-
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
         return MiniCPM3Model(vllm_config=vllm_config, prefix=prefix)

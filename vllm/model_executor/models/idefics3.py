@@ -595,9 +595,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

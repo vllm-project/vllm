@@ -1014,11 +1014,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         ],
     }
 
-    # LoRA specific attributes
-
-    embedding_modules = {}
-    embedding_padding_modules = []
-
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "lm_head.": "language_model.lm_head.",

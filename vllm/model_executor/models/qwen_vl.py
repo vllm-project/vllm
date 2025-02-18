@@ -662,9 +662,6 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
             "w1",
         ],
     }
-    # LoRA specific attributes
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
