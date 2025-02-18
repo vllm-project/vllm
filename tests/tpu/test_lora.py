@@ -1,5 +1,4 @@
 import vllm
-import sys
 
 from vllm.lora.request import LoRARequest
 
@@ -21,7 +20,7 @@ def test_lora_hotswapping():
         max_lora_rank=8
     )
 
-    prompt = "What is 1+1?"
+    prompt = "What is 1+1? \n"
 
     for _ in range(10):
         for i, req in enumerate(lora_requests):
