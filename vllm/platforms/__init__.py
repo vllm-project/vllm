@@ -119,13 +119,21 @@ def cpu_platform_plugin() -> Optional[str]:
 
 
 def neuron_platform_plugin() -> Optional[str]:
-    is_neuron = False
+    transformers_neuronx_installed = False
+    neuronx_distributed_inference_installed = False
     try:
         import transformers_neuronx  # noqa: F401
-        is_neuron = True
+        transformers_neuronx_installed = True
     except ImportError:
         pass
 
+    try:
+        import neuronx_distributed_inference
+        neuronx_distributed_inference_installed = True
+    except ImportError:
+        pass
+
+    is_neuron = transformers_neuronx_installed or neuronx_distributed_inference_installed
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
 
