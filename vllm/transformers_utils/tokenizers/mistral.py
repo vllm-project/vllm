@@ -310,6 +310,7 @@ class MistralTokenizer(TokenizerBase):
         text: Union[str, List[str], List[int]],
         text_pair: Optional[str] = None,
         add_special_tokens: bool = False,
+        split_special_tokens: bool = True,
         truncation: bool = False,
         max_length: Optional[int] = None,
     ):
