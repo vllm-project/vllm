@@ -1006,7 +1006,7 @@ class EngineArgs:
                             action="store_true",
                             default=False,
                             help="Enable sleep mode for the engine. "
-                            "(only cuda platform is supported)")
+                            "(only cuda and hip platforms are supported)")
 
         parser.add_argument(
             '--calculate-kv-scales',
