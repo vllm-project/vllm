@@ -42,8 +42,6 @@ class NeuronPlatform(Platform):
 
         assert (vllm_config.lora_config
                 is None), "LoRA is not supported for Neuron backend."
-        assert (not vllm_config.speculative_config
-                ), "Speculative decoding not yet supported for Neuron backend."
 
         cache_config = vllm_config.cache_config
         if cache_config:

@@ -1,10 +1,9 @@
 from importlib.util import find_spec
 import torch
 from typing import List, Optional
-from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
-                        SchedulerConfig, SpeculativeConfig)
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors
 from vllm.worker.neuronx_distributed_model_runner import NeuronxDistributedModelRunner
 
@@ -12,14 +11,9 @@ class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        speculation_config: SpeculativeConfig,
+        vllm_config: VllmConfig,
     ):
-        super().__init__(model_config, parallel_config, scheduler_config, device_config)
-        self.speculation_config = speculation_config
+        super().__init__(vllm_config)
 
     def load_model(self) -> None:
         from vllm.model_executor.model_loader.neuronx_distributed import get_neuron_speculation_model
@@ -27,7 +21,7 @@ class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
             self.model_config,
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
-            speculation_config=self.speculation_config)
+            speculation_config=self.speculative_config)
 
     @torch.inference_mode()
     def execute_model(
@@ -41,7 +35,7 @@ class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             input_block_ids=model_input.input_block_ids,
-            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                         device=self.device),
         )
 

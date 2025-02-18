@@ -287,18 +287,19 @@ class NeuronSpeculationCausalLM(nn.Module):
         # Lazy initialized
         self.model: nn.Module
 
+    # FIXME(Neuron): restore sampling_params after migrating framework selection and dynamic sampling
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         input_block_ids: torch.Tensor,
-        sampling_params: torch.Tensor,
+        # sampling_params: torch.Tensor,
     ) -> torch.Tensor:
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
-                            seq_ids=input_block_ids,
-                            sampling_params=sampling_params)
+                            seq_ids=input_block_ids)
+                            # sampling_params=sampling_params)
         # CTX encoding
         if (positions[:, 0]).sum().item() == 0:
             return output.fused_outputs[0][:, 0:1]
