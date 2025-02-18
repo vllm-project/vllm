@@ -28,10 +28,10 @@ The selected option sets the default pooler used to extract the final hidden sta
 - * Embedding (`embed`)
   * `LAST`
   * ✅︎
-  * ✗
+  * ❌
 - * Classification (`classify`)
   * `LAST`
-  * ✗
+  * ❌
   * ✅︎
 - * Sentence Pair Scoring (`score`)
   * \*
@@ -39,8 +39,8 @@ The selected option sets the default pooler used to extract the final hidden sta
   * \*
 - * Reward Modeling (`reward`)
   * `ALL`
-  * ✗
-  * ✗
+  * ❌
+  * ❌
 :::
 
 \*The default pooler is always defined by the model.
