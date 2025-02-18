@@ -1,0 +1,4 @@
+# Common dependencies
+-r requirements-common.txt
+
+torch==2.5.1
