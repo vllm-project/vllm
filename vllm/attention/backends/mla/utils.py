@@ -44,7 +44,7 @@ class MLACommonMetadata(AttentionMetadata):
     input_positions: torch.Tensor
 
 
-class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
+class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
     """
     Common class for implementing repeated parts
 
@@ -163,6 +163,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         kv_b_proj: ColumnParallelLinear,
         o_proj: RowParallelLinear,
     ) -> None:
+        # We add the module's inheritance and initialization to support the
+        # offload mode and MLA parameter decompression. In offload, CPU
+        # tensors are transferred to the GPU for parameter modification and
+        # then returned. The device_loading_context function, which uses
+        # module.named_parameters() and is for quantization, can handle this
+        # task. Since it needs a module-type class, we've added the
+        # inheritance and initialization.
+        torch.nn.Module.__init__(self)
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

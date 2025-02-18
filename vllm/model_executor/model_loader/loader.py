@@ -5,6 +5,7 @@ import collections
 import copy
 import dataclasses
 import fnmatch
+import gc
 import glob
 import inspect
 import itertools
@@ -165,16 +166,32 @@ def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
+            # There are cases of excess memory allocation that are not
+            # cleared, leading to "cuda out of memory" errors.
+            # TODO: Investigate the cause of the memory leak. It may be
+            # related to specific Python versions.
+            gc.collect()
 
     # Currently only used by MLA.
     # NOTE: This intentionally happens after other modules so we can easily
     # decompress the weights for MLA.
     for _, module in model.named_modules():
         if isinstance(module, Attention) and \
-            hasattr(module, "process_weights_after_loading"):
+            hasattr(module.impl, "process_weights_after_loading"):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
-            module.process_weights_after_loading(model_config.dtype)
+            # At this point, we assume that the tensor is located on the
+            # global target device. This context is specifically for
+            # scenarios involving CPU offloading. When CPU offloading is
+            # in use, we transfer the parameters to the device for
+            # processing and then move them back to the CPU afterwards.
+            with device_loading_context(module.impl, target_device):
+                module.impl.process_weights_after_loading(model_config.dtype)
+            # There are cases of excess memory allocation that are not
+            # cleared, leading to "cuda out of memory" errors.
+            # TODO: Investigate the cause of the memory leak. It may be
+            # related to specific Python versions.
+            gc.collect()
 
 
 class BaseModelLoader(ABC):
