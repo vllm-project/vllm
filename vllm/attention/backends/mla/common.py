@@ -241,7 +241,6 @@ except ImportError:
     # For rocm use upstream flash attention
     from flash_attn import flash_attn_varlen_func
 
-
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
@@ -516,8 +515,8 @@ class MLACommonMetadata(AttentionMetadata):
     # The dimension of the attention heads
     head_dim: Optional[int] = None
 
-    # Used when chunked prefill is enabled to simulate worst case workspace 
-    # allocations, hopefully to avoid going OOM 
+    # Used when chunked prefill is enabled to simulate worst case workspace
+    # allocations, hopefully to avoid going OOM
     is_profile_run: bool = False
 
     # New for MLA (compared to FlashAttention)
@@ -526,7 +525,7 @@ class MLACommonMetadata(AttentionMetadata):
     context_chunk_starts: Optional[torch.Tensor] = None
     context_chunk_seq_tot: Optional[List[int]] = None
     context_chunk_max_seq_lens: Optional[List[int]] = None
-    # Set by MLAAttentionState in `begin_forward` so it doesnt get broadcasted
+    # Set by MLAAttentionState in `begin_forward` so it doesn't get broadcasted
     chunked_prefill_workspace: Optional[torch.Tensor] = None
 
     def __post_init__(self):
@@ -1432,7 +1431,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
             # since this can be large
             _ = torch.empty(
-                (attn_metadata.chunked_prefill_workspace.shape[0], 
+                (attn_metadata.chunked_prefill_workspace.shape[0],
                  self.num_heads, self.qk_nope_head_dim + self.v_head_dim),
                 device=k_c_normed.device,
                 dtype=k_c_normed.dtype,
