@@ -42,7 +42,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 ### Transformers fallback
 
-After the merge of <gh-pr:11330>, `vllm` can fallback to models that are available in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
+`vllm` can fallback to models that are available in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
 
 To check if the backend is `transformers`, you can simply do this:
 
@@ -56,9 +56,13 @@ If it is `TransformersModel` then it means it's based on `transformers`!
 
 #### Supported features
 
-##### LORA and quantization
+##### Quantization
 
-Both are not supported yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
+Transformers fallback has supported most of available quantization in vLLM (except GGUF). See [Quantization page](#quantization-index) for more information about supported quantization in vllm.
+
+##### LoRA
+
+LoRA hasn't supported on transformers fallback yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
 
 Usually `transformers` model load weights via the `load_adapters` API, that depends on PEFT. We need to work a bit to either use this api (for now this would result in some weights not being marked as loaded) or replace modules accordingly.
 
