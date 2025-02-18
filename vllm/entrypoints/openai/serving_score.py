@@ -301,30 +301,24 @@ class ServingScores(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        model_name = request.model
         request_id = f"score-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        texts_1 = request.text_1
-        texts_2 = request.text_2
-
-        truncate_prompt_tokens = request.truncate_prompt_tokens
-
         try:
             final_res_batch = await self._run_scoring(
-                texts_1,
-                texts_2,
+                request.text_1,
+                request.text_2,
                 request,
                 request_id,
                 raw_request,
-                truncate_prompt_tokens,
+                request.truncate_prompt_tokens,
             )
 
             return self.request_output_to_score_response(
                 final_res_batch,
                 request_id,
                 created_time,
-                model_name,
+                request.model,
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -350,25 +344,21 @@ class ServingScores(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        model_name = request.model
         request_id = f"rerank-{self._base_request_id(raw_request)}"
-        truncate_prompt_tokens = request.truncate_prompt_tokens
-        query = request.query
         documents = request.documents
-
         top_n = request.top_n if request.top_n > 0 else len(documents)
 
         try:
             final_res_batch = await self._run_scoring(
-                query,
+                request.query,
                 documents,
                 request,
                 request_id,
                 raw_request,
-                truncate_prompt_tokens,
+                request.truncate_prompt_tokens,
             )
             return self.request_output_to_rerank_response(
-                final_res_batch, request_id, model_name, documents, top_n)
+                final_res_batch, request_id, request.model, documents, top_n)
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:

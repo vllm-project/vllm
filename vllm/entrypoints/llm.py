@@ -1178,7 +1178,6 @@ class LLM:
                                               lora_request,
                                               prompt_adapter_request)
         else:
-
             return self._embedding_score(
                 tokenizer,
                 input_text_1,  # type: ignore[arg-type]
