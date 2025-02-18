@@ -1,7 +1,7 @@
 import base64
 import io
 from abc import ABC, abstractmethod
-from typing import Collection, Optional
+from typing import Any, Collection, Optional, Iterable
 
 from datasets import IterableDataset, load_dataset, load_dataset_builder
 from PIL import Image
@@ -38,10 +38,9 @@ def image_url_to_mm_content(image_url: str):
     return mm_content
 
 
-class HFDatasetSampler(ABC):
+class DatasetSampler(ABC):
 
-    def __init__(self, dataset: IterableDataset, seed: Optional[int] = None):
-        self.dataset = dataset.shuffle(seed=seed).filter(self.filter_func)
+    dataset: Iterable[dict[str, Any]]
 
     @abstractmethod
     def filter_func(self, data: dict) -> bool:
@@ -59,7 +58,13 @@ class HFDatasetSampler(ABC):
         raise NotImplementedError
 
 
-class ShareGPTSampler(HFDatasetSampler):
+class HFDatasetSampler(DatasetSampler):
+
+    def __init__(self, hf_dataset: IterableDataset, seed: Optional[int] = None):
+        self.dataset = hf_dataset.shuffle(seed=seed).filter(self.filter_func)
+
+
+class ShareGPTHFSampler(HFDatasetSampler):
     """
     Dataset sampler for ShareGPT-style datasets.
     - Text-only dataset like: 'RyokoAI/ShareGPT52K' etc.
@@ -152,7 +157,7 @@ class VisionArenaBenchSampler(HFDatasetSampler):
         return sampled_requests
 
 
-DATASET_SAMPLE_FUNC: dict[str, HFDatasetSampler] = {
+HF_DATASET_SAMPLE_FUNC: dict[str, HFDatasetSampler] = {
     "lmarena-ai/vision-arena-bench-v0.1": VisionArenaBenchSampler,
 }
 
@@ -172,7 +177,7 @@ def get_hf_dataset_sampler(
                            split=dataset_split,
                            streaming=True)
 
-    if dataset_path in DATASET_SAMPLE_FUNC:
-        return DATASET_SAMPLE_FUNC[dataset_path](dataset, seed=seed)
+    if dataset_path in HF_DATASET_SAMPLE_FUNC:
+        return HF_DATASET_SAMPLE_FUNC[dataset_path](dataset, seed=seed)
     else:
-        return ShareGPTSampler(dataset, seed=seed)
+        return ShareGPTHFSampler(dataset, seed=seed)
