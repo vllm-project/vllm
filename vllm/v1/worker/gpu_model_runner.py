@@ -2,7 +2,7 @@
 
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -1011,14 +1011,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def generate_draft_token_ids(
         self,
         sampled_token_ids: List[List[int]],
-    ) -> List[Sequence[int]]:
+    ) -> List[List[int]]:
         # TODO(woosuk): Optimize.
-        draft_token_ids: List[Sequence[int]] = []
+        draft_token_ids: List[List[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 # Skip speculative decoding.
-                draft_token_ids.append(())
+                draft_token_ids.append([])
                 continue
 
             # Add sampled_token_ids to token_ids_cpu.
@@ -1031,7 +1031,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculative_config.num_speculative_tokens,
             )
             if drafter_output is None or len(drafter_output) == 0:
-                draft_token_ids.append(())
+                draft_token_ids.append([])
             else:
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids

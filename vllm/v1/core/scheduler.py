@@ -2,8 +2,7 @@
 
 import time
 from collections import deque
-from typing import (Deque, Dict, Iterable, List, Optional, Sequence, Set,
-                    Tuple, Union)
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
@@ -118,10 +117,10 @@ class Scheduler:
         num_scheduled_tokens: Dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
-        scheduled_encoder_inputs: Dict[str, Sequence[int]] = {}
+        scheduled_encoder_inputs: Dict[str, List[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
-        scheduled_spec_decode_tokens: Dict[str, Sequence[int]] = {}
+        scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -196,8 +195,9 @@ class Scheduler:
                                              request.num_computed_tokens -
                                              request.num_tokens)
                 if num_scheduled_spec_tokens > 0:
+                    del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
-                        request.spec_token_ids[:num_scheduled_spec_tokens])
+                        request.spec_token_ids)
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -405,7 +405,7 @@ class Scheduler:
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_budget: int,
-    ) -> Tuple[Sequence[int], int, int]:
+    ) -> Tuple[List[int], int, int]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
@@ -423,7 +423,7 @@ class Scheduler:
         decoder tokens up to just before the unschedulable encoder input.
         """
         if not request.has_encoder_inputs():
-            return (), num_new_tokens, encoder_budget
+            return [], num_new_tokens, encoder_budget
 
         encoder_inputs_to_schedule: List[int] = []
         mm_positions = request.mm_positions

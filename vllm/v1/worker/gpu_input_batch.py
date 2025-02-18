@@ -2,8 +2,7 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Dict, List, Optional, Sequence, Set, Tuple,
-                    cast)
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, cast
 
 import numpy as np
 import torch
@@ -482,14 +481,14 @@ class InputBatch:
         )
 
     def get_sampling_metadata(
-        self,
-        req_id_to_spec_token_ids: Dict[str,
-                                       Sequence[int]]) -> SamplingMetadata:
+            self,
+            req_id_to_spec_token_ids: Dict[str,
+                                           List[int]]) -> SamplingMetadata:
         self.sampling_metadata.spec_token_ids.clear()
         if req_id_to_spec_token_ids:
             # Set the new spec token ids in the cached sampling metadata.
             for req_id in self.req_ids:
-                spec_token_ids = req_id_to_spec_token_ids.get(req_id, ())
+                spec_token_ids = req_id_to_spec_token_ids.get(req_id, [])
                 self.sampling_metadata.spec_token_ids.append(spec_token_ids)
         return self.sampling_metadata
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-from typing import TYPE_CHECKING, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
@@ -46,7 +46,7 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
-        self.spec_token_ids: Sequence[int] = []
+        self.spec_token_ids: List[int] = []
         self.num_computed_tokens = 0
 
         # Multi-modal related

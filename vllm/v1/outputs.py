@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, NamedTuple, Optional, Sequence
+from typing import Dict, List, NamedTuple, Optional
 
 import torch
 
@@ -68,7 +68,7 @@ class ModelRunnerOutput:
     sampled_token_ids: List[List[int]]
 
     # num_reqs x num_spec_tokens
-    spec_token_ids: Optional[List[Sequence[int]]]
+    spec_token_ids: Optional[List[List[int]]]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
