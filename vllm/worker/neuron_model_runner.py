@@ -16,7 +16,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils import is_pin_memory_available, make_tensor_with_pad, is_transformers_neuronx, is_neuronx_distributed_inference
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 from vllm.worker.neuron_worker import use_neuronx_distributed, use_transformers_neuronx
 
@@ -270,15 +270,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 sampling_params.top_k = top_k
                 sampling_params.top_p = top_p
                 sampling_params.temperature = temperature
-
-        # we need multi_modal_data for later tokens as well
-        # multi_modal_inputs_list: List[MultiModalInputs] = []
-        # for seq_group_metadata in seq_group_metadata_list:
-        #     mm_data = seq_group_metadata.multi_modal_data
-        #     if mm_data:
-        #         multi_modal_inputs_list.append(mm_data)
-        # multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
-
+        
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens,
@@ -385,8 +377,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
                 sampling_params=sampling_params,
-                # **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
-                #                             device=self.device),
+                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                            device=self.device),
             )            
         elif use_transformers_neuronx():
             # [TODO] validate on-device sampling
@@ -395,8 +387,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
-                # **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
-                #                             device=self.device),
+                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                            device=self.device),
             )
 
         # Compute the logits only if the on-device sampling is turned off as
