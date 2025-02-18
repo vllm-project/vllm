@@ -412,3 +412,32 @@ def test_sampler_logit_bias(device: str, batch_size: int, bias_value: float):
                                                                  1e-2)
             else:
                 assert logits_for_req[token_id] == pytest.approx(1e-2)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("batch_size", [1, 2, 32])
+@pytest.mark.parametrize("bias_value", [-0.1, 1.2])
+def test_sampler_allowed_token_ids(device: str, batch_size: int,
+                                   bias_value: float):
+    """
+    Test to verify that when the repetition penalty is enabled, tokens
+    are penalized based on their presence in the prompt or the existing
+    output.
+    """
+    torch.set_default_device(device)
+    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
+    allowed_token_ids = set([0, 1, 2])
+    sampling_metadata.allowed_token_ids = list(allowed_token_ids)
+    # https://github.com/vllm-project/vllm/blob/38094584566b89210a6f72a408eba1fae43c3d81/tests/entrypoints/openai/test_completion.py#L620
+    sampler = Sampler()
+    logits = sampler.apply_allowed_token_ids(fake_logits, sampling_metadata)
+    logits = logits.cpu()
+    for batch_idx in range(batch_size):
+        logits_for_req = logits[batch_idx]
+        for token_id in range(VOCAB_SIZE):
+            if token_id not in allowed_token_ids:
+                assert logits_for_req[token_id] == float("-inf")
+            else:
+                assert logits_for_req[token_id] > float("-inf")

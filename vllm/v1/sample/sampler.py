@@ -49,6 +49,8 @@ class Sampler(nn.Module):
         logits = logits.to(torch.float32)
         # Apply logits bias.
         logits = self.apply_logits_bias(logits, sampling_metadata)
+        # Apply allowed token ids.
+        logits = self.apply_allowed_token_ids(logits, sampling_metadata)
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
@@ -226,4 +228,24 @@ class Sampler(nn.Module):
             if logit_bias:
                 for token_id, bias in logit_bias.items():
                     logits[i, token_id] += bias
+        return logits
+
+    def apply_allowed_token_ids(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        if not sampling_metadata.allowed_token_ids:
+            return logits
+        vocab_size = logits.size(dim=1)
+        if not all(0 <= tid < vocab_size
+                   for tid in sampling_metadata.allowed_token_ids):
+            raise ValueError("allowed_token_ids contains "
+                             "out-of-vocab token id")
+        allowed_ids = list(sampling_metadata.allowed_token_ids)
+        mask = torch.ones((logits.shape[-1], ),
+                          dtype=torch.bool,
+                          device=logits.device)
+        mask[allowed_ids] = False
+        logits.masked_fill_(mask, float("-inf"))
         return logits
