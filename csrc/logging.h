@@ -2,6 +2,11 @@
 #include <cstdarg>
 #include <cstdio>
 
+// #define debugging
+#undef debugging
+
+
+#ifdef debugging
 void logg_511(const char* format, ...) {
     std::ofstream logFile("debug.log", std::ios_base::app);
     if (!logFile.is_open()) {
@@ -20,3 +25,8 @@ void logg_511(const char* format, ...) {
     logFile << buffer << std::endl;
     logFile.close();
 }
+#else
+void logg_511(const char* format, ...) {
+    // Do nothing
+}
+#endif

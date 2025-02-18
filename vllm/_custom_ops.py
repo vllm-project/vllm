@@ -12,6 +12,9 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
 
+
+from vllm.core.logger import logger as core_logger
+
 logger = init_logger(__name__)
 
 if not current_platform.is_tpu() and not current_platform.is_hpu():
@@ -1034,11 +1037,14 @@ def concat_and_cache_mla(
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
+    core_logger.debug(f'key_caches: {key_caches}, value_caches: {value_caches}, block_mapping: {block_mapping}')
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
+    
+    core_logger.debug(f'src: {src}, dst: {dst}, block_mapping: {block_mapping}')
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
 
 

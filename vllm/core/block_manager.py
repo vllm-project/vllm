@@ -404,8 +404,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 list(seq_physical_block_id_mapping.items()))
             
             # log the swapping with the logger
-            logger.debug(f"Swapped in block for sequence {seq.seq_id}, 
-                         with physical block id mapping {physical_block_id_mapping}")
+            logger.debug(f"Swapped in block for sequence {seq.seq_id}, with physical block id mapping {physical_block_id_mapping}")
 
         return physical_block_id_mapping
 
