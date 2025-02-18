@@ -20,7 +20,6 @@ static __device__ __forceinline__ void moe_q(
   const int& row_x_0 = row_dst_0;
 
   const int col_dst_0 = blockIdx.y * mmq_x;
-  // const int& col_y_0 = col_dst_0;
 
   int token_ids[mmq_x / nwarps];
   int token_offs[mmq_x / nwarps];
@@ -29,6 +28,19 @@ static __device__ __forceinline__ void moe_q(
     token_ids[i / nwarps] = token_offs[i / nwarps] / top_k;
   }
   const int exp_idx = expert_ids[blockIdx.x];
+
+  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 &&
+      threadIdx.y == 0) {
+    printf(
+        "running kernel for expert id %d, row_dst %d \
+              blocks per warp %d \n",
+        exp_idx, row_dst_0, blocks_per_warp);
+    for (int i = 0; i < mmq_x; i += nwarps) {
+      printf("%d tok id %d, tok offset %d \n", i / nwarps,
+             token_ids[i / nwarps], token_offs[i / nwarps]);
+    }
+    printf("sum configured to %d %d\n", mmq_y / WARP_SIZE_GGUF, mmq_x / nwarps);
+  }
 
   const block_q_t* x = (const block_q_t*)((char*)vx + exp_idx * exp_stride);
   const block_q8_1* y = (const block_q8_1*)(vy);
@@ -68,6 +80,13 @@ static __device__ __forceinline__ void moe_q(
             (threadIdx.y + i) * WARP_SIZE_GGUF + kqs % WARP_SIZE_GGUF;
         tile_y_qs[index_y] =
             get_int_from_int8_aligned(by0->qs, threadIdx.x % QI8_1);
+        // if (blockIdx.x == 0 && blockIdx.y == 0 && ib0 == 0 && ir == 0 && i ==
+        // 0)
+        // {
+        //     printf("thread %d/%d loading data from col eff %d, idx %d, val
+        //     %d\n", threadIdx.x, threadIdx.y, col_y_eff, index_y,
+        //     tile_y_qs[index_y]);
+        // }
       }
 
 #pragma unroll
@@ -78,6 +97,11 @@ static __device__ __forceinline__ void moe_q(
         const int kby = threadIdx.x % (WARP_SIZE_GGUF / QI8_1);
         const int col_y_eff =
             min(token_ids[ids0 / nwarps * QI8_1] + ids, ncols_y - 1);
+        // if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 &&
+        // threadIdx.y == 0)
+        // {
+        //     printf("loading scale from col eff %d\n", col_y_eff);
+        // }
         // const int col_y_eff = min(col_y_0 + threadIdx.y + i, ncols_y-1); //
         // to prevent out-of-bounds memory accesses const int col_y_eff =
         // min(token_ids[i/nwarps], ncols_y-1); // to prevent out-of-bounds
@@ -130,6 +154,10 @@ static __device__ __forceinline__ void moe_q(
       const int row_dst = row_dst_0 + threadIdx.x + i;
       if (row_dst >= nrows_dst) {
         continue;
+      }
+      if (blockIdx.x == 0 && blockIdx.y == 0) {
+        printf("saving %f tocol %d, row %d\n",
+               sum[i / WARP_SIZE_GGUF][j / nwarps], col_dst, row_dst);
       }
       dst[col_dst * nrows_dst + row_dst] =
           __float2half(sum[i / WARP_SIZE_GGUF][j / nwarps]);

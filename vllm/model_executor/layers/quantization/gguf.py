@@ -311,10 +311,10 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
         final_hidden_states = torch.empty_like(x)
-        final_hidden_states_kern = _fused_moe_gguf(
-            x, layer.w13_qweight, layer.w2.qweight, topk_weights, topk_ids,
-            layer.w2.qweight_type.weight_type,
-            layer.w2.qweight_type.weight_type, self.act)
+        # final_hidden_states_kern = _fused_moe_gguf(
+        #     x, layer.w13_qweight, layer.w2_qweight, topk_weights, topk_ids,
+        #     layer.w13_qweight_type.weight_type,
+        #     layer.w2_qweight_type.weight_type, self.act)
         for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
             inp = x[tok].reshape((1, ) + x.shape[1:])
             current_hidden_state = None
@@ -334,7 +334,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                 else:
                     current_hidden_state.add_(current_state)
             final_hidden_states[tok] = current_hidden_state
-        assert torch.allclose(final_hidden_states, final_hidden_states_kern)
+        # assert torch.allclose(final_hidden_states, final_hidden_states_kern)
         return final_hidden_states
 
 
