@@ -757,25 +757,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "up_proj",
         ],
     }
-    # LoRA specific attributes, TODO: double check
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        "gate_proj"
-        "up_proj",
-        # vision tower
-        "qkv",
-        "attn.proj",  # Distinguish patch_embed.proj
-        "fc1",
-        "fc2",
-        # projector
-        "mlp.0",
-        "mlp.2"
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={

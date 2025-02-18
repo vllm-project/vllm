@@ -1231,23 +1231,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        # resampler
-        "kv_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -1341,23 +1324,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        # resampler
-        "kv_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -1467,9 +1433,6 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
     # initialized, but set all these attributes to empty.
     # These will be updated when an instance class is selected
     packed_modules_mapping = {}
-    supported_lora_modules = []
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -1490,7 +1453,6 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
         # quant_config references base class members,
         # so update values before init is called
         cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
-        cls.supported_lora_modules += instance_cls.supported_lora_modules
         cls.embedding_modules.update(instance_cls.embedding_modules)
         cls.embedding_padding_modules += instance_cls.embedding_padding_modules
         return instance_cls(vllm_config=vllm_config, prefix=prefix)

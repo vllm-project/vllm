@@ -48,12 +48,6 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
     embedding_modules = {}
     embedding_padding_modules = []
 

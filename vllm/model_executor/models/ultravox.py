@@ -360,10 +360,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     }
 
     # LoRA specific attributes
-    # TODO : Add LoRA to the audio tower and projector.
-    supported_lora_modules = [
-        "qkv_proj", "o_proj", "gate_up_proj", "down_proj"
-    ]
     embedding_modules = {}
     embedding_padding_modules = []
 
