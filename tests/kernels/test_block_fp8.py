@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
 
@@ -92,8 +94,10 @@ def native_w8a8_block_fp8_matmul(A,
         A[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)
     ]
     B_tiles = [[
-        B[j * block_n:min((j + 1) * block_n, N),
-          i * block_k:min((i + 1) * block_k, K), ] for i in range(k_tiles)
+        B[
+            j * block_n:min((j + 1) * block_n, N),
+            i * block_k:min((i + 1) * block_k, K),
+        ] for i in range(k_tiles)
     ] for j in range(n_tiles)]
     C_tiles = [
         C[:, j * block_n:min((j + 1) * block_n, N)] for j in range(n_tiles)
@@ -157,9 +161,9 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
-@pytest.mark.parametrize("num_tokens,d,dtype,group_size,seed",
-                         itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE,
-                                           SEEDS))
+@pytest.mark.parametrize(
+    "num_tokens,d,dtype,group_size,seed",
+    itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS))
 @torch.inference_mode()
 def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
     torch.manual_seed(seed)
@@ -174,9 +178,9 @@ def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
     assert torch.allclose(scale, ref_scale)
 
 
-@pytest.mark.parametrize("M,N,K,block_size,out_dtype,seed",
-                         itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES,
-                                           SEEDS))
+@pytest.mark.parametrize(
+    "M,N,K,block_size,out_dtype,seed",
+    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     torch.manual_seed(seed)
@@ -207,9 +211,10 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
-@pytest.mark.parametrize("M,N,K,E,topk,block_size,dtype,seed",
-                         itertools.product(M_moe, N_moe, K_moe, E, TOP_KS,
-                                           BLOCK_SIZE, DTYPES, SEEDS))
+@pytest.mark.parametrize(
+    "M,N,K,E,topk,block_size,dtype,seed",
+    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES,
+                      SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     torch.manual_seed(seed)

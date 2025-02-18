@@ -2,86 +2,87 @@
 
 vLLM is a Python library that supports the following CPU variants. Select your CPU type to see vendor specific instructions:
 
-::::{tab-set}
+:::::{tab-set}
 :sync-group: device
 
-:::{tab-item} x86
+::::{tab-item} Intel/AMD x86
+:selected:
 :sync: x86
 
-```{include} x86.inc.md
+:::{include} x86.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
-```
-
-:::
-
-:::{tab-item} ARM
-:sync: arm
-
-```{include} arm.inc.md
-:start-after: "# Installation"
-:end-before: "## Requirements"
-```
-
-:::
-
-:::{tab-item} Apple silicon
-:sync: apple
-
-```{include} apple.inc.md
-:start-after: "# Installation"
-:end-before: "## Requirements"
-```
-
 :::
 
 ::::
+
+::::{tab-item} ARM AArch64
+:sync: arm
+
+:::{include} arm.inc.md
+:start-after: "# Installation"
+:end-before: "## Requirements"
+:::
+
+::::
+
+::::{tab-item} Apple silicon
+:sync: apple
+
+:::{include} apple.inc.md
+:start-after: "# Installation"
+:end-before: "## Requirements"
+:::
+
+::::
+
+:::::
 
 ## Requirements
 
 - Python: 3.9 -- 3.12
 
-::::{tab-set}
+:::::{tab-set}
 :sync-group: device
 
-:::{tab-item} x86
+::::{tab-item} Intel/AMD x86
 :sync: x86
 
-```{include} x86.inc.md
+:::{include} x86.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
-```
-
-:::
-
-:::{tab-item} ARM
-:sync: arm
-
-```{include} arm.inc.md
-:start-after: "## Requirements"
-:end-before: "## Set up using Python"
-```
-
-:::
-
-:::{tab-item} Apple silicon
-:sync: apple
-
-```{include} apple.inc.md
-:start-after: "## Requirements"
-:end-before: "## Set up using Python"
-```
-
 :::
 
 ::::
+
+::::{tab-item} ARM AArch64
+:sync: arm
+
+:::{include} arm.inc.md
+:start-after: "## Requirements"
+:end-before: "## Set up using Python"
+:::
+
+::::
+
+::::{tab-item} Apple silicon
+:sync: apple
+
+:::{include} apple.inc.md
+:start-after: "## Requirements"
+:end-before: "## Set up using Python"
+:::
+
+::::
+
+:::::
 
 ## Set up using Python
 
 ### Create a new Python environment
 
-```{include} ../python_env_setup.inc.md
-```
+:::{include} ../python_env_setup.inc.md
+:::
 
 ### Pre-built wheels
 
@@ -89,40 +90,40 @@ Currently, there are no pre-built CPU wheels.
 
 ### Build wheel from source
 
-::::{tab-set}
+:::::{tab-set}
 :sync-group: device
 
-:::{tab-item} x86
+::::{tab-item} Intel/AMD x86
 :sync: x86
 
-```{include} x86.inc.md
+:::{include} x86.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
-```
-
-:::
-
-:::{tab-item} ARM
-:sync: arm
-
-```{include} arm.inc.md
-:start-after: "### Build wheel from source"
-:end-before: "## Set up using Docker"
-```
-
-:::
-
-:::{tab-item} Apple silicon
-:sync: apple
-
-```{include} apple.inc.md
-:start-after: "### Build wheel from source"
-:end-before: "## Set up using Docker"
-```
-
 :::
 
 ::::
+
+::::{tab-item} ARM AArch64
+:sync: arm
+
+:::{include} arm.inc.md
+:start-after: "### Build wheel from source"
+:end-before: "## Set up using Docker"
+:::
+
+::::
+
+::::{tab-item} Apple silicon
+:sync: apple
+
+:::{include} apple.inc.md
+:start-after: "### Build wheel from source"
+:end-before: "## Set up using Docker"
+:::
+
+::::
+
+:::::
 
 ## Set up using Docker
 
@@ -142,9 +143,9 @@ $ docker run -it \
              vllm-cpu-env
 ```
 
-:::{tip}
+::::{tip}
 For ARM or Apple silicon, use `Dockerfile.arm`
-:::
+::::
 
 ## Supported features
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from http import HTTPStatus
 from typing import List
@@ -154,3 +156,19 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
                                                     max_tokens=10)
 
     assert len(response.choices) == 1
+
+
+@pytest.mark.asyncio
+async def test_request_wrong_content_type(server: RemoteOpenAIServer):
+
+    chat_input = [{"role": "user", "content": "Write a long story"}]
+    client = server.get_async_client()
+
+    with pytest.raises(openai.APIStatusError):
+        await client.chat.completions.create(
+            messages=chat_input,
+            model=MODEL_NAME,
+            max_tokens=10000,
+            extra_headers={
+                "Content-Type": "application/x-www-form-urlencoded"
+            })

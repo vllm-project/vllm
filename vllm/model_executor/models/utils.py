@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 from dataclasses import dataclass, field
 from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
@@ -599,9 +601,8 @@ def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
         device: torch.device,
     ) -> IntermediateTensors:
         return IntermediateTensors({
-            key: torch.zeros((batch_size, hidden_size),
-                             dtype=dtype,
-                             device=device)
+            key:
+            torch.zeros((batch_size, hidden_size), dtype=dtype, device=device)
             for key in keys
         })
 

@@ -1,9 +1,10 @@
-from typing import Type
+# SPDX-License-Identifier: Apache-2.0
+
+from concurrent.futures import Future
+from typing import List, Type, Union
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.ray_distributed_executor import (  # noqa
-    RayDistributedExecutor as RayDistributedExecutorV0)
 from vllm.executor.uniproc_executor import (  # noqa
     ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0)
 from vllm.executor.uniproc_executor import (  # noqa
@@ -23,15 +24,16 @@ class Executor(ExecutorBase):
         parallel_config = vllm_config.parallel_config
         distributed_executor_backend = (
             parallel_config.distributed_executor_backend)
-        if distributed_executor_backend is None:
-            # If the user does not specify the distributed executor backend,
-            # we will choose the backend based on the world size.
-            if parallel_config.world_size > 1:
-                distributed_executor_backend = "mp"
-            else:
-                distributed_executor_backend = "uni"
-
-        if distributed_executor_backend == "ray":
+        # distributed_executor_backend must be set in VllmConfig.__post_init__
+        if isinstance(distributed_executor_backend, type):
+            if not issubclass(distributed_executor_backend, ExecutorBase):
+                raise TypeError(
+                    "distributed_executor_backend must be a subclass of "
+                    f"ExecutorBase. Got {distributed_executor_backend}.")
+            executor_class = distributed_executor_backend
+        elif distributed_executor_backend == "ray":
+            from vllm.v1.executor.ray_distributed_executor import (  # noqa
+                RayDistributedExecutor)
             executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
@@ -47,12 +49,12 @@ class Executor(ExecutorBase):
                              f"{distributed_executor_backend}")
         return executor_class
 
-    def initialize(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize(self, kv_cache_configs: List[KVCacheConfig]) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_cache", args=(kv_cache_config, ))
+        self.collective_rpc("initialize_cache", args=(kv_cache_configs, ))
         self.collective_rpc("compile_or_warm_up_model")
 
     def determine_available_memory(self) -> int:  # in bytes
@@ -62,19 +64,21 @@ class Executor(ExecutorBase):
         # operators can be applied to all workers.
         return min(output)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_specs(self) -> List[KVCacheSpec]:
         output = self.collective_rpc("get_kv_cache_spec")
-        for x in output:
-            assert x == output[0]
-        return output[0]
+        return output
 
     def execute_model(
         self,
         scheduler_output,
-    ) -> ModelRunnerOutput:
+    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
         output = self.collective_rpc("execute_model",
                                      args=(scheduler_output, ))
         return output[0]
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        return 1
 
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start, ))
@@ -85,8 +89,4 @@ class UniProcExecutor(UniProcExecutorV0, Executor):
 
 
 class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
-    pass
-
-
-class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
     pass

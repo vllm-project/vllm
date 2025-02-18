@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from itertools import count
 from typing import Callable, Dict, List, Optional
 from typing import Sequence as GenericSequence
@@ -274,3 +276,15 @@ def create_batch(batch_size,
             prompts, num_gpu_blocks, block_size, final_prompt_lens,
             prev_output_tokens, seq_ids)
     return seq_group_metadata_list, prompts, prev_output_tokens
+
+
+def maybe_enable_chunked_prefill(prefill_chunk_size, llm_kwargs):
+    if prefill_chunk_size > 0:
+        llm_kwargs.update(
+            **{
+                "enable_chunked_prefill": True,
+                "max_num_batched_tokens": prefill_chunk_size,
+                "max_num_seqs": prefill_chunk_size
+            })
+    else:
+        llm_kwargs["enable_chunked_prefill"] = False

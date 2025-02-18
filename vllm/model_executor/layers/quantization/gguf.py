@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import gguf
@@ -18,7 +20,7 @@ class GGUFConfig(QuantizationConfig):
     """Config class for GGUF."""
 
     def __init__(self, ) -> None:
-        pass
+        super().__init__()
 
     def __repr__(self) -> str:
         return ("GGUFConfig()")

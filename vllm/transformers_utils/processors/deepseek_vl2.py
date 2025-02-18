@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # yapf: disable
 # ruff: noqa: E501
 # coding=utf-8

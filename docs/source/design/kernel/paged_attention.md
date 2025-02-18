@@ -139,26 +139,26 @@
   const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
   ```
 
-  ```{figure} ../../assets/kernel/query.png
+  :::{figure} ../../assets/kernel/query.png
   :align: center
   :alt: query
   :width: 70%
 
   Query data of one token at one head
-  ```
+  :::
 
 - Each thread defines its own `q_ptr` which points to the assigned
   query token data on global memory. For example, if `VEC_SIZE` is 4
   and `HEAD_SIZE` is 128, the `q_ptr` points to data that contains
   total of 128 elements divided into 128 / 4 = 32 vecs.
 
-  ```{figure} ../../assets/kernel/q_vecs.png
+  :::{figure} ../../assets/kernel/q_vecs.png
   :align: center
   :alt: q_vecs
   :width: 70%
 
   `q_vecs` for one thread group
-  ```
+  :::
 
   ```cpp
   __shared__ Q_vec q_vecs[THREAD_GROUP_SIZE][NUM_VECS_PER_THREAD];
@@ -195,13 +195,13 @@
   points to key token data based on `k_cache` at assigned block,
   assigned head and assigned token.
 
-  ```{figure} ../../assets/kernel/key.png
+  :::{figure} ../../assets/kernel/key.png
   :align: center
   :alt: key
   :width: 70%
 
   Key data of all context tokens at one head
-  ```
+  :::
 
 - The diagram above illustrates the memory layout for key data. It
   assumes that the `BLOCK_SIZE` is 16, `HEAD_SIZE` is 128, `x` is
@@ -214,13 +214,13 @@
   elements for one token) that will be processed by 2 threads (one
   thread group) separately.
 
-  ```{figure} ../../assets/kernel/k_vecs.png
+  :::{figure} ../../assets/kernel/k_vecs.png
   :align: center
   :alt: k_vecs
   :width: 70%
 
   `k_vecs` for one thread
-  ```
+  :::
 
   ```cpp
   K_vec k_vecs[NUM_VECS_PER_THREAD]
@@ -289,14 +289,14 @@
   should be performed across the entire thread block, encompassing
   results between the query token and all context key tokens.
 
-  ```{math}
+  :::{math}
   :nowrap: true
 
   \begin{gather*}
   m(x):=\max _i \quad x_i \\ \quad f(x):=\left[\begin{array}{lll}e^{x_1-m(x)} & \ldots & e^{x_B-m(x)}\end{array}\right]\\ \quad \ell(x):=\sum_i f(x)_i \\
   \quad \operatorname{softmax}(x):=\frac{f(x)}{\ell(x)}
   \end{gather*}
-  ```
+  :::
 
 ### `qk_max` and `logits`
 
@@ -379,29 +379,29 @@
 
 ## Value
 
-```{figure} ../../assets/kernel/value.png
+:::{figure} ../../assets/kernel/value.png
 :align: center
 :alt: value
 :width: 70%
 
 Value data of all context tokens at one head
-```
+:::
 
-```{figure} ../../assets/kernel/logits_vec.png
+:::{figure} ../../assets/kernel/logits_vec.png
 :align: center
 :alt: logits_vec
 :width: 50%
 
 `logits_vec` for one thread
-```
+:::
 
-```{figure} ../../assets/kernel/v_vec.png
+:::{figure} ../../assets/kernel/v_vec.png
 :align: center
 :alt: v_vec
 :width: 70%
 
 List of `v_vec` for one thread
-```
+:::
 
 - Now we need to retrieve the value data and perform dot multiplication
   with `logits`. Unlike query and key, there is no thread group

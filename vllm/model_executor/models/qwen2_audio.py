@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
@@ -108,7 +110,11 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         hf_config = self.get_hf_config()
         max_source_positions = hf_config.audio_config.max_source_positions
         max_output_lengths = (max_source_positions - 2) // 2 + 1
@@ -236,16 +242,6 @@ class Qwen2AudioMultiModalProcessor(
                 replacement=get_replacement_qwen2_audio,
             )
         ]
-
-    def _always_apply_prompt_replacements(self) -> bool:
-        # Qwen2-Audio processor will start inserting placeholder tokens
-        # in an upcoming release:
-        # https://github.com/huggingface/transformers/pull/35534
-        # NOTE: `_find_placeholders_by_modality` may incorrectly think that HF
-        # has already performed processing for multi-audio input when the input
-        # audios are short (the corresponding placeholders may take up fewer
-        # tokens than the number of audio items)
-        return not hasattr(self.info.get_hf_processor(), "audio_token")
 
 
 @MULTIMODAL_REGISTRY.register_processor(

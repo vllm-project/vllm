@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
@@ -114,8 +115,8 @@ def _sgmv_shrink_kernel(
                    slice_id * output_d0_stride)
     c_ptr = cur_out_ptr + offset_cm[:, None] * output_d1_stride + offset_cn[
         None, :] * output_d2_stride
-    c_mask = (offset_cm[:, None] <
-              (cur_seq_start + M)) & (offset_cn[None, :] < N)
+    c_mask = (offset_cm[:, None] < (cur_seq_start + M)) & (offset_cn[None, :]
+                                                           < N)
     accumulator *= scaling
     # handles write-back with reduction-splitting
     if SPLIT_K == 1:

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -28,7 +30,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         llm_int8_skip_modules: Optional[List[str]] = None,
         llm_int8_threshold: float = 6.0,
     ) -> None:
-
+        super().__init__()
         self.load_in_8bit = load_in_8bit
         self.load_in_4bit = load_in_4bit
         self.bnb_4bit_compute_dtype = bnb_4bit_compute_dtype
@@ -131,8 +133,16 @@ def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
     components = prefix.split('.')
 
     # Check if any of the skip modules exactly matches any component
-    return any(module_name in components
-               for module_name in llm_int8_skip_modules)
+    substr_check = any(module_name in components
+                       for module_name in llm_int8_skip_modules)
+
+    # Allow certain layers to not be quantized
+    set_components = set(".".join(components[:i + 1])
+                         for i in range(len(components)))
+    set_llm_int8_skip_modules = set(llm_int8_skip_modules)
+    prefix_check = len(set_llm_int8_skip_modules & set_components) != 0
+
+    return substr_check or prefix_check
 
 
 class BitsAndBytesLinearMethod(LinearMethodBase):

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -311,8 +313,8 @@ class RequestStats:
             return []
         latency_s_lst = []
         for i in range(1, len(self.output_token_ts_s_lst)):
-            assert (self.output_token_ts_s_lst[i] >=
-                    self.output_token_ts_s_lst[i - 1])
+            assert (self.output_token_ts_s_lst[i]
+                    >= self.output_token_ts_s_lst[i - 1])
             latency_s = (self.output_token_ts_s_lst[i] -
                          self.output_token_ts_s_lst[i - 1])
             latency_s_lst.append(latency_s)

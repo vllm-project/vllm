@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import functools
 from collections import UserDict
 from dataclasses import dataclass
@@ -27,6 +29,17 @@ logger = init_logger(__name__)
 
 C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
 P = TypeVar("P", bound=ProcessorMixin, default=ProcessorMixin)
+
+
+class HashableDict(dict):
+    """
+    A dictionary that can be hashed by lru_cache.
+    """
+
+    # NOTE: pythonic dict is not hashable,
+    # we override on it directly for simplicity
+    def __hash__(self) -> int:  # type: ignore[override]
+        return hash(frozenset(self.items()))
 
 
 @dataclass(frozen=True)
@@ -101,6 +114,13 @@ class InputContext:
 
         if isinstance(typ, type):
             merged_kwargs["processor_cls"] = typ
+
+        # NOTE: Pythonic dict is not hashable and will raise unhashable type
+        # error when calling `cached_get_processor`, therefore we need to
+        # wrap it to a hashable dict.
+        for key, value in merged_kwargs.items():
+            if isinstance(value, dict):
+                merged_kwargs[key] = HashableDict(value)
 
         hf_processor = cached_get_processor(
             self.model_config.model,
@@ -330,7 +350,8 @@ class InputRegistry:
             )
             processor = mm_registry.create_processor(model_config, tokenizer)
             profiler = MultiModalProfiler(processor)
-            dummy_data = profiler.get_dummy_data(seq_len)
+            dummy_data = profiler.get_dummy_data(
+                seq_len, is_encoder_data=is_encoder_data)
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:

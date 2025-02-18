@@ -153,6 +153,7 @@ torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
 
 #ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
+bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 
 void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
@@ -175,8 +176,11 @@ void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
                               torch::Tensor const& b_scales,
                               std::optional<torch::Tensor> const& bias);
 
-bool cutlass_sparse_compress_entry(torch::Tensor& a_compressed,
-                                   torch::Tensor& e, torch::Tensor const& a);
+std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a);
+
+void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
+                      torch::Tensor& output_scale,
+                      torch::Tensor const& input_scale);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,

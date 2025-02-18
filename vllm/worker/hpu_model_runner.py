@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
@@ -637,12 +639,25 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     "Bias support in LoRA is not enabled in HPU yet."
                 assert not self.lora_config.fully_sharded_loras, \
                     "Fully sharded LoRAs is not enabled in HPU yet."
+                # It's necessary to distinguish between the
+                # max_position_embeddings of VLMs and LLMs.
+                if hasattr(self.model.config, "max_position_embeddings"):
+                    max_pos_embeddings = (
+                        self.model.config.max_position_embeddings)
+                else:
+                    max_pos_embeddings = (
+                        self.model.config.text_config.max_position_embeddings)
+
                 self.lora_manager = LRUCacheWorkerLoRAManager(
                     self.scheduler_config.max_num_seqs,
                     self.scheduler_config.max_num_batched_tokens,
-                    self.vocab_size, self.lora_config, self.device,
+                    self.vocab_size,
+                    self.lora_config,
+                    self.device,
                     self.model.embedding_modules,
-                    self.model.embedding_padding_modules)
+                    self.model.embedding_padding_modules,
+                    max_position_embeddings=max_pos_embeddings,
+                )
                 self.model = self.lora_manager.create_lora_manager(self.model)
 
             if self.model_config.quantization == 'inc':
