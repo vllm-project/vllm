@@ -18,7 +18,7 @@ DTYPE = "half"
     params=[False, True])
 def vllm_model(vllm_runner, request):
     """VllmRunner test fixture parameterized by APC."""
-    enable_prefix_caching = request.param[0]
+    enable_prefix_caching = request.param
     with vllm_runner(
             MODEL,
             dtype=DTYPE,
@@ -33,7 +33,7 @@ def vllm_model(vllm_runner, request):
 
 def _get_test_sampling_params(
     prompt_list: List[str],
-    seed: Optional[int] = None,
+    seed: Optional[int] = 42,
 ) -> Tuple[List[SamplingParams], List[int]]:
     """Generate random sampling params for a batch."""
 
