@@ -246,6 +246,7 @@ class ModelConfig:
         override_generation_config: Optional[Dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
+        self.model_weights = None
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -281,7 +282,7 @@ class ModelConfig:
                    f"'Please instead use `--hf-overrides '{hf_override!r}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
-        self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
+        self._maybe_pull_model_tokenizer_for_s3(model, tokenizer)
 
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
@@ -395,8 +396,8 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
-    def maybe_pull_model_tokenizer_for_s3(self, model: str,
-                                          tokenizer: str) -> None:
+    def _maybe_pull_model_tokenizer_for_s3(self, model: str,
+                                           tokenizer: str) -> None:
         """
         Pull the model config or tokenizer to a temporary
         directory in case of S3.
