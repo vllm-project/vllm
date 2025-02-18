@@ -182,7 +182,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # # assert topk_group is None, 'topk_group is not supported on HPU'
         # if layer is not None:
         #     return layer.hpu_fused_moe(x, router_logits, top_k)
-        assert len(x.shape) == 2
+        batch_size, seq_len, hidden_dim = x.shape
+        bt = batch_size * seq_len
+        x = x.view(-1, hidden_dim)
+        assert len(x.shape) == 2, f"Expected 2D tensor, got {x.shape}"
         import habana_frameworks.torch as htorch
         htorch.core.mark_step()
         if use_grouped_topk:
@@ -718,7 +721,8 @@ class FusedMoE(torch.nn.Module):
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
-            ep_rank=self.ep_rank)
+            # ep_rank=self.ep_rank
+            )
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             final_hidden_states = tensor_model_parallel_all_reduce(
