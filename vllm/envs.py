@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
+    VLLM_TEST_ENABLE_EP: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -559,6 +560,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
+
+    # If set, vLLM will use the experimental expert parallel implementation on
+    # the FusedMoE layer, using tensor parallelism size as expert parallelism
+    # size.
+    "VLLM_TEST_ENABLE_EP":
+    lambda: bool(int(os.getenv("VLLM_TEST_ENABLE_EP", "0"))),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,

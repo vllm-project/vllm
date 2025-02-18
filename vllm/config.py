@@ -718,6 +718,23 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
+        if envs.VLLM_TEST_ENABLE_EP:
+            num_expert_names = [
+                "moe_num_experts",  # Dbrx
+                "num_experts",  # Jamba
+                "n_routed_experts",  # DeepSeek
+                "num_local_experts",  # Mixtral
+            ]
+            num_experts = 0
+            for name in num_expert_names:
+                num_experts = getattr(self.hf_text_config, name, 0)
+                if num_experts > 0:
+                    break
+            if num_experts < 1:
+                raise ValueError(
+                    "Number of experts in the model must be greater than 0 "
+                    "when using expert parallelism.")
+
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
             architectures = getattr(self.hf_config, "architectures", [])
