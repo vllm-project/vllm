@@ -125,6 +125,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
         if attn_backend is not None:
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
+        if "enable_kv_scales_calculation" in tensor_dict:
+            tensor_dict.pop("enable_kv_scales_calculation")
         return cls(**tensor_dict)
 
     # Exclude `async_callback` to be able to pickle this object

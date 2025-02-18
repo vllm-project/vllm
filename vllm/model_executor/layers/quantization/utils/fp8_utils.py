@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
+from vllm.utils import is_navi
 
 logger = init_logger(__name__)
 
@@ -130,8 +131,8 @@ def input_to_float8(
     """This function quantizes input values to float8 values "
     "with tensor-wise quantization."""
     if dtype is None:
-        dtype = (torch.float8_e4m3fnuz
-                 if current_platform.is_rocm() else torch.float8_e4m3fn)
+        dtype = (torch.float8_e4m3fnuz if current_platform.is_rocm()
+                 and not is_navi() else torch.float8_e4m3fn)
     finfo = torch.finfo(dtype)
     min_val, max_val = x.aminmax()
     amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
@@ -262,8 +263,8 @@ def per_token_group_quant_fp8(
         scaling factor for quantization.
     """
     if dtype is None:
-        dtype = (torch.float8_e4m3fnuz
-                 if current_platform.is_rocm() else torch.float8_e4m3fn)
+        dtype = (torch.float8_e4m3fnuz if current_platform.is_rocm()
+                 and not is_navi() else torch.float8_e4m3fn)
     assert (x.shape[-1] % group_size == 0), (
         f"the last dimension of `x` {x.shape[-1]} must be divisible "
         f"by `group_size` {group_size}")

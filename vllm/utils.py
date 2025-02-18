@@ -1538,6 +1538,27 @@ class ClassRegistry(UserDict[Type[T], _V]):
         return any(cls in self.data for cls in key.mro())
 
 
+@lru_cache(maxsize=None)
+def is_navi() -> bool:
+    from vllm.platforms import current_platform
+    if not current_platform.is_rocm() or not torch.cuda.is_available():
+        return False
+    # All (visible) GPUs must be of the same type,
+    # otherwise FP8 results can't be guaranteed.
+    archName = torch.cuda.get_device_properties('cuda').gcnArchName
+    return archName is not None and "gfx1" in archName
+
+
+@lru_cache(maxsize=None)
+def is_navi3() -> bool:
+    from vllm.platforms import current_platform
+    if not current_platform.is_rocm() or not torch.cuda.is_available():
+        return False
+    # All (visible) GPUs must be of the same type,
+    # otherwise FP8 results can't be guaranteed.
+    archName = torch.cuda.get_device_properties('cuda').gcnArchName
+    return archName is not None and "gfx11" in archName
+
 def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """
     Create a weak reference to a tensor.

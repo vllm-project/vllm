@@ -199,6 +199,7 @@ class EngineArgs:
     worker_cls: str = "auto"
 
     kv_transfer_config: Optional[KVTransferConfig] = None
+    calculate_kv_scales: Optional[bool] = None
 
     generation_config: Optional[str] = None
     override_generation_config: Optional[Dict[str, Any]] = None
@@ -979,6 +980,15 @@ class EngineArgs:
             type=str,
             default="auto",
             help='The worker class to use for distributed execution.')
+        parser.add_argument(
+            '--calculate-kv-scales',
+            action='store_true',
+            help='This enables dynamic calculation of '
+            'k_scale and v_scale when kv-cache-dtype is fp8. '
+            'If calculate-kv-scales is false, the scales will '
+            'be loaded from the model checkpoint if available. '
+            'Otherwise, the scales will default to 1.0.')
+
         parser.add_argument(
             "--generation-config",
             type=nullable_str,

@@ -7,6 +7,10 @@
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 
+#ifdef USE_ROCM
+  #include "quantization/fp8/amd/hip_float8.h"
+#endif
+
 namespace vllm {
 
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
