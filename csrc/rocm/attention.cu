@@ -248,6 +248,12 @@ __device__ __forceinline__ _B16x8 scaled_convert_b8x8(const _B8x8 input,
 }
 
 __device__ __forceinline__ floatx4 to_float_fp8x4(const _B8x4& inp) {
+  // From MI300+ platforms, we have v_cvt_pk_f32_fp8 instruction
+  // to convert 2 packed fp8 to 2 packed fp32 values.
+  // However, in MI200 platforms, we only have v_cvt_f32_fp8
+  // to convert fp8 values individually. So we added
+  // #else case for fewer instructions (# inst=2) in MI300+, and fallback to
+  // #if case for other platforms (# inst=4).
   #if defined(__gfx90a__)
   float4 f32x4 = vllm::fp8::vec_conversion<float4, uint32_t>(
       *reinterpret_cast<const uint32_t*>(&inp));
@@ -462,10 +468,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
-  // set to true to enable non temporal kv loads: has some benefit in very high
-  // batch size cases
-  constexpr bool NT_KV_LOAD = false;
-
   constexpr int KX =
       16 / sizeof(cache_t);  // vLLM defines x as 16 Bytes of kv cache elements
   const cache_t* k_ptr = k_cache + wg_start_kv_head_idx * kv_head_stride;
@@ -489,11 +491,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
       const cache_t* k_fetch_ptr = k_ptr3 + offset1 * BLOCK_SIZE * KX + offset2;
       const _B16x8* k_fetch_ptr_16B =
           reinterpret_cast<const _B16x8*>(k_fetch_ptr);
-      if constexpr (NT_KV_LOAD) {
-        Klocal[token_depth][qkhe_depth] = load_ntmprl_16Byte(k_fetch_ptr_16B);
-      } else {
-        Klocal[token_depth][qkhe_depth] = *k_fetch_ptr_16B;
-      }
+      Klocal[token_depth][qkhe_depth] = *k_fetch_ptr_16B;
     }
   }
 
@@ -516,6 +514,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   int vphysical_block_number[VTLOOP][VBLOCKS_PER_LANE];
 
+  // after changes
   // fetch v physical block numbers
   for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
     for (int vblock_depth = 0; vblock_depth < VBLOCKS_PER_LANE;
@@ -523,11 +522,13 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
       const int vlocal_token_idx =
           vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
           rowid * VTOKENS_PER_LANE + vblock_depth * BLOCK_SIZE;
-      const int vglobal_token_idx =
-          partition_start_token_idx + vlocal_token_idx;
-      const int vblock_idx = (vglobal_token_idx < context_len)
-                                 ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_ctx_block;
+      // Use int64_t for arithmetic to prevent overflow
+      const int64_t vglobal_token_idx =
+          static_cast<int64_t>(partition_start_token_idx) + vlocal_token_idx;
+      const int vblock_idx =
+          (vglobal_token_idx < context_len)
+              ? static_cast<int>(vglobal_token_idx / BLOCK_SIZE)
+              : last_ctx_block;
       vphysical_block_number[vtoken_depth][vblock_depth] =
           block_table_seq[vblock_idx];
     }
@@ -554,12 +555,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
             v_ptr3 + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
         const _B16x8* v_fetch_ptr_16B =
             reinterpret_cast<const _B16x8*>(v_fetch_ptr);
-        if constexpr (NT_KV_LOAD) {
-          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
-              load_ntmprl_16Byte(v_fetch_ptr_16B);
-        } else {
-          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
-        }
+        Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
       }
     }
   }
