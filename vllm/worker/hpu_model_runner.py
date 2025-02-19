@@ -1966,11 +1966,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             (self.model.model is not None) and \
             self.inc_initialized_successfully and \
             not getattr(self, "_is_inc_finalized", False)
+        logger.info(f"can_finalize_inc: {can_finalize_inc}")
         if can_finalize_inc:
             from neural_compressor.torch.quantization import (
                 finalize_calibration)
             finalize_calibration(self.model.model)
             self._is_inc_finalized = True
+            logger.info("finalize calibration")
+        else:
+            logger.info("Can't finalize calibration")
 
     @property
     def vocab_size(self) -> int:
