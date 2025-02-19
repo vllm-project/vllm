@@ -191,13 +191,9 @@ def _decode_att_m_fwd(
     grid = (batch, head_num, NUM_KV_SPLITS)
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
 
-    num_warps = 4 if kv_group_num == 1 else 2
-    if kv_group_num == 1:
-        num_warps = 4
-    else:
-        num_warps = 2
-        if is_hip_:
-            num_warps = 1
+    num_warps = 4
+    if kv_group_num != 1:
+        num_warps = 2 if not is_hip_ else 1
 
     BLOCK_DMODEL = triton.next_power_of_2(Lk)
     BLOCK_DV = triton.next_power_of_2(Lv)
