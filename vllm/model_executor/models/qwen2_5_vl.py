@@ -688,11 +688,15 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
+        size: Optional[dict[str, int]] = None,
+        **kwargs: object,
     ) -> Qwen2_5_VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen2_5_VLProcessor,
             image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels),
+                                                     max_pixels=max_pixels,
+                                                     size=size),
+            **kwargs,
         )
 
 

@@ -722,11 +722,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
+        size: Optional[dict[str, int]] = None,
+        **kwargs: object,
     ) -> Qwen2VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen2VLProcessor,
             image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels),
+                                                     max_pixels=max_pixels,
+                                                     size=size),
+            **kwargs,
         )
 
     def _get_image_processor_kwargs(
@@ -734,27 +738,47 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
+        size: Optional[dict[str, int]] = None,
+        **kwargs: object,
     ):
-        image_kwargs = dict(self.ctx.model_config.mm_processor_kwargs or {})
-        if min_pixels is not None:
-            image_kwargs["min_pixels"] = min_pixels
-            image_kwargs.setdefault("size", {})["shortest_edge"] = min_pixels
-        if max_pixels is not None:
-            image_kwargs["max_pixels"] = max_pixels
-            image_kwargs.setdefault("size", {})["longest_edge"] = max_pixels
+        if self.ctx.model_config.mm_processor_kwargs:
+            kwargs.update(self.ctx.model_config.mm_processor_kwargs)
 
-        return image_kwargs
+        if min_pixels is not None:
+            kwargs["min_pixels"] = min_pixels
+
+            if size is None:
+                size = {"shortest_edge": min_pixels}
+            else:
+                size["shortest_edge"] = min_pixels
+
+        if max_pixels is not None:
+            kwargs["max_pixels"] = max_pixels
+
+            if size is None:
+                size = {"longest_edge": max_pixels}
+            else:
+                size["longest_edge"] = max_pixels
+
+        if size is not None:
+            kwargs["size"] = size
+
+        return kwargs
 
     def get_image_processor(
         self,
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
+        size: Optional[dict[str, int]] = None,
+        **kwargs: object,
     ):
         return cached_image_processor_from_config(
             self.ctx.model_config,
             **self._get_image_processor_kwargs(min_pixels=min_pixels,
-                                               max_pixels=max_pixels),
+                                               max_pixels=max_pixels,
+                                               size=size,
+                                               **kwargs),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:

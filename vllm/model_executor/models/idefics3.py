@@ -86,8 +86,8 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         self,
         *,
         size: Optional[Dict[str, int]] = None,
+        **kwargs: object,
     ) -> Idefics3Processor:
-        kwargs = {}
         if size is not None:
             kwargs["size"] = size
 

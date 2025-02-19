@@ -408,8 +408,8 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
     ) -> H2OVLProcessor:
-        kwargs = {}
         if min_dynamic_patch is not None:
             kwargs["min_dynamic_patch"] = min_dynamic_patch
         if max_dynamic_patch is not None:

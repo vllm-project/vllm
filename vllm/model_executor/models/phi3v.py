@@ -313,8 +313,8 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         self,
         *,
         num_crops: Optional[int] = None,
+        **kwargs: object,
     ) -> ProcessorMixin:
-        kwargs = {}
         if num_crops is not None:
             kwargs["num_crops"] = num_crops
 

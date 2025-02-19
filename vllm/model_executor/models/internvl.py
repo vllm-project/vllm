@@ -468,6 +468,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
     ) -> BaseInternVLProcessor:
         raise NotImplementedError
 
@@ -660,8 +661,8 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
     ) -> InternVLProcessor:
-        kwargs = {}
         if min_dynamic_patch is not None:
             kwargs["min_dynamic_patch"] = min_dynamic_patch
         if max_dynamic_patch is not None:

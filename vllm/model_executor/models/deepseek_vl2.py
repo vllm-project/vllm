@@ -133,8 +133,8 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
-    def get_hf_processor(self) -> DeepseekVLV2Processor:
-        return self.ctx.get_hf_processor(DeepseekVLV2Processor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(DeepseekVLV2Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
