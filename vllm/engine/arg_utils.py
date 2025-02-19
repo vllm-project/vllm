@@ -197,6 +197,8 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    low_bit_model_path: Optional[str] = None
+    low_bit_save_path: Optional[str] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -955,6 +957,18 @@ class EngineArgs:
             "loaded from model. If set to a folder path, the generation config "
             "will be loaded from the specified folder path.")
 
+        parser.add_argument(
+            "--low-bit-model-path",
+            type=nullable_str,
+            default=None,
+            help="Path for Low-bit loader")
+
+        parser.add_argument(
+            "--low-bit-save-path",
+            type=nullable_str,
+            default=None,
+            help="Path for Low-bit saver")
+
         return parser
 
     @classmethod
@@ -999,11 +1013,17 @@ class EngineArgs:
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
-            generation_config=self.generation_config)
+            generation_config=self.generation_config,
+            low_bit_model_path=self.low_bit_model_path,
+            low_bit_save_path=self.low_bit_save_path)
 
     def create_load_config(self) -> LoadConfig:
+        use_low_bit_loader = False
+        if self.low_bit_model_path is not None:
+            use_low_bit_loader = True
         return LoadConfig(
             load_format=self.load_format,
+            use_low_bit_loader=use_low_bit_loader,
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
@@ -1018,6 +1038,9 @@ class EngineArgs:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
+
+        if self.low_bit_model_path is not None and self.low_bit_save_path is not None:
+            raise ValueError(f"Please do not set --low-bit-model-path and --low-bit-save-path together")
 
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent

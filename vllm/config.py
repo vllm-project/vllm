@@ -229,7 +229,9 @@ class ModelConfig:
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  override_pooler_config: Optional["PoolerConfig"] = None,
                  logits_processor_pattern: Optional[str] = None,
-                 generation_config: Optional[str] = None) -> None:
+                 generation_config: Optional[str] = None,
+                 low_bit_model_path: Optional[str] = None,
+                 low_bit_save_path: Optional[str] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -240,6 +242,8 @@ class ModelConfig:
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
         self.rope_theta = rope_theta
+        self.low_bit_model_path = low_bit_model_path
+        self.low_bit_save_path = low_bit_save_path
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -1167,6 +1171,7 @@ class LoadConfig:
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    use_low_bit_loader: bool = False
     download_dir: Optional[str] = None
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)

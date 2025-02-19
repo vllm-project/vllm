@@ -1351,8 +1351,40 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         return model.eval()
 
 
+class IPEXLLMLowBitLoader(BaseModelLoader):
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        logger.info("IPEXLLMLowBitLoader get selected. Ensure your model is converted before.")
+        if load_config.model_loader_extra_config:
+            raise ValueError(f"Model loader extra config is not supported for "
+                             f"load format {load_config.load_format}")
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        """Download a model so that it can be immediately loaded."""
+        raise ValueError(f"IPEXLLMLowBitLoader does not support "
+                         f"download_model api.")
+
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        model_config = vllm_config.model_config
+
+        from ipex_llm.optimize import low_memory_init, load_low_bit
+        with set_default_torch_dtype(model_config.dtype):
+            # Initialize an empty skeleton of the model
+            with low_memory_init():
+                model = _initialize_model(vllm_config=vllm_config)
+        # Load the real weights from the config
+        local_rank = os.environ["LOCAL_RANK"]
+        load_path = os.path.join(model_config.low_bit_model_path,
+                                 str(local_rank))
+        model = load_low_bit(model, load_path)
+        return model
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
+
+    if load_config.use_low_bit_loader:
+        return IPEXLLMLowBitLoader(load_config)
 
     if isinstance(load_config.load_format, type):
         return load_config.load_format(load_config)
