@@ -173,6 +173,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata]):
         self.block2batch_matmul = Matmul()
         self.latent_cache_k = VLLMKVCache()
         self.latent_cache_v = VLLMKVCache()
+        self.prefill_use_fusedsdpa = "fsdpa" in enabled_flags()
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
@@ -300,7 +301,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata]):
                     softmax_op=self.softmax,
                     matmul_av_op=self.matmul_av,
                     valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                    fsdpa_op=self.fused_scaled_dot_product_attention,
+                    fsdpa_op=self.fused_scaled_dot_product_attention
+                    if self.prefill_use_fusedsdpa else None,
                 )
         attn_output = out\
             .view(batch_size, -1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
