@@ -250,7 +250,7 @@ class SyncParallelSamplingManager:
         """
         self.child_reqs[child_req_id] = (index, req_id)
 
-    def _aggregate_parallel_sampling_outputs(
+    def step(
         self,
         outputs: List[RequestOutput],
     ) -> List[RequestOutput]:
@@ -270,6 +270,9 @@ class SyncParallelSamplingManager:
           List of parallel sampling parent request outputs &
           unmodified `n=1` request outputs passed-thru from input.
         """
+        if not (self.parent_reqs and outputs):
+            # Return unmodified
+            return outputs
         agg_outputs = []
         for c_out in outputs:
             c_req_id = c_out.request_id
@@ -289,15 +292,6 @@ class SyncParallelSamplingManager:
                 # Not a parallel sampling request output
                 agg_outputs.append(c_out)
         return agg_outputs
-
-    def step(self,
-             request_outputs: List[RequestOutput]) -> List[RequestOutput]:
-        """Process parallel sampling child request outputs"""
-        if self.parent_reqs and request_outputs:
-            return self._aggregate_parallel_sampling_outputs(request_outputs)
-        # If there are no parallel sampling child request outputs,
-        # return unmodified.
-        return request_outputs
 
     def get_num_unfinished_requests(self, num_core_reqs: int) -> int:
         """Get the number of unfinished requests, correcting for parallel
