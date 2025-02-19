@@ -24,7 +24,7 @@ import transformers
 # ==-------------------------------------------------------------------------==
 # Calibration parameters
 least_tokens = 1024
-num_samples = 4  # 512
+num_samples = 512
 max_new_tokens = 32
 seed = 42
 # https://github.com/deepseek-ai/DeepSeek-R1/blob/main/README.md#deepseek-r1-evaluation
