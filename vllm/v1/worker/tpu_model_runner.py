@@ -13,11 +13,10 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
-from vllm.attention import AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingType
@@ -622,9 +621,7 @@ class TPUModelRunner:
                                      self.vllm_config):
                 assert self.model is not None
                 selected_token_ids = self.model(prompt_data.input_tokens,
-                                                prompt_data.input_positions,
-                                                prompt_data.attn_metadata,
-                                                self.kv_caches)
+                                                prompt_data.input_positions)
 
             # In parallel to TPU execution, prepare the next iteration
             if i < num_prompts - 1:
@@ -661,9 +658,7 @@ class TPUModelRunner:
                                      self.vllm_config):
                 assert self.model is not None
                 selected_token_ids = self.model(decode_data.input_tokens,
-                                                decode_data.input_positions,
-                                                decode_data.attn_metadata,
-                                                self.kv_caches)
+                                                decode_data.input_positions)
 
             # Transfer sampled tokens from TPU to CPU
             decode_token_ids_cpu = selected_token_ids.cpu()
@@ -732,7 +727,6 @@ class TPUModelRunner:
 
     def dummy_run(
         self,
-        kv_caches,
         num_tokens: int,
         seq_len: Optional[int] = None,
         exec_mode: Optional[ExecutionMode] = None,
@@ -839,7 +833,7 @@ class TPUModelRunner:
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
-            self.model(token_ids, position_ids, attn_metadata, kv_caches)
+            self.model(token_ids, position_ids)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -851,8 +845,7 @@ class TPUModelRunner:
         for batch_size in [1]:
             seq_len = 16
             while seq_len <= self.model_config.max_model_len:
-                self.dummy_run(self.kv_caches,
-                               batch_size,
+                self.dummy_run(batch_size,
                                seq_len,
                                exec_mode=ExecutionMode.PREFILL)
                 xm.wait_device_ops()
@@ -875,8 +868,7 @@ class TPUModelRunner:
             for batch_size in [1]:
                 seq_len = 16
                 while seq_len <= self.model_config.max_model_len:
-                    self.dummy_run(self.kv_caches,
-                                   batch_size,
+                    self.dummy_run(batch_size,
                                    seq_len,
                                    exec_mode=ExecutionMode.PREFIX_PREFILL)
                     xm.wait_device_ops()
@@ -899,10 +891,7 @@ class TPUModelRunner:
         seq_len = 1
         batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
-            self.dummy_run(self.kv_caches,
-                           batch_size,
-                           seq_len,
-                           exec_mode=ExecutionMode.DECODE)
+            self.dummy_run(batch_size, seq_len, exec_mode=ExecutionMode.DECODE)
             xm.wait_device_ops()
             logger.info("  batch_size: %d, seq_len: %d", batch_size, seq_len)
 
@@ -963,7 +952,6 @@ class ModelWrapperV1(nn.Module):
         self,
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
@@ -971,7 +959,6 @@ class ModelWrapperV1(nn.Module):
         Args:
             token_ids: The input token IDs of shape [batch_size, seq_len].
             position_ids: The input position IDs of shape [batch_size, seq_len].
-            attn_metadata: The Pallas attention metadata.
             input_lens: The actual input lengths of shape [batch_size].
             t: The sampling temperature of shape [batch_size].
             p: The top-p probability of shape [batch_size].
@@ -980,7 +967,8 @@ class ModelWrapperV1(nn.Module):
                 memory profiling at initialization.
         """
         # Skip this in memory profiling at initialization.
-        if attn_metadata is not None and kv_caches[0][0].numel() > 0:
+        if kv_caches[0][0].numel() > 0:
+            attn_metadata = get_forward_context().attn_metadata
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it
@@ -1001,12 +989,7 @@ class ModelWrapperV1(nn.Module):
             attn_metadata.slot_mapping = slot_mapping
 
         assert self.model is not None
-        hidden_states = self.model(
-            token_ids,
-            position_ids,
-            kv_caches,
-            attn_metadata,
-        )
+        hidden_states = self.model(token_ids, position_ids)
 
         hidden_states = hidden_states.flatten(0, 1)
         logits = self.model.compute_logits(hidden_states, None)
