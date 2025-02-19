@@ -24,7 +24,7 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, TokenizerPoolConfig
+from vllm.config import LoadFormat, TaskOption, TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -46,6 +46,21 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 _SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
+
+MODELS_ON_S3 = [
+    "distilbert/distilgpt2",
+    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Meta-Llama-3-8B",
+    "meta-llama/Llama-3.2-1B",
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "openai-community/gpt2",
+    "ArthurZ/Ilama-3.2-1B",
+    "llava-hf/llava-1.5-7b-hf",
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+]
+
+MODEL_WEIGHTS_S3_BUCKET = "s3://vllm-ci-model-weights"
+
 _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]
@@ -677,8 +692,15 @@ class VllmRunner:
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
+        load_format: Optional[LoadFormat] = None,
         **kwargs,
     ) -> None:
+        if model_name in MODELS_ON_S3 and not load_format:
+            model_name = (f"s3://vllm-ci-model-weights/"
+                          f"{model_name.split('/')[-1]}")
+            load_format = LoadFormat.RUNAI_STREAMER
+        if not load_format:
+            load_format = LoadFormat.AUTO
         self.model = LLM(
             model=model_name,
             task=task,
@@ -693,6 +715,7 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
+            load_format=load_format,
             **kwargs,
         )
 
