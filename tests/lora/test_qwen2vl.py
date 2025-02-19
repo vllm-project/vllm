@@ -31,7 +31,7 @@ class TestConfig:
             }
 
 
-class QwenVLTester:
+class Qwen2VLTester:
     """Test helper for Qwen VL models with LoRA"""
 
     PROMPT_TEMPLATE = (
@@ -115,7 +115,7 @@ def test_qwen2vl_lora(qwen2vl_lora_files):
     """Test Qwen 2.0 VL model with LoRA"""
     config = TestConfig(model_path=QWEN2VL_MODEL_PATH,
                         lora_path=qwen2vl_lora_files)
-    tester = QwenVLTester(config)
+    tester = Qwen2VLTester(config)
 
     # Test with different LoRA IDs
     for lora_id in [1, 2]:
@@ -137,7 +137,7 @@ def test_qwen25vl_lora(qwen25vl_lora_files):
     """Test Qwen 2.5 VL model with LoRA"""
     config = TestConfig(model_path=QWEN25VL_MODEL_PATH,
                         lora_path=qwen25vl_lora_files)
-    tester = QwenVLTester(config)
+    tester = Qwen2VLTester(config)
 
     # Test with different LoRA IDs
     for lora_id in [1, 2]:
