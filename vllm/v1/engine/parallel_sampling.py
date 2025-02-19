@@ -103,7 +103,7 @@ class ParallelSamplingRequestManager:
         self,
         index: int,
     ) -> str:
-        return str(index) + "_" + self.request_id
+        return f"{index}_{self.request_id}"
 
     def _process_output(
         self,
