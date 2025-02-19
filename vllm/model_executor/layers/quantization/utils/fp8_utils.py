@@ -159,7 +159,7 @@ def pad_block_fp8_weight_naive(weight, weight_scale, block_size):
     return weight, orig_M, orig_N
 
 
-def dequant_block_fp8_weight_naive(weight, weight_scale, block_size, dtype, original_M, original_N, do_unpad=False):
+def dequant_block_fp8_weight_naive(weight, weight_scale, block_size, dtype=torch.bfloat16, original_M=None, original_N=None, do_unpad=False):
     if weight_scale is None:
         return weight
     assert len(block_size) == 2
@@ -201,19 +201,20 @@ def apply_block_fp8_linear_hpu(
     bias: Optional[torch.Tensor] = None,
     original_M: Optional[torch.Tensor] = None,
     original_N: Optional[torch.Tensor] = None,
+    do_dequant: bool = True,
     do_unpad: bool = False,
 ) -> torch.Tensor:
     assert input_scale is None
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
-    original_M = original_M.data.item()
-    original_N = original_N.data.item()
-    output_shape = [*input.shape[:-1], original_M]
-    dequant_weight = dequant_block_fp8_weight_naive(weight, weight_scale, block_size, input_2d.dtype, original_M, original_N, do_unpad)
-    output = torch.nn.functional.linear(input_2d, dequant_weight, bias=None)
+    if do_dequant:
+        original_M = original_M.data.item()
+        original_N = original_N.data.item()
+        weight = dequant_block_fp8_weight_naive(weight, weight_scale, block_size, input.dtype, original_M, original_N, do_unpad)
+    output = torch.nn.functional.linear(input_2d, weight, bias=None)
     if bias is not None:
         output = output + bias
-    return output.to(dtype=input.dtype).view(*output_shape)
+    return output.to(dtype=input.dtype).view(*input.shape[:-1], -1)
 
 
 def input_to_float8(

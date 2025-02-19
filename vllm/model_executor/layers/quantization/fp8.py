@@ -148,6 +148,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if current_platform.is_cuda_alike():
             self.cutlass_fp8_supported = cutlass_fp8_supported()
             self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
+        self.pre_dequant = os.environ.get("VLLM_LOAD_DEQUANT_WEIGHT", "0") in ["1", "true"]
 
         self.use_marlin = False
         if not current_platform.is_hpu():
@@ -266,14 +267,27 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             if current_platform.is_hpu():
                 from vllm.model_executor.layers.quantization.utils.fp8_utils import pad_block_fp8_weight_naive
-                layer.weight, orig_M, orig_N = pad_block_fp8_weight_naive(
-                    layer.weight,
-                    layer.weight_scale_inv,
-                    self.quant_config.weight_block_size)
-                orig_M = torch.nn.Parameter(torch.tensor(orig_M, dtype=torch.int32), requires_grad=False)
-                orig_N = torch.nn.Parameter(torch.tensor(orig_N, dtype=torch.int32), requires_grad=False)
-                layer.register_parameter("orig_M", orig_M)
-                layer.register_parameter("orig_N", orig_N)
+                if self.pre_dequant:
+                    layer.weight, orig_M, orig_N = pad_block_fp8_weight_naive(
+                        layer.weight,
+                        layer.weight_scale_inv,
+                        self.quant_config.weight_block_size)
+                    layer.weight = torch.nn.Parameter(dequant_block_fp8_weight_naive(
+                        layer.weight,
+                        layer.weight_scale_inv,
+                        self.quant_config.weight_block_size,
+                        original_M=orig_M,
+                        original_N=orig_N,
+                        do_unpad=True))
+                else:
+                    layer.weight, orig_M, orig_N = pad_block_fp8_weight_naive(
+                        layer.weight,
+                        layer.weight_scale_inv,
+                        self.quant_config.weight_block_size)
+                    orig_M = torch.nn.Parameter(torch.tensor(orig_M, dtype=torch.int32), requires_grad=False)
+                    orig_N = torch.nn.Parameter(torch.tensor(orig_N, dtype=torch.int32), requires_grad=False)
+                    layer.register_parameter("orig_M", orig_M)
+                    layer.register_parameter("orig_N", orig_N)
             if current_platform.is_rocm():
                 weight, weight_scale_inv, _ = \
                     normalize_e4m3fn_to_e4m3fnuz(
@@ -386,8 +400,9 @@ class Fp8LinearMethod(LinearMethodBase):
                     weight_scale=layer.weight_scale_inv,
                     input_scale=layer.input_scale,
                     bias=bias,
-                    original_M=layer.orig_M,
-                    original_N=layer.orig_N,
+                    original_M=layer.orig_M if hasattr(layer, "orig_M") else None,
+                    original_N=layer.orig_N if hasattr(layer, "orig_N") else None,
+                    do_dequant=not self.pre_dequant,
                     do_unpad=True,
                 )
             else:
@@ -430,6 +445,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.block_quant = self.quant_config.weight_block_size is not None
         self.moe_n_slice = int(os.environ.get("VLLM_MOE_N_SLICE", 4))
         self.use_static_moe = os.environ.get("VLLM_USE_STATIC_MOE", "0") in ["1", "true"]
+        self.pre_dequant = os.environ.get("VLLM_LOAD_DEQUANT_WEIGHT", "0") in ["1", "true"]
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -555,23 +571,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             if current_platform.is_hpu():
-                from vllm.model_executor.layers.quantization.utils.fp8_utils import pad_block_fp8_weight_naive
-                layer.w13_weight, orig_M_w13, orig_N_w13 = pad_block_fp8_weight_naive(
-                    layer.w13_weight,
-                    layer.w13_weight_scale_inv,
-                    self.quant_config.weight_block_size)
-                layer.w2_weight, orig_M_w2, orig_N_w2 = pad_block_fp8_weight_naive(
-                    layer.w2_weight,
-                    layer.w2_weight_scale_inv,
-                    self.quant_config.weight_block_size)
-                orig_M_w13 = torch.nn.Parameter(torch.tensor(orig_M_w13, dtype=torch.int32), requires_grad=False)
-                orig_N_w13 = torch.nn.Parameter(torch.tensor(orig_N_w13, dtype=torch.int32), requires_grad=False)
-                layer.register_parameter("orig_M_w13", orig_M_w13)
-                layer.register_parameter("orig_N_w13", orig_N_w13)
-                orig_M_w2 = torch.nn.Parameter(torch.tensor(orig_M_w2, dtype=torch.int32), requires_grad=False)
-                orig_N_w2 = torch.nn.Parameter(torch.tensor(orig_N_w2, dtype=torch.int32), requires_grad=False)
-                layer.register_parameter("orig_M_w2", orig_M_w2)
-                layer.register_parameter("orig_N_w2", orig_N_w2)
+                # pre-dequant
+                if self.pre_dequant:
+                    layer.w13_weight = torch.nn.Parameter(dequant_block_fp8_weight_naive(
+                        layer.w13_weight,
+                        layer.w13_weight_scale_inv,
+                        self.quant_config.weight_block_size))
+                    layer.w2_weight = torch.nn.Parameter(dequant_block_fp8_weight_naive(
+                        layer.w2_weight,
+                        layer.w2_weight_scale_inv,
+                        self.quant_config.weight_block_size))
             if current_platform.is_rocm():
                 w13_weight, w13_weight_scale_inv, w13_input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
@@ -777,10 +786,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         assert n_expert_slice * self.moe_n_slice == num_experts
         x = x.view(-1, hidden_dim)
         total_num_experts = router_logits.size(-1)
-        if seq_len == 1 and (num_experts == total_num_experts) and (batch_size * top_k <= 64):
-            # num_tokens * topk(num_experts per token) is
-            # less than total number of experts,
-            # we can safely load less experts weight
+        if not self.pre_dequant and seq_len == 1 and (num_experts == total_num_experts) and (batch_size * top_k <= 64):
+            # conditionining on 1. not pre_dequant, 2. decode phase, 3. not with EP>1 4. Batch_size < 8
             use_partial_experts = True
         else:
             use_partial_experts = False
@@ -797,10 +804,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        orig_M_w13 = layer.orig_M_w13.data
-        orig_N_w13 = layer.orig_N_w13.data
-        orig_M_w2 = layer.orig_M_w2.data
-        orig_N_w2 = layer.orig_N_w2.data
         ep_shift = ep_rank * num_experts
         
         if seq_len > 1:
@@ -818,15 +821,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             for i in range(num_experts):
                 w13_weight_fp8_slice = w13_weight_fp8[i, ...]
                 w2_weight_fp8_slice = w2_weight_fp8[i, ...]
-                w13_scale_fp8_slice = w13_weight_scale_inv_fp8[i, ...]
-                w2_scale_fp8_slice = w2_weight_scale_inv_fp8[i, ...]
 
-                w13_weight = dequant_block_fp8_weight_naive(w13_weight_fp8_slice, w13_scale_fp8_slice, self.quant_config.weight_block_size, x.dtype, orig_M_w13, orig_N_w13)
+                if not self.pre_dequant:
+                    w13_scale_fp8_slice = w13_weight_scale_inv_fp8[i, ...]
+                    w13_weight = dequant_block_fp8_weight_naive(w13_weight_fp8_slice, w13_scale_fp8_slice, self.quant_config.weight_block_size, x.dtype)
                 up_gate_states = torch.matmul(x, w13_weight.transpose(0, 1))
                 d = up_gate_states.shape[-1] // 2
                 tmp_states = F.silu(up_gate_states[..., :d]) * up_gate_states[..., d:]
 
-                w2_weight = dequant_block_fp8_weight_naive(w2_weight_fp8_slice, w2_scale_fp8_slice, self.quant_config.weight_block_size, x.dtype, orig_M_w13, orig_N_w13)
+                if not self.pre_dequant:
+                    w2_scale_fp8_slice = w2_weight_scale_inv_fp8[i, ...]
+                    w2_weight = dequant_block_fp8_weight_naive(w2_weight_fp8_slice, w2_scale_fp8_slice, self.quant_config.weight_block_size, x.dtype)
                 current_hidden_states = torch.matmul(tmp_states, w2_weight.transpose(0, 1))
                 padded_weight = experts_mask[i + ep_shift].unsqueeze(1)
                 final_hidden_states += current_hidden_states * padded_weight
@@ -837,15 +842,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_weight = dequant_block_fp8_weight_naive(w13_weight_fp8,
                                                         w13_weight_scale_inv_fp8,
                                                         block_size=self.quant_config.weight_block_size,
-                                                        dtype=x.dtype,
-                                                        original_M=orig_M_w13,
-                                                        original_N=orig_N_w13)
+                                                        dtype=x.dtype) if not self.pre_dequant else w13_weight_fp8
             w2_weight = dequant_block_fp8_weight_naive(w2_weight_fp8,
                                                     w2_weight_scale_inv_fp8,
                                                     block_size=self.quant_config.weight_block_size,
-                                                    dtype=x.dtype,
-                                                    original_M=orig_M_w2,
-                                                    original_N=orig_N_w2)
+                                                    dtype=x.dtype) if not self.pre_dequant else w2_weight_fp8
             final_hidden_states = torch.zeros_like(x)
             for i in range(moe_n_slice):
                 min_expert = i * n_expert_slice
