@@ -71,8 +71,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(FuyuConfig)
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(FuyuProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(FuyuProcessor, **kwargs)
 
     def get_image_processor(self) -> FuyuImageProcessor:
         return self.get_hf_processor().image_processor

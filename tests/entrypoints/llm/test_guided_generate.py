@@ -8,12 +8,14 @@ import weakref
 import jsonschema
 import pytest
 
+from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
-MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+MODEL_NAME = "s3://vllm-ci-model-weights/Qwen2.5-1.5B-Instruct"
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 GUIDED_DECODING_BACKENDS_V1 = ["xgrammar"]
 
@@ -35,18 +37,18 @@ def v1(request, run_with_both_engines, monkeypatch):
         pytest.skip("Skipping test because V1 does not support regex")
 
 
-@pytest.fixture(scope="function")
-def llm(monkeypatch):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-        # pytest caches the fixture so we use weakref.proxy to
-        # enable garbage collection
-        llm = LLM(model=MODEL_NAME, max_model_len=1024)
+@pytest.fixture(scope="module")
+def llm():
+    # pytest caches the fixture so we use weakref.proxy to
+    # enable garbage collection
+    llm = LLM(model=MODEL_NAME,
+              load_format=LoadFormat.RUNAI_STREAMER,
+              max_model_len=1024)
 
-        with llm.deprecate_legacy_api():
-            yield weakref.proxy(llm)
-            del llm
-        cleanup_dist_env_and_memory()
+    with llm.deprecate_legacy_api():
+        yield weakref.proxy(llm)
+        del llm
+    cleanup_dist_env_and_memory()
 
 
 @pytest.mark.skip_global_cleanup

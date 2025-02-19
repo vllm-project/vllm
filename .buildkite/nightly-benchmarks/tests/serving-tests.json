@@ -66,8 +66,7 @@
             "swap_space": 16, 
             "speculative_model": "turboderp/Qwama-0.5B-Instruct",
             "num_speculative_tokens": 4,
-            "speculative_draft_tensor_parallel_size": 1,
-            "use_v2_block_manager": ""
+            "speculative_draft_tensor_parallel_size": 1
         },
         "client_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
