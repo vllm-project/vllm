@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention import Attention, AttentionType
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, DummyData, InputContext
@@ -646,7 +646,6 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[NestedTensors] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         # TODO: This method just returns the decoder sequence embeddings since
         # Whisper does not have encoder text tokens. Refactor this once
