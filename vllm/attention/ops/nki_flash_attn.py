@@ -830,6 +830,24 @@ def flash_attn_varlen_nkifunc(
     LARGE_TILE_SZ=2048,
     mixed_precision=True,
 ):
+    """
+    Compute flash paged attention for variable length sequences.
+
+    This function is a wrapper around the flash attention NKI kernel. It takes
+    in the following arguments:
+      - query: (1, n_heads, d, seq_q)
+      - key:   (1, n_kv_heads, d, seq_k)
+      - value: (1, n_kv_heads, seq_v, d)
+      - key_cache:   (n_blocks, n_kv_heads, block_size, d)
+      - value_cache: (n_blocks, n_kv_heads, block_size, d)
+      - block_tables: (n_active_blocks, )
+      - attn_mask: (seq_q, n_active_blocks * block_size + seq_q)
+
+    Notes:
+      - attn_mask must be reordered outside using `reorder_context_mask`
+      - Key/value cache layout must be (n_blocks, n_kv_heads, block_size, d) 
+        for better DMA throughput
+    """
     if n_kv_head is None:
         n_kv_head = key_cache.shape[1]
     assert key_cache.shape[1] == n_kv_head

@@ -337,8 +337,7 @@ def test_contexted_kv_attention(
     device = xm.xla_device()
 
     compiler_flags = [
-        "--model-type=transformer -O1",
-        "--internal-hlo2tensorizer-options='--verify-hlo'",
+        "-O1",
         "--retry_failed_compilation",
     ]
     compiler_flags_str = " ".join(compiler_flags)

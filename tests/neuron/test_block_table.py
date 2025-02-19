@@ -109,8 +109,7 @@ def test_load_and_transform_block_tables(
     device = xm.xla_device()
 
     compiler_flags = [
-        "--model-type=transformer -O1",
-        "--internal-hlo2tensorizer-options='--verify-hlo'",
+        "-O1",
         "--retry_failed_compilation",
     ]
     compiler_flags_str = " ".join(compiler_flags)
