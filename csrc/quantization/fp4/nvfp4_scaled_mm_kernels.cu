@@ -124,9 +124,9 @@ struct Fp4GemmSm100Half {
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, OperatorClass, PerSmTileShape_MNK, ClusterShape,
-          cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAccumulator, ElementAccumulator, ElementC, LayoutCTag,
-          AlignmentC, ElementD, LayoutDTag, AlignmentD,
+          cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
+          ElementAccumulator, ElementC, LayoutCTag, AlignmentC, ElementD,
+          LayoutDTag, AlignmentD,
           cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
 
   using CollectiveMainloop =
@@ -184,9 +184,9 @@ struct Fp4GemmSm100Bfloat16 {
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, OperatorClass, PerSmTileShape_MNK, ClusterShape,
-          cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAccumulator, ElementAccumulator, ElementC, LayoutCTag,
-          AlignmentC, ElementD, LayoutDTag, AlignmentD,
+          cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
+          ElementAccumulator, ElementC, LayoutCTag, AlignmentC, ElementD,
+          LayoutDTag, AlignmentD,
           cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
   
   using CollectiveMainloop =
@@ -213,7 +213,7 @@ struct Fp4GemmSm100Bfloat16 {
   using LayoutD = decltype(cute::make_layout(make_shape(0, 0, 0), StrideD{}));
 };
 
-template<typename T>
+template <typename T>
 typename T::Gemm::Arguments args_from_options(
     at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
     at::Tensor const& A_sf, at::Tensor const& B_sf, at::Tensor const& alpha,
@@ -242,7 +242,7 @@ typename T::Gemm::Arguments args_from_options(
   auto layout_SFB = Sm100BlkScaledConfig::tile_atom_to_shape_SFB(
       cute::make_shape(m, n, k, 1));
 
-  typename T::Gemm::Arguments arguments {
+  typename T::Gemm::Arguments arguments{
       cutlass::gemm::GemmUniversalMode::kGemm,
       {m, n, k, 1},
       {// Mainloop arguments
