@@ -9,6 +9,7 @@ import weakref
 import pytest
 
 from vllm import LLM
+from vllm.config import LoadFormat
 from vllm.platforms import current_platform
 
 from ..conftest import VllmRunner
@@ -33,7 +34,7 @@ def v1(run_with_both_engines):
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("distilbert/distilgpt2", load_format="runai_streamer")
+    llm = LLM("distilbert/distilgpt2", load_format=LoadFormat.RUNAI_STREAMER)
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails

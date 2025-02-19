@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import pytest
 
+from vllm.config import LoadFormat
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
@@ -13,6 +14,8 @@ from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.sampling_params import SamplingParams
 
 from ..conftest import MODEL_WEIGHTS_S3_BUCKET
+
+RUNAI_STREAMER_LOAD_FORMAT = LoadFormat.RUNAI_STREAMER
 
 
 class Mock:
@@ -39,7 +42,7 @@ CustomUniExecutorAsync = CustomUniExecutor
 def test_custom_executor_type_checking(model):
     with pytest.raises(ValueError):
         engine_args = EngineArgs(model=model,
-                                 load_format="runai_streamer",
+                                 load_format=RUNAI_STREAMER_LOAD_FORMAT,
                                  distributed_executor_backend=Mock)
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
@@ -57,7 +60,7 @@ def test_custom_executor(model, tmp_path):
 
         engine_args = EngineArgs(
             model=model,
-            load_format="runai_streamer",
+            load_format=RUNAI_STREAMER_LOAD_FORMAT,
             distributed_executor_backend=CustomUniExecutor,
             enforce_eager=True,  # reduce test time
         )
@@ -81,7 +84,7 @@ def test_custom_executor_async(model, tmp_path):
 
         engine_args = AsyncEngineArgs(
             model=model,
-            load_format="runai_streamer",
+            load_format=RUNAI_STREAMER_LOAD_FORMAT,
             distributed_executor_backend=CustomUniExecutorAsync,
             enforce_eager=True,  # reduce test time
         )
@@ -109,7 +112,7 @@ def test_respect_ray(model):
     engine_args = EngineArgs(
         model=model,
         distributed_executor_backend="ray",
-        load_format="runai_streamer",
+        load_format=RUNAI_STREAMER_LOAD_FORMAT,
         enforce_eager=True,  # reduce test time
     )
     engine = LLMEngine.from_engine_args(engine_args)

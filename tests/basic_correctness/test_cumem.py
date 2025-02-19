@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.config import LoadFormat
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.utils import GiB_bytes
 
@@ -127,7 +128,9 @@ def test_cumem_with_cudagraph():
 def test_end_to_end(model):
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
-    load_format = "runai_streamer" if "Llama" in model else "auto"
+    load_format = LoadFormat.AUTO
+    if "Llama" in model:
+        load_format = LoadFormat.RUNAI_STREAMER
     llm = LLM(model, load_format=load_format, enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)

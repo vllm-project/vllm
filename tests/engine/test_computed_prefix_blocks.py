@@ -2,6 +2,7 @@
 
 import pytest
 
+from vllm.config import LoadFormat
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.sampling_params import SamplingParams
@@ -26,7 +27,7 @@ def test_computed_prefix_blocks(model: str, block_size: int):
         "decoration.")
 
     engine_args = EngineArgs(model=model,
-                             load_format="runai_streamer",
+                             load_format=LoadFormat.RUNAI_STREAMER,
                              block_size=block_size,
                              enable_prefix_caching=True)
 

@@ -2,6 +2,7 @@
 
 import pytest
 
+from vllm.config import LoadFormat
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 
@@ -15,7 +16,7 @@ def test_skip_tokenizer_initialization(model: str):
     # token ids.
     llm = LLM(model=model,
               skip_tokenizer_init=True,
-              load_format="runai_streamer")
+              load_format=LoadFormat.RUNAI_STREAMER)
     sampling_params = SamplingParams(prompt_logprobs=True, detokenize=True)
 
     with pytest.raises(ValueError, match="cannot pass text prompts when"):

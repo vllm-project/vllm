@@ -31,8 +31,7 @@ logger = init_logger(__name__)
 
 try:
     from runai_model_streamer import SafetensorsStreamer
-except (ImportError, OSError) as e:
-    logger.info("Error importing runai_model_streamer: %s", e)
+except (ImportError, OSError):
     # see https://github.com/run-ai/runai-model-streamer/issues/26
     # OSError will be raised on arm64 platform
     runai_model_streamer = PlaceholderModule(

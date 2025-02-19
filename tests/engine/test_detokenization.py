@@ -2,6 +2,7 @@
 
 import pytest
 
+from vllm.config import LoadFormat
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 
@@ -19,7 +20,7 @@ def test_computed_prefix_blocks(model: str):
         "paper clips? Is there an easy to follow video tutorial available "
         "online for free?")
 
-    llm = LLM(model=model, load_format="runai_streamer")
+    llm = LLM(model=model, load_format=LoadFormat.RUNAI_STREAMER)
     sampling_params = SamplingParams(max_tokens=10,
                                      temperature=0.0,
                                      detokenize=False)

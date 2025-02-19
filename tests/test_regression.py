@@ -10,6 +10,7 @@ import gc
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.config import LoadFormat
 
 from .conftest import MODEL_WEIGHTS_S3_BUCKET
 
@@ -21,7 +22,7 @@ def test_duplicated_ignored_sequence_group():
                                      top_p=0.1,
                                      max_tokens=256)
     llm = LLM(model=f"{MODEL_WEIGHTS_S3_BUCKET}/distilgpt2",
-              load_format="runai_streamer",
+              load_format=LoadFormat.RUNAI_STREAMER,
               max_num_batched_tokens=4096,
               tensor_parallel_size=1)
     prompts = ["This is a short prompt", "This is a very long prompt " * 1000]
@@ -35,7 +36,7 @@ def test_max_tokens_none():
                                      top_p=0.1,
                                      max_tokens=None)
     llm = LLM(model=f"{MODEL_WEIGHTS_S3_BUCKET}/distilgpt2",
-              load_format="runai_streamer",
+              load_format=LoadFormat.RUNAI_STREAMER,
               max_num_batched_tokens=4096,
               tensor_parallel_size=1)
     prompts = ["Just say hello!"]
@@ -46,7 +47,7 @@ def test_max_tokens_none():
 
 def test_gc():
     llm = LLM(model=f"{MODEL_WEIGHTS_S3_BUCKET}/distilgpt2",
-              load_format="runai_streamer",
+              load_format=LoadFormat.RUNAI_STREAMER,
               enforce_eager=True)
     del llm
 

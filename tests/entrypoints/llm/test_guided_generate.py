@@ -7,6 +7,7 @@ import weakref
 import jsonschema
 import pytest
 
+from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
@@ -21,7 +22,7 @@ def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
-              load_format="runai_streamer",
+              load_format=LoadFormat.RUNAI_STREAMER,
               max_model_len=1024)
 
     with llm.deprecate_legacy_api():

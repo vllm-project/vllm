@@ -6,6 +6,7 @@ from typing import List
 import pytest
 
 from vllm import LLM, RequestOutput, SamplingParams
+from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "s3://vllm-ci-model-weights/distilgpt2"
@@ -30,7 +31,7 @@ def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
-              load_format="runai_streamer",
+              load_format=LoadFormat.RUNAI_STREAMER,
               max_num_batched_tokens=4096,
               tensor_parallel_size=1,
               gpu_memory_utilization=0.10,

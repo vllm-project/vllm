@@ -5,14 +5,17 @@ from typing import List
 import pytest
 
 from vllm import LLM
+from vllm.config import LoadFormat
 
 from ...conftest import MODEL_WEIGHTS_S3_BUCKET
 from ..openai.test_vision import TEST_IMAGE_URLS
 
+RUNAI_STREAMER_LOAD_FORMAT = LoadFormat.RUNAI_STREAMER
+
 
 def test_chat():
     llm = LLM(model=f"{MODEL_WEIGHTS_S3_BUCKET}/Llama-3.2-1B-Instruct",
-              load_format="runai_streamer")
+              load_format=RUNAI_STREAMER_LOAD_FORMAT)
 
     prompt1 = "Explain the concept of entropy."
     messages = [
@@ -31,7 +34,7 @@ def test_chat():
 
 def test_multi_chat():
     llm = LLM(model=f"{MODEL_WEIGHTS_S3_BUCKET}/Llama-3.2-1B-Instruct",
-              load_format="runai_streamer")
+              load_format=RUNAI_STREAMER_LOAD_FORMAT)
 
     prompt1 = "Explain the concept of entropy."
     prompt2 = "Explain what among us is."
@@ -69,7 +72,7 @@ def test_multi_chat():
 def test_chat_multi_image(image_urls: List[str]):
     llm = LLM(
         model=f"{MODEL_WEIGHTS_S3_BUCKET}/Phi-3.5-vision-instruct",
-        load_format="runai_streamer",
+        load_format=RUNAI_STREAMER_LOAD_FORMAT,
         dtype="bfloat16",
         max_model_len=4096,
         max_num_seqs=5,
