@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from vllm import _custom_ops as ops
 from vllm.envs import VLLM_USE_ROCM_SKINNY_GEMM
 from vllm.platforms import current_platform
-from vllm.utils import is_navi
+from vllm.utils import is_mi250, is_navi
 
 support_tuned_gemms = False
 if current_platform.is_rocm():
@@ -102,7 +102,8 @@ class TunedGemm:
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
         n = inp.shape[0]
-        if n != 1:
+        if (not VLLM_USE_ROCM_SKINNY_GEMM or n != 1
+                or not current_platform.is_rocm() or is_mi250() or is_navi()):
             return torch._scaled_mm(inp,
                                     weight,
                                     out_dtype=out_dtype,

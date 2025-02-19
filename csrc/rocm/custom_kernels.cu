@@ -10,6 +10,11 @@
   #define __HIP__MI300_MI250__
 #endif
 
+#if defined(__HIPCC__) && \
+    (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+  #define __HIP__MI300__
+#endif
+
 #if defined(NDEBUG)
   #undef NDEBUG
   #include <assert.h>
@@ -357,7 +362,7 @@ void LLGemmZZ(void* in_a, void* in_b, void* out_c, const int M, const int K,
   return rtn;
 }*/
 
-#if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
+#if defined(__HIP__MI300__)  // TODO: Add NAVI support
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSpltKQ_hf_sml_(const int K, const int Kp, const int N, const DTYPE* B,
@@ -534,7 +539,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     n += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI300_MI250__) TODO: Add NAVI support
+#else   // !defined(__HIP__MI300__) TODO: Add NAVI support
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
 __global__ void wvSpltKQ_hf_sml_(const int K, const int Kp, const int N,
                                  const DTYPE* B, const DTYPE* __restrict__ A,
@@ -544,9 +549,9 @@ __global__ void wvSpltKQ_hf_sml_(const int K, const int Kp, const int N,
                                  const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__MI300_MI250__) TODO: Add NAVI support
+#endif  // defined(__HIP__MI300__) TODO: Add NAVI support
 
-#if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
+#if defined(__HIP__MI300__)  // TODO: Add NAVI support
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSpltKQ_hf_(const int K, const int Kp, const int N, const DTYPE* B,
@@ -722,7 +727,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     n += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI300_MI250__) TODO: Add NAVI support
+#else   // !defined(__HIP__MI300__) TODO: Add NAVI support
 template <int THRDS, int YTILE, int WvPrGrp, int A_CHUNK, int UNRL, int M>
 __global__ void wvSpltKQ_hf_(const int K, const int Kp, const int N,
                              const DTYPE* B, const DTYPE* __restrict__ A,
@@ -731,7 +736,7 @@ __global__ void wvSpltKQ_hf_(const int K, const int Kp, const int N,
                              const int Otp, const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__MI300_MI250__) TODO: Add NAVI support
+#endif  // defined(__HIP__MI300__) TODO: Add NAVI support
 
 #if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
 // This version targets cases where A[] fits LDS capacity
