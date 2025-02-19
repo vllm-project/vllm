@@ -356,7 +356,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # # assert topk_group is None, 'topk_group is not supported on HPU'
         # if layer is not None:
         #     return layer.hpu_fused_moe(x, router_logits, top_k)
-        bs, seq_len, hidden_size = x.shape
+        # FIXME: (Yi) 2d or 3d?
+        hidden_size = x.shape[-1]
         x = x.reshape(-1, hidden_size)
         assert len(x.shape) == 2, f"Expected 2D input, got {x.shape}"
         import habana_frameworks.torch as htorch
