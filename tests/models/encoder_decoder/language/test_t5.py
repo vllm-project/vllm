@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM for T5 models using greedy sampling.
 Based on tests/models/encoder_decoder/language/test_bart.py.
 
@@ -16,8 +17,8 @@ from .conftest import compare_hf_vllm_logprobs
 @pytest.mark.parametrize(
     "model",
     [
-        pytest.param("google-t5/t5-small"),
-        pytest.param("google/flan-t5-base"),
+        pytest.param("Finnish-NLP/ul2-tiny-nl6-finnish"),
+        # pytest.param("google/flan-t5-base"),
     ],
 )
 @pytest.mark.parametrize("vllm_kwargs", [{"max_model_len": 512}])

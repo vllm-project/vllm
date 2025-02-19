@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from typing import List, Optional, Tuple
 
 from vllm.sequence import SampleLogprobs
