@@ -1970,11 +1970,16 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def shutdown_inc(self):
         rank = torch.distributed.get_rank()
-        
-        can_finalize_inc = ("inc" in self.model_config.quantization) and \
-            (self.model.model is not None) and \
-            self.inc_initialized_successfully and \
-            not getattr(self, "_is_inc_finalized", False)
+
+        can_finalize_inc = (
+            (
+                self.model_config.quantization is not None
+                and "inc" in self.model_config.quantization
+            )
+            and (self.model.model is not None)
+            and self.inc_initialized_successfully
+            and not getattr(self, "_is_inc_finalized", False)
+        )
         logger.info(f"can_finalize_inc: {can_finalize_inc}")
         if can_finalize_inc:
             from neural_compressor.torch.quantization import (
