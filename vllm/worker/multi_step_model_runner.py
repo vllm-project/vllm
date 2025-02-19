@@ -461,6 +461,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
     def execute_model(
         self,
         model_input: StatefulModelInput,
+        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
