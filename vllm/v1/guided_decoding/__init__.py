@@ -162,8 +162,8 @@ class GuidedDecodingManager:
                 ctx = self.compiler.compile_json_schema(grammar_spec)
         elif request_type == GuidedDecodingOptions.grammar:
             ctx = self.compiler.compile_grammar(grammar_spec)
-        elif request_type == GuidedDecodingOptions.regex:
-            ctx = self.compiler.compile_regex(grammar_spec)
+        # elif request_type == GuidedDecodingOptions.regex:
+        #     ctx = self.compiler.compile_regex(grammar_spec)
         else:
             raise ValueError(
                 f"`grammar` is not of valid supported types. ({request_type!s})"
