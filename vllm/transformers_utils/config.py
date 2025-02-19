@@ -144,7 +144,6 @@ def file_exists(
     revision: Optional[str] = None,
     token: Union[str, bool, None] = None,
 ) -> bool:
-
     file_list = list_repo_files(repo_id,
                                 repo_type=repo_type,
                                 revision=revision,
@@ -498,14 +497,13 @@ def get_sentence_transformer_tokenizer_config(model: str,
             if encoder_dict:
                 break
 
-    if not encoder_dict:
+    if not encoder_dict and not model.startswith("/"):
         try:
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
                                          revision=revision,
                                          token=HF_TOKEN)
-        except Exception as e:
-            logger.error("Error getting repo files", e)
+        except Exception:
             repo_files = []
 
         for config_name in sentence_transformer_config_files:
