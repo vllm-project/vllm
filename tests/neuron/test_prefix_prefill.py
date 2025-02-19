@@ -118,7 +118,7 @@ def ref_masked_attention(
             scaled_qk,
         )
     else:
-        return out
+        return (out, )
 
 
 def ref_context_attention(
@@ -144,18 +144,19 @@ def ref_context_attention(
     attn_mask = torch.logical_not(attn_mask)
     attn_mask = attn_mask.float() * -30000
 
-    output, cached_max, cached_sum_reciprocal, lse, masked_score, scaled_qk = (
-        ref_masked_attention(
-            query,
-            key,
-            value,
-            scale,
-            attn_mask,
-            return_max_reduce=return_max_reduce,
-        ))
+    output, *debug_tensors = ref_masked_attention(
+        query,
+        key,
+        value,
+        scale,
+        attn_mask,
+        return_max_reduce=return_max_reduce,
+    )
 
     output = output.unsqueeze(1)
     if return_max_reduce:
+        cached_max, cached_sum_reciprocal, lse, masked_score, scaled_qk = (
+            debug_tensors)
         return (
             output,
             cached_max,
@@ -312,15 +313,9 @@ def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
         (8, 1, 32),
     ],
 )
-@pytest.mark.parametrize(
-    "reorder_mask_outside,mixed_precision",
-    [
-        (True, True),
-        (False, False),
-    ],
-)
+@pytest.mark.parametrize("mixed_precision", [True, False])
 @torch.inference_mode()
-def test_flash_paged_attention_numerical(
+def test_contexted_kv_attention(
     prefill_batch_size: int,
     decode_batch_size: int,
     num_heads: int,
@@ -329,14 +324,13 @@ def test_flash_paged_attention_numerical(
     block_size: int,
     large_tile_size,
     mixed_precision: bool,
-    reorder_mask_outside: bool,
 ) -> None:
     import os
 
     import torch_xla.core.xla_model as xm
 
-    from vllm.attention.ops.nki_flash_attn import (context_mask_reorder_helper,
-                                                   flash_attn_varlen_nkifunc)
+    from vllm.attention.ops.nki_flash_attn import (flash_attn_varlen_nkifunc,
+                                                   reorder_context_mask)
 
     assert large_tile_size % block_size == 0
 
@@ -384,7 +378,7 @@ def test_flash_paged_attention_numerical(
         dtype=dtype,
     )
 
-    output_ref, *_ = ref_context_attention(
+    output_ref = ref_context_attention(
         query,
         key,
         value,
@@ -392,14 +386,13 @@ def test_flash_paged_attention_numerical(
         seq_lens,
         head_size,
         num_queries_per_kv,
-        return_max_reduce=True,
+        return_max_reduce=False,
     )
 
     # build neuron program
-    return_debug_tensors = False
     B_P_SIZE = 128
-    LARGE_TILE_SZ = large_tile_size
-    assert LARGE_TILE_SZ >= B_P_SIZE
+    assert (large_tile_size >= B_P_SIZE
+            ), f"Expect {large_tile_size=} to be larger than {B_P_SIZE=}"
 
     def ceil_div(a, b):
         return (a + b - 1) // b
@@ -416,10 +409,10 @@ def test_flash_paged_attention_numerical(
     context_lens = torch.tensor(seq_lens) - torch.tensor(query_lens)
     num_active_blocks = ceil_div(context_lens, block_size).sum().item()
     num_active_blocks = pad_to_multiple(num_active_blocks,
-                                        LARGE_TILE_SZ // block_size)
+                                        large_tile_size // block_size)
     context_kv_len = num_active_blocks * block_size
     assert (context_kv_len %
-            LARGE_TILE_SZ == 0), f"invalid context_kv_len={context_kv_len}"
+            large_tile_size == 0), f"invalid context_kv_len={context_kv_len}"
 
     # pad QKV tensors
     pad_dims = (
@@ -481,11 +474,7 @@ def test_flash_paged_attention_numerical(
     ).bool()
     attn_mask = torch.concat([prior_mask_padded, active_mask_padded], dim=1)
 
-    # reorder_mask_outside = True
-    if reorder_mask_outside:
-        # Due to vectorized DMA read, we need to reorder mask to match KV layout
-        attn_mask = context_mask_reorder_helper(attn_mask, LARGE_TILE_SZ,
-                                                block_size)
+    attn_mask = reorder_context_mask(attn_mask, large_tile_size, block_size)
 
     input_args = (
         query.to(device=device),
@@ -500,19 +489,10 @@ def test_flash_paged_attention_numerical(
         n_kv_head=num_kv_heads,
         head_size=head_size,
         mixed_precision=mixed_precision,
-        LARGE_TILE_SZ=LARGE_TILE_SZ,
-        mask_reordered=reorder_mask_outside,
-        return_debug_tensors=return_debug_tensors,
+        LARGE_TILE_SZ=large_tile_size,
     )
 
-    if return_debug_tensors:
-        output_nki, *debug_tensors = flash_attn_varlen_nkifunc(
-            *input_args, **input_kwargs)
-    else:
-        output_nki = flash_attn_varlen_nkifunc(*input_args, **input_kwargs)
-        debug_tensors = []
-
-    debug_tensors = [torch.tensor(dt).cpu() for dt in debug_tensors]
+    output_nki = flash_attn_varlen_nkifunc(*input_args, **input_kwargs)
 
     num_actual_tokens = sum(query_lens)
     # - o: shape (bs, n_heads, seq_q, d) -> (bs, seq_q, n_heads, d)
