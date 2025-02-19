@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
 import base64
 import io
+import json
+import random
 from abc import ABC, abstractmethod
-from typing import Any, Collection, Optional, Iterable
+from typing import Any, Collection, Iterable, Optional
 
 from datasets import IterableDataset, load_dataset, load_dataset_builder
 from PIL import Image
@@ -47,6 +50,7 @@ class DatasetSampler(ABC):
         """Filter function to filter out unsatisfied rows from dataset."""
         raise NotImplementedError
 
+    # TODO(Isotr0py): Add sample function to sample offline request.
     @abstractmethod
     def sample(
         self,
@@ -54,27 +58,18 @@ class DatasetSampler(ABC):
         tokenizer: PreTrainedTokenizerBase,
         fixed_output_len: Optional[int] = None
     ) -> list[tuple[str, int, int, dict[str, Collection[str]]]]:
-        """Function to sample requests from the dataset."""
+        """Function to sample online requests from the dataset."""
         raise NotImplementedError
 
 
-class HFDatasetSampler(DatasetSampler):
+class ShareGPTSampler(DatasetSampler):
 
-    def __init__(self, hf_dataset: IterableDataset, seed: Optional[int] = None):
-        self.dataset = hf_dataset.shuffle(seed=seed).filter(self.filter_func)
-
-
-class ShareGPTHFSampler(HFDatasetSampler):
-    """
-    Dataset sampler for ShareGPT-style datasets.
-    - Text-only dataset like: 'RyokoAI/ShareGPT52K' etc.
-    - Vision dataset like: 'lmms-lab/LLaVA-OneVision-Data' etc.
-    """
-
-    def __init__(self, dataset: IterableDataset, seed: Optional[int] = None):
-        assert "conversations" in dataset.features, (
-            "Sonnet-style Dataset must have 'conversations' column.")
-        super().__init__(dataset, seed=seed)
+    def __init__(self, dataset_path: str, seed: Optional[int] = None):
+        with open(dataset_path, encoding='utf-8') as f:
+            dataset = json.load(f)
+        dataset = [data for data in dataset if self.filter_func(data)]
+        random.shuffle(dataset)
+        self.dataset = dataset
 
     def filter_func(self, data: dict) -> bool:
         return len(data["conversations"]) >= 2
@@ -121,6 +116,27 @@ class ShareGPTHFSampler(HFDatasetSampler):
             sampled_requests.append(
                 (prompt, prompt_len, output_len, mm_content))
         return sampled_requests
+
+
+class HFDatasetSampler(DatasetSampler):
+
+    def __init__(self,
+                 hf_dataset: IterableDataset,
+                 seed: Optional[int] = None):
+        self.dataset = hf_dataset.shuffle(seed=seed).filter(self.filter_func)
+
+
+class ShareGPTHFSampler(ShareGPTSampler, HFDatasetSampler):
+    """
+    Dataset sampler for ShareGPT-style datasets.
+    - Text-only dataset like: 'RyokoAI/ShareGPT52K' etc.
+    - Vision dataset like: 'lmms-lab/LLaVA-OneVision-Data' etc.
+    """
+
+    def __init__(self, dataset: IterableDataset, seed: Optional[int] = None):
+        assert "conversations" in dataset.features, (
+            "Sonnet-style Dataset must have 'conversations' column.")
+        HFDatasetSampler.__init__(self, dataset, seed=seed)
 
 
 class VisionArenaBenchSampler(HFDatasetSampler):
