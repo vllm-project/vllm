@@ -11,7 +11,13 @@ class RedactFilter(logging.Filter):
         self._patterns = [re.compile(pattern) for pattern in patterns]
 
     def filter(self, record):
+        redacted_msg = record.getMessage()
         for pattern in self._patterns:
-            record.msg = pattern.sub("[...]", record.getMessage())
-        record.args = ()
+            redacted_msg = pattern.sub("[...]", redacted_msg)
+
+        # Update msg and clear args only if redaction occurred
+        if redacted_msg != record.getMessage():
+            record.msg = redacted_msg
+            record.args = ()
+
         return True

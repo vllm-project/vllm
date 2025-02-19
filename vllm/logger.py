@@ -33,7 +33,7 @@ DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
         },
     },
     # Custom filter uses () to specify its callable
-    # https://docs.python.org/3/howto/logging-cookbook.html#configuring-filters-with-dictconfig # noqa
+    # https://docs.python.org/3/howto/logging-cookbook.html#configuring-filters-with-dictconfig # noqa: E501
     "filters": {
         "vllm_redact": {
             "()": "vllm.logging_utils.RedactFilter",
