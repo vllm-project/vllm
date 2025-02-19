@@ -275,8 +275,8 @@ class AsyncLLM(EngineClient):
             gens.append(gen)
 
         # Merge generators
-        async for out in merge_async_iterators(*gens):
-            yield out[1]  # out[0] is index
+        async for _, out in merge_async_iterators(*gens):
+            yield out
 
     def generate(
         self,
