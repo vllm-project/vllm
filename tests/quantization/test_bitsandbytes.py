@@ -13,7 +13,7 @@ from tests.quantization.utils import is_quant_method_supported
 from tests.utils import compare_two_settings, fork_new_process_for_each_test
 
 models_4bit_to_test = [
-    ("facebook/opt-125m", "quantize opt model inflight"),
+    ("distilbert/distilgpt2", "quantize opt model inflight"),
 ]
 
 models_pre_qaunt_4bit_to_test = [
