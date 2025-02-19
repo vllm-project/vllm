@@ -16,15 +16,19 @@ from vllm.sampling_params import GuidedDecodingParams
 
 MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
+GUIDED_DECODING_BACKENDS_WITH_REASONING_SUPPORT = ["outlines", "xgrammar"]
 
 
 def test_guided_logits_processors(sample_regex, sample_json_schema):
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
-    regex_LP = RegexLogitsProcessor(sample_regex, tokenizer)
+    regex_LP = RegexLogitsProcessor(sample_regex,
+                                    tokenizer,
+                                    reasoner_config=None)
     json_LP = JSONLogitsProcessor(sample_json_schema,
                                   tokenizer,
-                                  whitespace_pattern=None)
+                                  whitespace_pattern=None,
+                                  reasoner_config=None)
 
     token_ids = tokenizer.encode(
         f"Give an example IPv4 address with this regex: {sample_regex}")
@@ -83,6 +87,78 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
                                         backend=backend)
     json_lp = await get_guided_decoding_logits_processor(
         json_request, tokenizer, config)
+    assert json_lp is not None
+    tensor = torch.rand(32000)
+    original_tensor = torch.clone(tensor)
+    tensor = json_lp(token_ids, tensor)
+    assert tensor.shape == original_tensor.shape
+    assert not torch.allclose(tensor, original_tensor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend",
+                         GUIDED_DECODING_BACKENDS_WITH_REASONING_SUPPORT)
+@pytest.mark.parametrize("is_local", [True, False])
+@pytest.mark.parametrize("reasoning_backend", ["deepseek_r1"])
+async def test_guided_logits_processor_with_reasoning(backend: str,
+                                                      is_local: bool,
+                                                      reasoning_backend: str,
+                                                      sample_regex,
+                                                      sample_json_schema):
+
+    reasoning_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    config = ModelConfig(
+        reasoning_model,
+        task="generate",
+        tokenizer=reasoning_model,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="bfloat16",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(reasoning_model)
+    token_ids = tokenizer.encode(
+        f"Give an example IPv4 address with this regex: {sample_regex}."
+        "<think>here is the thinking process")
+    regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
+
+    regex_lp = get_local_guided_decoding_logits_processor(regex_request,
+                    tokenizer, config, reasoning_backend) if is_local else \
+            await get_guided_decoding_logits_processor(
+                    regex_request, tokenizer, config, reasoning_backend)
+    assert regex_lp is not None
+    tensor = torch.rand(32000)
+    original_tensor = torch.clone(tensor)
+    tensor = regex_lp(token_ids, tensor)
+    assert tensor.shape == original_tensor.shape
+    assert torch.allclose(tensor, original_tensor)
+
+    token_ids = tokenizer.encode(
+        f"Give an employee profile that fits this schema: {sample_json_schema}."
+        "<think>here is the thinking process")
+    json_request = GuidedDecodingParams(json=sample_json_schema,
+                                        backend=backend)
+    json_lp = get_local_guided_decoding_logits_processor(
+        json_request, tokenizer, config, reasoning_backend) if is_local else \
+        await get_guided_decoding_logits_processor(
+            json_request, tokenizer, config, reasoning_backend)
+    assert json_lp is not None
+    tensor = torch.rand(32000)
+    original_tensor = torch.clone(tensor)
+    tensor = json_lp(token_ids, tensor)
+    assert tensor.shape == original_tensor.shape
+    assert torch.allclose(tensor, original_tensor)
+
+    # Thinking is over, so the tensor should change.
+    token_ids = tokenizer.encode(
+        f"Give an employee profile that fits this schema: {sample_json_schema}."
+        "<think>here is the thinking process</think> Then")
+    json_request = GuidedDecodingParams(json=sample_json_schema,
+                                        backend=backend)
+    json_lp = get_local_guided_decoding_logits_processor(
+        json_request, tokenizer, config, reasoning_backend) if is_local else \
+        await get_guided_decoding_logits_processor(
+            json_request, tokenizer, config, reasoning_backend)
     assert json_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
