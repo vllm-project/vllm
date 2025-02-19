@@ -74,7 +74,9 @@ class GuidedDecodingParams:
 
     def backend_options(self) -> List[str]:
         """Return the backend options as a list of strings."""
-        return (self.backend or "").split(":")[1:]
+        if not self.backend or ":" not in self.backend:
+            return []
+        return self.backend.split(":")[1].split(",")
 
     def no_fallback(self) -> bool:
         """Returns True if the "no-fallback" option is supplied for the guided
