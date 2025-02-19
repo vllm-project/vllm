@@ -10,7 +10,7 @@ from pqdm.threads import pqdm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ...utils import build_model_context
 
@@ -44,10 +44,7 @@ def test_processor_max_tokens(model_id):
     )
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
-        tokenizer=cached_get_tokenizer(
-            ctx.model_config.tokenizer,
-            trust_remote_code=ctx.model_config.trust_remote_code,
-        ),
+        tokenizer=cached_tokenizer_from_config(ctx.model_config),
     )
     info = processor.info
 
@@ -146,10 +143,7 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
     )
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
-        tokenizer=cached_get_tokenizer(
-            ctx.model_config.tokenizer,
-            trust_remote_code=ctx.model_config.trust_remote_code,
-        ),
+        tokenizer=cached_tokenizer_from_config(ctx.model_config),
     )
 
     image_ratios = [(171, 152), (184, 161), (198, 176), (333, 296), (369, 328),
@@ -180,10 +174,7 @@ def test_processor_prompt_replacements_all(model_id, num_imgs):
     )
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
-        tokenizer=cached_get_tokenizer(
-            ctx.model_config.tokenizer,
-            trust_remote_code=ctx.model_config.trust_remote_code,
-        ),
+        tokenizer=cached_tokenizer_from_config(ctx.model_config),
     )
 
     seen_aspect_ratios = set[float]()

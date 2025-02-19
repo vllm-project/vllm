@@ -16,8 +16,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
-from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
@@ -88,7 +88,7 @@ def input_processor_for_paligemma(ctx: InputContext,
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
 
-    tokenizer = cached_get_tokenizer(model_config.tokenizer)
+    tokenizer = cached_tokenizer_from_config(model_config)
     image_feature_size = hf_config.text_config.num_image_tokens
     image_token_str = tokenizer.decode(hf_config.image_token_index)
     bos_token = tokenizer.decode(hf_config.bos_token_id)

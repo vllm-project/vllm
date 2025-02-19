@@ -120,6 +120,7 @@ def resolve_internvl_min_max_num(
     dynamic_image_size: bool,
     use_thumbnail: bool,
 ) -> tuple[int, int]:
+    min_dynamic_patch = min_dynamic_patch if dynamic_image_size else 1
     max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
 
     if use_thumbnail and max_dynamic_patch != 1:
@@ -247,6 +248,7 @@ class BaseInternVLProcessor(ABC):
         config: PretrainedConfig,
         tokenizer: AnyTokenizer,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
     ) -> None:
@@ -258,18 +260,22 @@ class BaseInternVLProcessor(ABC):
         image_size: int = config.vision_config.image_size
         patch_size: int = config.vision_config.patch_size
 
-        if dynamic_image_size is None:
-            dynamic_image_size = config.dynamic_image_size
-        assert isinstance(dynamic_image_size, bool)
+        if min_dynamic_patch is None:
+            min_dynamic_patch = config.min_dynamic_patch
+        assert isinstance(min_dynamic_patch, int)
 
         if max_dynamic_patch is None:
             max_dynamic_patch = config.max_dynamic_patch
         assert isinstance(max_dynamic_patch, int)
 
+        if dynamic_image_size is None:
+            dynamic_image_size = config.dynamic_image_size
+        assert isinstance(dynamic_image_size, bool)
+
         self.num_image_token = int(
             (image_size // patch_size)**2 * (config.downsample_ratio**2))
         self.image_size = image_size
-        self.min_dynamic_patch: int = config.min_dynamic_patch
+        self.min_dynamic_patch = min_dynamic_patch
         self.max_dynamic_patch = max_dynamic_patch
         self.dynamic_image_size = dynamic_image_size
         self.use_thumbnail: bool = config.use_thumbnail
@@ -298,11 +304,13 @@ class BaseInternVLProcessor(ABC):
     def resolve_min_max_num(
         self,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         use_thumbnail: Optional[bool] = None,
     ) -> tuple[int, int]:
-        min_dynamic_patch = self.min_dynamic_patch
+        min_dynamic_patch = (self.min_dynamic_patch if min_dynamic_patch
+                             is None else min_dynamic_patch)
         max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
                              is None else max_dynamic_patch)
         dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
@@ -320,11 +328,13 @@ class BaseInternVLProcessor(ABC):
     def resolve_target_ratios(
         self,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         use_thumbnail: Optional[bool] = None,
     ) -> list[tuple[int, int]]:
         min_num, max_num = self.resolve_min_max_num(
+            min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
             use_thumbnail=use_thumbnail,
@@ -355,10 +365,12 @@ class BaseInternVLProcessor(ABC):
     def _images_to_pixel_values_lst(
         self,
         images: list[Image.Image],
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
     ) -> list[torch.Tensor]:
         min_num, max_num = self.resolve_min_max_num(
+            min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
             use_thumbnail=False,  # Applied in image_to_pixel_values
@@ -378,6 +390,7 @@ class BaseInternVLProcessor(ABC):
         self,
         text: Optional[Union[str, list[str]]] = None,
         images: Optional[Union[Image.Image, list[Image.Image]]] = None,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
@@ -396,6 +409,7 @@ class BaseInternVLProcessor(ABC):
         else:
             pixel_values_lst = self._images_to_pixel_values_lst(
                 images,
+                min_dynamic_patch=min_dynamic_patch,
                 max_dynamic_patch=max_dynamic_patch,
                 dynamic_image_size=dynamic_image_size,
             )
@@ -451,8 +465,10 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(
         self,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
     ) -> BaseInternVLProcessor:
         raise NotImplementedError
 
@@ -642,14 +658,23 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     def get_hf_processor(
         self,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
     ) -> InternVLProcessor:
-        return InternVLProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
+        if min_dynamic_patch is not None:
+            kwargs["min_dynamic_patch"] = min_dynamic_patch
+        if max_dynamic_patch is not None:
+            kwargs["max_dynamic_patch"] = max_dynamic_patch
+        if dynamic_image_size is not None:
+            kwargs["dynamic_image_size"] = dynamic_image_size
+
+        return self.ctx.init_processor(
+            InternVLProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
         )
 
 

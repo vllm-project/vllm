@@ -94,8 +94,8 @@ class MllamaProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> MllamaConfig:
         return self.ctx.get_hf_config(MllamaConfig)
 
-    def get_hf_processor(self) -> MllamaProcessor:
-        return self.ctx.get_hf_processor(MllamaProcessor)
+    def get_hf_processor(self, **kwargs: object) -> MllamaProcessor:
+        return self.ctx.get_hf_processor(MllamaProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
