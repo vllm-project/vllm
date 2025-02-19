@@ -763,10 +763,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         "qkv_proj",
         "o_proj",
         "gate_up_proj",
-        "down_proj"  # Same name with vision encoder
+        "down_proj",  # Same name with vision encoder
         # vision tower
         "qkv",
-        "gate_proj"
+        "gate_proj",
         "up_proj",
         "attn.proj",  # Distinguish patch_embed.proj
         "fc1",
