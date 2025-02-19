@@ -16,4 +16,4 @@ file_handler.setFormatter(formatter)
 # add the handlers to the logger
 logger.addHandler(file_handler)
 
-logger.info('Logger initialized')
+logger.debug('Logger initialized')

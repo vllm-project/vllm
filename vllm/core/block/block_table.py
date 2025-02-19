@@ -110,7 +110,7 @@ class BlockTable:
         
         # log token_ids and block ids
         block_ids = [block.block_id for block in blocks]
-        logger.debug(f"token_ids: {token_ids}, in blocks {block_ids}")
+        logger.debug(f"Allocate token_ids: {token_ids}, in blocks {block_ids}")
         
 
     def update(self, blocks: List[Block]) -> None:

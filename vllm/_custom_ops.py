@@ -1044,7 +1044,7 @@ def copy_blocks(key_caches: List[torch.Tensor],
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
     
-    core_logger.debug(f'src: {src}, dst: {dst}, block_mapping: {block_mapping}')
+    core_logger.debug(f'src: {hex(src.data_ptr())} on {src.device}, dst: {hex(dst.data_ptr())} on {dst.device}, block_mapping: {block_mapping}')
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
