@@ -30,7 +30,15 @@ from vllm.utils import PlaceholderModule
 logger = init_logger(__name__)
 
 try:
-    from runai_model_streamer import SafetensorsStreamer
+    import importlib.util
+
+    # Try to find the installed package first
+    spec = importlib.util.find_spec("runai_model_streamer")
+    if spec and "site-packages" in str(spec.origin):
+        # Only import from site-packages version
+        from runai_model_streamer import SafetensorsStreamer
+    else:
+        raise ImportError("runai_model_streamer not found in site-packages")
 except (ImportError, OSError) as e:
     logger.info("Error importing runai_model_streamer: %s", e)
     # see https://github.com/run-ai/runai-model-streamer/issues/26
