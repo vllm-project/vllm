@@ -236,7 +236,7 @@ def get_tokenizer(
     return tokenizer
 
 
-cached_get_tokenizer = lru_cache(get_tokenizer)
+cached_get_tokenizer = lru_cache(get_tokenizer)  # type: ignore[arg-type]
 
 
 def cached_tokenizer_from_config(

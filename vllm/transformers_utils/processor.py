@@ -85,7 +85,7 @@ def get_processor(
     return processor
 
 
-cached_get_processor = lru_cache(get_processor)
+cached_get_processor = lru_cache(get_processor)  # type: ignore[arg-type]
 
 
 def cached_processor_from_config(
@@ -137,7 +137,8 @@ def get_image_processor(
     return cast(BaseImageProcessor, processor)
 
 
-cached_get_image_processor = lru_cache(get_image_processor)
+cached_get_image_processor = lru_cache(
+    get_image_processor)  # type: ignore[arg-type]
 
 
 def cached_image_processor_from_config(
@@ -172,7 +173,8 @@ def get_video_processor(
     return cast(BaseImageProcessor, processor.video_processor)
 
 
-cached_get_video_processor = lru_cache(get_video_processor)
+cached_get_video_processor = lru_cache(
+    get_video_processor)  # type: ignore[arg-type]
 
 
 def cached_video_processor_from_config(
