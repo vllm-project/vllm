@@ -78,6 +78,27 @@ def test_kv_transfer_params_from_optional():
     assert params.kvcache_load_keys == ["key3"]
     assert params.kvcache_store_keys == ["key4"]
 
+    # Valid partial none input
+    dict_input = {
+        "prefix_prompt_ids": [1, 2],
+        "kvcache_load_keys": ["key3"],
+        "kvcache_store_keys": None
+    }
+    params = KVTransferParams.from_optional(dict_input)
+    assert params.prefix_prompt_ids == [1, 2]
+    assert params.kvcache_load_keys == ["key3"]
+    assert params.kvcache_store_keys is None
+
+    dict_input = {
+        "prefix_prompt_ids": [1, 2],
+        "kvcache_load_keys": None,
+        "kvcache_store_keys": ["key3"]
+    }
+    params = KVTransferParams.from_optional(dict_input)
+    assert params.prefix_prompt_ids == [1, 2]
+    assert params.kvcache_load_keys is None
+    assert params.kvcache_store_keys == ["key3"]
+
     # None input
     params = KVTransferParams.from_optional(None)
     assert params is None

@@ -28,23 +28,26 @@ def valid_kvcache_keys(lst: List[Any]) -> bool:
 
 
 def verify_input_from_optional(input_dict: dict) -> None:
-    if 'prefix_prompt_ids' in input_dict:
-        prefix_prompt_ids = input_dict['prefix_prompt_ids']
-        if not all(isinstance(x, int) for x in prefix_prompt_ids):
-            raise ValueError(f"prefix_prompt_ids: {prefix_prompt_ids} "
-                             "should be a list of integers.")
+    prefix_prompt_ids = input_dict.get("prefix_prompt_ids")
+    if prefix_prompt_ids is not None and not all(
+            isinstance(x, int) for x in prefix_prompt_ids):
+        raise ValueError(
+            f"prefix_prompt_ids: {prefix_prompt_ids} should be a list of "
+            "integers or None.")
 
-    if 'kvcache_load_keys' in input_dict:
-        kvcache_load_keys = input_dict['kvcache_load_keys']
-        if not all(isinstance(x, str) for x in kvcache_load_keys):
-            raise ValueError(f"kvcache_load_keys: {kvcache_load_keys} "
-                             "should be a list of strings.")
+    kvcache_load_keys = input_dict.get("kvcache_load_keys")
+    if kvcache_load_keys is not None and not all(
+            isinstance(x, str) for x in kvcache_load_keys):
+        raise ValueError(
+            f"kvcache_load_keys: {kvcache_load_keys} should be a list of "
+            "strings or None.")
 
-    if 'kvcache_store_keys' in input_dict:
-        kvcache_store_keys = input_dict['kvcache_store_keys']
-        if not all(isinstance(x, str) for x in kvcache_store_keys):
-            raise ValueError(f"kvcache_store_keys: {kvcache_store_keys} "
-                             "should be a list of strings.")
+    kvcache_store_keys = input_dict.get("kvcache_store_keys")
+    if kvcache_store_keys is not None and not all(
+            isinstance(x, str) for x in kvcache_store_keys):
+        raise ValueError(
+            f"kvcache_store_keys: {kvcache_store_keys} should be a list of "
+            "strings or None.")
 
 
 class KVTransferParams(
