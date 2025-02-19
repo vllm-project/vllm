@@ -152,7 +152,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         # xw32: kv_cache[0].shape=torch.Size([2, 57599, 16, 128])
-        print(f'xw32 PallasAttentionBackendImpl.forward  begins {query.shape=}, {key.shape=}, {len(kv_cache)=}, {kv_cache[0].shape=}')
+        # print(f'xw32 PallasAttentionBackendImpl.forward  begins {query.shape=}, {key.shape=}, {len(kv_cache)=}, {kv_cache[0].shape=}')
 
         if attn_metadata is None:
             if output is None:
@@ -166,13 +166,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
         value = value.view(num_tokens, self.num_kv_heads, self.head_size)
 
         if kv_cache[0].numel() > 0:
-            print('xw32 write to kv cache')
+            # print('xw32 write to kv cache')
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping, attn_metadata.total_num_scheduled_tokens)
 
         query = query * self.scale
-        print(f'xw32 xw32 PallasAttentionBackendImpl.forward: {query.shape=}, {key_cache.shape=}, {value_cache.shape=}, {attn_metadata.context_lens.shape=}, {attn_metadata.block_tables.shape=}, {attn_metadata.query_start_loc.shape=}, {attn_metadata.num_seqs=}', flush=True)
+        # print(f'xw32 xw32 PallasAttentionBackendImpl.forward: {query.shape=}, {key_cache.shape=}, {value_cache.shape=}, {attn_metadata.context_lens.shape=}, {attn_metadata.block_tables.shape=}, {attn_metadata.query_start_loc.shape=}, {attn_metadata.num_seqs=}', flush=True)
         output = torch.ops.xla.ragged_paged_attention(
             query,
             key_cache,
@@ -185,7 +185,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             num_queries_per_block=NUM_QUERIES_PER_BLOCK,
             use_kernel=True,
         )
-        print(f'xw32 PallasAttentionBackendImpl.forward finished', flush=True)
+        # print(f'xw32 PallasAttentionBackendImpl.forward finished', flush=True)
 
         return output.reshape(num_tokens, hidden_size)
 
@@ -207,7 +207,7 @@ def write_to_kv_cache(
         v_cache = [num_kv_heads, num_blocks, block_size, head_size]
 
     """
-    print(f'xw32 write_to_kv_cache {key.shape=}, {key_cache.shape=}, {slot_mapping.shape=}', flush=True)
+    # print(f'xw32 write_to_kv_cache {key.shape=}, {key_cache.shape=}, {slot_mapping.shape=}', flush=True)
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
 
@@ -219,4 +219,4 @@ def write_to_kv_cache(
     value_cache = value_cache.flatten(0, 2)
     key_cache.index_copy_(0, slot_mapping, key)
     value_cache.index_copy_(0, slot_mapping, value)
-    print(f'xw32 write_to_kv_cache finished', flush=True)
+    # print(f'xw32 write_to_kv_cache finished', flush=True)

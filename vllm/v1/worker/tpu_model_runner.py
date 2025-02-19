@@ -312,7 +312,7 @@ class TPUModelRunner():
         return kv_cache_spec
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
-        print(f'xw32 _prepare_inputs begins. {scheduler_output=}')
+        # print(f'xw32 _prepare_inputs begins. {scheduler_output=}')
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -441,7 +441,7 @@ class TPUModelRunner():
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        logger.info(f"xw32 TPUModelRunner.execute_model. {scheduler_output=}")
+        # logger.info(f"xw32 TPUModelRunner.execute_model. {scheduler_output=}")
 
         # Update cached state
         self._update_states(scheduler_output)
@@ -451,7 +451,7 @@ class TPUModelRunner():
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         input_ids = self.input_ids
-        print(f'xw32 TPUModelRunner.execute_model line459 {input_ids.shape=}, {num_scheduled_tokens=}')
+        # print(f'xw32 TPUModelRunner.execute_model line459 {input_ids.shape=}, {num_scheduled_tokens=}')
 
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config): 
@@ -462,7 +462,7 @@ class TPUModelRunner():
                 attn_metadata=attn_metadata,
                 logits_indices=logits_indices,
             )
-            print(f'xw32 TPUModelRunner.execute_model line470 {selected_token_ids.shape=}')
+            # print(f'xw32 TPUModelRunner.execute_model line470 {selected_token_ids.shape=}')
 
         # Then, let's update the cache state.
         num_reqs = self.input_batch.num_reqs
@@ -492,7 +492,7 @@ class TPUModelRunner():
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
-        print(f'xw32 TPUModelRunner.execute_model line496 {selected_token_ids.shape=}')
+        # print(f'xw32 TPUModelRunner.execute_model line496 {selected_token_ids.shape=}')
         max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
             valid_sampled_token_ids = selected_token_ids.tolist()
@@ -502,6 +502,7 @@ class TPUModelRunner():
                 req_state.output_token_ids.append(token_id)
                 self.input_batch.num_tokens[i] += 1
         else:
+            # print('xw32 TPUModelRunner.execute_model line505 max_gen_len>1 is triggered')
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
             valid_sampled_token_ids = [
@@ -526,7 +527,7 @@ class TPUModelRunner():
         return model_runner_output
 
     def load_model(self) -> None:
-        logger.info("xw32 TPUModelRunner.load_model begins.")
+        #logger.info("xw32 TPUModelRunner.load_model begins.")
         self.device = self.device_config.device
 
         # NOTE(woosuk): While the executor assigns the TP ranks to the worker
@@ -550,12 +551,12 @@ class TPUModelRunner():
         model = ModelWrapperV1(model)
         # TODO(xw32): turn on dynamo.
         # xw32 turns off dynamo
-        self.model = model
-        # self.model = torch.compile(model,
-        #                            backend="openxla",
-        #                            fullgraph=True,
-        #                            dynamic=False)
-        logger.info("xw32 TPUModelRunner.load_model ends.")
+        # self.model = model
+        self.model = torch.compile(model,
+                                   backend="openxla",
+                                   fullgraph=True,
+                                   dynamic=False)
+        # logger.info("xw32 TPUModelRunner.load_model ends.")
 
     # @torch.inference_mode() fails so I disabled it.
     # It's also not in the original v1 tpu_model_runner.py
@@ -596,14 +597,14 @@ class TPUModelRunner():
         # TODO(xw32): work with Alex to fix the issue later.
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
-            logger.info(f"xw32 TPUModelRunner.dummy_run. before calling self.model, {input_ids.shape=}, {position_ids.shape=}")
+            #logger.info(f"xw32 TPUModelRunner.dummy_run. before calling self.model, {input_ids.shape=}, {position_ids.shape=}")
             self.model(input_ids, position_ids, None, kv_caches, None)
-            logger.info(f"xw32 TPUModelRunner.dummy_run. after calling self.model")
+            #logger.info(f"xw32 TPUModelRunner.dummy_run. after calling self.model")
 
     def capture_model(self) -> None:
         """Compile the model."""
 
-        logger.info("xw32 TPUModelRunner.capture_model.")
+        #logger.info("xw32 TPUModelRunner.capture_model.")
         logger.info("Compiling the model with different input shapes.")
 
         # xw32: may need to compile for num_seqs.
@@ -687,7 +688,7 @@ class ModelWrapperV1(nn.Module):
                 memory profiling at initialization.
         """
         # Skip this in memory profiling at initialization.
-        logger.info("xw32 ModelWrapperV1.forward.")
+        #logger.info("xw32 ModelWrapperV1.forward.")
         # token_ids=tensor([9707,   11,  847,  829,  374, 0...0]
         # position_ids=tensor([0, 1, 2, 3, 4, 0, ..., 0]
         if attn_metadata is not None:
@@ -720,12 +721,12 @@ class ModelWrapperV1(nn.Module):
         )
         # TODO(xw32): should unconditionally run hidden_states = hidden_states[:attn_metadata.total_num_scheduled_tokens]. Same for logits_indices
         if attn_metadata is not None:
-            print(f'xw32 ModelWrapperV1.forward line724 {attn_metadata.total_num_scheduled_tokens=}, {hidden_states.shape=}')
+            #print(f'xw32 ModelWrapperV1.forward line724 {attn_metadata.total_num_scheduled_tokens=}, {hidden_states.shape=}')
             hidden_states = hidden_states[:attn_metadata.total_num_scheduled_tokens]
         if logits_indices is not None:
             logits_indices = logits_indices[:attn_metadata.num_seqs]
             hidden_states = hidden_states[logits_indices]
-            print(f'xw32 ModelWrapperV1.forward line728 {logits_indices=}, {hidden_states.shape=}')
+            #print(f'xw32 ModelWrapperV1.forward line728 {logits_indices=}, {hidden_states.shape=}')
 
         # hidden_states = hidden_states.flatten(0, 1) is not needed because previously hidden_states has shape [bs, T, C] and we need to combine the first 2 dimensions.
         # hidden_states = hidden_states.flatten(0, 1)
@@ -733,7 +734,7 @@ class ModelWrapperV1(nn.Module):
 
         # Greedy sampling.
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-        print(f'xw32 line728 {argmax_token_ids.shape=}')
+        #print(f'xw32 line728 {argmax_token_ids.shape=}')
         # argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
         return argmax_token_ids
 
