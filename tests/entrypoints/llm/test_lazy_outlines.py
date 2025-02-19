@@ -6,10 +6,11 @@ from contextlib import nullcontext
 from vllm_test_utils import BlameResult, blame
 
 from vllm import LLM, SamplingParams
+from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 
 
-def run_normal():
+def run_normal_opt125m():
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -33,9 +34,35 @@ def run_normal():
     cleanup_dist_env_and_memory()
 
 
+def run_normal():
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+    # Create an LLM without guided decoding as a baseline.
+    llm = LLM(model="s3://vllm-ci-model-weights/distilgpt2",
+              load_format=LoadFormat.RUNAI_STREAMER,
+              enforce_eager=True,
+              gpu_memory_utilization=0.3)
+    outputs = llm.generate(prompts, sampling_params)
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    # Destroy the LLM object and free up the GPU memory.
+    del llm
+    cleanup_dist_env_and_memory()
+
+
 def run_lmfe(sample_regex):
     # Create an LLM with guided decoding enabled.
-    llm = LLM(model="facebook/opt-125m",
+    llm = LLM(model="s3://vllm-ci-model-weights/distilgpt2",
+              load_format=LoadFormat.RUNAI_STREAMER,
               enforce_eager=True,
               guided_decoding_backend="lm-format-enforcer",
               gpu_memory_utilization=0.3)
