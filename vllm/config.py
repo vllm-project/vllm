@@ -1495,6 +1495,10 @@ class SchedulerConfig:
 
     chunked_prefill_enabled: bool = field(init=False)
 
+    # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
+    # or "mod.custom_class".
+    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
