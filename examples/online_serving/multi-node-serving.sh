@@ -1,9 +1,11 @@
 #!/bin/bash
+
 subcommand=$1
 shift
 
 ray_port=6379
 ray_init_timeout=300
+declare -a start_params
 
 case "$subcommand" in
   worker)
@@ -20,8 +22,7 @@ case "$subcommand" in
           ray_init_timeout="${1#*=}"
           ;;
         *)
-          echo "unknown argument: $1"
-          exit 1
+          start_params+=("$1")
       esac
       shift
     done
@@ -32,7 +33,7 @@ case "$subcommand" in
     fi
 
     for (( i=0; i < $ray_init_timeout; i+=5 )); do
-      ray start --address=$ray_address:$ray_port --block
+      ray start --address=$ray_address:$ray_port --block "${start_params[@]}"
       if [ $? -eq 0 ]; then
         echo "Worker: Ray runtime started with head address $ray_address:$ray_port"
         exit 0
@@ -58,8 +59,7 @@ case "$subcommand" in
               ray_init_timeout="${1#*=}"
               ;;
             *)
-              echo "unknown argument: $1"
-              exit 1
+              start_params+=("$1")
           esac
           shift
     done
@@ -70,7 +70,7 @@ case "$subcommand" in
     fi
 
     # start the ray daemon
-    ray start --head --port=$ray_port
+    ray start --head --port=$ray_port "${start_params[@]}"
 
     # wait until all workers are active
     for (( i=0; i < $ray_init_timeout; i+=5 )); do
