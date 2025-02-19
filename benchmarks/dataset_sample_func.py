@@ -6,6 +6,7 @@ import random
 from abc import ABC, abstractmethod
 from typing import Any, Collection, Iterable, Optional
 
+import numpy as np
 from datasets import IterableDataset, load_dataset, load_dataset_builder
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
@@ -62,7 +63,55 @@ class DatasetSampler(ABC):
         raise NotImplementedError
 
 
+class RandomSampler(DatasetSampler):
+    """Dataset sampler for creating random request."""
+
+    def __init__(
+        self,
+        prefix_len: int,
+        input_len: int,
+        range_ratio: float,
+    ):
+        self.prefix_len = prefix_len
+        self.input_len = input_len
+        self.range_ratio = range_ratio
+
+    def sample(
+        self,
+        num_samples: int,
+        tokenizer: PreTrainedTokenizerBase,
+        fixed_output_len: Optional[int] = 128,
+    ) -> list[tuple[str, int, int, dict[str, Collection[str]]]]:
+        prefix_token_ids = np.random.randint(0,
+                                             tokenizer.vocab_size,
+                                             size=self.prefix_len).tolist()
+
+        input_lens = np.random.randint(
+            int(self.input_len * self.range_ratio),
+            self.input_len + 1,
+            size=num_samples,
+        )
+        output_lens = np.random.randint(
+            int(fixed_output_len * self.range_ratio),
+            fixed_output_len + 1,
+            size=num_samples,
+        )
+        offsets = np.random.randint(0, tokenizer.vocab_size, size=num_samples)
+        input_requests = []
+        for i in range(num_samples):
+            prompt = tokenizer.decode(prefix_token_ids +
+                                      [(offsets[i] + i + j) %
+                                       tokenizer.vocab_size
+                                       for j in range(input_lens[i])])
+
+            input_requests.append(
+                (prompt, int(self.prefix_len + input_lens[i]),
+                 int(output_lens[i]), None))
+        return input_requests
+
+
 class ShareGPTSampler(DatasetSampler):
+    """Dataset sampler for ShareGPT local datasets."""
 
     def __init__(self, dataset_path: str, seed: Optional[int] = None):
         with open(dataset_path, encoding='utf-8') as f:
@@ -128,7 +177,7 @@ class HFDatasetSampler(DatasetSampler):
 
 class ShareGPTHFSampler(ShareGPTSampler, HFDatasetSampler):
     """
-    Dataset sampler for ShareGPT-style datasets.
+    Dataset sampler for ShareGPT-style remote datasets on hf hub.
     - Text-only dataset like: 'RyokoAI/ShareGPT52K' etc.
     - Vision dataset like: 'lmms-lab/LLaVA-OneVision-Data' etc.
     """
