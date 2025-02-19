@@ -161,9 +161,6 @@ class EngineCore:
         # the bitmask allocation for grammars
         # should be ready at this point.
         if len(self.guided_decoding_manager.requests) > 0:
-            if not self.guided_decoding_manager.is_bitmask_ready:
-                raise ValueError("Could be a bug at this point")
-            # one copy
             scheduler_output.grammar_bitmask = \
                 self.guided_decoding_manager.grammar_bitmask
 
