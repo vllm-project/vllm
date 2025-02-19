@@ -32,7 +32,7 @@ class TestConfig:
 
 
 class Qwen2VLTester:
-    """Test helper for Qwen VL models with LoRA"""
+    """Test helper for Qwen2 VL models with LoRA"""
 
     PROMPT_TEMPLATE = (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
