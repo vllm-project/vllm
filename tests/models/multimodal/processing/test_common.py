@@ -10,7 +10,7 @@ from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import ProcessingCache
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import HF_EXAMPLE_MODELS
@@ -42,10 +42,7 @@ def _test_processing_correctness(
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
     ctx = InputProcessingContext(
         model_config,
-        tokenizer=cached_get_tokenizer(
-            model_config.tokenizer,
-            trust_remote_code=model_info.trust_remote_code,
-        ),
+        tokenizer=cached_tokenizer_from_config(model_config),
     )
     # Ensure that it can fit all of the data
     cache = ProcessingCache(capacity=1 << 30)
