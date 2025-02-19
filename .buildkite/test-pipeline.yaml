@@ -225,8 +225,8 @@ steps:
     - python3 other/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 other/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/encoder_decoder.py
     - python3 offline_inference/basic/classify.py
-    - python3 offline_inference/basic/embedding.py
-    - python3 offline_inference/basic/scoring.py
+    - python3 offline_inference/basic/embed.py
+    - python3 offline_inference/basic/score.py
     - python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min

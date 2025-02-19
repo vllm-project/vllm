@@ -88,7 +88,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/basic/embedding.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/embed.py>
 
 ### `LLM.classify`
 
@@ -125,7 +125,7 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/basic/scoring.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/score.py>
 
 ## Online Serving
 
