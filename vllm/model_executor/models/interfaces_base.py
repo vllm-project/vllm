@@ -62,7 +62,7 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
     if not callable(model_forward):
         return False
 
-    vllm_kws = ("input_ids", "positions", "kv_caches", "attn_metadata")
+    vllm_kws = ("input_ids", "positions")
     missing_kws = tuple(kw for kw in vllm_kws
                         if not supports_kw(model_forward, kw))
 
