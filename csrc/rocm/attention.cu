@@ -252,7 +252,8 @@ __device__ __forceinline__ floatx4 to_float_fp8x4(const _B8x4& inp) {
   // to convert 2 packed fp8 to 2 packed fp32 values.
   // However, in MI200 platforms, we only have v_cvt_f32_fp8
   // to convert fp8 values individually. So we added
-  // #else case for fewer instructions (# inst=2) in MI300+, and fallback to
+  // #else case for fewer instructions (# inst=2) in MI300+, 
+  // and fallback to
   // #if case for other platforms (# inst=4).
   #if defined(__gfx90a__)
   float4 f32x4 = vllm::fp8::vec_conversion<float4, uint32_t>(
