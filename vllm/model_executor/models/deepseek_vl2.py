@@ -28,13 +28,13 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
                                                           MlpProjectorConfig,
                                                           VisionEncoderConfig)
 from vllm.transformers_utils.processors.deepseek_vl2 import (
     DeepseekVLV2Processor)
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -308,13 +308,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.text_config = config.text_config
 
         model_config = vllm_config.model_config
-        tokenizer = cached_get_tokenizer(
-            model_config.tokenizer,
-            tokenizer_mode=model_config.tokenizer_mode,
-            tokenizer_revision=model_config.tokenizer_revision,
-            trust_remote_code=model_config.trust_remote_code,
-        )
-        self.image_token_id = tokenizer.vocab.get(_IMAGE_TOKEN)
+        tokenizer = cached_tokenizer_from_config(model_config)
+        self.image_token_id = tokenizer.vocab[_IMAGE_TOKEN]
 
         self.vision = self._init_vision_module(self.vision_config,
                                                quant_config,
