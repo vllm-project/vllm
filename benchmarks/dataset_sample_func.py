@@ -44,14 +44,14 @@ def image_url_to_mm_content(image_url: str):
 
 class DatasetSampler(ABC):
 
-    dataset: Iterable[dict[str, Any]]
+    dataset: Optional[Iterable[Any]]
+    tokenizer: PreTrainedTokenizerBase
 
     @abstractmethod
     def filter_func(self, data: dict) -> bool:
         """Filter function to filter out unsatisfied rows from dataset."""
         raise NotImplementedError
 
-    # TODO(Isotr0py): Add sample function to sample offline request.
     @abstractmethod
     def sample(
         self,
@@ -60,6 +60,14 @@ class DatasetSampler(ABC):
         fixed_output_len: Optional[int] = None
     ) -> list[tuple[str, int, int, dict[str, Collection[str]]]]:
         """Function to sample online requests from the dataset."""
+        raise NotImplementedError
+
+    # TODO(Isotr0py): Add sample function to sample offline request.
+    def sample_offline(self,
+                       num_samples: int,
+                       tokenizer: PreTrainedTokenizerBase,
+                       fixed_output_len: Optional[int] = None) -> list[Any]:
+        """Function to sample offline requests from the dataset."""
         raise NotImplementedError
 
 
@@ -71,19 +79,20 @@ class RandomSampler(DatasetSampler):
         prefix_len: int,
         input_len: int,
         range_ratio: float,
+        tokenizer: PreTrainedTokenizerBase,
     ):
         self.prefix_len = prefix_len
         self.input_len = input_len
         self.range_ratio = range_ratio
+        self.tokenizer = tokenizer
 
     def sample(
         self,
         num_samples: int,
-        tokenizer: PreTrainedTokenizerBase,
         fixed_output_len: Optional[int] = 128,
     ) -> list[tuple[str, int, int, dict[str, Collection[str]]]]:
         prefix_token_ids = np.random.randint(0,
-                                             tokenizer.vocab_size,
+                                             self.tokenizer.vocab_size,
                                              size=self.prefix_len).tolist()
 
         input_lens = np.random.randint(
@@ -96,13 +105,15 @@ class RandomSampler(DatasetSampler):
             fixed_output_len + 1,
             size=num_samples,
         )
-        offsets = np.random.randint(0, tokenizer.vocab_size, size=num_samples)
+        offsets = np.random.randint(0,
+                                    self.tokenizer.vocab_size,
+                                    size=num_samples)
         input_requests = []
         for i in range(num_samples):
-            prompt = tokenizer.decode(prefix_token_ids +
-                                      [(offsets[i] + i + j) %
-                                       tokenizer.vocab_size
-                                       for j in range(input_lens[i])])
+            prompt = self.tokenizer.decode(prefix_token_ids +
+                                           [(offsets[i] + i + j) %
+                                            self.tokenizer.vocab_size
+                                            for j in range(input_lens[i])])
 
             input_requests.append(
                 (prompt, int(self.prefix_len + input_lens[i]),
@@ -113,12 +124,17 @@ class RandomSampler(DatasetSampler):
 class ShareGPTSampler(DatasetSampler):
     """Dataset sampler for ShareGPT local datasets."""
 
-    def __init__(self, dataset_path: str, seed: Optional[int] = None):
+    def __init__(self,
+                 dataset_path: str,
+                 tokenizer: PreTrainedTokenizerBase,
+                 seed: Optional[int] = None):
         with open(dataset_path, encoding='utf-8') as f:
             dataset = json.load(f)
         dataset = [data for data in dataset if self.filter_func(data)]
+        # seed was set in main function
         random.shuffle(dataset)
         self.dataset = dataset
+        self.tokenizer = tokenizer
 
     def filter_func(self, data: dict) -> bool:
         return len(data["conversations"]) >= 2
@@ -134,7 +150,6 @@ class ShareGPTSampler(DatasetSampler):
     def sample(
         self,
         num_samples: int,
-        tokenizer: PreTrainedTokenizerBase,
         fixed_output_len: Optional[int] = 128,
     ) -> list[tuple[str, int, int, dict[str, Collection[str]]]]:
         sampled_requests: list[tuple[str, int, int,
@@ -145,9 +160,9 @@ class ShareGPTSampler(DatasetSampler):
 
             # Tokenize the prompts and completions.
             prompt = data["conversations"][0]["value"]
-            prompt_token_ids = tokenizer(prompt).input_ids
+            prompt_token_ids = self.tokenizer(prompt).input_ids
             completion = data["conversations"][1]["value"]
-            completion_token_ids = tokenizer(completion).input_ids
+            completion_token_ids = self.tokenizer(completion).input_ids
             prompt_len = len(prompt_token_ids)
             output_len = len(
                 completion_token_ids
@@ -167,11 +182,97 @@ class ShareGPTSampler(DatasetSampler):
         return sampled_requests
 
 
+class SonnetSampler(DatasetSampler):
+    """Dataset sampler for Sonnet local datasets."""
+
+    def __init__(
+        self,
+        dataset_path: str,
+        input_len: int,
+        prefix_len: int,
+        tokenizer: PreTrainedTokenizerBase,
+    ):
+        assert input_len > prefix_len, (
+            "'args.sonnet-input-len' must be "
+            "greater than 'args.prefix-input-len'.")
+
+        self.tokenizer = tokenizer
+
+        # Load the dataset.
+        with open(dataset_path, encoding='utf-8') as f:
+            self.dataset = f.readlines()
+
+        # Tokenize the poem lines.
+        poem_token_ids = tokenizer(self.dataset).input_ids
+        average_poem_len = sum(
+            len(token_ids)
+            for token_ids in poem_token_ids) / len(poem_token_ids)
+
+        # Base prefix for all requests.
+        base_prompt = "Pick as many lines as you can from these poem lines:\n"
+        base_message = [{
+            "role": "user",
+            "content": base_prompt,
+        }]
+        base_prompt_formatted = tokenizer.apply_chat_template(
+            base_message, add_generation_prompt=True, tokenize=False)
+        base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
+
+        assert input_len > base_prompt_offset, (
+            "Please set 'args.sonnet-input-len' "
+            f"higher than {base_prompt_offset}.")
+        num_input_lines = round(
+            (input_len - base_prompt_offset) / average_poem_len)
+
+        # First approximately `prefix_len` number of tokens in the
+        # prompt are fixed poem lines.
+        assert prefix_len > base_prompt_offset, (
+            f"Please set 'args.sonnet-prefix-len' "
+            f"higher than {base_prompt_offset}.")
+
+        num_prefix_lines = round(
+            (prefix_len - base_prompt_offset) / average_poem_len)
+        num_input_lines = round(
+            (input_len - base_prompt_offset) / average_poem_len)
+
+        self.base_prompt = base_prompt
+        self.num_lines_needed = num_input_lines - num_prefix_lines
+        self.prefix_lines = self.dataset[:num_prefix_lines]
+
+    def sample(
+        self,
+        num_samples: int,
+        output_len: int = 128,
+    ) -> list[tuple[str, int, int, dict[str, Collection[str]]]]:
+        sampled_requests: list[tuple[str, int, int]] = []
+        for _ in range(num_samples):
+            sampled_lines = "".join(
+                self.prefix_lines +
+                random.choices(self.dataset, k=self.num_lines_needed))
+
+            prompt = f"{self.base_prompt}{sampled_lines}"
+            message = [
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ]
+            prompt_formatted = self.tokenizer.apply_chat_template(
+                message, add_generation_prompt=True, tokenize=False)
+            prompt_len = len(self.tokenizer(prompt_formatted).input_ids)
+            sampled_requests.append(
+                (prompt, prompt_formatted, prompt_len, output_len, None))
+
+        return sampled_requests
+
+
 class HFDatasetSampler(DatasetSampler):
 
     def __init__(self,
                  hf_dataset: IterableDataset,
+                 tokenizer: PreTrainedTokenizerBase,
                  seed: Optional[int] = None):
+        self.tokenizer = tokenizer
         self.dataset = hf_dataset.shuffle(seed=seed).filter(self.filter_func)
 
 
@@ -198,7 +299,6 @@ class VisionArenaBenchSampler(HFDatasetSampler):
     def sample(
         self,
         num_samples: int,
-        tokenizer: PreTrainedTokenizerBase,
         fixed_output_len: Optional[int] = 128,
     ):
         sampled_requests: list[tuple[str, int, int,
@@ -208,7 +308,7 @@ class VisionArenaBenchSampler(HFDatasetSampler):
                 break
 
             prompt = data["turns"][0][0]['content']
-            prompt_token_ids = tokenizer(prompt).input_ids
+            prompt_token_ids = self.tokenizer(prompt).input_ids
 
             prompt_len = len(prompt_token_ids)
             output_len = fixed_output_len
@@ -231,6 +331,7 @@ def get_hf_dataset_sampler(
     dataset_path: str,
     dataset_subset: Optional[str],
     dataset_split: str,
+    tokenizer: PreTrainedTokenizerBase,
     seed: Optional[int] = None,
 ) -> HFDatasetSampler:
     ds_builder = load_dataset_builder(dataset_path, name=dataset_subset)
@@ -243,6 +344,8 @@ def get_hf_dataset_sampler(
                            streaming=True)
 
     if dataset_path in HF_DATASET_SAMPLE_FUNC:
-        return HF_DATASET_SAMPLE_FUNC[dataset_path](dataset, seed=seed)
+        return HF_DATASET_SAMPLE_FUNC[dataset_path](dataset,
+                                                    tokenizer=tokenizer,
+                                                    seed=seed)
     else:
-        return ShareGPTHFSampler(dataset, seed=seed)
+        return ShareGPTHFSampler(dataset, tokenizer=tokenizer, seed=seed)
