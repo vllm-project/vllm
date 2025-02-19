@@ -84,7 +84,7 @@ def _test_processing_correctness(
 
     tokenizer_encode_kwargs = {}
     if model_config.hf_config.model_type in ("mllama", "whisper"):
-        # For Mllama, tokenizer will always add bos_token at the beginning of
+        # For some encoder-decoder models, tokenizer will always add bos_token at the beginning of
         # prompt by default, causing hf_processor outputs incorrect token ids.
         # So we need use `add_special_tokens=False` here to leave bos_token
         # to be added by the processor.
