@@ -32,6 +32,8 @@ DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
             "format": _FORMAT,
         },
     },
+    # Custom filter uses () to specify its callable
+    # https://docs.python.org/3/howto/logging-cookbook.html#configuring-filters-with-dictconfig # noqa
     "filters": {
         "vllm_redact": {
             "()": "vllm.logging_utils.RedactFilter",
@@ -126,7 +128,9 @@ def _configure_vllm_root_logger() -> None:
             log_filter_patterns = json.loads(VLLM_LOG_FILTER_PATTERNS)
         except json.JSONDecodeError as exc:
             raise ValueError(
-                "Invalid JSON format in VLLM_LOG_FILTER_PATTERNS.") from exc
+                "Invalid JSON format in VLLM_LOG_FILTER_PATTERNS. "
+                "Ensure it's a valid JSON array of strings, e.g., "
+                "'[\"pattern1\", \"pattern2\"]'.") from exc
     else:
         log_filter_patterns = []
 
