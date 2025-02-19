@@ -28,7 +28,7 @@ sys.path.append(os.path.abspath("../.."))
 # -- Project information -----------------------------------------------------
 
 project = 'vLLM'
-copyright = f'{datetime.now().year}, vLLM Team'
+copyright = f'{datetime.datetime.now().year}, vLLM Team'
 author = 'the vLLM Team'
 
 # -- General configuration ---------------------------------------------------
