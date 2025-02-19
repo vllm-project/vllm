@@ -428,7 +428,7 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
 
 
 def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
-    """Given an signed vision feature layer, get the number of hidden layers
+    """Given a signed vision feature layer, get the number of hidden layers
     needed to leverage it.
 
     Args:
@@ -438,7 +438,7 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     """
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
-    return feature_layer_index + 1
+    return feature_layer_index
 
 
 def init_vision_tower_for_llava(

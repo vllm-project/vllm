@@ -969,7 +969,7 @@ class PixtralHFTransformer(nn.Module):
         position_embeddings: torch.Tensor,
         return_all_hidden_states: bool,
     ) -> torch.Tensor:
-        hidden_states_pool = []
+        hidden_states_pool = [x]
 
         for layer in self.layers:
             x = layer(x, attention_mask, position_embeddings)
