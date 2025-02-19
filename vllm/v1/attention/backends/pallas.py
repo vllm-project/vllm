@@ -13,6 +13,7 @@ from vllm.attention.backends.utils import CommonAttentionState
 
 
 NUM_QUERIES_PER_BLOCK = 128
+NUM_KV_PAGES_PER_BLOCK = 128
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -181,7 +182,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             attn_metadata.block_tables,
             attn_metadata.query_start_loc,
             attn_metadata.num_seqs,
-            num_kv_pages_per_block=16,
+            num_kv_pages_per_block=NUM_KV_PAGES_PER_BLOCK,
             num_queries_per_block=NUM_QUERIES_PER_BLOCK,
             use_kernel=True,
         )

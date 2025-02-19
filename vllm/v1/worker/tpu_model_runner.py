@@ -24,7 +24,8 @@ from vllm.sampling_params import SamplingType
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata,
-                                               NUM_QUERIES_PER_BLOCK)
+                                               NUM_QUERIES_PER_BLOCK,
+                                               NUM_KV_PAGES_PER_BLOCK)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -133,7 +134,8 @@ class TPUModelRunner():
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         # self.input_batch.block_table has shape of [max_num_reqs, max_num_blocks_per_req].
         # Because I want the block_table.shape[0] to be num_token, so I did this way.
-        self.block_table_cpu = torch.zeros((self.max_num_tokens, self.input_batch.block_table.get_cpu_tensor().shape[1]),
+        padded_max_num_blocks_per_req = _get_padded_number(self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
+        self.block_table_cpu = torch.zeros((self.max_num_tokens, padded_max_num_blocks_per_req),
                                            dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
                                            device="cpu")
 
@@ -410,9 +412,9 @@ class TPUModelRunner():
         self.position_ids = self.positions_cpu[:padded_total_num_scheduled_tokens].to(self.device)
         self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
         slot_mapping = self.slot_mapping_cpu[:padded_total_num_scheduled_tokens].to(self.device)
-        block_table = self.block_table_cpu[:padded_total_num_scheduled_tokens]
-        block_table[:num_reqs] = self.input_batch.block_table.get_cpu_tensor()[:num_reqs]
-        block_table = block_table.to(self.device)
+        padded_block_table = self.block_table_cpu[:padded_total_num_scheduled_tokens]
+        padded_block_table[:num_reqs, :self.max_num_blocks_per_req] = self.input_batch.block_table.get_cpu_tensor()[:num_reqs]
+        padded_block_table = padded_block_table.to(self.device)
         query_start_loc = self.query_start_loc_cpu[:padded_total_num_scheduled_tokens+1].to(self.device)
         seq_lens = self.seq_lens_cpu[:padded_total_num_scheduled_tokens].to(self.device)
 
@@ -421,7 +423,7 @@ class TPUModelRunner():
         # slot_mapping=tensor([         0,          1,          2,          3,          4, 1000000000, ...])
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
-            block_tables=block_table,
+            block_tables=padded_block_table,
             context_lens=seq_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_reqs,
