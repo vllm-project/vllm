@@ -8,6 +8,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
+from vllm.logger import rank_debug
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -409,6 +410,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # )
             htorch.core.mark_step()
             # logger.debug(f"done mark step {i}")
+        rank_debug(f"final_hidden_states.shape: {final_hidden_states.shape}")
         return final_hidden_states.view(-1, x.shape[1])
 
 
