@@ -549,7 +549,7 @@ class Scheduler:
 
             stopped = False
             new_logprobs = None
-            new_token_ids = None
+            new_token_ids: List[int] = []
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
@@ -570,7 +570,6 @@ class Scheduler:
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-                new_token_ids = request.output_token_ids[-num_new_tokens:]
                 num_new_tokens = 1
             else:
                 num_new_tokens = 0
@@ -586,8 +585,7 @@ class Scheduler:
                         output.new_token_id_offsets = [1] * i
                     output.new_token_id_offsets.append(offset)
 
-                new_ids = request.output_token_ids[-num_new_tokens:]
-                output.new_token_ids += new_ids
+                output.new_token_ids += new_token_ids
 
                 if new_logprobs is not None:
                     output.new_logprobs[req_id] = new_logprobs
@@ -609,9 +607,9 @@ class Scheduler:
                 new_running.append(request)
 
         # Add sentinel to make output processing simpler.
-        num_new_tokens = len(output.new_token_ids)
-        if num_new_tokens > 0 and output.new_token_id_offsets is not None:
-            output.new_token_id_offsets.append(num_new_tokens)
+        total_new_tokens = len(output.new_token_ids)
+        if total_new_tokens > 0 and output.new_token_id_offsets is not None:
+            output.new_token_id_offsets.append(total_new_tokens)
 
         self.running = new_running
         output.new_prompt_logprobs_tensors = prompt_logprobs_dict
