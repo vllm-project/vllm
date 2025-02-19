@@ -83,9 +83,9 @@ def main(args: dict):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser()
     # Add engine args
-    enging_group = parser.add_argument_group("Engine arguments")
-    EngineArgs.add_cli_args(enging_group)
-    enging_group.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    engine_group = parser.add_argument_group("Engine arguments")
+    EngineArgs.add_cli_args(engine_group)
+    engine_group.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
     sampling_group.add_argument("--max-tokens", type=int)
