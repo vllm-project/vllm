@@ -394,10 +394,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Note: The w13_weight was removed by INC.
         # num_experts = layer.w13_weight.shape[0]
         num_experts = layer.num_experts
+        if hasattr(layer, "w13_weight"):
+            assert (
+                layer.w13_weight.shape[0] == num_experts
+            ), f"Expected {layer.w13_weight.shape[0]} experts, got {num_experts}"
+        # For mixtral, the `num_expert_group` is 8.
         if num_expert_group is None:
             num_expert_group = 8
         num_expert_group = num_expert_group
         n_expert_slice = num_experts // num_expert_group
+        # For TP 16, EP 16:
+        #   num_experts = 256 // 16 = 16
+        #   num_expert_group = 8
+        #   n_expert_slice = 16 // 8 = 2
         rank_debug(f"num_experts: {num_experts}, n_expert_slice: {n_expert_slice}, num_expert_group: {num_expert_group}")
         assert n_expert_slice * num_expert_group == num_experts
         for i in range(num_expert_group):
@@ -543,8 +552,8 @@ class FusedMoE(torch.nn.Module):
         self.custom_routing_function = custom_routing_function
         if is_hpu:
             # from vllm_hpu_extension.ops import DynamicFusedMOE
-            # self.hpu_fused_moe = DynamicFusedMOE(self.num_experts)
-            self._need_init_dynamic_fused_moe_lst = True
+            self.hpu_fused_moe = _DynamicFusedMOE(self.num_experts)
+            # self._need_init_dynamic_fused_moe_lst = True
 
 
         self.scoring_func = scoring_func
@@ -711,12 +720,12 @@ class FusedMoE(torch.nn.Module):
         expert_data.copy_(loaded_weight)
 
         if is_hpu:
-            return 
+            # return 
             # FIXME: (Yi) add it back
             # if VLLM_LOAD_FOR_INC:
             #     return
             # else:
-            # self.hpu_fused_moe.MoeOp.w13_list[expert_id].set_weight(orig_exp_data)
+            self.hpu_fused_moe.MoeOp.w13_list[expert_id].set_weight(orig_exp_data)
             # print(f"loaded w13 for hpu for expert_id: {expert_id}, orig_exp_data.shape: {orig_exp_data.shape}")
 
     def _load_w2(self,
@@ -739,12 +748,12 @@ class FusedMoE(torch.nn.Module):
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
         if is_hpu:
-            return 
+            # return 
             # if VLLM_LOAD_FOR_INC:
                 # return 
             # FIXME: (Yi) add it back
             # else:
-            # self.hpu_fused_moe.MoeOp.w2_list[expert_id].set_weight(expert_data)
+            self.hpu_fused_moe.MoeOp.w2_list[expert_id].set_weight(expert_data)
             # print(f"loaded w2 for hpu for expert_id: {expert_id}, expert_data.shape: {expert_data.shape}")
 
     def _load_single_value(self, param: torch.nn.Parameter,
