@@ -46,7 +46,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import (bind_kv_cache, is_fake_hpu, is_pin_memory_available,
+from vllm.utils import (bind_kv_cache, is_pin_memory_available,
                         make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
@@ -345,8 +345,22 @@ class HpuModelAdapter:
         mask = mask >= metadata.block_usage.unsqueeze(-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
-        block_mapping = torch.nn.functional.one_hot(metadata.block_groups,
-                                                    num_classes=batch_size)
+        if os.environ.get('VLLM_USE_FAKE_HPU',
+                          '0') == '0' and htorch.utils.internal.is_lazy():
+            block_mapping = torch.nn.functional.one_hot(metadata.block_groups,
+                                                        num_classes=batch_size)
+        else:
+            # Unfortunately one_hot on CPU/torch.compile mode/eager mode
+            # doesn't handle out of bounds classes so we need to convert
+            # all negative values to 0 (block_mapping) or bs (block_groups)
+            block_groups = metadata.block_groups.to(torch.long)
+            block_mapping = torch.nn.functional.relu(block_groups)
+            block_mapping = torch.nn.functional.one_hot(block_mapping,
+                                                        num_classes=batch_size)
+            oob_values = block_groups.lt(0)
+            block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
+            block_groups.masked_fill_(oob_values, batch_size)
+            metadata = metadata._replace(block_groups=block_groups)
         block_mapping = block_mapping.to(dtype)
         metadata = metadata._replace(block_mapping=block_mapping,
                                      attn_bias=attn_bias)
@@ -365,8 +379,9 @@ class HpuModelAdapter:
     def _update_metadata(self, attn_metadata, batch_size, seq_len, device,
                          dtype):
         if attn_metadata.is_prompt:
-            attn_metadata = self._set_attn_bias(attn_metadata, batch_size,
-                                                seq_len, device, dtype)
+            meta = attn_metadata
+            attn_metadata = self._set_attn_bias(meta, batch_size, seq_len,
+                                                device, dtype)
         else:
             meta = attn_metadata
             attn_metadata = self._set_block_mapping(meta, batch_size, device,
@@ -925,11 +940,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         block_indices, block_offsets = precompute_indices_and_offsets(
             self.block_size, slot_mapping, True)
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.long,
-                                           device='cpu')
-        context_lens_tensor = context_lens_tensor.to(self.device,
-                                                     non_blocking=True)
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             block_list=None,
@@ -941,7 +951,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_groups=None,
             attn_bias=None,
             seq_lens_tensor=seq_lens_tensor,
-            context_lens_tensor=context_lens_tensor,
             num_prefills=real_num_seqs,
             num_prefill_tokens=sum_query_len,
             num_decode_tokens=0,
@@ -967,7 +976,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        output=None,
     ) -> PrepareDecodeMetadata:
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
@@ -998,9 +1006,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
-                if output is None:
-                    generation_token = seq_data.get_last_token_id()
-                    input_tokens.append([generation_token])
+                generation_token = seq_data.get_last_token_id()
+                input_tokens.append([generation_token])
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
@@ -1011,9 +1018,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 seq_lens.append(seq_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
-                num_fully_occupied_blocks = position // self.block_size
-                block_table = block_table[:num_fully_occupied_blocks + 1]
-
                 if len(block_table) == 0:
                     block_number = _PAD_BLOCK_ID
                 else:
@@ -1033,14 +1037,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
-        if output is None:
-            input_tokens = torch.tensor(input_tokens,
-                                        dtype=torch.long,
-                                        device=self.device)
-        else:
-            real_batch_size = len(seq_group_metadata_list)
-            input_tokens = output[:real_batch_size]
-
+        input_tokens = torch.tensor(input_tokens,
+                                    dtype=torch.long,
+                                    device=self.device)
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.long,
                                        device=self.device)
@@ -1112,7 +1111,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_groups=block_groups,
             attn_bias=None,
             seq_lens_tensor=None,
-            context_lens_tensor=None,
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=num_decode_tokens,
