@@ -17,6 +17,15 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.utils import cached_get_tokenizer
+
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,BaseProcessingInfo,
+                                        PromptReplacement,
+                                        PromptReplacementDetails)
+from transformers import (BatchFeature, PaliGemmaConfig)
+from vllm.multimodal.parse import (MultiModalDataItems, ImageProcessorItems)
+
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -47,77 +56,77 @@ PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
                              PaliGemmaImageEmbeddingInputs]
 
 
-def get_max_paligemma_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(PaliGemmaConfig)
-    vision_config = hf_config.vision_config
+# def get_max_paligemma_image_tokens(ctx: InputContext):
+#     hf_config = ctx.get_hf_config(PaliGemmaConfig)
+#     vision_config = hf_config.vision_config
 
-    return get_max_siglip_image_tokens(vision_config)
-
-
-def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
-                             mm_counts: Mapping[str, int]):
-    hf_config = ctx.get_hf_config(PaliGemmaConfig)
-    vision_config = hf_config.vision_config
-    num_images = mm_counts["image"]
-
-    seq_data, ranges = dummy_seq_data_for_siglip(
-        vision_config,
-        seq_len,
-        num_images,
-        image_token_id=hf_config.image_token_index,
-    )
-
-    mm_data = dummy_image_for_siglip(vision_config, num_images)
-    return DummyData(seq_data, mm_data, ranges)
+#     return get_max_siglip_image_tokens(vision_config)
 
 
-def input_processor_for_paligemma(ctx: InputContext,
-                                  inputs: DecoderOnlyInputs):
+# def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
+#                              mm_counts: Mapping[str, int]):
+#     hf_config = ctx.get_hf_config(PaliGemmaConfig)
+#     vision_config = hf_config.vision_config
+#     num_images = mm_counts["image"]
 
-    """
-    The correct prompt format needs to be:
-    '<image>' * image_feature_size + '<bos>' + prompt + '\n'
+#     seq_data, ranges = dummy_seq_data_for_siglip(
+#         vision_config,
+#         seq_len,
+#         num_images,
+#         image_token_id=hf_config.image_token_index,
+#     )
 
-    See https://github.com/huggingface/transformers/blob/25245ec26dc29bcf6102e1b4ddd0dfd02e720cf5/src/transformers/models/paligemma/processing_paligemma.py#L55
-    """ # noqa
+#     mm_data = dummy_image_for_siglip(vision_config, num_images)
+#     return DummyData(seq_data, mm_data, ranges)
 
-    multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
 
-    model_config = ctx.model_config
-    hf_config = ctx.get_hf_config(PaliGemmaConfig)
+# def input_processor_for_paligemma(ctx: InputContext,
+#                                   inputs: DecoderOnlyInputs):
 
-    tokenizer = cached_get_tokenizer(model_config.tokenizer)
-    image_feature_size = hf_config.text_config.num_image_tokens
-    image_token_str = tokenizer.decode(hf_config.image_token_index)
-    bos_token = tokenizer.decode(hf_config.bos_token_id)
-    image_token_str_pad = image_token_str * image_feature_size
-    image_token_ids_pad = [hf_config.image_token_index] * image_feature_size
+#     """
+#     The correct prompt format needs to be:
+#     '<image>' * image_feature_size + '<bos>' + prompt + '\n'
 
-    orig_prompt = inputs.get("prompt")
-    orig_prompt_ids = inputs.get("prompt_token_ids")
+#     See https://github.com/huggingface/transformers/blob/25245ec26dc29bcf6102e1b4ddd0dfd02e720cf5/src/transformers/models/paligemma/processing_paligemma.py#L55
+#     """ # noqa
 
-    if orig_prompt is not None and image_token_str in orig_prompt:
-        logger.warning(
-            "The image token '%s' was detected in the prompt and "
-            "will be removed. Please follow the proper prompt format"
-            " documented on HuggingFace.", image_token_str)
-        orig_prompt = orig_prompt.replace(image_token_str, "")
-        orig_prompt_ids.remove(hf_config.image_token_index)
+#     multi_modal_data = inputs.get("multi_modal_data")
+#     if multi_modal_data is None or "image" not in multi_modal_data:
+#         return inputs
 
-    new_prompt = f"{image_token_str_pad}{bos_token}{orig_prompt}\n"
+#     model_config = ctx.model_config
+#     hf_config = ctx.get_hf_config(PaliGemmaConfig)
 
-    # The PaliGemma 2 tokenizer does not include a starting BOS token
-    if orig_prompt_ids[0] != hf_config.bos_token_id:
-        orig_prompt_ids = [hf_config.bos_token_id] + orig_prompt_ids
+#     tokenizer = cached_get_tokenizer(model_config.tokenizer)
+#     image_feature_size = hf_config.text_config.num_image_tokens
+#     image_token_str = tokenizer.decode(hf_config.image_token_index)
+#     bos_token = tokenizer.decode(hf_config.bos_token_id)
+#     image_token_str_pad = image_token_str * image_feature_size
+#     image_token_ids_pad = [hf_config.image_token_index] * image_feature_size
 
-    new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
+#     orig_prompt = inputs.get("prompt")
+#     orig_prompt_ids = inputs.get("prompt_token_ids")
 
-    # NOTE: Create a defensive copy of the original inputs
-    return token_inputs(prompt_token_ids=new_token_ids,
-                        prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+#     if orig_prompt is not None and image_token_str in orig_prompt:
+#         logger.warning(
+#             "The image token '%s' was detected in the prompt and "
+#             "will be removed. Please follow the proper prompt format"
+#             " documented on HuggingFace.", image_token_str)
+#         orig_prompt = orig_prompt.replace(image_token_str, "")
+#         orig_prompt_ids.remove(hf_config.image_token_index)
+
+#     new_prompt = f"{image_token_str_pad}{bos_token}{orig_prompt}\n"
+
+#     # The PaliGemma 2 tokenizer does not include a starting BOS token
+#     if orig_prompt_ids[0] != hf_config.bos_token_id:
+#         orig_prompt_ids = [hf_config.bos_token_id] + orig_prompt_ids
+
+#     new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
+
+#     # NOTE: Create a defensive copy of the original inputs
+#     return token_inputs(prompt_token_ids=new_token_ids,
+#                         prompt=new_prompt,
+#                         multi_modal_data=multi_modal_data)
 
 
 class PaliGemmaMultiModalProjector(nn.Module):
@@ -131,11 +140,115 @@ class PaliGemmaMultiModalProjector(nn.Module):
         hidden_states = self.linear(image_features)
         return hidden_states
 
+class PaliGemmaProcessingInfo(BaseProcessingInfo):
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper()
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_paligemma_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_paligemma)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_paligemma)
+    def get_hf_config(self):
+        return self.ctx.get_hf_config(PaliGemmaConfig)
+    
+    def get_model_config(self):
+        return self.ctx.model_config 
+    
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {"image": self.get_num_image_tokens()}
+
+    def get_num_image_tokens(self) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        return get_max_siglip_image_tokens(vision_config)
+
+class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo]):
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            # HF processor always adds placeholders even when there's no image
+            tokenizer = self.info.get_tokenizer()
+            prompt_ids = tokenizer.encode(prompt)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+    
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        hf_config = self.info.get_hf_config()
+        vision_config = hf_config.vision_config
+        max_image_size = vision_config.image_size
+
+        num_images = mm_counts.get("image", 0)
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=max_image_size,
+                                   height=max_image_size,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text="",
+            mm_data=mm_data,
+        )
+    
+class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingInfo]):
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image")
+        )
+    
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        hf_config = self.info.get_hf_config()
+        image_token_id = hf_config.image_token_index
+        #model_config = self.info.get_model_config()
+        #tokenizer = cached_get_tokenizer(model_config.tokenizer)
+        #bos_token = tokenizer.decode(hf_config.bos_token_id)
+        
+        tokenizer = self.info.get_tokenizer()
+        num_image_tokens = self.info.get_num_image_tokens()
+        image_tokens = [image_token_id] * num_image_tokens
+
+        bos_token_id = tokenizer.bos_token_id
+        assert isinstance(bos_token_id, int)
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[bos_token_id],
+                replacement=PromptReplacementDetails(
+                    full=image_tokens + [bos_token_id],
+                    features=image_tokens,
+                ),
+            )
+        ]
+
+@MULTIMODAL_REGISTRY.register_processor(PaliGemmaMultiModalProcessor,
+                                        info=PaliGemmaProcessingInfo,
+                                        dummy_inputs=PaliGemmaDummyInputsBuilder)
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
     packed_modules_mapping = {
