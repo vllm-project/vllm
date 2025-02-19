@@ -1169,18 +1169,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return hidden_states
 
     def profile_run(self) -> None:
-        # use an empty tensor instead of `None`` to force Dynamo to pass
-        # it by reference, rather by specializing on the value `None`.
-        # the `dtype` argument does not matter, and we use `float32` as
-        # a placeholder (it has wide hardware support).
-        # it is important to create tensors inside the loop, rather than
-        # multiplying the list, to avoid Dynamo from treating them as
-        # tensor aliasing.
-        dummy_kv_caches = [
-            torch.tensor((), dtype=torch.float32, device=self.device)
-            for _ in range(self.num_attn_layers)
-        ]
-
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
         if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
@@ -1291,8 +1279,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with self.maybe_profile_with_lora(self.lora_config,
                                           num_scheduled_tokens):
             # Trigger compilation for general shape.
-            hidden_states = self._dummy_run(self.max_num_tokens,
-                                            dummy_kv_caches)
+            hidden_states = self._dummy_run(self.max_num_tokens)
             if get_pp_group().is_last_rank:
                 hidden_states = hidden_states[logit_indices]
                 logits = self.model.compute_logits(hidden_states, None)
