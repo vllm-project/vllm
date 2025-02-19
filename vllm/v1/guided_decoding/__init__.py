@@ -105,7 +105,8 @@ class GuidedDecodingManager:
         self._grammar_bitmask = self.executor.submit(
             xgr.allocate_token_bitmask,
             self.vllm_config.scheduler_config.max_num_seqs,
-            self.vocab_size / 32)
+            self.vocab_size,
+        )
 
     def _ensure_bitmask_ready(self) -> bool:
         if isinstance(self._grammar_bitmask, Future):
