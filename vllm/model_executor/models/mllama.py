@@ -44,6 +44,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
+                                               QKVCrossParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -66,7 +67,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal, SupportsV0Only
 from .llama import LlamaDecoderLayer, LlamaMLP
-from .utils import QKVCrossParallelLinear, maybe_prefix
+from .utils import maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -806,6 +807,7 @@ class MllamaTextCrossAttention(nn.Module):
             self.num_key_value_heads // self.tensor_parallel_size
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
+        self.num_key_value_heads = config.num_key_value_heads
 
         self.layer_idx = layer_idx
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
