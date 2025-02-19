@@ -605,13 +605,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        # NOTE(woosuk): Due to chunked prefills, the batch may contain partial
-        # requests. While we should not sample any token from these partial
-        # requests, we do so for simplicity. We will ignore the sampled
-        # tokens from the partial requests.
-        # TODO: Support prompt logprobs.
-        logits_indices = query_start_loc[1:] - 1
-
         return attn_metadata, logits_indices, bitmask
 
     def _compute_cascade_attn_prefix_len(
