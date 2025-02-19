@@ -1169,7 +1169,7 @@ class EngineArgs:
 
             # For multimodal models and models with MLA, chunked prefill is
             # disabled by default in V0, but enabled by design in V1
-            if model_config.is_multimodal_model and model_config.use_mla:
+            if model_config.is_multimodal_model or model_config.use_mla:
                 self.enable_chunked_prefill = bool(envs.VLLM_USE_V1)
 
             elif use_long_context:
