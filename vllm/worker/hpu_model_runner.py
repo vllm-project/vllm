@@ -750,13 +750,25 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 )
                 self.model = self.lora_manager.create_lora_manager(self.model)
 
-            if self.model_config.quantization == 'inc':
+            if "inc" in self.model_config.quantization:
                 logger.info("Preparing model with INC..")
                 with HabanaMemoryProfiler() as m_inc:
                     from neural_compressor.torch.quantization import (
                         FP8Config, convert, prepare)
-                    config = FP8Config.from_json_file(
-                        os.getenv("QUANT_CONFIG", ""))
+                    quant_method = self.model_config.quantization
+                    if quant_method == "inc":
+                        config = FP8Config.from_json_file(
+                            os.getenv("QUANT_CONFIG", ""))
+                    else:
+                        if quant_method == "inc_p":
+                            config_dir = os.getenv("QUANT_CONFIG", "")
+                            config_path = os.path.join(config_dir, "inc_measure_config.json")
+                        elif quant_method == "inc_q":
+                            config_dir = os.getenv("QUANT_CONFIG", "")
+                            config_path = os.path.join(config_dir, "inc_quant_config.json")
+                        else:
+                            raise ValueError(f"Invalid quantization method: {quant_method}")
+                        config = FP8Config.from_json_file(config_path)
                     if config.measure:
                         self.model = prepare(self.model, config)
                     elif config.quantize:
