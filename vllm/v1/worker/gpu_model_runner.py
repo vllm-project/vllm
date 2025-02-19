@@ -938,8 +938,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
-                kv_caches=self.kv_caches,
-                attn_metadata=None,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
@@ -1134,11 +1132,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
-        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> torch.Tensor:
         model = self.model
-        if kv_caches is None:
-            kv_caches = self.kv_caches
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -1168,8 +1163,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
-                kv_caches=kv_caches,
-                attn_metadata=None,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
