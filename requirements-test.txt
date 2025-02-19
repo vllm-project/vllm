@@ -171,6 +171,8 @@ huggingface-hub==0.26.2
     #   tokenizers
     #   transformers
     #   vocos
+humanize==4.11.0
+    # via runai-model-streamer
 idna==3.10
     # via
     #   anyio
@@ -290,6 +292,7 @@ numpy==1.26.4
     #   patsy
     #   peft
     #   rouge-score
+    #   runai-model-streamer
     #   sacrebleu
     #   scikit-learn
     #   scipy
@@ -514,6 +517,10 @@ rpds-py==0.20.1
     #   referencing
 rsa==4.7.2
     # via awscli
+runai-model-streamer==0.11.0
+    # via -r requirements-test.in
+runai-model-streamer-s3==0.11.0
+    # via -r requirements-test.in
 s3transfer==0.10.3
     # via
     #   awscli
@@ -594,6 +601,7 @@ torch==2.5.1
     #   encodec
     #   lm-eval
     #   peft
+    #   runai-model-streamer
     #   sentence-transformers
     #   tensorizer
     #   timm

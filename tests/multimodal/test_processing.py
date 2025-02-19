@@ -553,7 +553,8 @@ def test_find_mm_placeholders(
     assert result == expected
 
 
-@pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
+@pytest.mark.parametrize(
+    "model_id", ["s3://vllm-ci-model-weights/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize(
     ("limit", "num_supported", "is_valid"),
     [(0, 0, True), (0, 1, True), (1, 0, False), (1, 1, True), (1, 2, True),
@@ -592,7 +593,8 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         profiler.get_dummy_data(model_config.max_model_len)
 
 
-@pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
+@pytest.mark.parametrize(
+    "model_id", ["s3://vllm-ci-model-weights/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize(
     ("num_images", "limit", "is_valid"),
     [(0, 0, True), (0, 1, True), (1, 0, False), (1, 1, True), (1, 2, True),
@@ -661,7 +663,7 @@ class _ProcessorProxy:
         return dict(exists=exists)
 
 
-@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-7B-Instruct"])  # Dummy
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
 # yapf: disable
 @pytest.mark.parametrize(
     ("call_kwargs", "expected_kwargs"),

@@ -17,7 +17,7 @@ from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
 from ..models.utils import check_outputs_equal
 
 MODELS = [
-    "facebook/opt-125m",
+    "distilbert/distilgpt2",
 ]
 
 

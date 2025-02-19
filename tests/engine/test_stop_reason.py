@@ -12,7 +12,7 @@ import transformers
 
 from vllm import SamplingParams
 
-MODEL = "facebook/opt-350m"
+MODEL = "distilbert/distilgpt2"
 STOP_STR = "."
 SEED = 42
 MAX_TOKENS = 1024

@@ -9,6 +9,7 @@ import weakref
 import pytest
 
 from vllm import LLM
+from vllm.config import LoadFormat
 from vllm.platforms import current_platform
 
 from ..conftest import VllmRunner
@@ -33,7 +34,7 @@ def v1(run_with_both_engines):
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("facebook/opt-125m")
+    llm = LLM("distilbert/distilgpt2", load_format=LoadFormat.RUNAI_STREAMER)
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails
@@ -94,14 +95,14 @@ def test_models(
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, "
     "test_suite", [
-        ("facebook/opt-125m", "ray", "", "L4"),
-        ("facebook/opt-125m", "mp", "", "L4"),
-        ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4"),
-        ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4"),
-        ("facebook/opt-125m", "ray", "", "A100"),
-        ("facebook/opt-125m", "mp", "", "A100"),
-        ("facebook/opt-125m", "mp", "FLASHINFER", "A100"),
-        ("meta-llama/Llama-3.2-1B-Instruct", "ray", "FLASHINFER", "A100"),
+        ("distilbert/distilgpt2", "ray", "", "L4"),
+        ("distilbert/distilgpt2", "mp", "", "L4"),
+        ("meta-llama/Llama-2-7b-hf", "ray", "", "L4"),
+        ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
+        ("distilbert/distilgpt2", "ray", "", "A100"),
+        ("distilbert/distilgpt2", "mp", "", "A100"),
+        ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100"),
+        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
     ])
 def test_models_distributed(
     hf_runner,
