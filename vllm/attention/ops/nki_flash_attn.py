@@ -95,8 +95,9 @@ def transform_block_tables_for_indirect_load(
         head_id = nisa.iota(head_id, dtype=nl.int32).reshape((1, 1))
         head_id = nl.transpose(
             head_id.broadcast_to((1, num_tiles_per_partition)))
-        head_id = head_id.broadcast_to(
-            (num_tiles_per_partition, num_blocks_per_tile))
+        if num_blocks_per_tile > 1:
+            head_id = head_id.broadcast_to(
+                (num_tiles_per_partition, num_blocks_per_tile))
 
     if block_size_tiling_factor > 1:
         broadcast_shape = (
