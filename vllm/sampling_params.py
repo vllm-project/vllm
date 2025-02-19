@@ -70,11 +70,11 @@ class GuidedDecodingParams:
         
         For example if the backend is "xgrammar:no-fallback", returns "xgrammar"
         """
-        return self.backend.split(":")[0]
+        return (self.backend or "").split(":")[0]
 
     def backend_options(self) -> List[str]:
         """Return the backend options as a list of strings."""
-        return self.backend.split(":")[1:]
+        return (self.backend or "").split(":")[1:]
 
     def no_fallback(self) -> bool:
         """Returns True if the "no-fallback" option is supplied for the guided
