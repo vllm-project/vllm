@@ -1962,6 +1962,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         finalize_calibration(self.model.model)
 
     def shutdown_inc(self):
+        rank = torch.distributed.get_rank()
+        
         can_finalize_inc = ("inc" in self.model_config.quantization) and \
             (self.model.model is not None) and \
             self.inc_initialized_successfully and \
@@ -1972,9 +1974,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 finalize_calibration)
             finalize_calibration(self.model.model)
             self._is_inc_finalized = True
-            logger.info("finalize calibration")
+            logger.info(f"[rank: {rank}] finalize calibration")
         else:
-            logger.info("Can't finalize calibration")
+            logger.info(f"[rank: {rank}] Can't finalize calibration")
 
     @property
     def vocab_size(self) -> int:
