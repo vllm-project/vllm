@@ -312,7 +312,7 @@ class FusedMoE(torch.nn.Module):
                                          dtype=torch.int32)
             # Create a expert map for the local experts
             local_num_experts = num_experts // self.ep_size
-            ep_rank = get_tensor_model_parallel_rank() // self.tp_size
+            ep_rank = get_tensor_model_parallel_rank()
             if ep_rank < (self.ep_size - 1):
                 # Each non-last rank gets local_num_experts experts.
                 self.expert_map[ep_rank * local_num_experts:

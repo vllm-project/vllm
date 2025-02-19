@@ -21,6 +21,18 @@ logger = init_logger(__name__)
 
 
 @triton.jit
+def write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N, offs_token,
+                          token_mask, BLOCK_SIZE_M, BLOCK_SIZE_N,
+                          compute_type):
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=compute_type)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[
+        None, :]
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
+@triton.jit
 def fused_moe_kernel_gptq_awq(
         # Pointers to matrices
         a_ptr,
@@ -124,14 +136,10 @@ def fused_moe_kernel_gptq_awq(
     if off_experts == -1:
         # -----------------------------------------------------------
         # Write back zeros to the output when the expert is not
-        # in the current EP rank.
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N),
-                               dtype=compute_type)
-        offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[
-            None, :]
-        c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-        tl.store(c_ptrs, accumulator, mask=c_mask)
+        # in the current expert parallel rank.
+        write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N,
+                              offs_token, token_mask, BLOCK_SIZE_M,
+                              BLOCK_SIZE_N, compute_type)
         return
 
     offs_bn = (pid_n * BLOCK_SIZE_N +
@@ -337,14 +345,10 @@ def fused_moe_kernel(
     if off_experts == -1:
         # -----------------------------------------------------------
         # Write back zeros to the output when the expert is not
-        # in the current EP rank.
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N),
-                               dtype=compute_type)
-        offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[
-            None, :]
-        c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-        tl.store(c_ptrs, accumulator, mask=c_mask)
+        # in the current expert parallel rank.
+        write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N,
+                              offs_token, token_mask, BLOCK_SIZE_M,
+                              BLOCK_SIZE_N, compute_type)
         return
 
     offs_bn = (pid_n * BLOCK_SIZE_N +
@@ -585,8 +589,9 @@ def moe_align_block_size(
     - block_size: The block size used in block matrix multiplication.
     - num_experts: The total number of experts.
     - expert_map: A tensor of shape [num_experts] that maps the expert index
-        from the global space to the local expert index space of the current
-        expert parallel shard.
+        from the global space to the local index space of the current
+        expert parallel shard. If the expert is not in the current expert
+        parallel shard, the mapping is set to -1.
 
     Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according
@@ -621,6 +626,8 @@ def moe_align_block_size(
                              device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    # Expert ids must be zeroed out to prevent index out of bounds error while
+    # mapping global expert ids to local expert ids in expert parallelism.
     expert_ids = torch.zeros((max_num_m_blocks, ),
                              dtype=torch.int32,
                              device=topk_ids.device)

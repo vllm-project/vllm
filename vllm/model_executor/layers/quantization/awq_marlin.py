@@ -463,6 +463,11 @@ class AWQMoEMethod(FusedMoEMethodBase):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if expert_map is not None:
+            raise NotImplementedError(
+                "Expert Parallelism is not supported for "
+                "fused Marlin MoE method.")
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
