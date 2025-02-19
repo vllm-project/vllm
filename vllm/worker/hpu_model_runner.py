@@ -1939,7 +1939,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     def execute_model(
         self,
         model_input: ModelInputForHPUWithSamplingMetadata,
-        kv_caches: List[torch.Tensor],
+        kv_caches: Optional[List[torch.Tensor]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         warmup_mode=False,
