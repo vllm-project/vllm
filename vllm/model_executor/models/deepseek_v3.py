@@ -280,7 +280,8 @@ class DeepseekV3Attention(nn.Module):
                               num_kv_heads=self.num_local_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+                              prefix=f"{prefix}.attn",
+                              use_mla=True)
 
     def forward(
         self,
@@ -342,6 +343,7 @@ class DeepseekV3Attention(nn.Module):
         v = v.view(batch_size, seq_len, self.num_local_heads * self.qk_head_dim)
 
         # print(f"before sending to attn, q shape is {q.shape}, k shape is {k.shape}, v shape is {v.shape}")
+        print(f"ATTENTION class is {self.attn.impl}")
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         attn_output = attn_output.view(
             batch_size, seq_len, self.num_local_heads,
@@ -461,7 +463,8 @@ class DeepseekV3Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
+            #config.num_hidden_layers,
+            6,
             lambda prefix: DeepseekV3DecoderLayer(
                 config,
                 prefix,
