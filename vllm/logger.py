@@ -151,8 +151,9 @@ def rank_debug(msg, level="info", target_rank=None):
     import torch
     fn = getattr(logger, level)
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
-    if target_rank is None and rank == target_rank:
-        fn(f"[Rank {rank}] {msg}")
+    if target_rank is not None:
+        if rank == target_rank:
+            fn(f"[Rank {rank}] {msg}")
     else:
         fn(f"[Rank {rank}] {msg}")
 
