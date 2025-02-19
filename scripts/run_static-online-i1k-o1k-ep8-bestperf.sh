@@ -57,7 +57,7 @@ pid=$(($!-1))
 
 until [[ "$n" -ge 1000 ]] || [[ $ready == true ]]; do
     n=$((n+1))
-    if grep -q "Uvicorn running on" benchmark_logs/${log_name}_serving.log; then
+    if grep -q "Started server process" benchmark_logs/${log_name}_serving.log; then
         break
     fi
     sleep 5s
