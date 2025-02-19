@@ -46,7 +46,7 @@ class ParallelSamplingRequest:
           Child `sampling_params` instance.
         """
         seed = self.sampling_params.seed
-        if seed is None and self.cached_child_sampling_params:
+        if self.cached_child_sampling_params:
             # Reuse child sampling_params data structure
             return self.cached_child_sampling_params
         # Build child sampling_params
@@ -103,7 +103,7 @@ class ParallelSamplingRequest:
         self,
         index: int,
     ) -> str:
-        return str(index) + "_" + self.request_id
+        return f"{index}_{self.request_id}"
 
     def _process_output(
         self,
