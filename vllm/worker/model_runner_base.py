@@ -225,7 +225,6 @@ class ModelRunnerBase(ABC, Generic[T]):
     def execute_model(
         self,
         model_input: T,
-        kv_caches: Optional[List[torch.Tensor]],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         **kwargs,

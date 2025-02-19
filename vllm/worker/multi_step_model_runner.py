@@ -461,7 +461,6 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
     def execute_model(
         self,
         model_input: StatefulModelInput,
-        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
@@ -476,7 +475,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # path for warm up runs
         if not model_input.is_multi_step:
             return self._base_model_runner.execute_model(
-                frozen_model_input, kv_caches, intermediate_tensors, num_steps)
+                frozen_model_input, intermediate_tensors, num_steps)
 
         # make sure we skip the sampler on the lask rank and only pythonize
         # if CPU is ahead.
@@ -538,7 +537,6 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         # Execute the model
         output = self._base_model_runner.execute_model(frozen_model_input,
-                                                       kv_caches,
                                                        intermediate_tensors,
                                                        num_steps=1)
 
