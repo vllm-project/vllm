@@ -478,10 +478,6 @@ def get_nvcc_cuda_version() -> Version:
     return nvcc_cuda_version
 
 
-def get_path(*filepath) -> str:
-    return os.path.join(ROOT_DIR, *filepath)
-
-
 def get_gaudi_sw_version():
     """
     Returns the driver version.
@@ -550,8 +546,8 @@ def get_vllm_version() -> str:
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
 
-    def _read_requirements(filename: str) -> List[str]:
-        with open(get_path(filename)) as f:
+    def _read_requirements(path: str) -> List[str]:
+        with open(os.path.join(ROOT_DIR, path)) as f:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []
         for line in requirements:
