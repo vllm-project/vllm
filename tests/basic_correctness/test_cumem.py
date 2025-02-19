@@ -6,9 +6,11 @@ import pytest
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.config import LoadFormat
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.utils import GiB_bytes
 
+from ..conftest import MODEL_WEIGHTS_S3_BUCKET
 from ..utils import fork_new_process_for_each_test
 
 
@@ -120,15 +122,22 @@ def test_cumem_with_cudagraph():
 @pytest.mark.parametrize(
     "model, use_v1",
     [
-        ("meta-llama/Llama-3.2-1B", True),  # sleep mode with safetensors
-        ("facebook/opt-125m", False)  # sleep mode with pytorch checkpoint
+        # sleep mode with safetensors
+        (f"{MODEL_WEIGHTS_S3_BUCKET}/Llama-3.2-1B", True),
+        (f"{MODEL_WEIGHTS_S3_BUCKET}/Llama-3.2-1B", False),
+        # sleep mode with pytorch checkpoint
+        ("facebook/opt-125m", False),
+        ("facebook/opt-125m", True)
     ])
 def test_end_to_end(model: str, use_v1: bool):
     import os
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
-    llm = LLM(model, enable_sleep_mode=True)
+    load_format = LoadFormat.AUTO
+    if "Llama" in model:
+        load_format = LoadFormat.RUNAI_STREAMER
+    llm = LLM(model, load_format=load_format, enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
