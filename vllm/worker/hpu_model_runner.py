@@ -1974,6 +1974,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             from neural_compressor.torch.quantization import (
                 finalize_calibration)
             finalize_calibration(self.model.model)
+            import time
+            logger.info(f"[rank: {rank}] sleeping for 5 seconds")
+            time.sleep(5)
             self._is_inc_finalized = True
             logger.info(f"[rank: {rank}] finalize calibration")
         else:
