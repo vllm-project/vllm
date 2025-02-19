@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Benchmark the efficiency of prefix caching.
 

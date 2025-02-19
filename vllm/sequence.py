@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Sequence and its related classes."""
 import copy
 import enum
@@ -380,7 +381,7 @@ class SequenceData(msgspec.Struct,
                 f"prompt_token_ids={self._prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
-                f"get_num_computed_tokens={self.get_num_computed_tokens()}")
+                f"get_num_computed_tokens={self.get_num_computed_tokens()})")
 
 
 class Sequence:
@@ -605,7 +606,7 @@ class Sequence:
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
                 f"status={self.status.name}, "
-                f"num_blocks={self.n_blocks}, ")
+                f"num_blocks={self.n_blocks})")
 
 
 class SequenceGroupState(msgspec.Struct,
@@ -1136,6 +1137,9 @@ class IntermediateTensors:
     def __setitem__(self, key: str, value: torch.Tensor):
         self.tensors[key] = value
 
+    def items(self):
+        return self.tensors.items()
+
     def __len__(self):
         return len(self.tensors)
 
@@ -1303,6 +1307,8 @@ class ExecuteModelRequest(
     previous_hidden_states: Optional[HiddenStates] = None
     # The number of forward steps to run.
     num_steps: int = 1
+    # The step index for spec model input.
+    spec_step_idx: Optional[int] = None
     # Finished request ids since last step.
     finished_requests_ids: List[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.

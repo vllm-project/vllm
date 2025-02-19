@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from contextlib import contextmanager
 from typing import Any, Dict, List, Literal, Optional, Set, Type, Union
 
@@ -131,7 +133,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # For NotFoundError
             raise ValueError(
                 f"Loading lora {lora_request.lora_name} failed: No adapter "
-                f"found for {lora_path}") from e
+                f"found for {lora_request.lora_path}") from e
         except Exception as e:
             # For BadRequestError
             raise e

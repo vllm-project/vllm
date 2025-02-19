@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Utilities for downloading and initializing model weights."""
 import fnmatch
 import glob
@@ -5,6 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from collections import defaultdict
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
@@ -25,6 +27,8 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
 
+logger = init_logger(__name__)
+
 try:
     from runai_model_streamer import SafetensorsStreamer
 except (ImportError, OSError):
@@ -34,8 +38,6 @@ except (ImportError, OSError):
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
         "SafetensorsStreamer")
-
-logger = init_logger(__name__)
 
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
@@ -236,7 +238,8 @@ def download_weights_from_hf(
     Returns:
         str: The path to the downloaded model weights.
     """
-    if not huggingface_hub.constants.HF_HUB_OFFLINE:
+    local_only = huggingface_hub.constants.HF_HUB_OFFLINE
+    if not local_only:
         # Before we download we look at that is available:
         fs = HfFileSystem()
         file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
@@ -252,6 +255,7 @@ def download_weights_from_hf(
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
+        start_time = time.perf_counter()
         hf_folder = snapshot_download(
             model_name_or_path,
             allow_patterns=allow_patterns,
@@ -259,8 +263,12 @@ def download_weights_from_hf(
             cache_dir=cache_dir,
             tqdm_class=DisabledTqdm,
             revision=revision,
-            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            local_files_only=local_only,
         )
+        time_taken = time.perf_counter() - start_time
+        if time_taken > 0.5:
+            logger.info("Time spent downloading weights for %s: %.6f seconds",
+                        model_name_or_path, time_taken)
     return hf_folder
 
 
@@ -452,7 +460,6 @@ def pt_weights_iterator(
         state = torch.load(bin_file, map_location="cpu", weights_only=True)
         yield from state.items()
         del state
-        torch.cuda.empty_cache()
 
 
 def get_gguf_extra_tensor_names(

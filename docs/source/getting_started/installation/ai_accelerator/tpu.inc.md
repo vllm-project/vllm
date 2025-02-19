@@ -30,6 +30,10 @@ For TPU pricing information, see [Cloud TPU pricing](https://cloud.google.com/tp
 You may need additional persistent storage for your TPU VMs. For more
 information, see [Storage options for Cloud TPU data](https://cloud.devsite.corp.google.com/tpu/docs/storage-options).
 
+:::{attention}
+There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
+:::
+
 ## Requirements
 
 - Google Cloud TPU VM

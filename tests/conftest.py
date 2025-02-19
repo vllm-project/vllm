@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import os
 import tempfile
@@ -22,7 +24,7 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, TokenizerPoolConfig
+from vllm.config import LoadFormat, TaskOption, TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -44,6 +46,21 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 _SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
+
+MODELS_ON_S3 = [
+    "distilbert/distilgpt2",
+    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Meta-Llama-3-8B",
+    "meta-llama/Llama-3.2-1B",
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "openai-community/gpt2",
+    "ArthurZ/Ilama-3.2-1B",
+    "llava-hf/llava-1.5-7b-hf",
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+]
+
+MODEL_WEIGHTS_S3_BUCKET = "s3://vllm-ci-model-weights"
+
 _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]
@@ -675,8 +692,15 @@ class VllmRunner:
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
+        load_format: Optional[LoadFormat] = None,
         **kwargs,
     ) -> None:
+        if model_name in MODELS_ON_S3 and not load_format:
+            model_name = (f"s3://vllm-ci-model-weights/"
+                          f"{model_name.split('/')[-1]}")
+            load_format = LoadFormat.RUNAI_STREAMER
+        if not load_format:
+            load_format = LoadFormat.AUTO
         self.model = LLM(
             model=model_name,
             task=task,
@@ -691,6 +715,7 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
+            load_format=load_format,
             **kwargs,
         )
 
@@ -735,6 +760,7 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
+        **kwargs: Any,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
@@ -742,7 +768,8 @@ class VllmRunner:
                                  audios=audios)
 
         req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params)
+                                          sampling_params=sampling_params,
+                                          **kwargs)
 
         outputs: List[Tuple[List[List[int]], List[str]]] = []
         for req_output in req_outputs:
@@ -780,6 +807,7 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
+        **kwargs: Any,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
         inputs = self.get_inputs(prompts,
@@ -788,7 +816,8 @@ class VllmRunner:
                                  audios=audios)
 
         req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params)
+                                          sampling_params=sampling_params,
+                                          **kwargs)
 
         toks_str_logsprobs_prompt_logprobs = (
             self._final_steps_generate_w_logprobs(req_outputs))
@@ -824,13 +853,15 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
+        **kwargs: Any,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts,
                                 greedy_params,
                                 images=images,
                                 videos=videos,
-                                audios=audios)
+                                audios=audios,
+                                **kwargs)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
 
@@ -845,6 +876,7 @@ class VllmRunner:
         videos: Optional[PromptVideoInput] = None,
         stop_token_ids: Optional[List[int]] = None,
         stop: Optional[List[str]] = None,
+        **kwargs: Any,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
@@ -859,7 +891,8 @@ class VllmRunner:
                                         greedy_logprobs_params,
                                         images=images,
                                         audios=audios,
-                                        videos=videos)
+                                        videos=videos,
+                                        **kwargs)
 
     def generate_encoder_decoder_greedy_logprobs(
         self,

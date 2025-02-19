@@ -2,13 +2,13 @@
 # Nightly benchmark
 
 This benchmark aims to:
+
 - Provide performance clarity: Provide clarity on which one (vllm, tensorrt-llm, lmdeploy and SGLang) leads in performance in what workload.
 - Be reproducible: one can run the exact same set of benchmarking commands inside the exact same docker by following reproducing instructions.
 
 Latest results: [results link](https://blog.vllm.ai/2024/09/05/perf-update.html), scroll to the end.
 
 Latest reproduction guilde: [github issue link](https://github.com/vllm-project/vllm/issues/8176)
-
 
 ## Setup
 
@@ -33,7 +33,7 @@ Latest reproduction guilde: [github issue link](https://github.com/vllm-project/
     - Queries are randomly sampled, and arrival patterns are determined via Poisson process, but all with fixed random seed.
   - Evaluation metrics: Throughput (higher the better), TTFT (time to the first token, lower the better), ITL (inter-token latency, lower the better).
 
-# Known issues
+## Known issues
 
 - TRT-LLM crashes with Llama 3.1 8B [issue](https://github.com/NVIDIA/TensorRT-LLM/issues/2105).
 - TGI does not support `ignore-eos` flag.

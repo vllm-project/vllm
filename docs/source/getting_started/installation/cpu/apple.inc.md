@@ -4,6 +4,10 @@ vLLM has experimental support for macOS with Apple silicon. For now, users shall
 
 Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 
+:::{attention}
+There are no pre-built wheels or images for this device, so you must build vLLM from source.
+:::
+
 ## Requirements
 
 - OS: `macOS Sonoma` or later
