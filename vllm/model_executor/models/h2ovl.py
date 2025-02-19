@@ -356,19 +356,15 @@ class H2OVLProcessor(BaseInternVLProcessor):
             num_patches = num_patches_1 + num_patches_2 - 1
         else:
             target_ratios = self.resolve_target_ratios(
-                override_min_num=1,
                 use_thumbnail=False,  # Applied in calculate_targets
             )
-            num_patches, _, _, target_aspect_ratio = calculate_h2ovl_targets(
+            num_patches, _, _, _ = calculate_h2ovl_targets(
                 orig_width=image_width,
                 orig_height=image_height,
                 image_size=self.image_size,
                 target_ratios=target_ratios,
                 use_thumbnail=use_thumbnail,
             )
-
-            if num_patches == 7 and image_width == 2688:
-                raise AssertionError
 
         return num_patches * self.num_image_token
 
