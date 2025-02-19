@@ -250,7 +250,9 @@ def test_stop_via_update_from_output():
                                        },
                                        num_common_prefix_blocks=0,
                                        finished_req_ids=set(),
-                                       free_encoder_input_ids=[])
+                                       free_encoder_input_ids=[],
+                                       h2d_swap_map={},
+                                       d2h_swap_map={})
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -300,7 +302,9 @@ def test_stop_via_update_from_output():
                                        },
                                        num_common_prefix_blocks=0,
                                        finished_req_ids=set(),
-                                       free_encoder_input_ids=[])
+                                       free_encoder_input_ids=[],
+                                       h2d_swap_map={},
+                                       d2h_swap_map={})
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -348,7 +352,9 @@ def test_stop_via_update_from_output():
                                        },
                                        num_common_prefix_blocks=0,
                                        finished_req_ids=set(),
-                                       free_encoder_input_ids=[])
+                                       free_encoder_input_ids=[],
+                                       h2d_swap_map={},
+                                       d2h_swap_map={})
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -393,7 +399,9 @@ def test_stop_via_update_from_output():
         },
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[])
+        free_encoder_input_ids=[],
+        h2d_swap_map={},
+        d2h_swap_map={})
 
     model_output = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
