@@ -36,6 +36,7 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
+from vllm.logger import rank_debug
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -778,7 +779,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     htcore.hpu_initialize(self.model,
                                           mark_only_scales_as_const=True)
                 self.inc_initialized_successfully = True
-                logger.info(f"INC MODEL: \n{self.model}")
+                rank_debug(f"INC MODEL: \n{self.model}")
                 logger.info("Preparing model with INC took %s",
                             m_inc.get_summary_string())
             elif not is_fake_hpu():
