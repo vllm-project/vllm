@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import copy
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Callable, List, Mapping, Optional
 
+from vllm.inputs import PromptType
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.utils import merge_async_iterators
+
+AsyncGenerateMethodType = Callable[[
+    PromptType, SamplingParams, str, Optional[LoRARequest], Optional[Mapping[
+        str, str]], Optional[PromptAdapterRequest], int
+], AsyncGenerator[RequestOutput, None]]
 
 
 class ParallelSamplingRequest:
@@ -92,7 +101,7 @@ class ParallelSamplingRequest:
             # Note: will be sorted by index later
             self.request_output.outputs.append(new_completion)
 
-    def _get_parent_request_output(self) -> RequestOutput:
+    def _get_final_request_output(self) -> RequestOutput:
         """Invariant: parent completion outputs sorted by index"""
         assert self.request_output is not None
         self.request_output.outputs = sorted(self.request_output.outputs,
@@ -144,10 +153,10 @@ class ParallelSamplingRequest:
         if self.num_completions == self.n:
             # Return aggregated request output after obtaining
             # all completions
-            return self._get_parent_request_output()
+            return self._get_final_request_output()
         return None
 
-    async def parallel_sampling_child_gen(
+    async def wrap_child_async_generator(
         self,
         child_gen: AsyncGenerator[RequestOutput, None],
         index: int,
@@ -186,3 +195,37 @@ class ParallelSamplingRequest:
     @property
     def output_kind(self) -> RequestOutputKind:
         return self.sampling_params.output_kind
+
+
+async def generate_parallel_sampling_async(
+    generate: AsyncGenerateMethodType,
+    prompt: PromptType,
+    sampling_params: SamplingParams,
+    request_id: str,
+    lora_request: Optional[LoRARequest] = None,
+    trace_headers: Optional[Mapping[str, str]] = None,
+    prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    priority: int = 0,
+) -> AsyncGenerator[RequestOutput, None]:
+    """Generate completions for async parallel sampling requests."""
+    parent_req = ParallelSamplingRequest(request_id, sampling_params)
+
+    # Aggregate generators for n child requests
+    gens: List[AsyncGenerator[RequestOutput, None]] = []
+    for idx in range(parent_req.n):
+        c_sampling_params = parent_req.get_child_sampling_params(idx)
+        child_gen = generate(
+            prompt=prompt,
+            sampling_params=c_sampling_params,
+            request_id=parent_req.get_child_request_id(idx),
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            prompt_adapter_request=prompt_adapter_request,
+            priority=priority,
+        )  # type: ignore
+        gen = parent_req.wrap_child_async_generator(child_gen, idx)
+        gens.append(gen)
+
+    # Merge generators
+    async for _, out in merge_async_iterators(*gens):
+        yield out

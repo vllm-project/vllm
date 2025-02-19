@@ -21,10 +21,10 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import cdiv, kill_process_tree, merge_async_iterators
+from vllm.utils import cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
-from vllm.v1.engine.parallel_sampling import ParallelSamplingRequest
+from vllm.v1.engine.parallel_sampling import generate_parallel_sampling_async
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
@@ -244,40 +244,6 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
-    async def _generate_parallel_sampling(
-        self,
-        prompt: PromptType,
-        sampling_params: SamplingParams,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        """Generate completions for parallel sampling requests."""
-        parent_req = ParallelSamplingRequest(request_id, sampling_params)
-        n = parent_req.n
-
-        # Aggregate generators for n child requests
-        gens: List[AsyncGenerator[RequestOutput, None]] = []
-        for idx in range(n):
-            c_sampling_params = parent_req.get_child_sampling_params(idx)
-            child_gen = self._generate(
-                prompt=prompt,
-                sampling_params=c_sampling_params,
-                request_id=parent_req.get_child_request_id(idx),
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-                priority=priority,
-            )
-            gen = parent_req.parallel_sampling_child_gen(child_gen, idx)
-            gens.append(gen)
-
-        # Merge generators
-        async for _, out in merge_async_iterators(*gens):
-            yield out
-
     def generate(
         self,
         prompt: PromptType,
@@ -289,10 +255,14 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         n = sampling_params.n
-        _generate  = self._generate if n is None or n == 1 \
-            else self._generate_parallel_sampling # handle parallel sampling
-        return _generate(prompt, sampling_params, request_id, lora_request,
-                         trace_headers, prompt_adapter_request, priority)
+        if n is None or n == 1:
+            return self._generate(prompt, sampling_params, request_id,
+                                  lora_request, trace_headers,
+                                  prompt_adapter_request, priority)
+        else:
+            return generate_parallel_sampling_async(
+                self._generate, prompt, sampling_params, request_id,
+                lora_request, trace_headers, prompt_adapter_request, priority)
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
