@@ -3,12 +3,14 @@
 import json
 import re
 import weakref
+from unittest import mock
 
 import jsonschema
 import pytest
 
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
+from vllm.model_executor import guided_decoding as guided_decoding_module
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
@@ -275,6 +277,24 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
                      sampling_params=sampling_params,
                      use_tqdm=True,
                      guided_options_request=dict(guided_regex=sample_regex))
+
+
+@pytest.mark.skip_global_cleanup
+def test_disable_guided_decoding_fallback(sample_regex, llm):
+    sampling_params = SamplingParams(temperature=0.8,
+                                     top_p=0.95,
+                                     guided_decoding=GuidedDecodingParams(
+                                         regex=sample_regex,
+                                         backend="xgrammar"))
+
+    with mock.patch.object(guided_decoding_module,
+                           "VLLM_DISABLE_GUIDED_DECODING_FALLBACK", True):
+        with pytest.raises(
+                ValueError,
+                match="xgrammar does not support regex guided decoding"):
+            llm.generate(prompts="This should fail",
+                         sampling_params=sampling_params,
+                         use_tqdm=True)
 
 
 @pytest.mark.skip_global_cleanup
