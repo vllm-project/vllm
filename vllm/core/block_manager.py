@@ -159,6 +159,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
             # Add blocks to the block table only if the sequence is non empty.
             block_table.allocate(token_ids=seq.get_token_ids(),
+                                 seq=seq,
                                  extra_hash=extra_hash)
 
         return block_table
@@ -203,12 +204,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             assert encoder_seq is not None
             block_table = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
-            
-        # log the allocation with the logger
-        # Will include each sequence in the group and the request id
-        # need to save the allocated block for each sequence
-        for seq in waiting_seqs:
-            logger.debug(f"Allocated block for sequence {seq.seq_id} with request id {seq_group.request_id}")
         
 
     def can_append_slots(self, seq_group: SequenceGroup,
@@ -380,6 +375,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 to GPU.
         """
         physical_block_id_mapping = []
+        seq_ids = [seq.seq_id for seq in seq_group.get_seqs()]
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             blocks = self.block_tables[seq.seq_id].blocks
             if len(blocks) == 0:
@@ -404,7 +400,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 list(seq_physical_block_id_mapping.items()))
             
             # log the swapping with the logger
-            logger.debug(f"Swapped in block for sequence {seq.seq_id}, with physical block id mapping {physical_block_id_mapping}")
+        logger.debug(f"Swapped in blocks for sequences {seq_ids}")
+        # logger.debug(f"Swapped in blocks for sequences {seq_ids}, with physical block id mapping {physical_block_id_mapping}")
 
         return physical_block_id_mapping
 
@@ -436,6 +433,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 GPU to CPU.
         """
         physical_block_id_mapping = []
+        seq_ids = [seq.seq_id for seq in seq_group.get_seqs()]
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             blocks = self.block_tables[seq.seq_id].blocks
             if len(blocks) == 0:
@@ -460,7 +458,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 list(seq_physical_block_id_mapping.items()))
             
             # log the swapping with the logger
-            logger.debug(f"Swapped out block for sequence {seq.seq_id}")
+        logger.debug(f"Swapped out blocks for sequences {seq_ids}")
+        # logger.debug(f"Swapped out blocks for sequences {seq_ids}, with physical block id mapping {physical_block_id_mapping}")
 
         return physical_block_id_mapping
 

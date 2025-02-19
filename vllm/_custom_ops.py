@@ -1037,14 +1037,11 @@ def concat_and_cache_mla(
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
-    core_logger.debug(f'key_caches: {key_caches}, value_caches: {value_caches}, block_mapping: {block_mapping}')
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    
-    core_logger.debug(f'src: {hex(src.data_ptr())} on {src.device}, dst: {hex(dst.data_ptr())} on {dst.device}, block_mapping: {block_mapping}')
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
 
 

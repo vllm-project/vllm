@@ -8,6 +8,7 @@ from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
 from vllm.utils import Device, cdiv, chunk_list
 
 from vllm.core.logger import logger
+from vllm.sequence import Sequence
 
 
 class BlockTable:
@@ -85,6 +86,7 @@ class BlockTable:
     def allocate(self,
                  token_ids: List[int],
                  device: Device = Device.GPU,
+                 seq: Sequence = None,
                  extra_hash: Optional[int] = None) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
@@ -109,8 +111,9 @@ class BlockTable:
         self._num_full_slots = len(token_ids)
         
         # log token_ids and block ids
-        block_ids = [block.block_id for block in blocks]
-        logger.debug(f"Allocate token_ids: {token_ids}, in blocks {block_ids}")
+        if seq is not None:
+            block_ids = [block.block_id for block in blocks]
+            logger.debug(f"Allocate sequence: {seq.seq_id}, in blocks {block_ids}")
         
 
     def update(self, blocks: List[Block]) -> None:
