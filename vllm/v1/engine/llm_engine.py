@@ -21,7 +21,7 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
-from vllm.v1.engine.parallel_sampling import ParallelSamplingRequestManager
+from vllm.v1.engine.parallel_sampling import ParallelSamplingRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
@@ -50,8 +50,7 @@ class LLMEngine:
 
         # Bookkeeping for parallel sampling requests
         # - parent req ID -> parent request manager
-        self.parallel_parent_reqs: Dict[str,
-                                        ParallelSamplingRequestManager] = {}
+        self.parallel_parent_reqs: Dict[str, ParallelSamplingRequest] = {}
         # - child req ID -> (child req index, parent req ID)
         self.parallel_child_reqs: Dict[str, Tuple[int, str]] = {}
         # - flag to reset parallel sampling bookkeeping logic
@@ -179,7 +178,7 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
         """Add request, `n>1`"""
-        req_mgr = ParallelSamplingRequestManager(request_id, params)
+        req_mgr = ParallelSamplingRequest(request_id, params)
         self.parallel_parent_reqs[request_id] = req_mgr
         # Add n child requests with unique request IDs & random seeds and n=1
         for idx in range(req_mgr.n):

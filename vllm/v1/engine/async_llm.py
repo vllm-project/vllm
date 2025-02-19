@@ -24,7 +24,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import cdiv, kill_process_tree, merge_async_iterators
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
-from vllm.v1.engine.parallel_sampling import ParallelSamplingRequestManager
+from vllm.v1.engine.parallel_sampling import ParallelSamplingRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
@@ -255,23 +255,23 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate completions for parallel sampling requests."""
-        req_mgr = ParallelSamplingRequestManager(request_id, sampling_params)
-        n = req_mgr.n
+        parent_req = ParallelSamplingRequest(request_id, sampling_params)
+        n = parent_req.n
 
         # Aggregate generators for n child requests
         gens: List[AsyncGenerator[RequestOutput, None]] = []
         for idx in range(n):
-            c_sampling_params = req_mgr.get_child_sampling_params(idx)
+            c_sampling_params = parent_req.get_child_sampling_params(idx)
             child_gen = self._generate(
                 prompt=prompt,
                 sampling_params=c_sampling_params,
-                request_id=req_mgr.get_child_request_id(idx),
+                request_id=parent_req.get_child_request_id(idx),
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
             )
-            gen = req_mgr.parallel_sampling_child_gen(child_gen, idx)
+            gen = parent_req.parallel_sampling_child_gen(child_gen, idx)
             gens.append(gen)
 
         # Merge generators

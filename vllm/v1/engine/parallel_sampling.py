@@ -7,7 +7,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 
-class ParallelSamplingRequestManager:
+class ParallelSamplingRequest:
     """Info, state & processing for parallel sampling request.
     
     Store parent request ID and sampling params.
