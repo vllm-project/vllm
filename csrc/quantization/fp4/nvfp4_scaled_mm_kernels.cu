@@ -188,7 +188,7 @@ struct Fp4GemmSm100Bfloat16 {
           ElementAccumulator, ElementC, LayoutCTag, AlignmentC, ElementD,
           LayoutDTag, AlignmentD,
           cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
-  
+
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
           ArchTag, OperatorClass, ElementA, LayoutATag, AlignmentA, ElementB,
@@ -197,7 +197,7 @@ struct Fp4GemmSm100Bfloat16 {
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
-  
+
   using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
