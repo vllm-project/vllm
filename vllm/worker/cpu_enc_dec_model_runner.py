@@ -279,7 +279,6 @@ class CPUEncoderDecoderModelRunner(
     def execute_model(
         self,
         model_input: EncoderDecoderModelInputForCPU,
-        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
@@ -297,10 +296,6 @@ class CPUEncoderDecoderModelRunner(
             model_input.encoder_input_tokens,
             "encoder_positions":
             model_input.encoder_input_positions,
-            "kv_caches":
-            kv_caches,
-            "attn_metadata":
-            model_input.attn_metadata,
             **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
             "intermediate_tensors":
