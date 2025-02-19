@@ -78,7 +78,6 @@ repo_id = "bartowski/Phi-3-medium-4k-instruct-GGUF"
 filename = "Phi-3-medium-4k-instruct-IQ2_M.gguf"
 tokenizer = "microsoft/Phi-3-medium-4k-instruct"
 print(hf_hub_download(repo_id, filename=filename))
-    run_gguf_inference(model, tokenizer)
 ```
 
 ```bash
