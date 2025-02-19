@@ -7,6 +7,7 @@ import datetime
 import locale
 import os
 import re
+import shlex
 import subprocess
 import sys
 # Unlike the rest of the PyTorch this file must be python2 compliant.
@@ -93,11 +94,12 @@ DEFAULT_PIP_PATTERNS = {
 
 def run(command):
     """Return (return-code, stdout, stderr)."""
-    shell = True if type(command) is str else False
+    if isinstance(command, str):
+        command = shlex.split(command)
+
     p = subprocess.Popen(command,
                          stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE,
-                         shell=shell)
+                         stderr=subprocess.PIPE)
     raw_output, raw_err = p.communicate()
     rc = p.returncode
     if get_platform() == 'win32':
