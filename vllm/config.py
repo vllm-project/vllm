@@ -409,7 +409,8 @@ class ModelConfig:
         if is_s3(model) or is_s3(tokenizer):
             if is_s3(model):
                 s3_model = S3Model()
-                s3_model.pull_files(model, allow_pattern=["*config.json"])
+                s3_model.pull_files(
+                    model, allow_pattern=["*.model", "*.py", "*.json"])
                 self.model_weights = self.model
                 self.model = s3_model.dir
 
