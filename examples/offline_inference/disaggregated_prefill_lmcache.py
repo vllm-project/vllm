@@ -43,7 +43,7 @@ def run_prefill(prefill_done, prompts):
     # We use GPU 0 for prefill node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
+    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
     ktc = KVTransferConfig.from_cli(
         '{"kv_connector":"LMCacheConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
@@ -115,8 +115,7 @@ if __name__ == "__main__":
     prefill_done = Event()
     prefill_process = Process(target=run_prefill, args=(prefill_done, prompts))
     decode_process = Process(target=run_decode, args=(prefill_done, prompts))
-    lmcache_server_process = run_lmcache_server(
-        port)  #Process(target=run_lmcache_server, args=(port, ))
+    lmcache_server_process = run_lmcache_server(port)
 
     # Start prefill node
     prefill_process.start()
