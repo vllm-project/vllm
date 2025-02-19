@@ -18,7 +18,6 @@ from vllm.v1.guided_decoding import (Grammar, GuidedDecodingKey,
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
-    import torch
 
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
@@ -81,8 +80,7 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
 
         # Grammar fields, including the grammar object and the bitmask
-        self._grammar: Future[Grammar] | Grammar | None = None
-        self._grammar_bitmask = None
+        self._grammar: Optional[Union[Future[Grammar], Grammar]] = None
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> Request:
@@ -189,24 +187,6 @@ class Request:
                 return False
         return True
 
-    def allocate_grammar_bitmask(self, batch_size: int,
-                                 vocab_size: int) -> None:
-        if not self._check_grammar_completion():
-            return
-
-        if self._grammar is not None:
-            if isinstance(self._grammar, Grammar):
-                self._grammar_bitmask = self._grammar.allocate_bitmask(
-                    batch_size, vocab_size)
-            else:
-                logger.error(
-                    "Grammar is not ready yet. This should never happen."
-                    " Please file an issue.")
-
-    @functools.cached_property
-    def grammar_bitmask(self) -> Optional[torch.Tensor]:
-        return self._grammar_bitmask
-
     @property
     def is_grammar_ready(self) -> bool:
         if isinstance(self._grammar, Future):
@@ -220,7 +200,7 @@ class Request:
         return self._grammar if isinstance(self._grammar, Grammar) else None
 
     @grammar.setter
-    def grammar(self, grammar: Grammar | Future[Grammar]) -> None:
+    def grammar(self, grammar: Union[Grammar, Future[Grammar]]) -> None:
         self._grammar = grammar
 
 

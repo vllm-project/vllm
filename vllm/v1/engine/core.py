@@ -74,8 +74,7 @@ class EngineCore:
         self.mm_input_cache_server = MMInputCacheServer(
             vllm_config.model_config)
 
-        self.guided_decoding_manager = GuidedDecodingManager(
-            vllm_config=vllm_config)
+        self.guided_decoding_manager = GuidedDecodingManager(vllm_config)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -156,9 +155,18 @@ class EngineCore:
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         # Calculate bitmasks for all active requests
-        self.calculate_grammar_bitmasks()
+        self.setup_request_grammars()
 
         scheduler_output = self.scheduler.schedule()
+        # the bitmask allocation for grammars
+        # should be ready at this point.
+        if len(self.guided_decoding_manager.requests) > 0:
+            if not self.guided_decoding_manager.is_bitmask_ready:
+                raise ValueError("Could be a bug at this point")
+            # one copy
+            scheduler_output.grammar_bitmask = \
+                self.guided_decoding_manager.grammar_bitmask
+
         if scheduler_output.total_num_scheduled_tokens == 0:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
@@ -226,19 +234,18 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
-    def calculate_grammar_bitmasks(self):
+    def setup_request_grammars(self):
         for req in self.guided_decoding_manager.requests:
-            if req.grammar_bitmask is not None:
+            if req.grammar is not None:
                 continue
 
             # Check if grammar is ready in cache
-            grammar = self.guided_decoding_manager.grammar_cache.get(
+            grammar = self.guided_decoding_manager.request_key_to_grammar.get(
                 req.guided_decoding_key)
             if grammar is not None:
                 req.grammar = grammar
-                req.allocate_grammar_bitmask(
-                    1, self.guided_decoding_manager.vocab_size)
                 continue
+        self.guided_decoding_manager.allocate_bitmask()
 
     def add_lora(self, lora_request: LoRARequest) -> None:
         self.model_executor.add_lora(lora_request)

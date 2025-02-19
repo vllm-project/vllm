@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
@@ -28,7 +28,6 @@ class NewRequestData:
     num_computed_tokens: int
     lora_request: Optional["LoRARequest"]
     grammar: Optional["Grammar"]
-    grammar_bitmask: Optional["torch.Tensor"]
 
     @classmethod
     def from_request(
@@ -48,7 +47,6 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             grammar=request.grammar,
-            grammar_bitmask=request.grammar_bitmask,
         )
 
 
@@ -63,7 +61,6 @@ class CachedRequestData:
     new_token_ids: List[int]
     new_block_ids: List[int]
     num_computed_tokens: int
-    grammar_bitmask: Optional["torch.Tensor"]
 
     @classmethod
     def from_request(
@@ -79,7 +76,6 @@ class CachedRequestData:
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=request.num_computed_tokens,
-            grammar_bitmask=request.grammar_bitmask,
         )
 
 
@@ -121,5 +117,17 @@ class SchedulerOutput:
     # Used to free the encoder cache.
     free_encoder_input_ids: List[Tuple[str, int]]
 
-    # Set of request ids for all requests that uses guided decoding
-    guided_decoding_request_ids: Set[str]
+    # Dict of request ids to its index within the batch
+    # for filling the next token bitmask
+    guided_decoding_request_ids: Dict[str, int]
+    # the bitmask for the whole batch
+    _grammar_bitmask: Optional["torch.Tensor"] = field(default=None,
+                                                       repr=False)
+
+    @property
+    def grammar_bitmask(self) -> Optional[torch.Tensor]:
+        return self._grammar_bitmask
+
+    @grammar_bitmask.setter
+    def grammar_bitmask(self, bitmask: torch.Tensor) -> None:
+        self._grammar_bitmask = bitmask

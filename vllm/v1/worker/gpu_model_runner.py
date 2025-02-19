@@ -28,7 +28,7 @@ from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
-from vllm.v1.guided_decoding import Grammar
+from vllm.v1.guided_decoding import apply_bitmask
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -299,7 +299,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
                 grammar=new_req_data.grammar,
-                grammar_bitmask=new_req_data.grammar_bitmask,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -395,15 +394,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Fill the bitmask
             if (req_id in scheduler_output.guided_decoding_request_ids
                     and req_state.grammar is not None):
+                idx = scheduler_output.guided_decoding_request_ids[req_id]
+                # should already be ready
+                assert scheduler_output.grammar_bitmask is not None
                 if not req_state.grammar.prefilled:
                     req_state.grammar.prefilled = True
                 else:
-                    token_idx = scheduler_output.num_scheduled_tokens[
-                        req_id] - 1
                     if not req_state.grammar.matcher.is_terminated():
-                        assert req_state.grammar_bitmask is not None
+                        # NOTE: this relies on xgrammar internal bitmask,
+                        # so we need to give the actual index
+                        # of the the request_id in the batch
                         req_state.grammar.fill_bitmask(
-                            req_state.grammar_bitmask, token_idx)
+                            scheduler_output.grammar_bitmask, idx)
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
@@ -431,7 +433,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _prepare_inputs(
         self, scheduler_output: "SchedulerOutput"
-    ) -> Tuple[FlashAttentionMetadata, torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[FlashAttentionMetadata, torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -440,11 +442,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
-
-        # Prepare bitmasks for guided decoding
-        # OPTIMIZATION: We shouldn't copy over
-        # the bitmask like this multiple times
-        bitmask: Optional[torch.Tensor] = None
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -455,10 +452,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_scheduled_tokens[i] = num_tokens
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
-            # TODO -
-            #  -- we have a bitmask per request
-            #  -- need to pull the latest bitmask out of scheduler_output
-            bitmask = self.requests[req_id].grammar_bitmask
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -605,7 +598,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return attn_metadata, logits_indices, bitmask
+        return attn_metadata, logits_indices
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -894,8 +887,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices, bitmask = self._prepare_inputs(
-            scheduler_output)
+        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -967,9 +959,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Apply guided decoding bitmasks if present
-        if bitmask is not None:
-            Grammar.apply_bitmask(logits,
-                                  bitmask.to(self.device, non_blocking=True))
+        if scheduler_output.grammar_bitmask is not None:
+            # TODO: we probably should move this before and
+            # after, this might not be correct
+            apply_bitmask(
+                logits,
+                scheduler_output.grammar_bitmask.to(self.device,
+                                                    non_blocking=True),
+                list(scheduler_output.guided_decoding_request_ids.values()))
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.get_sampling_metadata(

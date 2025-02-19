@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import enum
-from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Dict, Set, Tuple
+import functools
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import xgrammar as xgr
@@ -25,17 +26,31 @@ class GuidedDecodingOptions(enum.Enum):
 GuidedDecodingKey = Tuple[GuidedDecodingOptions, str]
 
 
+def reset_bitmask(bitmask: torch.Tensor):
+    # this calls bitmask.fill_(tensor([1, 1, ...], dtype=int32))
+    xgr.reset_token_bitmask(bitmask)
+
+
+def apply_bitmask(logits: torch.Tensor, vocab_mask: torch.Tensor,
+                  indices: List[int]) -> None:
+    xgr.apply_token_bitmask_inplace(logits, vocab_mask, indices=indices)
+
+
 class Grammar:
     # NOTE: This would be a generic-enough class for
     # supporting different backends, in the future.
     # For now, just xgrammar.
     #
+    # TODO: support max_rollback_tokens
     # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
     # for jump-forward decoding
-    # TODO: support max_rollback_tokens
 
-    def __init__(self, matcher: xgr.GrammarMatcher, vocab_size: int,
-                 ctx: xgr.CompiledGrammar) -> None:
+    def __init__(
+        self,
+        matcher: xgr.GrammarMatcher,
+        vocab_size: int,
+        ctx: xgr.CompiledGrammar,
+    ) -> None:
         self.matcher = matcher
         self.vocab_size = vocab_size
         self.ctx = ctx
@@ -46,17 +61,9 @@ class Grammar:
         # and will also update the machine state
         return self.matcher.accept_token(token)
 
-    def allocate_bitmask(self, batch_size: int,
-                         vocab_size: int) -> torch.Tensor:
-        return xgr.allocate_token_bitmask(batch_size, vocab_size)
-
     # this should be ran in parallel with model decoding
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         self.matcher.fill_next_token_bitmask(bitmask, idx)
-
-    @staticmethod
-    def apply_bitmask(logits: torch.Tensor, vocab_mask: torch.Tensor) -> None:
-        xgr.apply_token_bitmask_inplace(logits, vocab_mask)
 
     def reset(self):
         self.matcher.reset()
@@ -80,24 +87,55 @@ class GuidedDecodingManager:
             lora_config=vllm_config.lora_config)
         tokenizer_group.ping()
         self.vocab_size = vllm_config.model_config.get_vocab_size()
+        self.vllm_config = vllm_config
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         tokenizer_info = xgr.TokenizerInfo.from_huggingface(
             tokenizer, vocab_size=self.vocab_size)
         self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
 
-        self.grammar_cache: Dict[GuidedDecodingKey, Grammar] = {}
+        self.request_key_to_grammar: Dict[GuidedDecodingKey, Grammar] = {}
 
         self.executor = ThreadPoolExecutor()
         self.requests: Set[Request] = set()
+        self._grammar_bitmask: Optional[Union[torch.Tensor,
+                                              Future[torch.Tensor]]] = None
+
+    def allocate_bitmask(self) -> None:
+        self._grammar_bitmask = self.executor.submit(
+            xgr.allocate_token_bitmask,
+            self.vllm_config.scheduler_config.max_num_seqs,
+            self.vocab_size / 32)
+
+    def _ensure_bitmask_ready(self) -> bool:
+        if isinstance(self._grammar_bitmask, Future):
+            try:
+                self._grammar_bitmask = self._grammar_bitmask.result(
+                    timeout=0.05)
+            except TimeoutError:
+                return False
+        return True
+
+    @functools.cached_property
+    def grammar_bitmask(self) -> Optional[torch.Tensor]:
+        self._ensure_bitmask_ready()
+        return self._grammar_bitmask if not isinstance(self._grammar_bitmask,
+                                                       Future) else None
+
+    @property
+    def is_bitmask_ready(self) -> bool:
+        if isinstance(self._grammar_bitmask, Future):
+            return not self._grammar_bitmask.running(
+            ) and self._grammar_bitmask.done()
+        return self._grammar_bitmask is not None
 
     def should_cache(self, request: Request):
         if not request.use_guided_decoding:
             return False
-        request.grammar = self.grammar_cache.get(request.guided_decoding_key)
+        request.grammar = self.request_key_to_grammar.get(
+            request.guided_decoding_key)
         if not request.grammar:
             request.grammar = self.cache(request)
-            print(request.grammar)
             return True
         return False
 
@@ -107,11 +145,11 @@ class GuidedDecodingManager:
     def _executor_loop(self, request: Request):
         key = request.guided_decoding_key
         self.requests.add(request)
-        if key in self.grammar_cache:
-            return self.grammar_cache[key]
+        if key in self.request_key_to_grammar:
+            return self.request_key_to_grammar[key]
 
-        self.grammar_cache[key] = self.initialize_grammar(key)
-        return self.grammar_cache[key]
+        self.request_key_to_grammar[key] = self.initialize_grammar(key)
+        return self.request_key_to_grammar[key]
 
     def initialize_grammar(self, key: GuidedDecodingKey) -> Grammar:
         request_type, grammar_spec = key
@@ -123,11 +161,15 @@ class GuidedDecodingManager:
                 ctx = self.compiler.compile_json_schema(grammar_spec)
         elif request_type == GuidedDecodingOptions.grammar:
             ctx = self.compiler.compile_grammar(grammar_spec)
+        elif request_type == GuidedDecodingOptions.regex:
+            ctx = self.compiler.compile_regex(grammar_spec)
         else:
             raise ValueError(
                 f"`grammar` is not of valid supported types. ({request_type!s})"
             )
 
-        return Grammar(matcher=xgr.GrammarMatcher(ctx),
-                       vocab_size=self.vocab_size,
-                       ctx=ctx)
+        return Grammar(
+            matcher=xgr.GrammarMatcher(ctx),
+            vocab_size=self.vocab_size,
+            ctx=ctx,
+        )

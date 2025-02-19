@@ -112,7 +112,7 @@ class Scheduler:
         scheduled_resumed_reqs: List[Request] = []
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
-        guided_decoding_request_ids: Set[str] = set()
+        guided_decoding_request_ids: Dict[str, int] = {}
 
         req_to_new_block_ids: Dict[str, List[int]] = {}
         num_scheduled_tokens: Dict[str, int] = {}
@@ -144,10 +144,9 @@ class Scheduler:
                 req_index += 1
                 continue
 
-            if request.use_guided_decoding:
-                if request.grammar_bitmask is None:
-                    request.allocate_grammar_bitmask(1, self.vocab_size)
-                guided_decoding_request_ids.add(request.request_id)
+            if request.use_guided_decoding \
+                and request.request_id not in guided_decoding_request_ids:
+                guided_decoding_request_ids[request.request_id] = req_index
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
@@ -246,10 +245,9 @@ class Scheduler:
                     num_to_skip += 1
                     continue
 
-                if request.use_guided_decoding:
-                    if request.grammar_bitmask is None:
-                        request.allocate_grammar_bitmask(1, self.vocab_size)
-                    guided_decoding_request_ids.add(request.request_id)
+                if request.use_guided_decoding \
+                    and request.request_id not in guided_decoding_request_ids:
+                    guided_decoding_request_ids[request.request_id] = req_index
 
                 #
                 # Check that adding the request still respects the max_loras
@@ -394,7 +392,8 @@ class Scheduler:
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            guided_decoding_request_ids=guided_decoding_request_ids)
+            guided_decoding_request_ids=guided_decoding_request_ids,
+        )
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -425,7 +424,6 @@ class Scheduler:
                                                       new_token_ids,
                                                       new_block_ids)
             self._cached_reqs_data[request.request_id] = req_data
-        req_data.grammar_bitmask = request.grammar_bitmask
         return req_data
 
     def _try_schedule_encoder_inputs(
