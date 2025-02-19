@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Collection, Iterable, Optional
 
 import numpy as np
+import pandas as pd
 from datasets import IterableDataset, load_dataset, load_dataset_builder
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
@@ -56,7 +57,6 @@ class DatasetSampler(ABC):
     def sample(
         self,
         num_samples: int,
-        tokenizer: PreTrainedTokenizerBase,
         fixed_output_len: Optional[int] = None
     ) -> list[tuple[str, int, int, dict[str, Collection[str]]]]:
         """Function to sample online requests from the dataset."""
@@ -65,10 +65,52 @@ class DatasetSampler(ABC):
     # TODO(Isotr0py): Add sample function to sample offline request.
     def sample_offline(self,
                        num_samples: int,
-                       tokenizer: PreTrainedTokenizerBase,
                        fixed_output_len: Optional[int] = None) -> list[Any]:
         """Function to sample offline requests from the dataset."""
         raise NotImplementedError
+
+
+class BurstGPTSampler(DatasetSampler):
+    """Dataset sampler for creating burst request."""
+
+    def __init__(
+        self,
+        dataset_path: str,
+        tokenizer: PreTrainedTokenizerBase,
+        seed: Optional[int] = None,
+    ):
+        df = pd.read_csv(dataset_path)
+        self.df = df[self.filter_func(df)]
+        self.tokenizer = tokenizer
+        self.seed = seed
+
+    def filter_func(self, data: pd.DataFrame) -> pd.DataFrame:
+        return (data["Model"] == "GPT-4" & data["Response tokens"] > 0)
+
+    def sample(
+        self,
+        num_samples: int,
+        fixed_output_len: Optional[int] = None,
+    ) -> list[tuple[str, int, int, None]]:
+        self.dataset: pd.DataFrame
+        # Randomly sample num_requests from the dataset
+        if num_samples <= len(self.dataset):
+            gpt4_df = self.dataset.sample(n=num_samples,
+                                          random_state=self.seed)
+        else:
+            gpt4_df = self.dataset.sample(n=num_samples,
+                                          random_state=self.seed,
+                                          replace=True)
+        # Convert the dataframe to a list of tuples
+        dataset = gpt4_df.values.tolist()
+        input_requests = []
+        for i in range(num_samples):
+            input_len = int(dataset[i][2])
+            output_len = int(dataset[i][3])
+            prompt = self.tokenizer.decode([(i + j) % self.tokenizer.vocab_size
+                                            for j in range(input_len)])
+            input_requests.append((prompt, input_len, output_len, None))
+        return input_requests
 
 
 class RandomSampler(DatasetSampler):
@@ -267,6 +309,7 @@ class SonnetSampler(DatasetSampler):
 
 
 class HFDatasetSampler(DatasetSampler):
+    """Base class for sampling Hugging Face Datasets."""
 
     def __init__(self,
                  hf_dataset: IterableDataset,

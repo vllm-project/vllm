@@ -36,7 +36,6 @@ from datetime import datetime
 from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
                                   RequestFuncOutput)
 from dataset_sample_func import get_hf_dataset_sampler
@@ -94,9 +93,9 @@ def sample_sharegpt_requests(
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int, None]]:
-    from .dataset_sample_func import ShareGPTDatasetSampler
+    from .dataset_sample_func import ShareGPTSampler
 
-    hf_dataset_sampler = ShareGPTDatasetSampler(dataset_path)
+    hf_dataset_sampler = ShareGPTSampler(dataset_path)
     return hf_dataset_sampler.sample(num_requests, tokenizer, fixed_output_len)
 
 
@@ -106,27 +105,12 @@ def sample_burstgpt_requests(
     random_seed: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, int, int, None]]:
-    df = pd.read_csv(dataset_path)
-    gpt4_df = df[df["Model"] == "GPT-4"]
-    # Remove the failed requests (i.e., response length is 0)
-    gpt4_df = gpt4_df[gpt4_df["Response tokens"] > 0]
-    # Randomly sample num_requests from the dataset
-    if num_requests <= len(gpt4_df):
-        gpt4_df = gpt4_df.sample(n=num_requests, random_state=random_seed)
-    else:
-        gpt4_df = gpt4_df.sample(n=num_requests,
-                                 random_state=random_seed,
-                                 replace=True)
-    # Convert the dataframe to a list of tuples
-    dataset = gpt4_df.values.tolist()
-    input_requests = []
-    for i in range(num_requests):
-        input_len = int(dataset[i][2])
-        output_len = int(dataset[i][3])
-        prompt = tokenizer.decode([(i + j) % tokenizer.vocab_size
-                                   for j in range(input_len)])
-        input_requests.append((prompt, input_len, output_len, None))
-    return input_requests
+    from .dataset_sample_func import BurstGPTSampler
+
+    burstgpt_sampler = BurstGPTSampler(dataset_path,
+                                       tokenizer=tokenizer,
+                                       seed=random_seed)
+    return burstgpt_sampler.sample(num_requests)
 
 
 def sample_sonnet_requests(
