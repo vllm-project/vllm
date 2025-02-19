@@ -46,7 +46,10 @@ def _init_attn_metadata_from_tensor_dict(
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
         if field.name in tensor_dict:
-            valid_attn_kwargs[field.name] = tensor_dict.pop(field.name)
+            if field.name == "input_positions":
+                valid_attn_kwargs[field.name] = tensor_dict[field.name]
+            else:
+                valid_attn_kwargs[field.name] = tensor_dict.pop(field.name)
 
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
     tensor_dict["attn_metadata"] = attn_metadata
