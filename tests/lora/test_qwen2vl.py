@@ -7,7 +7,6 @@ from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 import vllm
-from tests.utils import fork_new_process_for_each_test
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
@@ -110,7 +109,6 @@ QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 @pytest.mark.xfail(
     current_platform.is_rocm(),
     reason="Qwen2-VL dependency xformers incompatible with ROCm")
-@fork_new_process_for_each_test
 def test_qwen2vl_lora(qwen2vl_lora_files):
     """Test Qwen 2.0 VL model with LoRA"""
     config = TestConfig(model_path=QWEN2VL_MODEL_PATH,
@@ -132,7 +130,6 @@ def test_qwen2vl_lora(qwen2vl_lora_files):
     Version(TRANSFORMERS_VERSION) < Version("4.49.0"),
     reason="Qwen2.5-VL require transformers version no lower than 4.49.0",
 )
-@fork_new_process_for_each_test
 def test_qwen25vl_lora(qwen25vl_lora_files):
     """Test Qwen 2.5 VL model with LoRA"""
     config = TestConfig(model_path=QWEN25VL_MODEL_PATH,
