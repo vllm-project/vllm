@@ -808,7 +808,7 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `PaliGemmaForConditionalGeneration`
+- * `PaliGemmaForConditionalGeneration`\*
   * PaliGemma, PaliGemma 2
   * T + I<sup>E</sup>
   * `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc.
@@ -883,6 +883,10 @@ To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"
 :::{note}
 The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
+:::
+
+:::{note}
+Currently the PaliGemma model series is implemented without PrefixLM attention mask. This model series may be deprecated in a future release.
 :::
 
 :::{note}
