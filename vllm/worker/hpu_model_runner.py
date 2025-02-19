@@ -1962,7 +1962,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         finalize_calibration(self.model.model)
 
     def shutdown_inc(self):
-        can_finalize_inc = (self.model_config.quantization == 'inc') and \
+        can_finalize_inc = ("inc" in self.model_config.quantization) and \
             (self.model.model is not None) and \
             self.inc_initialized_successfully and \
             not getattr(self, "_is_inc_finalized", False)
