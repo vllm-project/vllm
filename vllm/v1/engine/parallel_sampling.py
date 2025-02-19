@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import copy
-from typing import AsyncGenerator, Callable, List, Mapping, Optional
+from typing import AsyncGenerator, Callable, List, Mapping, Optional, Tuple
 
 from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
@@ -38,7 +38,7 @@ class ParallelSamplingRequest:
         self.sampling_params = sampling_params
         self.cached_child_sampling_params = None
 
-    def get_child_sampling_params(
+    def _get_child_sampling_params(
         self,
         index: int,
     ) -> SamplingParams:
@@ -108,8 +108,17 @@ class ParallelSamplingRequest:
                                              key=lambda x: x.index)
         return self.request_output
 
-    def get_child_request_id(self, index: int) -> str:
-        return f"{index}_{self.request_id}"
+    def get_child_info(self, index: int) -> Tuple[str, SamplingParams]:
+        """Get child request ID and sampling params.
+        
+        Args:
+          index: index within `n` child requests.
+        
+        Returns:
+          (request ID, sampling_params) tuple
+        """
+        return (f"{index}_{self.request_id}",
+                self._get_child_sampling_params(index))
 
     def _process_output(
         self,
@@ -210,11 +219,11 @@ async def generate_parallel_sampling_async(
     # Aggregate generators for n child requests
     gens: List[AsyncGenerator[RequestOutput, None]] = []
     for idx in range(parent_req.n):
-        c_sampling_params = parent_req.get_child_sampling_params(idx)
+        c_req_id, c_params = parent_req.get_child_info(idx)
         child_gen = generate(
             prompt=prompt,
-            sampling_params=c_sampling_params,
-            request_id=parent_req.get_child_request_id(idx),
+            sampling_params=c_params,
+            request_id=c_req_id,
             lora_request=lora_request,
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,

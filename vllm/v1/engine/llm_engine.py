@@ -182,11 +182,11 @@ class LLMEngine:
         self.parallel_parent_reqs[request_id] = req_mgr
         # Add n child requests with unique request IDs & random seeds and n=1
         for idx in range(req_mgr.n):
-            c_request_id = req_mgr.get_child_request_id(idx)
-            self.parallel_child_reqs[c_request_id] = (idx, request_id)
-            self._add_request(request_id=c_request_id,
+            c_req_id, c_params = req_mgr.get_child_info(idx)
+            self.parallel_child_reqs[c_req_id] = (idx, request_id)
+            self._add_request(request_id=c_req_id,
                               prompt=prompt,
-                              params=req_mgr.get_child_sampling_params(idx),
+                              params=c_params,
                               arrival_time=arrival_time,
                               lora_request=lora_request,
                               trace_headers=trace_headers,
