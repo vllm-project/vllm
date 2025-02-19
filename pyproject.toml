@@ -42,7 +42,7 @@ Slack="http://slack.vllm.ai/"
 vllm = "vllm.entrypoints.cli.main:main"
 
 [tool.setuptools_scm]
-version_file = "vllm/_version.py"
+# no extra settings needed, presence enables setuptools-scm
 
 [tool.setuptools.packages.find]
 where = ["."]
