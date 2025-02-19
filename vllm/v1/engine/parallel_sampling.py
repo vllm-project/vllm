@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import copy
-from typing import AsyncGenerator, Callable, List, Mapping, Optional, Tuple
+from typing import (AsyncGenerator, Callable, Dict, List, Mapping, Optional,
+                    Tuple, Union)
 
 from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils import merge_async_iterators
@@ -14,6 +16,12 @@ AsyncGenerateMethodType = Callable[[
     PromptType, SamplingParams, str, Optional[LoRARequest], Optional[Mapping[
         str, str]], Optional[PromptAdapterRequest], int
 ], AsyncGenerator[RequestOutput, None]]
+
+SyncAddRequestMethodType = Callable[[
+    str, PromptType, Union[SamplingParams, PoolingParams], Optional[float],
+    Optional[LoRARequest], Optional[Mapping[
+        str, str]], Optional[PromptAdapterRequest], int
+], None]
 
 
 class ParallelSamplingRequest:
@@ -120,7 +128,7 @@ class ParallelSamplingRequest:
         return (f"{index}_{self.request_id}",
                 self._get_child_sampling_params(index))
 
-    def _process_output(
+    def process_output(
         self,
         child_req_output: RequestOutput,
         index: int,
@@ -186,7 +194,7 @@ class ParallelSamplingRequest:
           to the caller.
         """
         async for out in child_gen:
-            if req_out := self._process_output(out, index):
+            if req_out := self.process_output(out, index):
                 yield req_out
 
     @property
@@ -201,6 +209,108 @@ class ParallelSamplingRequest:
     @property
     def output_kind(self) -> RequestOutputKind:
         return self.sampling_params.output_kind
+
+
+class SyncParallelSamplingManager:
+
+    def __init__(self):
+        # Parent req ID -> parent request manager
+        self.parent_reqs: Dict[str, ParallelSamplingRequest] = {}
+        # Child req ID -> (child req index, parent req ID)
+        self.child_reqs: Dict[str, Tuple[int, str]] = {}
+        # Flag to reset parallel sampling bookkeeping logic
+        # between engine runs
+        self._do_reset = False
+
+    def _reset_if_needed(self) -> None:
+        """Reset at beginning of sync generate()"""
+        if self._do_reset:
+            self.parent_reqs.clear()
+            self.child_reqs.clear()
+            self._do_reset = False
+
+    def schedule_reset(self) -> None:
+        """Schedule reset for the next time a parent request is added."""
+        if self.parent_reqs:
+            self._do_reset = True
+
+    def register_parent_request(self, req: ParallelSamplingRequest) -> None:
+        """Register parallel sampling parent request."""
+        self._reset_if_needed()
+        self.parent_reqs[req.request_id] = req
+
+    def register_child_request(self, req_id: str, child_req_id: str,
+                               index: int) -> None:
+        """Register parallel sampling child request with parent.
+        
+        Args:
+          req_id: parent request ID
+          child_req_id: child request ID
+          index: child request index within `n` child requests
+        """
+        self.child_reqs[child_req_id] = (index, req_id)
+
+    def _aggregate_parallel_sampling_outputs(
+        self,
+        outputs: List[RequestOutput],
+    ) -> List[RequestOutput]:
+        """Build parallel sampling request outputs.
+        
+        Extract child request outputs, aggregate them
+        into parent request output, and return parent
+        output when complete.
+
+        Do not modify `n=1` requests.
+
+        Args:
+          outputs: step request outputs. Mix of child request
+                   outputs & `n=1` request outputs.
+
+        Return:
+          List of parallel sampling parent request outputs &
+          unmodified `n=1` request outputs passed-thru from input.
+        """
+        agg_outputs = []
+        for c_out in outputs:
+            c_req_id = c_out.request_id
+            if cdx_req_id := self.child_reqs.get(c_req_id, None):
+                # For each parallel sampling child request output:
+                (cdx, req_id) = cdx_req_id
+                req = self.parent_reqs[req_id]
+                # Update parallel sampling request
+                if out := req.process_output(c_out, cdx):
+                    # Return parent request output if complete;
+                    # cleanup parent request bookkeeping.
+                    agg_outputs.append(out)
+                    del self.parent_reqs[req_id]
+                # Cleanup child request bookkeeping.
+                del self.child_reqs[c_req_id]
+            else:
+                # Not a parallel sampling request output
+                agg_outputs.append(c_out)
+        return agg_outputs
+
+    def step(self,
+             request_outputs: List[RequestOutput]) -> List[RequestOutput]:
+        """Process parallel sampling child request outputs"""
+        if self.parent_reqs and request_outputs:
+            return self._aggregate_parallel_sampling_outputs(request_outputs)
+        # If there are no parallel sampling child request outputs,
+        # return unmodified.
+        return request_outputs
+
+    def get_num_unfinished_requests(self, num_core_reqs: int) -> int:
+        """Get the number of unfinished requests, correcting for parallel
+           sampling.
+        
+        Args:
+          num_core_reqs: The number of unfinished requests in the engine core.
+        
+        Returns:
+          Number of unfinished requests, where each parallel sampling req 
+          counts as 1
+        """
+        return num_core_reqs + len(self.parent_reqs) - len(self.child_reqs)
 
 
 async def generate_parallel_sampling_async(
@@ -235,3 +345,32 @@ async def generate_parallel_sampling_async(
     # Merge generators
     async for _, out in merge_async_iterators(*gens):
         yield out
+
+
+def add_request_parallel_sampling(
+    add_request: SyncAddRequestMethodType,
+    parallel_mgr: SyncParallelSamplingManager,
+    request_id: str,
+    prompt: PromptType,
+    params: Union[SamplingParams, PoolingParams],
+    arrival_time: Optional[float] = None,
+    lora_request: Optional[LoRARequest] = None,
+    trace_headers: Optional[Mapping[str, str]] = None,
+    prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    priority: int = 0,
+) -> None:
+    """Add sync parallel sampling request."""
+    req = ParallelSamplingRequest(request_id, params)
+    parallel_mgr.register_parent_request(req)
+    # Add n child requests with unique request IDs & random seeds and n=1
+    for idx in range(req.n):
+        c_req_id, c_params = req.get_child_info(idx)
+        parallel_mgr.register_child_request(request_id, c_req_id, idx)
+        add_request(request_id=c_req_id,
+                    prompt=prompt,
+                    params=c_params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request,
+                    priority=priority)  # type: ignore
