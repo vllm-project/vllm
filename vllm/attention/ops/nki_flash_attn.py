@@ -476,18 +476,11 @@ def flash_paged_attention(
     q_h_per_k_h = h // k_h
     assert b == 1, f"invalid batch size {b=}"
     assert d <= 128, f" we do not support head_dim > 128, got head dim {d=}"
-    assert tuple(key_cache.shape) == (
-        num_blocks,
-        k_h,
-        block_size,
-        d,
-    ), "key_cache shape mismatch!"
-    assert tuple(value_cache.shape) == (
-        num_blocks,
-        k_h,
-        block_size,
-        d,
-    ), "value_cache shape mismatch!"
+    cache_shape = (num_blocks, k_h, block_size, d)
+    assert (tuple(key_cache.shape) == cache_shape
+            ), f"{key_cache.shape=} mismatch, expect {cache_shape}"
+    assert (tuple(value_cache.shape) == cache_shape
+            ), f"{value_cache.shape=} mismatch, expect {cache_shape}"
     assert key is None or tuple(key.shape) == (
         1,
         k_h,
@@ -500,8 +493,39 @@ def flash_paged_attention(
         seqlen_q,
         d,
     ), f"value shape {value.shape} mismatch!"
+
+    assert (
+        nl.program_ndim() == 2
+    ), f"Expect spmd grid with 2 dimensions, got {nl.program_ndim()} instead!"
+    batch_id = nl.program_id(axis=0)
+    head_id = nl.program_id(axis=1)
+
+    (num_active_blocks, ) = block_tables.shape
+    context_kv_len = num_active_blocks * block_size
+    assert (
+        LARGE_TILE_SZ % B_F_SIZE == 0
+    ), f"Need {LARGE_TILE_SZ=} to be divisible by {B_F_SIZE=} in transpose_p"
+    assert (context_kv_len % LARGE_TILE_SZ == 0
+            ), f"Need {context_kv_len=} to be divisible by {LARGE_TILE_SZ=}"
+
+    num_blocks_per_large_tile = LARGE_TILE_SZ // block_size
+    assert is_power_of_2(
+        num_blocks_per_large_tile
+    ), f"{num_blocks_per_large_tile=} is expected of be power of 2"
+    if seqlen_q > B_F_SIZE:
+        MAX_REDUCTION_TILE = 2048
+        if seqlen_q // 2 > MAX_REDUCTION_TILE:
+            assert (
+                seqlen_q % MAX_REDUCTION_TILE == 0
+            ), f"{seqlen_q=} should be divisible by {MAX_REDUCTION_TILE=}"
+        else:
+            assert (seqlen_q % B_F_SIZE == 0
+                    ), f"{seqlen_q=} should be divisible by {B_F_SIZE=})"
+
     kernel_dtype = nl.bfloat16 if mixed_precision else query.dtype
     acc_type = np.dtype(np.float32) if mixed_precision else kernel_dtype
+    softmax_scale = softmax_scale or (1.0 / (d**0.5))
+    num_large_k_tile = context_kv_len // LARGE_TILE_SZ
 
     o = nl.ndarray((b, h, seqlen_q, d),
                    dtype=query.dtype,
@@ -528,29 +552,6 @@ def flash_paged_attention(
             buffer=nl.sbuf,
             lazy_initialization=True,
         )
-
-    assert (
-        nl.program_ndim() == 2
-    ), f"Expect spmd grid with 2 dimensions, got {nl.program_ndim()} instead!"
-    batch_id = nl.program_id(axis=0)
-    head_id = nl.program_id(axis=1)
-
-    softmax_scale = softmax_scale or (1.0 / (d**0.5))
-
-    (num_active_blocks, ) = block_tables.shape
-    context_kv_len = num_active_blocks * block_size
-    assert (
-        LARGE_TILE_SZ % B_F_SIZE == 0
-    ), f"Need {LARGE_TILE_SZ=} to be divisible by {B_F_SIZE=} in transpose_p"
-    assert (context_kv_len % LARGE_TILE_SZ == 0
-            ), f"Need {context_kv_len=} to be divisible by {LARGE_TILE_SZ=}"
-    num_large_k_tile = context_kv_len // LARGE_TILE_SZ
-    num_blocks_per_large_tile = LARGE_TILE_SZ // block_size
-    assert is_power_of_2(
-        num_blocks_per_large_tile
-    ), f"{num_blocks_per_large_tile=} is expected of be power of 2"
-    assert is_power_of_2(seqlen_q), f"{seqlen_q=} is expected to be power of 2"
-
     block_tables_sbuf = load_block_tables(
         block_tables_hbm=block_tables,
         num_tiles=num_large_k_tile,
@@ -807,7 +808,7 @@ def context_mask_reorder_helper(mask, LARGE_TILE_SZ, block_size):
             B_P_SIZE,
             tiled_block_size,
         )
-        context_mask = context_mask.transpose(3, 4).contiguous().reshape(
+        context_mask = context_mask.transpose(3, 4).reshape(
             total_query_len, context_kv_len)
         new_mask = mask[:, context_kv_len:]
         return torch.concat([context_mask, new_mask], dim=1).to(device)
