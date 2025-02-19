@@ -270,8 +270,8 @@ class LLMEngine:
 
         # Ensure that parallel sampling logic gets reset after the
         # engine finishes processing this batch
-        self._do_reset_parallel_sampling = (True if num_parallel_reqs > 0 else
-                                            self._do_reset_parallel_sampling)
+        if self.parallel_parent_requests:
+            self._do_reset_parallel_sampling = True    
 
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()
