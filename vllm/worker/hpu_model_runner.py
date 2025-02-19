@@ -1420,7 +1420,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             profiler.start()
         for _ in range(times):
             inputs = self.prepare_model_input(seqs)
-            self.execute_model(inputs, warmup_mode=True)
+            self.execute_model(inputs, None, warmup_mode=True)
             torch.hpu.synchronize()
             if profiler:
                 profiler.step()
@@ -1939,7 +1939,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     def execute_model(
         self,
         model_input: ModelInputForHPUWithSamplingMetadata,
-        kv_caches: Optional[List[torch.Tensor]] = None,
+        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         warmup_mode=False,
