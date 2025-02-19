@@ -38,7 +38,9 @@ from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
                                   RequestFuncOutput)
-from dataset_sample_func import get_hf_dataset_sampler
+from dataset_sample_func import (BurstGPTSampler, RandomSampler,
+                                 ShareGPTSampler, SonnetSampler,
+                                 get_hf_dataset_sampler)
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -93,10 +95,8 @@ def sample_sharegpt_requests(
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int, None]]:
-    from .dataset_sample_func import ShareGPTSampler
-
-    hf_dataset_sampler = ShareGPTSampler(dataset_path)
-    return hf_dataset_sampler.sample(num_requests, tokenizer, fixed_output_len)
+    hf_dataset_sampler = ShareGPTSampler(dataset_path, tokenizer=tokenizer)
+    return hf_dataset_sampler.sample(num_requests, fixed_output_len)
 
 
 def sample_burstgpt_requests(
@@ -105,8 +105,6 @@ def sample_burstgpt_requests(
     random_seed: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, int, int, None]]:
-    from .dataset_sample_func import BurstGPTSampler
-
     burstgpt_sampler = BurstGPTSampler(dataset_path,
                                        tokenizer=tokenizer,
                                        seed=random_seed)
@@ -121,8 +119,6 @@ def sample_sonnet_requests(
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, str, int, int, None]]:
-    from .dataset_sample_func import SonnetSampler
-
     sonnet_sampler = SonnetSampler(
         dataset_path,
         input_len=input_len,
@@ -157,10 +153,11 @@ def sample_random_requests(
     range_ratio: float,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, int, int]]:
-    from .dataset_sample_func import RandomSampler
-
-    random_sampler = RandomSampler(prefix_len, input_len, range_ratio)
-    return random_sampler.sample(num_prompts, output_len, tokenizer)
+    random_sampler = RandomSampler(prefix_len,
+                                   input_len,
+                                   range_ratio,
+                                   tokenizer=tokenizer)
+    return random_sampler.sample(num_prompts, output_len)
 
 
 async def get_request(

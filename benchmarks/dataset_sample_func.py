@@ -48,7 +48,6 @@ class DatasetSampler(ABC):
     dataset: Optional[Iterable[Any]]
     tokenizer: PreTrainedTokenizerBase
 
-    @abstractmethod
     def filter_func(self, data: dict) -> bool:
         """Filter function to filter out unsatisfied rows from dataset."""
         raise NotImplementedError
@@ -80,12 +79,12 @@ class BurstGPTSampler(DatasetSampler):
         seed: Optional[int] = None,
     ):
         df = pd.read_csv(dataset_path)
-        self.df = df[self.filter_func(df)]
+        self.dataset = df[self.filter_func(df)]
         self.tokenizer = tokenizer
         self.seed = seed
 
     def filter_func(self, data: pd.DataFrame) -> pd.DataFrame:
-        return (data["Model"] == "GPT-4" & data["Response tokens"] > 0)
+        return (data["Model"] == "GPT-4") & (data["Response tokens"] > 0)
 
     def sample(
         self,
@@ -326,10 +325,16 @@ class ShareGPTHFSampler(ShareGPTSampler, HFDatasetSampler):
     - Vision dataset like: 'lmms-lab/LLaVA-OneVision-Data' etc.
     """
 
-    def __init__(self, dataset: IterableDataset, seed: Optional[int] = None):
+    def __init__(self,
+                 dataset: IterableDataset,
+                 tokenizer: PreTrainedTokenizerBase,
+                 seed: Optional[int] = None):
         assert "conversations" in dataset.features, (
             "Sonnet-style Dataset must have 'conversations' column.")
-        HFDatasetSampler.__init__(self, dataset, seed=seed)
+        HFDatasetSampler.__init__(self,
+                                  dataset,
+                                  tokenizer=tokenizer,
+                                  seed=seed)
 
 
 class VisionArenaBenchSampler(HFDatasetSampler):
