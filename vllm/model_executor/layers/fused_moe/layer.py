@@ -396,10 +396,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         num_experts = layer.num_experts
         if num_expert_group is None:
             num_expert_group = 8
-        NUM_EXPERT_GROUPS = num_expert_group
-        n_expert_slice = num_experts // NUM_EXPERT_GROUPS
-        assert n_expert_slice * NUM_EXPERT_GROUPS == num_experts
-        for i in range(NUM_EXPERT_GROUPS):
+        num_expert_group = num_expert_group
+        n_expert_slice = num_experts // num_expert_group
+        rank_debug(f"num_experts: {num_experts}, n_expert_slice: {n_expert_slice}, num_expert_group: {num_expert_group}")
+        assert n_expert_slice * num_expert_group == num_experts
+        for i in range(num_expert_group):
             _temp_expert_group = getattr(layer, f"_temp_expert_group_{i}")
             final_hidden_states += _temp_expert_group.MoeOp(
                 hidden_states=x,
@@ -584,12 +585,11 @@ class FusedMoE(torch.nn.Module):
             layer._need_init_dynamic_fused_moe_lst = False
             if num_expert_group is None:
                 num_expert_group = 8
-            NUM_EXPERT_GROUPS = num_expert_group
-            num_expert_per_group = num_experts_on_rank// NUM_EXPERT_GROUPS
-            n_expert_slice = num_experts_on_rank // NUM_EXPERT_GROUPS
-            assert n_expert_slice * NUM_EXPERT_GROUPS == num_experts_on_rank
+            num_expert_per_group = num_experts_on_rank// num_expert_group
+            n_expert_slice = num_experts_on_rank // num_expert_group
+            assert n_expert_slice * num_expert_group == num_experts_on_rank
 
-            for i in range(NUM_EXPERT_GROUPS):
+            for i in range(num_expert_group):
                 _temp_expert_group = _DynamicFusedMOE(num_expert_per_group)
                 min_expert = i * n_expert_slice
                 max_expert = (i + 1) * n_expert_slice
