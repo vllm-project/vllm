@@ -64,7 +64,6 @@ class Mamba2DecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor],
@@ -76,8 +75,8 @@ class Mamba2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, attn_metadata,
-                                   mamba_cache_params, sequence_idx)
+        hidden_states = self.mixer(hidden_states, mamba_cache_params,
+                                   sequence_idx)
         return hidden_states, residual
 
 

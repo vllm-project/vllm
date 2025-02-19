@@ -25,7 +25,6 @@ from torch import nn
 from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
                           Idefics3Processor)
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -561,8 +560,6 @@ class Idefics3Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -570,8 +567,6 @@ class Idefics3Model(nn.Module):
         hidden_states = self.text_model(
             input_ids,
             positions,
-            kv_caches,
-            attn_metadata,
             intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
@@ -658,8 +653,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -677,8 +670,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         hidden_states = self.model.text_model(input_ids,
                                               positions,
-                                              kv_caches,
-                                              attn_metadata,
                                               intermediate_tensors,
                                               inputs_embeds=inputs_embeds)
 

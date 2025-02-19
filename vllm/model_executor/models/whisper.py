@@ -467,8 +467,6 @@ class WhisperModel(nn.Module):
         input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]],
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         encoder_outputs = self.get_encoder_outputs(input_features)
         decoder_outputs = self.decoder(
@@ -481,8 +479,6 @@ class WhisperModel(nn.Module):
     def get_encoder_outputs(
         self,
         input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]],
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
     ) -> Optional[torch.Tensor]:
         if input_features is None:
             return None
@@ -631,15 +627,12 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         decoder_outputs = self.model(
             input_features=audio_input["input_features"],
             input_ids=input_ids,
-            attn_metadata=attn_metadata,
         )
         return decoder_outputs
 

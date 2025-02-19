@@ -278,8 +278,7 @@ class GLMTransformer(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states = layer(hidden_states=hidden_states,
                                   position_ids=position_ids)
 
