@@ -63,11 +63,15 @@ def mm_input_mapper_for_glmv(
     if tokenizer is None:
         raise RuntimeError("No HuggingFace processor is available "
                            "to process the image object")
+    if isinstance(data, List):
+        image = data[0]
+    else:
+        image = data
     try:
         raw_batch_data = tokenizer.apply_chat_template(
             conversation=[{
                 "role": "user",
-                "image": data
+                "image": image
             }],
             add_generation_prompt=True,
             tokenize=True,
@@ -175,11 +179,15 @@ def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
         ctx.model_config.model,
         trust_remote_code=ctx.model_config.trust_remote_code)
 
+    if isinstance(multi_modal_data["image"], List):
+        image = multi_modal_data["image"][0]
+    else:
+        image = multi_modal_data["image"]
     try:
         raw_batch_data = tokenizer.apply_chat_template(
             conversation=[{
                 "role": "user",
-                "image": multi_modal_data["image"],
+                "image": image,
                 "content": inputs['prompt'],
             }],
             add_generation_prompt=True,

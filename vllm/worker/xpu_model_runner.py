@@ -238,8 +238,11 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                     input_positions.append(position)
                 if is_prompt:
                     mm_data = seq_group_metadata.multi_modal_data
-                    if mm_data:
+                    if mm_data and not self.runner.model_is_mrope:
                         mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                    else:
+                        mm_kwargs = mm_data
+                    if mm_kwargs is not None:
                         multi_modal_kwargs_list.append(mm_kwargs)
                     if self.runner.model_is_mrope and mm_data:
                         image_grid_thw = mm_kwargs.get("image_grid_thw", None)
@@ -720,7 +723,7 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
         rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
         if rope_scaling is None:
             return False
-        return rope_scaling.get("type", None) == "mrope"
+        return rope_scaling.get("type", None) == "mrope" or rope_scaling.get("mrope_section", None) is not None
 
     @torch.inference_mode()
     def profile_run(self) -> None:

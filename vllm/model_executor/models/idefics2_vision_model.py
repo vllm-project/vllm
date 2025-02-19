@@ -106,16 +106,6 @@ class Idefics2VisionEmbeddings(nn.Module):
         return embeddings
 
 
-def attention_softmax(attn_weights: torch.Tensor, training: bool):
-    if attn_weights.is_contiguous() and attn_weights.device.type == "xpu" and not training:
-        import xe_addons
-        xe_addons.attn_softmax_inplaced(attn_weights)
-    else:
-        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1,
-                                                   dtype=torch.float32).to(attn_weights.dtype)
-    return attn_weights
-
-
 class Idefics2VisionAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -159,40 +149,11 @@ class Idefics2VisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size, q_len, _ = hidden_states.size()
         qkv, _ = self.qkv_proj(
             hidden_states
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
-        query_states = query_states.view(batch_size, q_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-        key_states = key_states.view(batch_size, q_len,
-                                     self.num_heads_per_partition,
-                                     self.head_dim)
-        value_states = value_states.view(batch_size, q_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-
-        attn_weights = torch.matmul(query_states, key_states.transpose(
-            2, 3)) * self.scale
-
-        attn_weights = attention_softmax(attn_weights, self.training)
-        attn_weights = nn.functional.dropout(attn_weights,
-                                             p=self.dropout,
-                                             training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        # see: https://facebookresearch.github.io/xformers/components/ops.html
-        # out = xops.memory_efficient_attention_forward(
-        #     query_states,
-        #     key_states,
-        #     value_states,
-        #     p=self.dropout,
-        #     scale=self.scale,
-        # )
-        out = attn_output.view(batch_size, q_len, -1)
+        out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
         return attn_output
 

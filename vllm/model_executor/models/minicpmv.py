@@ -141,6 +141,8 @@ class Resampler2_5(BaseResampler):
         self.max_size = max_size
         self._set_2d_pos_cache(self.max_size)
 
+        #self.apply(self._init_weights)
+
     def _set_2d_pos_cache(self,
                           max_size: Tuple[int, int],
                           device: torch.types.Device = "cpu") -> None:
@@ -859,14 +861,47 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
 
 class MiniCPMV2_6(MiniCPMVBaseModel):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
-        super().__init__(config, multimodal_config, cache_config, quant_config)
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+    # LoRA specific attributes
+    supported_lora_modules = [
+        # vision encoder
+        "fc1",
+        "fc2",
+        "out_proj",
+        # language model
+        "qkv_proj",  # same name with vision encoder
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+        # resampler
+        "kv_proj",
+    ]
+
+    # BitandBytes specific attributes
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (2, 6)
 
     def init_llm(
@@ -947,7 +982,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
             all_pixel_values.type(dtype).to(device),
             patch_attention_mask=patch_attn_mask,
             tgt_sizes=tgt_sizes.to(device),
-        ).last_hidden_state
+        )
 
         return self.resampler(vision_embedding, tgt_sizes)
 

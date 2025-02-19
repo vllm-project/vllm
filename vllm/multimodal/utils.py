@@ -118,20 +118,29 @@ class MediaConnector:
         fetch_timeout: Optional[int] = None,
     ) -> _M:
         url_spec = urlparse(url)
-
         if url_spec.scheme.startswith("http"):
-            connection = self.connection
-            data = await connection.async_get_bytes(url, timeout=fetch_timeout)
+            try:
+                import requests
+                image = Image.open(requests.get(url, stream=True).raw)
+                return image
+            except:
+                connection = self.connection
+                data = await connection.async_get_bytes(url, timeout=fetch_timeout)
 
-            return media_io.load_bytes(data)
+                return media_io.load_bytes(data)
 
         if url_spec.scheme == "data":
             return self._load_data_url(url_spec, media_io)
 
         if url_spec.scheme == "file":
             return self._load_file_url(url_spec, media_io)
+    
+        import os
+        if url_spec.scheme == "" and os.path.exists(url):
+            image = Image.open(url).convert('RGB')
+            return image
 
-        msg = "The URL must be either a HTTP, data or file URL."
+        msg = "The URL must be either a HTTP, data, file URL or a exist path."
         raise ValueError(msg)
 
     def fetch_audio(

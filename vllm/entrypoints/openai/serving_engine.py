@@ -32,7 +32,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
-from vllm.inputs import TokensPrompt
+from vllm.inputs import TokensPrompt, TokenInputs
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -434,8 +434,9 @@ class OpenAIServing:
                 prompt=tokenizer.decode(request_prompt),
                 prompt_token_ids=request_prompt)
 
-        engine_prompt = TokensPrompt(
-            prompt_token_ids=prompt_inputs["prompt_token_ids"])
+        engine_prompt = TokenInputs(
+            prompt_token_ids=prompt_inputs["prompt_token_ids"],
+            prompt=prompt_inputs["prompt"])
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
 
