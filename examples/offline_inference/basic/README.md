@@ -76,7 +76,6 @@ Try one yourself by downloading a GUFF quantised model and using the following a
 from huggingface_hub import hf_hub_download
 repo_id = "bartowski/Phi-3-medium-4k-instruct-GGUF"
 filename = "Phi-3-medium-4k-instruct-IQ2_M.gguf"
-tokenizer = "microsoft/Phi-3-medium-4k-instruct"
 print(hf_hub_download(repo_id, filename=filename))
 ```
 
