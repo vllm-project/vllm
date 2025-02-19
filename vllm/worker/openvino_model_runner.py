@@ -330,7 +330,6 @@ class OpenVINOModelRunner(ModelRunnerBase):
     def execute_model(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        kv_caches: List[Tuple["ov.Tensor", "ov.Tensor"]],
     ) -> Optional[SamplerOutput]:
         (
             input_tokens,
@@ -346,10 +345,6 @@ class OpenVINOModelRunner(ModelRunnerBase):
             input_tokens,
             "positions":
             input_positions,
-            "kv_caches":
-            kv_caches,
-            "attn_metadata":
-            attn_metadata,
             **MultiModalKwargs.as_kwargs(multi_modal_kwargs or {},
                                          device=self.device),
         }
