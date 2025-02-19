@@ -945,11 +945,8 @@ def grouped_topk(hidden_states: torch.Tensor,
         # scores for expert selection but original scores for routing weights
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
-        group_scores = (
-            scores.view(num_token, num_expert_group, -1)
-            .topk(2, dim=-1)[0]
-            .sum(dim=-1)
-        )
+        group_scores = (scores.view(num_token, num_expert_group,
+                                    -1).topk(2, dim=-1)[0].sum(dim=-1))
     else:
         group_scores = scores.view(num_token, num_expert_group,
                                    -1).max(dim=-1).values  # [n, n_group]
@@ -960,7 +957,8 @@ def grouped_topk(hidden_states: torch.Tensor,
     score_mask = group_mask.unsqueeze(-1).expand(
         num_token, num_expert_group,
         scores.shape[-1] // num_expert_group).reshape(num_token, -1)  # [n, e]
-    tmp_scores = scores.masked_fill(~score_mask.bool(), float("-inf"))  # [n, e]
+    tmp_scores = scores.masked_fill(~score_mask.bool(),
+                                    float("-inf"))  # [n, e]
 
     if e_score_correction_bias is not None:
         topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)[1]
