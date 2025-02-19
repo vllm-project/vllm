@@ -394,6 +394,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Note: The w13_weight was removed by INC.
         # num_experts = layer.w13_weight.shape[0]
         num_experts = layer.num_experts
+        if num_expert_group is None:
+            num_expert_group = 8
         NUM_EXPERT_GROUPS = num_expert_group
         n_expert_slice = num_experts // NUM_EXPERT_GROUPS
         assert n_expert_slice * NUM_EXPERT_GROUPS == num_experts
