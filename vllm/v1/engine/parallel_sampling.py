@@ -108,10 +108,7 @@ class ParallelSamplingRequest:
                                              key=lambda x: x.index)
         return self.request_output
 
-    def get_child_request_id(
-        self,
-        index: int,
-    ) -> str:
+    def get_child_request_id(self, index: int) -> str:
         return f"{index}_{self.request_id}"
 
     def _process_output(
