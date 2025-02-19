@@ -125,9 +125,9 @@ class SchedulerOutput:
                                                        repr=False)
 
     @property
-    def grammar_bitmask(self) -> Optional[torch.Tensor]:
+    def grammar_bitmask(self) -> Optional["torch.Tensor"]:
         return self._grammar_bitmask
 
     @grammar_bitmask.setter
-    def grammar_bitmask(self, bitmask: torch.Tensor) -> None:
+    def grammar_bitmask(self, bitmask: "torch.Tensor") -> None:
         self._grammar_bitmask = bitmask
