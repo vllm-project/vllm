@@ -130,7 +130,8 @@ class MixtralMoE(nn.Module):
                                      quant_config=None)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_dim = hidden_states.shape
+        bs, seq_len, hidden_dim = hidden_states.shape
+        num_tokens = bs * seq_len
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
