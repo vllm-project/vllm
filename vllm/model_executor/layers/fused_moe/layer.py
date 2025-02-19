@@ -413,7 +413,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         #   num_experts = 256 // 16 = 16
         #   num_expert_group = 8
         #   n_expert_slice = 16 // 8 = 2
-        rank_debug(f"num_experts: {num_experts}, n_expert_slice: {n_expert_slice}, num_expert_group: {num_expert_group}")
+        # rank_debug(f"num_experts: {num_experts}, n_expert_slice: {n_expert_slice}, num_expert_group: {num_expert_group}")
         assert n_expert_slice * num_expert_group == num_experts
         for i in range(num_expert_group):
             _temp_expert_group = getattr(layer, f"_temp_expert_group_{i}")
