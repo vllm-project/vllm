@@ -358,7 +358,6 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
     # LoRA specific attributes
     embedding_modules = {"embed_tokens": "input_embeddings"}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

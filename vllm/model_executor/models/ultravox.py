@@ -359,10 +359,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
-    # LoRA specific attributes
-    embedding_modules = {}
-    embedding_padding_modules = []
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 

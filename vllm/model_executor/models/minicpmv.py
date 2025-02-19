@@ -1429,10 +1429,6 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
     which is not conducive to the current integration logic of LoRA and
     bitsandbytes in vLLM. Therefore, it is necessary to separate them.
     """
-    # Ensure that the LoRA support check passes when the class is not
-    # initialized, but set all these attributes to empty.
-    # These will be updated when an instance class is selected
-    packed_modules_mapping = {}
 
     def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config

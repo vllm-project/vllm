@@ -334,6 +334,8 @@ class LoRAModelManager(AdapterModelManager):
         self.scaling_factor_to_offset: Dict[float, int] = {}
         super().__init__(model)
         self.supported_lora_modules = get_supported_lora_modules(self.model)
+        assert self.supported_lora_modules, "No supported LoRA modules found in"
+        f"{self.model.__class__.__name__}."
         if lora_config.long_lora_scaling_factors:
             # We need to replace rotary emb layer to do batch computation
             # for long lora.
