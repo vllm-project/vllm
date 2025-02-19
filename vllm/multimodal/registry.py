@@ -266,6 +266,7 @@ class MultiModalRegistry:
             return processor.info.get_mm_max_tokens_per_item(
                 seq_len, mm_limits)
 
+        print(self._plugins['image'].get_max_multimodal_tokens(model_config), self._plugins['image'].get_max_multimodal_tokens)
         return {
             key: plugin.get_max_multimodal_tokens(model_config)
             for key, plugin in self._plugins.items()
@@ -285,6 +286,7 @@ class MultiModalRegistry:
             usage of a model.
         """
         mm_limits = self.get_mm_limits_per_prompt(model_config)
+        print("mm_limits", mm_limits)
 
         return {
             key: max_tokens_per_mm_item

@@ -317,6 +317,7 @@ class InputPreprocessor:
         * :class:`SingletonInputs` instance
         """
         parsed = parse_singleton_prompt(prompt)
+        print("CALLED PROCESSOR", parsed["type"])
 
         if parsed["type"] == "str":
             prompt_text = parsed["content"]

@@ -131,6 +131,7 @@ class LLMEngine:
     ) -> None:
 
         # 1) Process raw inputs into the request.
+        print("CALL add_request", prompt, self.processor)
         request = self.processor.process_inputs(request_id, prompt, params,
                                                 arrival_time, lora_request,
                                                 trace_headers,

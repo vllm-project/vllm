@@ -176,6 +176,7 @@ class InputProcessingContext(InputContext):
             allow_var_kwargs=True,
         )
 
+        # print("CTX", data.keys(), merged_kwargs.keys())
         try:
             return hf_processor(**data, **merged_kwargs, return_tensors="pt")
         except Exception as exc:
@@ -461,6 +462,7 @@ class InputRegistry:
             processor,
         )
 
+        print("process_input", processor, mm_processor_kwargs.keys())
         processed_inputs = processor(
             InputContext(model_config),
             inputs,

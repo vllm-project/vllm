@@ -691,6 +691,11 @@ class LLM:
             ]
 
         tokenizer = self.get_tokenizer()
+        model_config = self.llm_engine.processor.input_preprocessor.model_config
+        mm_processor = self.llm_engine.processor.input_preprocessor.mm_registry.create_processor(model_config, tokenizer)
+        processor = mm_processor.info.ctx.get_hf_processor()
+        chat_template = processor.chat_template
+
         model_config = self.llm_engine.get_model_config()
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,

@@ -542,6 +542,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         remaining blocks.
         """
         computed_block_nums = inter_data.computed_block_nums
+        print("cache hit", computed_block_nums is not None, inter_data.is_prompt)
 
         # Note that prefix caching does not support sliding window.
         prefix_cache_hit = (computed_block_nums is not None
@@ -651,10 +652,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Note that when is_prompt=True, we expect only one sequence
         # in the group.
         if not self.enable_prompt_adapter:
+            print("no enable_prompt_adapter")
             return
 
         prompt_adapter_id = seq_group_metadata.prompt_adapter_id
         if prompt_adapter_id <= 0 or not inter_data.is_prompt:
+            print("no prompt_adapter_id", prompt_adapter_id)
             return
 
         # We expect only one sequence in the group when is_prompt=True.
@@ -670,6 +673,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.prompt_adapter_prompt_mapping = [prompt_adapter_id] * (
             query_len if seq_group_metadata.sampling_params
             and seq_group_metadata.sampling_params.prompt_logprobs else 1)
+        print("prompt adapters", inter_data.prompt_adapter_index_mapping, inter_data.prompt_adapter_prompt_mapping)
 
     def _compute_multi_modal_input(self, inter_data: InterDataForSeqGroup,
                                    seq_group_metadata: SequenceGroupMetadata):
@@ -683,9 +687,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if not mm_data:
             return
 
+        # print("seq_group_metadata", seq_group_metadata, positions)
         if self.runner.mm_registry.has_processor(self.runner.model_config):
             mm_kwargs = mm_data
         else:
+            print("RUN INPUT MAPPER AGAIN BUT WHY")
             mm_kwargs = self.multi_modal_input_mapper(
                 mm_data,
                 seq_group_metadata.mm_processor_kwargs,
@@ -693,6 +699,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         inter_data.multi_modal_kwargs = mm_kwargs
         inter_data.multi_modal_placeholder_maps = placeholder_maps
+        print("placeholder_maps", placeholder_maps["image"].src_ranges, placeholder_maps["image"].dest_ranges)
 
         # special processing for mrope position deltas.
         if self.runner.model_config.uses_mrope:
@@ -752,12 +759,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             encoder_seq_len=encoder_seq_len)
 
         self.inter_data_list.append(inter_data)
+        # print("input_tokens", inter_data.input_tokens)
 
         for seq_idx in range(n_seqs):
             for per_seq_fn in self.per_seq_compute_fns:
-                per_seq_fn(inter_data, seq_idx, seq_group_metadata)
+                per_seq_fn(inter_data, seq_idx, seq_group_metadata) # ADDS PLACEHOLDER HERE I GUESS?
         for per_seq_group_fn in self.per_seq_group_compute_fns:
-            per_seq_group_fn(inter_data, seq_group_metadata)
+            per_seq_group_fn(inter_data, seq_group_metadata) # ADDS MM KWARGS HERE
+        # print("inter_data should have mm here!!!", inter_data.multi_modal_kwargs is not None)
 
     def _use_captured_graph(self,
                             batch_size: int,
@@ -977,6 +986,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             if data.multi_modal_kwargs is not None
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
+        # print("building", multi_modal_kwargs.keys())
 
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
@@ -1718,6 +1728,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        if "pixel_values" in multi_modal_kwargs:
+            print('FINALLY FORWARD', model_input.input_tokens.shape, multi_modal_kwargs["pixel_values"].shape)
+        else:
+            print('DECODE', model_input.input_tokens.shape)
         if not bypass_model_exec:
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):

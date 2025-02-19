@@ -38,7 +38,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsQuant
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.inputs import InputRegistry, INPUT_REGISTRY, DummyData
+from vll.Sequence import SequenceData
+from .interfaces import SupportsQuant, SupportsMultiModal
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -119,7 +122,20 @@ def replace_linear_class(
     )
 
 
-class TransformersModel(nn.Module, SupportsQuant):
+def map_auto_class(config):
+    AutoModel
+
+
+def dummy_encoder_data_for_whisper(ctx, seq_len: int, mm_counts):
+    assert mm_counts["image"] == 1
+    return DummyData(
+        SequenceData.from_prompt_token_counts((0, 596)),
+        {"image": np.zeros((3, 336, 336))},
+    )
+
+@INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_whisper)
+@MULTIMODAL_REGISTRY.register_max_multimodal_tokens("image", 576)
+class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
@@ -132,12 +148,12 @@ class TransformersModel(nn.Module, SupportsQuant):
         cache_config = vllm_config.cache_config
 
         self.config = config
-        self.vocab_size = config.vocab_size
-        self.unpadded_vocab_size = config.vocab_size
+        self.vocab_size = config.get_text_config().vocab_size
+        self.unpadded_vocab_size = config.get_text_config().vocab_size
 
         self.model: PreTrainedModel = AutoModel.from_config(
             self.config,
-            attn_implementation="vllm",
+            attn_implementation={"text_config": "vllm", "vision_config": "eager"},
             torch_dtype=vllm_config.model_config.dtype,
             trust_remote_code=vllm_config.model_config.trust_remote_code,
         )
@@ -150,39 +166,42 @@ class TransformersModel(nn.Module, SupportsQuant):
         tp_size = get_tensor_model_parallel_world_size()
         self.attention_instances = [
             Attention(
-                num_heads=divide(config.num_attention_heads, tp_size),
-                head_size=config.head_dim,
+                num_heads=divide(config.get_text_config().num_attention_heads, tp_size),
+                head_size=config.get_text_config().head_dim,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_flash_attention_forward
-                scale=config.head_dim**-0.5,
-                num_kv_heads=divide(config.num_key_value_heads, tp_size),
+                scale=config.get_text_config().head_dim**-0.5,
+                num_kv_heads=divide(config.get_text_config().num_key_value_heads, tp_size),
                 cache_config=cache_config,
                 quant_config=self.quant_config,
-                prefix=f"{i}.attn") for i in range(config.num_hidden_layers)
+                prefix=f"{i}.attn") for i in range(config.get_text_config().num_hidden_layers)
         ]
 
         # Model modifications
         self.replace_vocab_embed_class(self.model)
 
         # ForCausalLM modifications
-        self.lm_head = ParallelLMHead(config.vocab_size,
-                                      config.hidden_size,
+        self.lm_head = ParallelLMHead(config.get_text_config().vocab_size,
+                                      config.get_text_config().hidden_size,
                                       quant_config=self.quant_config,
                                       prefix=maybe_prefix(prefix, "lm_head"))
-        if config.tie_word_embeddings:
+        if config.get_text_config().tie_word_embeddings:
             self.lm_head.weight = self.model.get_input_embeddings().weight
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size, logit_scale)
+                                                config.get_text_config().vocab_size, logit_scale)
         self.sampler = get_sampler()
+
+        MultiModalRegistry()._get_plugin("image").register_max_multimodal_tokens(576)
+        InputRegistry()._dummy_factories_by_model_type[model_cls] = factory
 
     def apply_base_model_tp_plan(self, module: nn.Module, prefix: str = ""):
         """
         Apply the base model tensor parallelization plan to a module.
         Currently only supports linear layers.
         """
-        if (self.config.base_model_tp_plan is None
+        if (self.config.get_text_config().base_model_tp_plan is None
                 and get_tensor_model_parallel_world_size() > 1):
             raise ValueError(
                 "Trying to run tensor parallelization but the model does not "
@@ -190,7 +209,7 @@ class TransformersModel(nn.Module, SupportsQuant):
 
         for child_name, child_module in module.named_children():
             qual_name = maybe_prefix(prefix, child_name)
-            for pattern, style in self.config.base_model_tp_plan.items():
+            for pattern, style in self.config.get_text_config().base_model_tp_plan.items():
                 if re.match(pattern, qual_name) and isinstance(
                         child_module, nn.Linear):
                     new_module = replace_linear_class(child_module, style,
@@ -204,8 +223,8 @@ class TransformersModel(nn.Module, SupportsQuant):
         # Use native set input embeddings
         new_module = VocabParallelEmbedding(
             self.vocab_size,
-            self.config.hidden_size,
-            org_num_embeddings=self.config.vocab_size,
+            self.config.get_text_config().hidden_size,
+            org_num_embeddings=self.vocab_size,
             quant_config=None,
         )
         log_replacement("input embedding", self.model.get_input_embeddings(),
@@ -252,7 +271,10 @@ class TransformersModel(nn.Module, SupportsQuant):
         loaded_params = set[str]()
         for name, loaded_weight in weights:
             if name not in params_dict:
-                name = f"{self.model.base_model_prefix}.{name}"
+                if "lm_head" in name:
+                    name = name.replace("language_model.", "")
+                else:
+                    name = f"{self.model.base_model_prefix}.{name}"
             if name in params_dict:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",

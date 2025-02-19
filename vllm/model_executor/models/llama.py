@@ -375,6 +375,7 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
+        # print(hidden_states.shape)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
