@@ -12,6 +12,7 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+import datetime
 import inspect
 import logging
 import os
@@ -27,7 +28,7 @@ sys.path.append(os.path.abspath("../.."))
 # -- Project information -----------------------------------------------------
 
 project = 'vLLM'
-copyright = '2024, vLLM Team'
+copyright = f'{datetime.datetime.now().year}, vLLM Team'
 author = 'the vLLM Team'
 
 # -- General configuration ---------------------------------------------------
