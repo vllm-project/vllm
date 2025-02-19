@@ -101,6 +101,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 self.driver_worker.execute_method)
 
     def shutdown(self) -> None:
+        logger.info(
+            "Shutting down Ray distributed executor. If you see error log "
+            "from logging.cc regarding SIGTERM received, please ignore because "
+            "this is the expected termination process in Ray.")
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
