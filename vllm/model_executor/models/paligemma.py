@@ -164,6 +164,31 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
         return get_max_siglip_image_tokens(vision_config)
 
 class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo]):
+    
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        hf_config = self.info.get_hf_config()
+        vision_config = hf_config.vision_config
+        max_image_size = vision_config.image_size
+
+        num_images = mm_counts.get("image", 0)
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=max_image_size,
+                                   height=max_image_size,
+                                   num_images=num_images)
+        }
+        #print("kh get_dummy_processor_inputs",max_image_size,num_images)
+        return ProcessorInputs(
+            prompt_text="",
+            mm_data=mm_data,
+        )
+    
+class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingInfo]):
 
     def _call_hf_processor(
         self,
@@ -183,30 +208,6 @@ class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo
             mm_kwargs=mm_kwargs,
         )
     
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        hf_config = self.info.get_hf_config()
-        vision_config = hf_config.vision_config
-        max_image_size = vision_config.image_size
-
-        num_images = mm_counts.get("image", 0)
-
-        mm_data = {
-            "image":
-            self._get_dummy_images(width=max_image_size,
-                                   height=max_image_size,
-                                   num_images=num_images)
-        }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
-    
-class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingInfo]):
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
