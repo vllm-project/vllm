@@ -113,10 +113,9 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     def get_num_unfinished_requests(self) -> int:
-        num_core_reqs = self.output_processor.get_num_unfinished_requests()
-        num_child_reqs = self._num_parallel_sampling_child_requests()
-        num_parent_reqs = self._num_parallel_sampling_requests()
-        return num_core_reqs + num_parent_reqs - num_child_reqs
+        """Get num unfinished requests, accounting for parallel sampling."""
+        return (self.output_processor.get_num_unfinished_requests() +
+                len(self.parallel_parent_reqs) - len(self.parallel_child_reqs))
 
     def has_unfinished_requests(self) -> bool:
         return self.output_processor.has_unfinished_requests()
@@ -258,14 +257,11 @@ class LLMEngine:
                 agg_outputs.append(c_out)
         return agg_outputs
 
-    def _num_parallel_sampling_requests(self) -> int:
-        return len(self.parallel_parent_reqs)
-
     def _num_parallel_sampling_child_requests(self) -> int:
         return len(self.parallel_child_reqs)
 
     def step(self) -> List[RequestOutput]:
-        num_parallel_reqs = self._num_parallel_sampling_requests()
+        num_parallel_reqs = len(self.parallel_parent_reqs)
 
         # Ensure that parallel sampling logic gets reset after the
         # engine finishes processing this batch
@@ -286,8 +282,7 @@ class LLMEngine:
         if num_parallel_reqs > 0 and len(request_outputs) > 0:
             # Process parallel sampling child request outputs
             return self._aggregate_parallel_sampling_outputs(request_outputs)
-        else:
-            return request_outputs
+        return request_outputs
 
     def get_model_config(self):
         return self.model_config
