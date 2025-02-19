@@ -29,6 +29,8 @@ QUANTIZATION_METHODS: List[str] = [
     "neuron_quant",
     "ipex",
     "inc",
+    "inc_p",
+    "inc_q",
     "quark"
 ]
 
