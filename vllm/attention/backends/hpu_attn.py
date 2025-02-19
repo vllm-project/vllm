@@ -80,7 +80,7 @@ class HPUMLAAttentionBackend(HPUAttentionBackend):
         return (num_blocks, block_size, head_size//9*1), (num_blocks, block_size, head_size//9*8)
     
     @staticmethod
-    def get_impl_cls() -> Type["HPUAttentionImpl"]:
+    def get_impl_cls() -> Type["HPUMLAImpl"]:
         return HPUMLAImpl
 
     @staticmethod
