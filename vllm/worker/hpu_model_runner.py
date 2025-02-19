@@ -19,6 +19,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import torch
+import torch.distributed
 import torch.nn as nn
 import vllm_hpu_extension.environment as environment
 from vllm_hpu_extension.bucketing import HPUBucketingContext
@@ -1977,6 +1978,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             logger.info(f"[rank: {rank}] finalize calibration")
         else:
             logger.info(f"[rank: {rank}] Can't finalize calibration")
+        torch.distributed.barrier()
 
     @property
     def vocab_size(self) -> int:
