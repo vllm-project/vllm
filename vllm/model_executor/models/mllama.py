@@ -39,6 +39,7 @@ from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -824,8 +825,6 @@ class MllamaTextCrossAttention(nn.Module):
         attention_mask: Optional[torch.Tensor],
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv_dec, _ = self.qkv_proj(hidden_states)
         q, _, _ = qkv_dec.split(
@@ -846,14 +845,11 @@ class MllamaTextCrossAttention(nn.Module):
         q = self.q_norm(q)
 
         if attention_mask is not None:
-            output = self._attention_with_mask(q, k, v, kv_cache,
-                                               attention_mask,
-                                               kv_range_for_decode,
-                                               attn_metadata)
+            output = self._attention_with_mask(q, k, v, attention_mask,
+                                               kv_range_for_decode)
         else:
             output = self.attn(
-                q.view(-1, self.num_local_heads * self.head_dim), k, v,
-                kv_cache, attn_metadata)
+                q.view(-1, self.num_local_heads * self.head_dim), k, v)
         out, _ = self.o_proj(output)
         return out
 
@@ -862,11 +858,11 @@ class MllamaTextCrossAttention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        kv_cache: torch.Tensor,
         attention_mask: torch.Tensor,
         kv_range_for_decode: List[Tuple[int, int]],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        kv_cache = self.attn.kv_cache
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         # Skip writing kv-cache for the initial profiling run.
         if len(kv_cache.shape) > 1:
             i = torch.ones(1, dtype=torch.float32)

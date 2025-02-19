@@ -107,7 +107,6 @@ class BambaMixerDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
@@ -120,8 +119,8 @@ class BambaMixerDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-        hidden_states = self.mamba(hidden_states, attn_metadata,
-                                   mamba_cache_params, sequence_idx)
+        hidden_states = self.mamba(hidden_states, mamba_cache_params,
+                                   sequence_idx)
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(
             hidden_states, residual)
@@ -215,15 +214,13 @@ class BambaAttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -231,8 +228,6 @@ class BambaAttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         **kwargs,
     ):
@@ -246,8 +241,6 @@ class BambaAttentionDecoderLayer(nn.Module):
         hidden_states = self.self_attention(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(
@@ -348,9 +341,7 @@ class BambaModel(nn.Module):
         num_attn = 0
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            kv_cache = None
             if isinstance(layer, BambaAttentionDecoderLayer):
-                kv_cache = kv_caches[num_attn]
                 num_attn += 1
 
             layer_mamba_cache_params = None
@@ -361,8 +352,6 @@ class BambaModel(nn.Module):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
                 residual=residual,
                 mamba_cache_params=layer_mamba_cache_params,
                 sequence_idx=seq_idx,

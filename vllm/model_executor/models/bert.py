@@ -152,13 +152,8 @@ class BertLayer(nn.Module):
                                  quant_config=quant_config,
                                  prefix=f"{prefix}.output")
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-    ):
-        attn_output = self.attention(hidden_states, kv_cache, attn_metadata)
+    def forward(self, hidden_states: torch.Tensor):
+        attn_output = self.attention(hidden_states)
         intermediate_output = self.intermediate(attn_output)
         output = self.output(intermediate_output, attn_output)
         return output
@@ -191,10 +186,8 @@ class BertAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        self_output = self.self(hidden_states, kv_cache, attn_metadata)
+        self_output = self.self(hidden_states)
         return self.output(self_output, hidden_states)
 
 
@@ -246,12 +239,10 @@ class BertSelfAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        output = self.attn(q, k, v, kv_cache, attn_metadata)
+        output = self.attn(q, k, v)
         return output
 
 

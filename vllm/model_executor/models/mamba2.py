@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """PyTorch MAMBA2 model."""
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -10,6 +10,7 @@ from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
@@ -122,7 +123,6 @@ class Mamba2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -142,6 +142,7 @@ class Mamba2Model(nn.Module):
         # proper continuous batching computation including
         # chunked prefill
         seq_idx = None
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         if attn_metadata.num_prefills > 0:
             seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
             for i, (srt, end) in enumerate(
@@ -224,8 +225,6 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[KVCache],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
@@ -238,9 +237,8 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
-        hidden_states = self.backbone(input_ids, positions, attn_metadata,
-                                      mamba_cache_params, intermediate_tensors,
-                                      inputs_embeds)
+        hidden_states = self.backbone(input_ids, positions, mamba_cache_params,
+                                      intermediate_tensors, inputs_embeds)
 
         return hidden_states
 

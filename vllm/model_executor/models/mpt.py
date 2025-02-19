@@ -125,8 +125,6 @@ class MPTAttention(nn.Module):
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         del position_ids  # unused.
         qkv, _ = self.Wqkv(hidden_states)
@@ -136,7 +134,7 @@ class MPTAttention(nn.Module):
         if self.qk_ln:
             q = self.q_ln(q)
             k = self.k_ln(k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -196,15 +194,11 @@ class MPTBlock(nn.Module):
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         x = self.norm_1(hidden_states)
         x = self.attn(
             position_ids=position_ids,
             hidden_states=x,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         hidden_states = hidden_states + x
         x = self.norm_2(hidden_states)

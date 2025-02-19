@@ -142,8 +142,6 @@ class PersimmonAttention(nn.Module):
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # [seq_length, 3 x hidden_size]
         qkv, _ = self.query_key_value(hidden_states)
@@ -161,7 +159,7 @@ class PersimmonAttention(nn.Module):
             k = self._merge_heads(k)
 
         q, k = self.rotary_emb(position_ids, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.dense(attn_output)
         return output
 
@@ -189,8 +187,6 @@ class PersimmonDecoderLayer(nn.Module):
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -200,8 +196,6 @@ class PersimmonDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             position_ids=position_ids,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states
 
