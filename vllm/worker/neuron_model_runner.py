@@ -312,7 +312,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def execute_model(
         self,
         model_input: ModelInputForNeuron,
-        kv_caches: Optional[List[torch.Tensor]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
