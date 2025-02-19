@@ -184,6 +184,7 @@ def get_quant_config(model_config: ModelConfig,
         return quant_cls()
 
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
+    print("hf_folder:", hf_folder)
 
     quant_config_files = [
         f for f in config_files if any(
