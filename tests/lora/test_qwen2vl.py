@@ -21,7 +21,7 @@ class TestConfig:
     max_loras: int = 2
     max_lora_rank: int = 16
     max_model_len: int = 4096
-    mm_processor_kwargs: Dict[str, int] = None
+    mm_processor_kwargs: Optional[Dict[str, int]] = None
 
     def __post_init__(self):
         if self.mm_processor_kwargs is None:
