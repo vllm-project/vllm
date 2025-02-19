@@ -410,7 +410,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # )
             htorch.core.mark_step()
             # logger.debug(f"done mark step {i}")
-        rank_debug(f"final_hidden_states.shape: {final_hidden_states.shape}")
+        # rank_debug(f"final_hidden_states.shape: {final_hidden_states.shape}")
         return final_hidden_states.view(-1, x.shape[1])
 
 
@@ -579,6 +579,8 @@ class FusedMoE(torch.nn.Module):
         if layer._need_init_dynamic_fused_moe_lst:
             num_experts_on_rank = self.num_experts
             layer._need_init_dynamic_fused_moe_lst = False
+            if num_expert_group is None:
+                num_expert_group = 8
             NUM_EXPERT_GROUPS = num_expert_group
             num_expert_per_group = num_experts_on_rank// NUM_EXPERT_GROUPS
             n_expert_slice = num_experts_on_rank // NUM_EXPERT_GROUPS
