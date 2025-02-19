@@ -400,8 +400,8 @@ class AriaProcessingInfo(BaseProcessingInfo):
     def get_vision_config(self):
         return self.get_hf_config().vision_config
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(AriaProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(AriaProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}

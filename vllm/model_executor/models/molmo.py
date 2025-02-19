@@ -1200,8 +1200,8 @@ class MolmoProcessorWrapper:
 
 class MolmoProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(self) -> MolmoProcessorWrapper:
-        processor = self.ctx.get_hf_processor()
+    def get_hf_processor(self, **kwargs: object) -> MolmoProcessorWrapper:
+        processor = self.ctx.get_hf_processor(**kwargs)
         return MolmoProcessorWrapper(processor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:

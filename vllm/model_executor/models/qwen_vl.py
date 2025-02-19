@@ -519,8 +519,13 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
 
         return _get_tokenizer_without_image_pad(tokenizer)
 
-    def get_hf_processor(self) -> QwenVLProcessor:
-        return QwenVLProcessor(self.get_hf_config(), self.get_tokenizer())
+    def get_hf_processor(self, **kwargs: object) -> QwenVLProcessor:
+        return self.ctx.init_processor(
+            QwenVLProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}

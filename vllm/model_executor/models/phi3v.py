@@ -313,11 +313,12 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         self,
         *,
         num_crops: Optional[int] = None,
+        **kwargs: object,
     ) -> ProcessorMixin:
         if num_crops is not None:
-            return self.ctx.get_hf_processor(num_crops=num_crops)
+            kwargs["num_crops"] = num_crops
 
-        return self.ctx.get_hf_processor()
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}

@@ -97,8 +97,8 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     def get_hf_config(self) -> LlavaOnevisionLikeConfig:
         return self.ctx.get_hf_config(LlavaOnevisionConfig)
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(LlavaOnevisionProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(LlavaOnevisionProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}

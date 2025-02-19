@@ -4,7 +4,7 @@ import pytest
 from transformers import Idefics3Config
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ....conftest import _ImageAssets
 from ...utils import build_model_context
@@ -22,9 +22,15 @@ models = ["HuggingFaceM4/Idefics3-8B-Llama3"]
     ])
 # yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
-def test_processor_override(image_assets: _ImageAssets, model: str,
-                            mm_processor_kwargs: dict[str, object],
-                            expected_toks_per_img: int, num_imgs: int):
+@pytest.mark.parametrize("kwargs_on_init", [True, False])
+def test_processor_override(
+    image_assets: _ImageAssets,
+    model: str,
+    mm_processor_kwargs: dict[str, object],
+    expected_toks_per_img: int,
+    num_imgs: int,
+    kwargs_on_init: bool,
+):
     """Ensure input_processor_for_idefics3 handles num_crops properly."""
     # Same as the previous test - don't initialize mm_processor_kwargs
     # in this test and assume that the kwargs will be correctly expanded by
@@ -33,15 +39,15 @@ def test_processor_override(image_assets: _ImageAssets, model: str,
         model_name=model,
         tokenizer_name=model,
         trust_remote_code=True,
-        mm_processor_kwargs=None,
+        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    tokenizer = cached_get_tokenizer(ctx.model_config.tokenizer)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
         tokenizer=tokenizer,
     )
-    hf_processor = processor.info.get_hf_processor(**mm_processor_kwargs)
+    hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
 
     # Build the image str / prompt based on the number of images we pass
     placeholders = "<image>" if num_imgs == 1 else "\n".join(
@@ -54,8 +60,10 @@ def test_processor_override(image_assets: _ImageAssets, model: str,
     dummy_image = image_assets[0].pil_image.resize(dummy_image_size)
     mm_data = {"image": [dummy_image] * num_imgs}
 
-    processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
+    processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+
     # Ensure the placeholders format are correct
+    hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
     hf_processed_inputs = hf_processor(text=prompt, images=mm_data["image"])
     assert processed_inputs["prompt_token_ids"] == hf_processed_inputs[
         "input_ids"][0]

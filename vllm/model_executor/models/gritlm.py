@@ -15,9 +15,9 @@ from vllm.model_executor.layers.pooler import PoolerHead
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
-from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            PoolingSequenceGroupOutput)
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 logger = init_logger(__name__)
 
@@ -29,12 +29,7 @@ class GritLMPooler(nn.Module):
 
         self.model_config = model_config
 
-        tokenizer = cached_get_tokenizer(
-            self.model_config.tokenizer,
-            tokenizer_mode=self.model_config.tokenizer_mode,
-            tokenizer_revision=self.model_config.tokenizer_revision,
-            trust_remote_code=self.model_config.trust_remote_code,
-        )
+        tokenizer = cached_tokenizer_from_config(self.model_config)
 
         # Collect the tokens needed for pattern matching.
         # "▁<" is different from "_<". The former uses "▁" to indicate that

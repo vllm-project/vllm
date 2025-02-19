@@ -72,8 +72,8 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
     def get_hf_config(self) -> LlavaNextLikeConfig:
         return self.ctx.get_hf_config(LlavaNextConfig)
 
-    def get_hf_processor(self):
-        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
 
         # In case patch_size is omitted from `processor_config.json`
         # e.g. for E5-V: https://huggingface.co/royokong/e5-v

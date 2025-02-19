@@ -56,8 +56,8 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(LlavaNextVideoProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(LlavaNextVideoProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"video": 1}

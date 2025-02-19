@@ -29,7 +29,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              NestedTensors)
 from vllm.multimodal.audio import resample_audio
 from vllm.sequence import SequenceData
-from vllm.transformers_utils.processor import cached_get_processor
+from vllm.transformers_utils.processor import cached_processor_from_config
 
 from .interfaces import SupportsMultiModal, SupportsTranscription
 from .utils import AutoWeightsLoader, WeightsMapper, make_layers
@@ -579,7 +579,7 @@ def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
                                    mm_counts: Mapping[str, int]):
     assert mm_counts["audio"] == 1
     num_tokens = get_max_whisper_audio_tokens(ctx)
-    processor = cached_get_processor(ctx.model_config.model)
+    processor = cached_processor_from_config(ctx.model_config)
     chunk_length = processor.feature_extractor.chunk_length
     sampling_rate = processor.feature_extractor.sampling_rate
     num_samples = chunk_length * sampling_rate
@@ -596,7 +596,7 @@ def input_processor_for_whisper(ctx: InputContext, inputs):
         multi_modal_data["audio"] = multi_modal_data["audio"][0]
     # Resample and process audio
     audio, orig_sr = multi_modal_data["audio"]
-    processor = cached_get_processor(ctx.model_config.model)
+    processor = cached_processor_from_config(ctx.model_config)
     target_sr = processor.feature_extractor.sampling_rate
     audio = resample_audio(audio, orig_sr=orig_sr, target_sr=target_sr)
     multi_modal_data["audio"] = (audio, target_sr)
@@ -618,7 +618,7 @@ def input_mapper_for_whisper(
     if len(multi_modal_data) == 0:
         return MultiModalKwargs()
 
-    processor = cached_get_processor(ctx.model_config.model)
+    processor = cached_processor_from_config(ctx.model_config)
     sampling_rate = processor.feature_extractor.sampling_rate
 
     audios = [audio for audio, _ in multi_modal_data]

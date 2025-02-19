@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
-from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -11,7 +10,7 @@ from PIL import Image
 
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import get_image_processor
+from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.utils import is_list_of
 
 from .base import MediaIO, MultiModalPlugin
@@ -21,8 +20,6 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
-
-cached_get_image_processor = lru_cache(get_image_processor)
 
 
 class ImagePlugin(MultiModalPlugin):

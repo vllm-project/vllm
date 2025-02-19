@@ -58,8 +58,8 @@ class ChameleonProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(ChameleonConfig)
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(ChameleonProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(ChameleonProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}

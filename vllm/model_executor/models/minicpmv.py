@@ -331,11 +331,8 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
-    def get_hf_processor(
-        self,
-        **kwargs: object,
-    ):
-        hf_processor = self.ctx.get_hf_processor()
+    def get_hf_processor(self, **kwargs: object):
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
 
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
