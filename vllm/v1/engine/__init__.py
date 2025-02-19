@@ -2,7 +2,7 @@
 
 import enum
 import time
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import msgspec
 
@@ -106,6 +106,18 @@ class EngineCoreOutput(
         return self.finish_reason is not None
 
 
+class UtilityOutput(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        gc=False):  # type: ignore[call-arg]
+
+    call_id: int
+
+    # Non-None implies the call failed, result should be None.
+    failure_message: Optional[str] = None
+    result: Any = None
+
+
 class EngineCoreOutputs(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -116,9 +128,11 @@ class EngineCoreOutputs(
     # e.g. columnwise layout
 
     # [num_reqs]
-    outputs: List[EngineCoreOutput]
-    scheduler_stats: Optional[SchedulerStats]
+    outputs: List[EngineCoreOutput] = []
+    scheduler_stats: Optional[SchedulerStats] = None
     timestamp: float = 0.0
+
+    utility_output: Optional[UtilityOutput] = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -132,6 +146,4 @@ class EngineCoreRequestType(enum.Enum):
     """
     ADD = b'\x00'
     ABORT = b'\x01'
-    PROFILE = b'\x02'
-    RESET_PREFIX_CACHE = b'\x03'
-    ADD_LORA = b'\x04'
+    UTILITY = b'\x02'
