@@ -11,6 +11,10 @@ void LLMM1(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
 void wvSpltK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
              const int64_t N_in, const int64_t CuCount);
 
+void wvSpltKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
+              at::Tensor& scale_a, at::Tensor& scale_b, const int64_t N_in,
+              const int64_t Otp_in, const int64_t CuCount);
+
 void paged_attention(torch::Tensor& out, torch::Tensor& exp_sums,
                      torch::Tensor& max_logits, torch::Tensor& tmp_out,
                      torch::Tensor& query, torch::Tensor& key_cache,

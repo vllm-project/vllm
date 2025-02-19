@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import torch
@@ -90,6 +91,36 @@ class TunedGemm:
             return out
         else:
             return None
+
+    def scaled_mm(
+        self,
+        inp: torch.Tensor,
+        weight: torch.Tensor,
+        out_dtype: torch.dtype,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        n = inp.shape[0]
+        if n != 1:
+            return torch._scaled_mm(inp,
+                                    weight,
+                                    out_dtype=out_dtype,
+                                    scale_a=scale_a,
+                                    scale_b=scale_b,
+                                    bias=bias)
+        weightT = weight.t()
+        out = torch.empty(inp.shape[0],
+                          weightT.shape[0],
+                          dtype=out_dtype,
+                          device='cuda')
+
+        Otp = 1  #default bfloat16
+        if out_dtype == torch.float16:
+            Otp = 0
+        ops.wvSpltKQ(weightT, inp, out, scale_a, scale_b, n, Otp,
+                     self.cu_count)
+        return out
 
     def mm(self, inp, weights, bias=None):
         if not support_tuned_gemms:
