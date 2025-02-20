@@ -46,7 +46,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/basic.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/basic.py>
 
 ### `LLM.beam_search`
 
@@ -103,7 +103,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/chat.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic/chat.py>
 
 If the model doesn't have a chat template or you want to specify another one,
 you can explicitly pass a chat template:
