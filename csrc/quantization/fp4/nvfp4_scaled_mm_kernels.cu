@@ -33,67 +33,33 @@
 using namespace cute;
 
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
-struct Fp4GemmSm100Float {
-  // A matrix configuration
-  using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
-  using LayoutATag = cutlass::layout::RowMajor;
-  static constexpr int AlignmentA = 32;
+// Kernel Perf config
+template <typename T>
+struct KernelTraits;
 
-  // B matrix configuration
-  using ElementB = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
-  using LayoutBTag = cutlass::layout::ColumnMajor;
-  static constexpr int AlignmentB = 32;
-
-  // C/D matrix configuration
-  using ElementD = float;
-  using ElementC = float;
-  using LayoutCTag = cutlass::layout::RowMajor;
-  using LayoutDTag = cutlass::layout::RowMajor;
-  static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
-  static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
-  // Kernel functional config
-  using ElementAccumulator = float;
-  using ArchTag = cutlass::arch::Sm100;
-  using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
-
-  // Kernel Perf config
+template <>
+struct KernelTraits<float> {
   using MmaTileShape = Shape<_128, _128, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
   using PerSmTileShape_MNK = Shape<_128, _128, _256>;
-
-  using CollectiveEpilogue =
-      typename cutlass::epilogue::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, PerSmTileShape_MNK, ClusterShape,
-          cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
-          ElementAccumulator, ElementC, LayoutCTag, AlignmentC, ElementD,
-          LayoutDTag, AlignmentD,
-          cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
-
-  using CollectiveMainloop =
-      typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, ElementA, LayoutATag, AlignmentA, ElementB,
-          LayoutBTag, AlignmentB, ElementAccumulator, MmaTileShape,
-          ClusterShape,
-          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-              sizeof(typename CollectiveEpilogue::SharedStorage))>,
-          cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
-
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
-  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
-  using StrideA = typename Gemm::GemmKernel::StrideA;
-  using LayoutA = decltype(cute::make_layout(make_shape(0, 0, 0), StrideA{}));
-  using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFA;
-  using StrideB = typename Gemm::GemmKernel::StrideB;
-  using LayoutB = decltype(cute::make_layout(make_shape(0, 0, 0), StrideB{}));
-  using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFB;
-  using StrideC = typename Gemm::GemmKernel::StrideC;
-  using LayoutC = decltype(cute::make_layout(make_shape(0, 0, 0), StrideC{}));
-  using StrideD = typename Gemm::GemmKernel::StrideD;
-  using LayoutD = decltype(cute::make_layout(make_shape(0, 0, 0), StrideD{}));
 };
 
-struct Fp4GemmSm100Half {
+template <>
+struct KernelTraits<cutlass::half_t> {
+  using MmaTileShape = Shape<_256, _256, _256>;
+  using ClusterShape = Shape<_4, _4, _1>;
+  using PerSmTileShape_MNK = Shape<_128, _256, _256>;
+};
+
+template <>
+struct KernelTraits<cutlass::bfloat16_t> {
+  using MmaTileShape = Shape<_256, _256, _256>;
+  using ClusterShape = Shape<_4, _4, _1>;
+  using PerSmTileShape_MNK = Shape<_128, _256, _256>;
+};
+
+template <typename T>
+struct Fp4GemmSm100 {
   // A matrix configuration
   using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
   using LayoutATag = cutlass::layout::RowMajor;
@@ -105,8 +71,8 @@ struct Fp4GemmSm100Half {
   static constexpr int AlignmentB = 32;
 
   // C/D matrix configuration
-  using ElementD = cutlass::half_t;
-  using ElementC = cutlass::half_t;
+  using ElementD = T;
+  using ElementC = T;
   using LayoutCTag = cutlass::layout::RowMajor;
   using LayoutDTag = cutlass::layout::RowMajor;
   static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
@@ -117,69 +83,9 @@ struct Fp4GemmSm100Half {
   using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
 
   // Kernel Perf config
-  using MmaTileShape = Shape<_256, _256, _256>;
-  using ClusterShape = Shape<_4, _4, _1>;
-  using PerSmTileShape_MNK = Shape<_128, _256, _256>;
-
-  using CollectiveEpilogue =
-      typename cutlass::epilogue::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, PerSmTileShape_MNK, ClusterShape,
-          cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
-          ElementAccumulator, ElementC, LayoutCTag, AlignmentC, ElementD,
-          LayoutDTag, AlignmentD,
-          cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
-
-  using CollectiveMainloop =
-      typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, ElementA, LayoutATag, AlignmentA, ElementB,
-          LayoutBTag, AlignmentB, ElementAccumulator, MmaTileShape,
-          ClusterShape,
-          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-              sizeof(typename CollectiveEpilogue::SharedStorage))>,
-          cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
-
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
-  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
-  using StrideA = typename Gemm::GemmKernel::StrideA;
-  using LayoutA = decltype(cute::make_layout(make_shape(0, 0, 0), StrideA{}));
-  using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFA;
-  using StrideB = typename Gemm::GemmKernel::StrideB;
-  using LayoutB = decltype(cute::make_layout(make_shape(0, 0, 0), StrideB{}));
-  using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFB;
-  using StrideC = typename Gemm::GemmKernel::StrideC;
-  using LayoutC = decltype(cute::make_layout(make_shape(0, 0, 0), StrideC{}));
-  using StrideD = typename Gemm::GemmKernel::StrideD;
-  using LayoutD = decltype(cute::make_layout(make_shape(0, 0, 0), StrideD{}));
-};
-
-struct Fp4GemmSm100Bfloat16 {
-  // A matrix configuration
-  using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
-  using LayoutATag = cutlass::layout::RowMajor;
-  static constexpr int AlignmentA = 32;
-
-  // B matrix configuration
-  using ElementB = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
-  using LayoutBTag = cutlass::layout::ColumnMajor;
-  static constexpr int AlignmentB = 32;
-
-  // C/D matrix configuration
-  using ElementD = cutlass::bfloat16_t;
-  using ElementC = cutlass::bfloat16_t;
-  using LayoutCTag = cutlass::layout::RowMajor;
-  using LayoutDTag = cutlass::layout::RowMajor;
-  static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
-  static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
-  // Kernel functional config
-  using ElementAccumulator = float;
-  using ArchTag = cutlass::arch::Sm100;
-  using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
-
-  // Kernel Perf config
-  using MmaTileShape = Shape<_256, _256, _256>;
-  using ClusterShape = Shape<_4, _4, _1>;
-  using PerSmTileShape_MNK = Shape<_128, _256, _256>;
+  using MmaTileShape = typename KernelTraits<T>::MmaTileShape;
+  using ClusterShape = typename KernelTraits<T>::ClusterShape;
+  using PerSmTileShape_MNK = typename KernelTraits<T>::PerSmTileShape_MNK;
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
@@ -266,11 +172,12 @@ void runGemm(at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
              at::Tensor const& A_sf, at::Tensor const& B_sf,
              at::Tensor const& alpha, int64_t m, int64_t n, int64_t k,
              cudaStream_t stream) {
-  typename T::Gemm gemm;
+  typename Fp4GemmSm100<T>::Gemm gemm;
 
-  auto arguments = args_from_options<T>(D, A, B, A_sf, B_sf, alpha, m, n, k);
+  auto arguments = args_from_options<Fp4GemmSm100<T>>(D, A, B, A_sf, B_sf,
+                                                      alpha, m, n, k);
 
-  size_t workspace_size = T::Gemm::get_workspace_size(arguments);
+  size_t workspace_size = Fp4GemmSm100<T>::Gemm::get_workspace_size(arguments);
   auto const workspace_options =
       torch::TensorOptions().dtype(torch::kUInt8).device(A.device());
   auto workspace = torch::empty(workspace_size, workspace_options);
@@ -361,11 +268,11 @@ void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
 
   if (out_dtype == at::ScalarType::Half) {
-    runGemm<Fp4GemmSm100Half>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+    runGemm<cutlass::half_t>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else if (out_dtype == at::ScalarType::BFloat16) {
-    runGemm<Fp4GemmSm100Bfloat16>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+    runGemm<cutlass::bfloat16_t>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else if (out_dtype == at::ScalarType::Float) {
-    runGemm<Fp4GemmSm100Float>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+    runGemm<float>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else {
     TORCH_CHECK(false, "Unsupported output data type of nvfp4 mm");
   }
