@@ -15,7 +15,7 @@ from ....conftest import _ImageAssets, HfRunner, PromptImageInput, VllmRunner
 from ...utils import check_logprobs_close
 
 
-MODELS = ["/data/LLM-model/Florence-2-base"]
+MODELS = ["microsoft/Florence-2-base"]
 # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
 # Therefore, we borrow the BartTokenizer from the original Bart model
 TOKENIZER = "facebook/bart-base"
@@ -30,6 +30,19 @@ PROMPTS = [
     "<OCR>",
     "<OD>",
 ]
+
+
+def get_hf_images_prompts(
+        prompts_: list[ExplicitEncoderDecoderPrompt[str, TextPrompt]],
+    ) -> tuple[list[ExplicitEncoderDecoderPrompt[str, str]], list[Image.Image]]:
+    prompts, images = [], []
+    for prompt in prompts_:
+        encoder_prompt = prompt["encoder_prompt"]
+        prompts.append(ExplicitEncoderDecoderPrompt(
+            encoder_prompt=encoder_prompt["prompt"],
+            decoder_prompt=None,))
+        images.append(encoder_prompt["multi_modal_data"]["image"])
+    return prompts, images
 
 
 def vllm_to_hf_output(vllm_output: tuple[list[int], str,
@@ -66,20 +79,8 @@ def run_test(
                                                 num_logprobs=num_logprobs)
             for prompts in inputs
         ]
-    
-    def separate_prompts_images(
-            prompts_: list[ExplicitEncoderDecoderPrompt[str, TextPrompt]],
-        ) -> tuple[list[ExplicitEncoderDecoderPrompt[str, str]], list[Image.Image]]:
-        prompts, images = [], []
-        for prompt in prompts_:
-            encoder_prompt = prompt["encoder_prompt"]
-            prompts.append(ExplicitEncoderDecoderPrompt(
-                encoder_prompt=encoder_prompt["prompt"],
-                decoder_prompt=None,))
-            images.append(encoder_prompt["multi_modal_data"]["image"])
-        return prompts, images
 
-    inputs = [separate_prompts_images(prompts) for prompts in inputs]
+    inputs = [get_hf_images_prompts(prompts) for prompts in inputs]
 
     with hf_runner(model, dtype=dtype, skip_tokenizer_init=True) as hf_model:
         hf_model.model.get_output_embeddings = lambda: \
@@ -107,13 +108,13 @@ def run_test(
     "size_factors",
     [
         # No image
-        # [],
+        [],
         # Single-scale
         [1.0],
         # Single-scale, batched
-        # [1.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0],
         # Multi-scale
-        # [0.25, 0.5, 1.0],
+        [0.25, 0.5, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", ["float"])
