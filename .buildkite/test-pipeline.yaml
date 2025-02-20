@@ -134,7 +134,9 @@ steps:
   - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
+  - tests/distributed/test_dp.py
   commands:
+  - torchrun --nproc-per-node=2 distributed/test_dp.py
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
