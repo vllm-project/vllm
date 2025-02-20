@@ -570,16 +570,16 @@ class TPUModelRunner():
         seq_len: Optional[int] = None,
     ) -> None:
         input_ids = torch.zeros(num_tokens,
-                                     dtype=torch.int32,
-                                     device=self.device)
+                                dtype=torch.int32,
+                                device=self.device)
         position_ids = torch.zeros(num_tokens,
-                                     dtype=torch.int64,
-                                     device=self.device)
+                                   dtype=torch.int64,
+                                   device=self.device)
         slot_mapping = torch.zeros(num_tokens,
                                    dtype=torch.int64,
                                    device=self.device)
         block_tables = torch.zeros(
-            (num_tokens, self.max_num_blocks_per_req),
+            (num_tokens, self.block_table_cpu.shape[1]),
             dtype=torch.int32,
             device=self.device)
         query_start_loc = torch.zeros(num_tokens+1, dtype=torch.int32, device=self.device)
@@ -600,7 +600,7 @@ class TPUModelRunner():
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
             #logger.info(f"xw32 TPUModelRunner.dummy_run. before calling self.model, {input_ids.shape=}, {position_ids.shape=}")
-            self.model(input_ids, position_ids, None, kv_caches, None)
+            self.model(input_ids, position_ids, attn_metadata, kv_caches, None)
             #logger.info(f"xw32 TPUModelRunner.dummy_run. after calling self.model")
 
     def capture_model(self) -> None:
@@ -612,10 +612,14 @@ class TPUModelRunner():
         # xw32: may need to compile for num_seqs.
         start = time.perf_counter()
         num_tokens = 16
+        # The num_tokens_list below is how GPU precompiles.
+        # num_tokens_list = [512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1]
         while True:
             self.dummy_run(self.kv_caches, num_tokens)
-            xm.wait_device_ops()
             logger.info("  -- num_tokens: %d", num_tokens)
+            xm.mark_step()
+            xm.wait_device_ops()
+            # print(f'xw32 capture_model line 620 {self.scheduler_config.max_num_batched_tokens=}')
             if num_tokens >= self.scheduler_config.max_num_batched_tokens:
                 break
             num_tokens *= 2
@@ -693,13 +697,14 @@ class ModelWrapperV1(nn.Module):
         #logger.info("xw32 ModelWrapperV1.forward.")
         # token_ids=tensor([9707,   11,  847,  829,  374, 0...0]
         # position_ids=tensor([0, 1, 2, 3, 4, 0, ..., 0]
-        if attn_metadata is not None:
+        if attn_metadata is not None and kv_caches[0][0].numel() > 0:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it
             # work, we need to flatten the first three dimensions and modify
             # the slot_mapping accordingly.
             # kv_caches: List[Tuple[torch.Tensor, torch.Tensor]]
+            # print(f'xw32 line705 {kv_caches[0][0].shape=}')
             num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
             slot_mapping = attn_metadata.slot_mapping
             slot_mapping = slot_mapping.flatten()

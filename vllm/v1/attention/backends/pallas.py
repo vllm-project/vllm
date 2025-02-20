@@ -12,7 +12,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 
 
-NUM_QUERIES_PER_BLOCK = 128
+NUM_QUERIES_PER_BLOCK = 16
 NUM_KV_PAGES_PER_BLOCK = 128
 
 
