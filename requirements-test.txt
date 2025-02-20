@@ -66,6 +66,7 @@ charset-normalizer==3.4.0
 click==8.1.7
     # via
     #   black
+    #   jiwer
     #   nltk
     #   ray
 colorama==0.4.6
@@ -170,6 +171,8 @@ huggingface-hub==0.26.2
     #   tokenizers
     #   transformers
     #   vocos
+humanize==4.11.0
+    # via runai-model-streamer
 idna==3.10
     # via
     #   anyio
@@ -187,6 +190,8 @@ jinja2==3.1.4
     # via
     #   datamodel-code-generator
     #   torch
+jiwer==3.0.5
+    # via -r requirements-test.in
 jmespath==1.0.1
     # via
     #   boto3
@@ -287,6 +292,7 @@ numpy==1.26.4
     #   patsy
     #   peft
     #   rouge-score
+    #   runai-model-streamer
     #   sacrebleu
     #   scikit-learn
     #   scipy
@@ -470,6 +476,8 @@ pyyaml==6.0.2
     #   timm
     #   transformers
     #   vocos
+rapidfuzz==3.12.1
+    # via jiwer
 ray[adag]==2.40.0
     # via -r requirements-test.in
 redis==5.2.0
@@ -509,6 +517,10 @@ rpds-py==0.20.1
     #   referencing
 rsa==4.7.2
     # via awscli
+runai-model-streamer==0.11.0
+    # via -r requirements-test.in
+runai-model-streamer-s3==0.11.0
+    # via -r requirements-test.in
 s3transfer==0.10.3
     # via
     #   awscli
@@ -589,6 +601,7 @@ torch==2.5.1
     #   encodec
     #   lm-eval
     #   peft
+    #   runai-model-streamer
     #   sentence-transformers
     #   tensorizer
     #   timm
