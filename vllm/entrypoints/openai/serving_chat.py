@@ -6,7 +6,7 @@ import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, List,
                     Optional)
 from typing import Sequence as GenericSequence
-from typing import Union
+from typing import Tuple, Union
 
 from fastapi import Request
 
@@ -21,8 +21,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, PromptTokenUsageInfo,
-    RequestResponseMetadata, ToolCall, UsageInfo)
+    DeltaToolCall, ErrorResponse, FunctionCall, InBandMetrics,
+    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
                                                        ReasoningParserManager)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
@@ -59,12 +59,14 @@ class OpenAIServingChat(OpenAIServing):
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
+        in_band_metrics: Optional[str] = None,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         in_band_metrics=in_band_metrics)
 
         self.response_role = response_role
         self.chat_template = chat_template
@@ -115,8 +117,8 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse,
-               ErrorResponse]:
+    ) -> Tuple[Union[AsyncGenerator[str, None], ChatCompletionResponse,
+                     ErrorResponse], Optional[InBandMetrics]]:
         """
         Chat Completion API similar to OpenAI's API.
 
@@ -127,7 +129,7 @@ class OpenAIServingChat(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
-            return error_check_ret
+            return error_check_ret, None
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
@@ -168,7 +170,7 @@ class OpenAIServingChat(OpenAIServing):
                 return self.create_error_response(
                     "\"auto\" tool choice requires "
                     "--enable-auto-tool-choice and --tool-call-parser to be set"
-                )
+                ), None
 
             tool_dicts = None if request.tools is None else [
                 tool.model_dump() for tool in request.tools
@@ -195,7 +197,7 @@ class OpenAIServingChat(OpenAIServing):
             )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
         request_id = "chatcmpl-" \
                      f"{self._base_request_id(raw_request, request.request_id)}"
@@ -252,7 +254,7 @@ class OpenAIServingChat(OpenAIServing):
                 generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
         assert len(generators) == 1
         result_generator, = generators
@@ -261,7 +263,7 @@ class OpenAIServingChat(OpenAIServing):
         if request.stream:
             return self.chat_completion_stream_generator(
                 request, result_generator, request_id, model_name,
-                conversation, tokenizer, request_metadata)
+                conversation, tokenizer, request_metadata), None
 
         try:
             return await self.chat_completion_full_generator(
@@ -269,7 +271,7 @@ class OpenAIServingChat(OpenAIServing):
                 conversation, tokenizer, request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
@@ -677,7 +679,8 @@ class OpenAIServingChat(OpenAIServing):
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> Union[ErrorResponse, ChatCompletionResponse]:
+    ) -> Tuple[Union[ErrorResponse, ChatCompletionResponse],
+               Optional[InBandMetrics]]:
 
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
@@ -686,12 +689,19 @@ class OpenAIServingChat(OpenAIServing):
             async for res in result_generator:
                 final_res = res
         except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
+            return self.create_error_response("Client disconnected"), None
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(str(e)), None
 
         assert final_res is not None
+        req_inband_metrics: Optional[InBandMetrics] = None
+        if final_res.metrics is not None:
+            req_inband_metrics = InBandMetrics(
+                cpu_kv_cache_utilisation=final_res.metrics.
+                cpu_kv_cache_utilization,
+                gpu_kv_cache_utilisation=final_res.metrics.
+                gpu_kv_cache_utilization)
 
         choices: List[ChatCompletionResponseChoice] = []
 
@@ -725,7 +735,7 @@ class OpenAIServingChat(OpenAIServing):
                     reasoning_parser = self.reasoning_parser(tokenizer)
                 except RuntimeError as e:
                     logger.exception("Error in reasoning parser creation.")
-                    return self.create_error_response(str(e))
+                    return self.create_error_response(str(e)), None
 
                 reasoning_content, content = (
                     reasoning_parser.extract_reasoning_content(
@@ -776,7 +786,7 @@ class OpenAIServingChat(OpenAIServing):
                     tool_parser = self.tool_parser(tokenizer)
                 except RuntimeError as e:
                     logger.exception("Error in tool parser creation.")
-                    return self.create_error_response(str(e))
+                    return self.create_error_response(str(e)), None
 
                 tool_call_info = tool_parser.extract_tool_calls(
                     output.text, request=request)
@@ -850,7 +860,7 @@ class OpenAIServingChat(OpenAIServing):
             prompt_logprobs=final_res.prompt_logprobs,
         )
 
-        return response
+        return response, req_inband_metrics
 
     def _get_top_logprobs(
             self, logprobs: Dict[int, Logprob], top_logprobs: Optional[int],

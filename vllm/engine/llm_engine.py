@@ -1113,6 +1113,9 @@ class LLMEngine:
                         seq_group, output, is_async)
 
             if seq_group.is_finished():
+                # Set inband metrics
+                self._get_stats(scheduler_outputs=scheduler_outputs,
+                                model_output=outputs)
                 finished_now.append(i)
 
         # Generate outputs for the requests that finished this iteration
@@ -1737,6 +1740,13 @@ class LLMEngine:
                     if seq_group.metrics.model_execute_time is not None:
                         model_execute_time_requests.append(
                             seq_group.metrics.model_execute_time * 1000)
+
+                    # In band metrics
+                    seq_group.metrics.gpu_kv_cache_utilization = (
+                        gpu_cache_usage_sys or 0.0)
+                    seq_group.metrics.cpu_kv_cache_utilization = (
+                        cpu_cache_usage_sys or 0.0)
+
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))

@@ -207,6 +207,7 @@ class EngineArgs:
     model_impl: str = "auto"
 
     calculate_kv_scales: Optional[bool] = None
+    enable_inband_metrics: Optional[str] = None
 
     additional_config: Optional[Dict[str, Any]] = None
 

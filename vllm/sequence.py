@@ -121,6 +121,8 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
+    gpu_kv_cache_utilization: Optional[float] = None
+    cpu_kv_cache_utilization: Optional[float] = None
 
 
 class SequenceDataDelta(
