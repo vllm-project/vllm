@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+from vllm.platforms import current_platform
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -183,6 +184,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
+        # Currently different K headdim and V headdim is only supported for
+        # hopper devices
+        self.pad_v_head = not self.vllm_flash_attn_version >= 3 or \
+            current_platform.get_device_capability()[0] != 9
 
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
@@ -492,15 +497,17 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
+        v_dim = v.shape[-1]
+        if self.pad_v_head:
+            # For MLA the v head dim is smaller than qk head dim so we pad out
+            # v with 0s to match the qk head dim
+            v = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
+                                        value=0)
 
         attn_output = self.flash_attn_varlen_func(
             q=q,
             k=k,
-            v=v_padded,
+            v=v,
             cu_seqlens_q=seq_start_loc,
             cu_seqlens_k=seq_start_loc,
             max_seqlen_q=max_prefill_seq_len,
@@ -508,8 +515,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             softmax_scale=self.scale,
             causal=True,
         )
-        attn_output = attn_output\
-            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                .reshape(-1, self.num_heads * v.shape[-1])
 
+        if self.pad_v_head:
+            attn_output = attn_output\
+                .view(-1, self.num_heads, q.shape[-1])[..., :v_dim]
+
+        attn_output = attn_output.reshape(-1, self.num_heads * v_dim)
         return self.o_proj(attn_output)[0]
