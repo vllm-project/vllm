@@ -38,7 +38,8 @@ class CustomUniExecutor(UniProcExecutor):
 CustomUniExecutorAsync = CustomUniExecutor
 
 
-@pytest.mark.parametrize("model", [f"{MODEL_WEIGHTS_S3_BUCKET}/distilgpt2"])
+@pytest.mark.parametrize("model",
+                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
 def test_custom_executor_type_checking(model):
     with pytest.raises(ValueError):
         engine_args = EngineArgs(model=model,
@@ -51,7 +52,8 @@ def test_custom_executor_type_checking(model):
         AsyncLLMEngine.from_engine_args(engine_args)
 
 
-@pytest.mark.parametrize("model", [f"{MODEL_WEIGHTS_S3_BUCKET}/distilgpt2"])
+@pytest.mark.parametrize("model",
+                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
 def test_custom_executor(model, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
@@ -75,7 +77,8 @@ def test_custom_executor(model, tmp_path):
         os.chdir(cwd)
 
 
-@pytest.mark.parametrize("model", [f"{MODEL_WEIGHTS_S3_BUCKET}/distilgpt2"])
+@pytest.mark.parametrize("model",
+                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
 def test_custom_executor_async(model, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
@@ -103,7 +106,8 @@ def test_custom_executor_async(model, tmp_path):
         os.chdir(cwd)
 
 
-@pytest.mark.parametrize("model", [f"{MODEL_WEIGHTS_S3_BUCKET}/distilgpt2"])
+@pytest.mark.parametrize("model",
+                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
 def test_respect_ray(model):
     # even for TP=1 and PP=1,
     # if users specify ray, we should use ray.
