@@ -91,8 +91,8 @@ class KVCacheManager:
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
-        self.req_to_block_hashes: DefaultDict[str, List[BlockHashType]] = (
-            defaultdict(list))
+        self.req_to_block_hashes: DefaultDict[
+            str, List[BlockHashType]] = defaultdict(list)
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -297,10 +297,14 @@ class KVCacheManager:
              for cpu_block in new_computed_cpu_blocks})
 
         num_cached_blocks = self.num_cached_block[request.request_id]
+        # Speculated tokens might be rejected in the future, so we does
+        # not cache any speculated tokens. We only cache blocks with
+        # generated (accepted) tokens.
         num_full_blocks_after_append = (
             total_tokens - len(request.spec_token_ids)) // self.block_size
         new_full_blocks = req_blocks[
             num_cached_blocks:num_full_blocks_after_append]
+
         if new_full_blocks:
             self._cache_full_blocks(
                 request=request,
@@ -308,11 +312,9 @@ class KVCacheManager:
                 # The new full blocks are the full blocks that are not computed.
                 full_blocks=new_full_blocks,
                 prev_block=(req_blocks[num_cached_blocks -
-                                       1] if num_cached_blocks > 0 else None),
-            )
+                                       1] if num_cached_blocks > 0 else None))
         self.num_cached_block[
             request.request_id] = num_full_blocks_after_append
-
         return new_blocks
 
     def free(self, request: Request) -> None:
@@ -352,9 +354,7 @@ class KVCacheManager:
         if num_used_blocks > 0:
             logger.warning(
                 "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet",
-                num_used_blocks,
-            )
+                "blocks (%d) are not freed yet", num_used_blocks)
             return False
 
         # Remove all hashes so that no new blocks will hit.
