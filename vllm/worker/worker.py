@@ -215,6 +215,7 @@ class Worker(LocalOrDistributedWorkerBase):
             by adjusting the `gpu_memory_utilization` parameter.
         """
         from vllm.platforms import current_platform
+
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         current_platform.empty_cache()
@@ -274,6 +275,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _assert_memory_footprint_increased_during_profiling(self):
         from vllm.platforms import current_platform
+
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         free_gpu_memory, total = current_platform.mem_get_info()

@@ -305,39 +305,38 @@ class Platform:
                            "This may slow down the performance.")
             return False
         return True
-    
+
     @classmethod
     def empty_cache(cls) -> None:
         """
         Clear the cache of the current device.
         """
         raise NotImplementedError
-    
+
     @classmethod
     def reset_peak_memory_stats(cls,
-                                device: Union[torch.types.Device, int] = None
-                                ) -> None:
+                                device: Union[torch.types.Device,
+                                              int] = None) -> None:
         """Reset the peak memory stats of the current device."""
         raise NotImplementedError
 
     @classmethod
-    def memory_stats(cls,
-                     device: Union[torch.types.Device, int] = None
-                    ) -> Dict[str, Any]:
+    def memory_stats(
+            cls,
+            device: Union[torch.types.Device, int] = None) -> Dict[str, Any]:
         """Return the memory stats of the current device."""
         raise NotImplementedError
-    
+
     @classmethod
-    def mem_get_info(cls,
-                     device: Union[torch.types.Device, int] = None
-                     ) -> Tuple[int, int]:
+    def mem_get_info(
+            cls,
+            device: Union[torch.types.Device, int] = None) -> Tuple[int, int]:
         """Return the global free and total memory of the current device."""
         raise NotImplementedError
-    
+
     @classmethod
     def memory_reserved(cls,
-                        device: Union[torch.types.Device, int] = None
-                        ) -> int:
+                        device: Union[torch.types.Device, int] = None) -> int:
         """Return the memory reserved by the current device."""
         raise NotImplementedError
 
