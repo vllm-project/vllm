@@ -623,6 +623,7 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
     def execute_model(
         self,
         model_input: ModelInputForCPUWithSamplingMetadata,
+        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         previous_hidden_states: Optional[torch.Tensor] = None,

@@ -153,6 +153,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
     def execute_model(
         self,
         model_input: EncoderDecoderModelInput,
+        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[PoolerOutput]]:

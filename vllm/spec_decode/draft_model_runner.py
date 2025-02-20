@@ -171,6 +171,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     def execute_model(
         self,
         model_input: ModelRunnerInputBase,
+        kv_caches: List[torch.Tensor],
         previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
