@@ -87,7 +87,8 @@ class Qwen2ToolParser(ToolParser):
         # sent yet, don't allow sending
         # an incomplete string since OpenAI only ever (as far as I have
         # seen) allows sending the entire tool/ function name at once.
-        flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
+        flags = Allow.ALL if self.current_tool_name_sent \
+            else Allow.ALL & ~Allow.STR
 
         delta = None
         try:
