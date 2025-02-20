@@ -6,8 +6,8 @@ ARG RCCL_BRANCH="648a58d"
 ARG RCCL_REPO="https://github.com/ROCm/rccl"
 ARG TRITON_BRANCH="e5be006"
 ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
-ARG PYTORCH_BRANCH="3a585126"
-ARG PYTORCH_VISION_BRANCH="v0.19.1"
+ARG PYTORCH_BRANCH="6c0e7463"
+ARG PYTORCH_VISION_BRANCH="v0.21.0"
 ARG PYTORCH_REPO="https://github.com/pytorch/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG FA_BRANCH="1a7f4dfa"
@@ -126,6 +126,7 @@ RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
 RUN git clone --recursive ${AITER_REPO}
 RUN cd aiter \
     && git checkout ${AITER_BRANCH} \
+    && git submodule update --init --recursive \
     && pip install -r requirements.txt \
     && PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py bdist_wheel --dist-dir=dist
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
