@@ -9,7 +9,9 @@ from vllm import LLM, PoolingParams, PoolingRequestOutput
 from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_NAME = "s3://vllm-ci-model-weights/e5-mistral-7b-instruct"
+from ...conftest import MODEL_WEIGHTS_S3_BUCKET
+
+MODEL_NAME = f"{MODEL_WEIGHTS_S3_BUCKET}/intfloat/e5-mistral-7b-instruct"
 
 PROMPTS = [
     "Hello, my name is",

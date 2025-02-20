@@ -7,7 +7,7 @@ from transformers import PretrainedConfig
 
 from vllm import LLM
 
-from ..conftest import MODELS_ON_S3
+from ..conftest import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from .registry import HF_EXAMPLE_MODELS
 
 
@@ -45,7 +45,7 @@ def test_can_initialize(model_arch):
                       _initialize_kv_caches):
         model_name = model_info.default
         if model_name in MODELS_ON_S3:
-            model_name = f"s3://vllm-ci-model-weights/{model_name.split('/')[-1]}"
+            model_name = f"{MODEL_WEIGHTS_S3_BUCKET}/{model_name}"
         LLM(
             model_name,
             tokenizer=model_info.tokenizer,
