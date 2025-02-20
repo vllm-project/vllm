@@ -31,12 +31,13 @@ from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.sample.metadata import SamplingMetadata
+
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
 
@@ -1303,14 +1304,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if get_pp_group().is_last_rank:
                 hidden_states = hidden_states[logit_indices]
                 logits = self.model.compute_logits(hidden_states, None)
-                penalties = torch.full((logits.size(0),), 0.0, device=self.device)
+                penalties = torch.full((num_reqs, ), 0.0, device=self.device)
                 dummy_metadata = SamplingMetadata(
-                    temperature=torch.full((logits.size(0),), 0.5, device=self.device),
+                    temperature=torch.full((num_reqs, ),
+                                           0.5,
+                                           device=self.device),
                     all_greedy=False,
                     all_random=False,
                     spec_token_ids=None,
-                    top_p=torch.full((logits.size(0),), 0.99, device=self.device),
-                    top_k=torch.full((logits.size(0),), logits.size(1) - 1, device=self.device),
+                    top_p=torch.full((num_reqs, ), 0.99, device=self.device),
+                    top_k=torch.full((num_reqs, ),
+                                     logits.size(1) - 1,
+                                     device=self.device),
                     min_p=None,
                     generators={},
                     max_num_logprobs=None,
@@ -1319,11 +1324,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     frequency_penalties=penalties,
                     presence_penalties=penalties,
                     repetition_penalties=penalties,
-                    output_token_ids=[[] for _ in range(logits.size(0))],
+                    output_token_ids=[[] for _ in range(num_reqs)],
                     min_tokens={},
-                    logit_bias=[None for _ in range(logits.size(0))]
-                )
-                sampler_output = self.model.sample(logits=logits, sampling_metadata=dummy_metadata)
+                    logit_bias=[None for _ in range(num_reqs)])
+                sampler_output = self.model.sample(
+                    logits=logits, sampling_metadata=dummy_metadata)
             else:
                 logits = None
                 sampler_output = None
