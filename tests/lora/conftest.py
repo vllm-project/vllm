@@ -238,6 +238,11 @@ def qwen2vl_lora_files():
 
 
 @pytest.fixture(scope="session")
+def qwen25vl_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen25-vl-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 

@@ -734,16 +734,17 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "up_proj",
         ],
     }
-    # LoRA specific attributes, TODO: double check
+    # LoRA specific attributes
     supported_lora_modules = [
+        # language model
         "qkv_proj",
         "o_proj",
         "gate_up_proj",
-        "down_proj",
-        "gate_proj"
-        "up_proj",
+        "down_proj",  # Same name with vision encoder
         # vision tower
         "qkv",
+        "gate_proj",
+        "up_proj",
         "attn.proj",  # Distinguish patch_embed.proj
         "fc1",
         "fc2",
@@ -751,6 +752,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         "mlp.0",
         "mlp.2"
     ]
+
     embedding_modules = {}
     embedding_padding_modules = []
 
