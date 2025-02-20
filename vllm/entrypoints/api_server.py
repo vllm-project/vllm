@@ -127,6 +127,7 @@ async def run_server(args: Namespace,
 
     shutdown_task = await serve_http(
         app,
+        sock=None,
         host=args.host,
         port=args.port,
         log_level=args.log_level,
@@ -144,7 +145,7 @@ async def run_server(args: Namespace,
 if __name__ == "__main__":
     parser = FlexibleArgumentParser()
     parser.add_argument("--host", type=str, default=None)
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8000, ge=1024, le=65535)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
     parser.add_argument("--ssl-ca-certs",

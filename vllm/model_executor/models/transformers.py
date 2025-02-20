@@ -15,7 +15,7 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 import re
-from typing import Iterable, Optional, Union
+from typing import Iterable, Literal, Optional, Union
 
 import torch
 from torch import nn
@@ -28,6 +28,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -37,6 +38,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsQuant
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -50,10 +52,10 @@ def vllm_flash_attention_forward(
         value: torch.Tensor,
         attention_mask: torch.Tensor,
         # Transformers kwargs
-        scaling: float = None,
+        scaling: Optional[float] = None,
         # vLLM kwargs
-        attn_metadata: AttentionMetadata = None,
-        attention_instances: list[Attention] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+        attention_instances: Optional[list[Attention]] = None,
         **kwargs):
     self_attn = attention_instances[module.layer_idx]
     if scaling is not None:
@@ -72,15 +74,24 @@ def vllm_flash_attention_forward(
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
 
 
+def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
+    logger.debug("%s: %s -> %s", name, old_module, new_module)
+
+
 def replace_linear_class(
         linear: nn.Linear,
-        style: str,
+        style: Literal["colwise", "rowwise"],
         quant_config=None) -> Union[ColumnParallelLinear, RowParallelLinear]:
     """
-    In model configurations, we use a neutral type (string) to specify parallel
-    styles, here we use it to translate nn.Linear into vllm-style tp Linear.
-
-    Quant config is not supported yet
+    Replace nn.Linear with one of vLLM's tensor parallel linear classes.
+    
+    `quant_config` is not yet supported.
+    Args:
+        linear (nn.Linear): `nn.Linear` to be replaced.
+        style (str): Tensor parallel style of the new linear, e.g. "colwise".
+        quant_config (QuantConfig): Quantization config for the new linear.
+    Returns:
+        Union[ColumnParallelLinear, RowParallelLinear]: The new linear.
     """
 
     if not isinstance(style, str):
@@ -90,10 +101,7 @@ def replace_linear_class(
     vllm_linear_cls = {
         "colwise": ColumnParallelLinear,
         "rowwise": RowParallelLinear,
-    }.get(style)
-
-    if vllm_linear_cls is None:
-        raise ValueError(f"Unsupported parallel style value: {style}")
+    }.get(style, ReplicatedLinear)
 
     class HFCompatibleLinear(vllm_linear_cls):
         """
@@ -107,10 +115,11 @@ def replace_linear_class(
         input_size=linear.in_features,
         output_size=linear.out_features,
         bias=linear.bias is not None,
+        quant_config=quant_config,
     )
 
 
-class TransformersModel(nn.Module):
+class TransformersModel(nn.Module, SupportsQuant):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
@@ -119,11 +128,9 @@ class TransformersModel(nn.Module):
         super().__init__()
         logger.info("Using Transformers backend.")
 
-        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        self.quant_config = quant_config
+
         self.config = config
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
@@ -137,7 +144,7 @@ class TransformersModel(nn.Module):
         prefix = self.model.base_model_prefix
 
         # MLP modifications
-        self.tensor_parallelize(self.model)
+        self.apply_base_model_tp_plan(self.model)
 
         # Attention modifications (assumes 1 attention op per hidden layer)
         tp_size = get_tensor_model_parallel_world_size()
@@ -150,7 +157,7 @@ class TransformersModel(nn.Module):
                 scale=config.head_dim**-0.5,
                 num_kv_heads=divide(config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
-                quant_config=None,
+                quant_config=self.quant_config,
                 prefix=f"{i}.attn") for i in range(config.num_hidden_layers)
         ]
 
@@ -160,7 +167,7 @@ class TransformersModel(nn.Module):
         # ForCausalLM modifications
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=None,
+                                      quant_config=self.quant_config,
                                       prefix=maybe_prefix(prefix, "lm_head"))
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.get_input_embeddings().weight
@@ -170,13 +177,13 @@ class TransformersModel(nn.Module):
                                                 config.vocab_size, logit_scale)
         self.sampler = get_sampler()
 
-    def log_replacement(self, name: str, old_module: nn.Module,
-                        new_module: nn.Module):
-        logger.debug("%s: %s -> %s", name, old_module, new_module)
-
-    def tensor_parallelize(self, module: nn.Module, prefix: str = ""):
+    def apply_base_model_tp_plan(self, module: nn.Module, prefix: str = ""):
+        """
+        Apply the base model tensor parallelization plan to a module.
+        Currently only supports linear layers.
+        """
         if (self.config.base_model_tp_plan is None
-                and self.vllm_config.parallel_config.tensor_parallel_size > 1):
+                and get_tensor_model_parallel_world_size() > 1):
             raise ValueError(
                 "Trying to run tensor parallelization but the model does not "
                 "support it yet!")
@@ -189,9 +196,9 @@ class TransformersModel(nn.Module):
                     new_module = replace_linear_class(child_module, style,
                                                       self.quant_config)
                     setattr(module, child_name, new_module)
-                    self.log_replacement(qual_name, child_module, new_module)
+                    log_replacement(qual_name, child_module, new_module)
             else:
-                self.tensor_parallelize(child_module, prefix=qual_name)
+                self.apply_base_model_tp_plan(child_module, prefix=qual_name)
 
     def replace_vocab_embed_class(self, module: nn.Module):
         # Use native set input embeddings
@@ -201,8 +208,8 @@ class TransformersModel(nn.Module):
             org_num_embeddings=self.config.vocab_size,
             quant_config=None,
         )
-        self.log_replacement("input embedding",
-                             self.model.get_input_embeddings(), new_module)
+        log_replacement("input embedding", self.model.get_input_embeddings(),
+                        new_module)
         self.model.set_input_embeddings(new_module)
 
     def forward(

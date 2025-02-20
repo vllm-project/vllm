@@ -51,7 +51,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         kv_cache_scheme: Optional[Dict[str, Any]] = None,
         config: Optional[Dict[str, Any]] = None,
     ):
-
+        super().__init__()
         self.ignore = ignore
         self.quant_format = quant_format
         # Map from [target -> scheme]
@@ -408,24 +408,24 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
                                     sparsity_scheme=sparsity_scheme):
-            # FIXME(tlrmchlsmth): layers using W16A16 CUTLASS 2:4 sparse kernels
-            # currently produce bad output in some cases
-            if weight_quant is None:
-                logger.warning_once(
-                    "CompressedTensors24 scheme is disabled for the w16a16 "
-                    "case. Falling back to UnquantizedLinearMethod")
-                return None
             # Have a valid sparsity scheme
             # Validate layer is supported by Cutlass 2:4 Kernel
-            scheme = CompressedTensors24(quantized=weight_quant is not None
-                                         or input_quant is not None,
-                                         weight_quant=weight_quant,
-                                         input_quant=input_quant)
+            model_compression_config = (None if sparsity_scheme is None
+                                        or sparsity_scheme.format == "dense"
+                                        else self.config)
+
+            scheme = CompressedTensors24(
+                quantized=weight_quant is not None or input_quant is not None,
+                weight_quant=weight_quant,
+                input_quant=input_quant,
+                model_compression_config=model_compression_config,
+            )
         elif weight_quant is None:
             logger.warning_once("Acceleration for non-quantized schemes is "
                                 "not supported by Compressed Tensors. "
                                 "Falling back to UnquantizedLinearMethod")
             return None
+
         else:
             # Find the quant_scheme
             scheme = self._get_scheme_from_parts(  # type: ignore
@@ -475,10 +475,21 @@ class CompressedTensorsConfig(QuantizationConfig):
         :return: True if the layer is supported by the Cutlass 2:4 Kernel
             False otherwise
         """
-        is_valid_sparsity = (sparsity_scheme is not None
-                             and sparsity_scheme.sparsity_structure
-                             == SparsityStructure.TWO_FOUR.value
-                             and sparsity_scheme.format == "dense")
+        if sparsity_scheme is None:
+            return False
+
+        is_valid_sparsity_structure: bool = (
+            sparsity_scheme.sparsity_structure ==
+            SparsityStructure.TWO_FOUR.value)
+
+        valid_compressors = {
+            CompressionFormat.dense.value,
+            CompressionFormat.sparse_24_bitmask.value
+        }
+
+        is_valid_sparsity = (is_valid_sparsity_structure
+                             and sparsity_scheme.format in valid_compressors)
+
         if not is_valid_sparsity:
             return False
 

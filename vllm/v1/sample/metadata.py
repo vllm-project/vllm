@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -13,14 +13,17 @@ class SamplingMetadata:
     all_greedy: bool
     all_random: bool
 
-    top_p: torch.Tensor
-    top_k: torch.Tensor
-    no_top_p: bool
-    no_top_k: bool
+    # None when there are no speculated tokens.
+    spec_token_ids: Optional[List[List[int]]]
+
+    top_p: Optional[torch.Tensor]
+    top_k: Optional[torch.Tensor]
+    min_p: Optional[torch.Tensor]
 
     generators: Dict[int, torch.Generator]
 
-    max_num_logprobs: int
+    # None means no logprobs, 0 means sampled token logprobs only
+    max_num_logprobs: Optional[int]
 
     no_penalties: bool
     prompt_token_ids: Optional[torch.Tensor]
@@ -29,5 +32,8 @@ class SamplingMetadata:
     repetition_penalties: torch.Tensor
 
     output_token_ids: List[List[int]]
-    min_tokens: List[int]
-    stop_token_ids: List[Set[int]]
+
+    # req_index -> (min_tokens, stop_token_ids)
+    min_tokens: Dict[int, Tuple[int, Set[int]]]
+
+    logit_bias: List[Optional[Dict[int, float]]]

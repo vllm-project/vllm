@@ -19,6 +19,7 @@ pqdm
 ray[adag]==2.40.0
 sentence-transformers # required for embedding tests
 soundfile # required for audio tests
+jiwer # required for audio tests
 timm # required for internvl test
 torch==2.5.1
 torchaudio==2.5.1
@@ -36,3 +37,5 @@ genai_perf==0.0.8
 tritonclient==2.51.0
 
 numpy < 2.0.0
+runai-model-streamer==0.11.0
+runai-model-streamer-s3==0.11.0

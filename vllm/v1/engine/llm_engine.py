@@ -45,6 +45,7 @@ class LLMEngine:
         multiprocess_mode: bool = False,
     ) -> None:
         self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -72,6 +73,7 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
+            log_stats=False,  # FIXME: implement
         )
 
     @classmethod
@@ -166,6 +168,12 @@ class LLMEngine:
 
     def reset_prefix_cache(self):
         self.engine_core.reset_prefix_cache()
+
+    def sleep(self, level: int = 1):
+        self.engine_core.sleep(level)
+
+    def wake_up(self):
+        self.engine_core.wake_up()
 
     def get_tokenizer_group(
         self,
