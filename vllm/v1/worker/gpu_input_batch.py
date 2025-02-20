@@ -242,10 +242,12 @@ class InputBatch:
         self.block_table.add_row(req_index, request.block_ids)
 
         sampling_params = request.sampling_params
-        self.temperature_cpu[req_index] = sampling_params.temperature
         if sampling_params.sampling_type == SamplingType.GREEDY:
+            # Avoid later division by zero.
+            self.temperature_cpu[req_index] = -1.0
             self.greedy_reqs.add(req_id)
         else:
+            self.temperature_cpu[req_index] = sampling_params.temperature
             self.random_reqs.add(req_id)
 
         self.top_p_cpu[req_index] = sampling_params.top_p
@@ -410,7 +412,11 @@ class InputBatch:
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
-        copy_slice(self.temperature_cpu_tensor, self.temperature, num_reqs)
+        if not self.all_greedy:
+            temperature = copy_slice(self.temperature_cpu_tensor,
+                                     self.temperature, num_reqs)
+        else:
+            temperature = None
         if not self.no_top_p:
             copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
         if not self.no_top_k:
@@ -437,7 +443,7 @@ class InputBatch:
             prompt_token_ids = None
 
         return SamplingMetadata(
-            temperature=self.temperature[:num_reqs],
+            temperature=temperature,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
