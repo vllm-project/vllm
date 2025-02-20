@@ -1170,9 +1170,9 @@ class EngineArgs:
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
 
-            # For multimodal models, chunked prefill is disabled by default in
-            # V0, but enabled by design in V1
-            if model_config.is_multimodal_model:
+            # For multimodal models and models with MLA, chunked prefill is
+            # disabled by default in V0, but enabled by design in V1
+            if model_config.is_multimodal_model or model_config.use_mla:
                 self.enable_chunked_prefill = bool(envs.VLLM_USE_V1)
 
             elif use_long_context:
@@ -1206,7 +1206,6 @@ class EngineArgs:
               and model_config.runner_type == "pooling"):
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
-
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
