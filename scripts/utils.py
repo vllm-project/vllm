@@ -19,3 +19,4 @@ def get_prompt_token_ids(model_path, prompts, max_length=1024):
         if len(tokens.input_ids[0]) < max_length:
             continue
         prompt_token_ids.append([x.item() for x in tokens.input_ids[0]])
+    return prompt_token_ids
