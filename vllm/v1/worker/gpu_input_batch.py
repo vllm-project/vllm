@@ -192,7 +192,7 @@ class InputBatch:
 
         self.logit_bias: List[Optional[Dict[int,
                                             float]]] = [None] * max_num_reqs
-        self.has_allowed_token_ids: List[bool] = [False] * max_num_reqs
+        self.has_allowed_token_ids: Set[str] = set()
         self.allowed_token_ids_mask: Optional[torch.Tensor] = None
         self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
 
@@ -297,7 +297,7 @@ class InputBatch:
                        for tid in sampling_params.allowed_token_ids):
                 raise ValueError(
                     "allowed_token_ids contains out-of-vocab token id")
-            self.has_allowed_token_ids[req_index] = True
+            self.has_allowed_token_ids.add(req_id)
             if self.allowed_token_ids_mask_cpu_tensor is None:
                 # Lazy allocation for this tensor, which can be large.
                 self.allowed_token_ids_mask = torch.zeros(self.max_num_reqs,
@@ -357,7 +357,7 @@ class InputBatch:
             self.request_lora_mapping[req_index] = 0
 
         self.logit_bias[req_index] = None
-        self.has_allowed_token_ids[req_index] = False
+        self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         return req_index
@@ -428,8 +428,6 @@ class InputBatch:
 
             self.logit_bias[empty_index] = self.logit_bias[last_req_index]
 
-            self.has_allowed_token_ids[
-                empty_index] = self.has_allowed_token_ids[last_req_index]
             if self.allowed_token_ids_mask_cpu_tensor is not None:
                 self.allowed_token_ids_mask_cpu_tensor[
                     empty_index] = self.allowed_token_ids_mask_cpu_tensor[
@@ -478,8 +476,8 @@ class InputBatch:
             prompt_token_ids = None
 
         allowed_token_ids_mask: Optional[torch.Tensor] = None
-        if not self.no_allowed_token_ids and \
-                self.allowed_token_ids_mask is not None:
+        if not self.no_allowed_token_ids:
+            assert self.allowed_token_ids_mask is not None
             copy_slice(self.allowed_token_ids_mask_cpu_tensor,
                        self.allowed_token_ids_mask, num_reqs)
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
@@ -502,7 +500,6 @@ class InputBatch:
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
-            no_allowed_token_ids=self.no_allowed_token_ids,
             allowed_token_ids_mask=allowed_token_ids_mask,
         )
 
@@ -597,4 +594,4 @@ class InputBatch:
 
     @property
     def no_allowed_token_ids(self) -> bool:
-        return not any(self.has_allowed_token_ids)
+        return len(self.has_allowed_token_ids) == 0

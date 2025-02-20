@@ -237,9 +237,7 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        # One idea is implement this as a PyTorch C++ op, and we may
-        # even optimize the logit_bias layout.
-        if not sampling_metadata.no_allowed_token_ids:
+        if sampling_metadata.allowed_token_ids_mask is not None:
             logits.masked_fill_(sampling_metadata.allowed_token_ids_mask,
                                 float("-inf"))
         return logits

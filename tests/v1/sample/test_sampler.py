@@ -62,9 +62,8 @@ def _create_allowed_token_ids(
     vocab_size: int,
     num_allowed_token_ids: int,
     device: torch.device,
-) -> Tuple[bool, Optional[torch.Tensor]]:
+) -> Optional[torch.Tensor]:
     mask: Optional[torch.Tensor] = None
-    no_allowed_token_ids = True
     for i in range(batch_size):
         if i % 2 == 1:
             continue
@@ -75,8 +74,7 @@ def _create_allowed_token_ids(
         start = min(i, vocab_size - 1)
         end = min(i + num_allowed_token_ids, vocab_size - 1)
         mask[i, start:end] = True
-        no_allowed_token_ids = False
-    return (no_allowed_token_ids, mask)
+    return mask
 
 
 def _create_default_sampling_metadata(
@@ -114,7 +112,6 @@ def _create_default_sampling_metadata(
         no_penalties=True,
         min_tokens={},
         logit_bias=[None] * batch_size,
-        no_allowed_token_ids=True,
         allowed_token_ids_mask=None,
     )
     return fake_sampling_metadata
@@ -448,18 +445,16 @@ def test_sampler_allowed_token_ids(device: str, batch_size: int,
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
     sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-    no_allowed_token_ids, mask = _create_allowed_token_ids(
+    mask = _create_allowed_token_ids(
         batch_size=batch_size,
         vocab_size=VOCAB_SIZE,
         num_allowed_token_ids=num_allowed_token_ids,
         device=device,
     )
-    sampling_metadata.no_allowed_token_ids = no_allowed_token_ids
     sampling_metadata.allowed_token_ids_mask = mask
     sampler = Sampler()
     logits = sampler.apply_allowed_token_ids(fake_logits, sampling_metadata)
     logits = logits.cpu()
-    assert not sampling_metadata.no_allowed_token_ids
     for batch_idx in range(batch_size):
         logits_for_req = logits[batch_idx]
         if batch_idx % 2 == 1:

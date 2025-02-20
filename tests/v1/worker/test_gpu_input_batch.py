@@ -66,7 +66,6 @@ def _construct_expected_sampling_metadata(
     temperature = [0.0 for _ in range(num_reqs)]
     min_tokens = {}
     logit_bias = [None] * num_reqs
-    has_allowed_token_ids = [False] * num_reqs
     allowed_token_ids_mask = torch.zeros(num_reqs,
                                          VOCAB_SIZE,
                                          dtype=torch.bool,
@@ -92,7 +91,6 @@ def _construct_expected_sampling_metadata(
             req.sampling_params.all_stop_token_ids)
         logit_bias[index_in_input_batch] = req.sampling_params.logit_bias
         if req.sampling_params.allowed_token_ids:
-            has_allowed_token_ids[index_in_input_batch] = True
             allowed_token_ids_mask[index_in_input_batch][
                 req.sampling_params.allowed_token_ids] = True
 
@@ -131,7 +129,6 @@ def _construct_expected_sampling_metadata(
                       and all(x == 0 for x in frequency_penalties)
                       and all(x == 1 for x in repetition_penalties)),
         logit_bias=logit_bias,
-        no_allowed_token_ids=not any(has_allowed_token_ids),
         allowed_token_ids_mask=allowed_token_ids_mask,
     )
 
@@ -254,9 +251,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     assert expected_sampling_metadata.no_penalties == \
            sampling_metadata.no_penalties
     assert expected_sampling_metadata.logit_bias == sampling_metadata.logit_bias
-    assert (expected_sampling_metadata.no_allowed_token_ids ==
-            sampling_metadata.no_allowed_token_ids)
-    if not sampling_metadata.no_allowed_token_ids:
+    if sampling_metadata.allowed_token_ids_mask:
         assert torch.allclose(
             expected_sampling_metadata.allowed_token_ids_mask,
             sampling_metadata.allowed_token_ids_mask)

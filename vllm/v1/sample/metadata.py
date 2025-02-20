@@ -38,10 +38,6 @@ class SamplingMetadata:
 
     logit_bias: List[Optional[Dict[int, float]]]
 
-    # These two parameters are for allowed_token_ids.
-    # `no_allowed_token_ids`` is a bool to indicate whether we have
-    # allowed_token_ids.
     # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,
     # vocab size).
-    no_allowed_token_ids: bool
     allowed_token_ids_mask: Optional[torch.Tensor]
