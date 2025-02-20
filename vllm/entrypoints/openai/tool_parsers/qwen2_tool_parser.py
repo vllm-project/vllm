@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 import json
+import re
 from typing import Dict, Sequence, Union
 
 import partial_json_parser
@@ -12,8 +12,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser, ToolParserManager
-from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    ToolParser, ToolParserManager)
+from vllm.entrypoints.openai.tool_parsers.utils import (
+    extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
@@ -29,9 +31,11 @@ class Qwen2ToolParser(ToolParser):
         self.position = 0
         self.tool_tag_start = "<tool_call>"
         self.tool_tag_end = "</tool_call>"
-        self.tool_call_regex = re.compile(r'<tool_call>(.*?)</tool_call>', re.DOTALL)
+        self.tool_call_regex = re.compile(r'<tool_call>(.*?)</tool_call>',
+                                          re.DOTALL)
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         if request.tools and request.tool_choice != 'none':
             # do not skip special tokens because qwen2 use the special
             # tokens to indicated the start and end of the tool calls
@@ -47,14 +51,14 @@ class Qwen2ToolParser(ToolParser):
         return None
 
     def extract_tool_calls_streaming(
-            self,
-            previous_text: str,
-            current_text: str,
-            delta_text: str,
-            previous_token_ids: Sequence[int],
-            current_token_ids: Sequence[int],
-            delta_token_ids: Sequence[int],
-            request: ChatCompletionRequest,
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         if self.tool_tag_start not in current_text:
             self.position = len(current_text)
@@ -91,7 +95,8 @@ class Qwen2ToolParser(ToolParser):
             # tool calls are generated in an object in qwen2
             # it's not support parallel tool calls
             try:
-                tool_call_arr: Dict = partial_json_parser.loads(parsable_arr, flags)
+                tool_call_arr: Dict = partial_json_parser.loads(
+                    parsable_arr, flags)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
@@ -106,7 +111,9 @@ class Qwen2ToolParser(ToolParser):
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
                                       id=f"chatcmpl-tool-{random_uuid()}",
-                                      function=DeltaFunctionCall(name=function_name).model_dump(exclude_none=True))
+                                      function=DeltaFunctionCall(
+                                          name=function_name).model_dump(
+                                              exclude_none=True))
                     ])
                     self.current_tool_name_sent = True
                     self.streamed_args_for_tool.append("")
@@ -115,7 +122,8 @@ class Qwen2ToolParser(ToolParser):
             # now we know we're on the same tool call and we're streaming
             # arguments
             else:
-                prev_arguments = self.get_argments(self.prev_tool_call_arr[self.current_tool_id])
+                prev_arguments = self.get_argments(
+                    self.prev_tool_call_arr[self.current_tool_id])
                 cur_arguments = self.get_argments(tool_call_arr)
 
                 # not arguments generated
@@ -123,31 +131,40 @@ class Qwen2ToolParser(ToolParser):
                     delta = None
                 # will never happen
                 elif not cur_arguments and prev_arguments:
-                    logger.error("INVARIANT - impossible to have arguments reset mid-arguments")
+                    logger.error(
+                        "INVARIANT - impossible to have arguments reset "
+                        "mid-arguments")
                     delta = None
                 # first time to get parameters
                 elif cur_arguments and not prev_arguments:
                     cur_arguments_json = json.dumps(cur_arguments)
-                    arguments_delta = cur_arguments_json[:cur_arguments_json.index(delta_text) + len(delta_text)]
+                    arguments_delta = cur_arguments_json[:cur_arguments_json.
+                                                         index(delta_text) +
+                                                         len(delta_text)]
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(arguments=arguments_delta)
-                                      .model_dump(exclude_none=True))
+                                      function=DeltaFunctionCall(
+                                          arguments=arguments_delta).
+                                      model_dump(exclude_none=True))
                     ])
-                    self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
+                    self.streamed_args_for_tool[
+                        self.current_tool_id] += arguments_delta
                 # both prev and cur parameters, send the increase parameters
                 elif cur_arguments and prev_arguments:
                     cur_args_json = json.dumps(cur_arguments)
                     prev_args_json = json.dumps(prev_arguments)
 
-                    argument_diff = extract_intermediate_diff(cur_args_json, prev_args_json)
+                    argument_diff = extract_intermediate_diff(
+                        cur_args_json, prev_args_json)
 
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(arguments=argument_diff)
-                                      .model_dump(exclude_none=True))
+                                      function=DeltaFunctionCall(
+                                          arguments=argument_diff).model_dump(
+                                              exclude_none=True))
                     ])
-                    self.streamed_args_for_tool[self.current_tool_id] += argument_diff
+                    self.streamed_args_for_tool[
+                        self.current_tool_id] += argument_diff
 
             # check to see if the name is defined and has been sent. if so,
             # stream the name - otherwise keep waiting
@@ -157,7 +174,9 @@ class Qwen2ToolParser(ToolParser):
             return delta
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
-            logger.debug("Skipping chunk as a result of tool streaming extraction error")
+            logger.debug(
+                "Skipping chunk as a result of tool streaming extraction "
+                "error")
             return None
 
     def check_tool_name(self, tool_list: list, tools: list) -> bool:
@@ -172,9 +191,9 @@ class Qwen2ToolParser(ToolParser):
         return match_flag
 
     def extract_tool_calls(
-            self,
-            model_output: str,
-            request: ChatCompletionRequest,
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         text = model_output
         tools = request.tools
@@ -186,7 +205,9 @@ class Qwen2ToolParser(ToolParser):
             for matche_tool in matches:
                 tool_dict = json.loads(matche_tool)
                 name = tool_dict['name']
-                parameters = json.dumps(tool_dict.get('parameters', tool_dict.get('arguments', {})))
+                parameters = json.dumps(
+                    tool_dict.get('parameters', tool_dict.get('arguments',
+                                                              {})))
                 tool_list.append((name, parameters))
 
             if not self.check_tool_name(tool_list, tools):
@@ -195,14 +216,14 @@ class Qwen2ToolParser(ToolParser):
                                                     content=text)
 
             tool_calls = [
-                ToolCall(function=FunctionCall(name=name, arguments=parameters))
+                ToolCall(
+                    function=FunctionCall(name=name, arguments=parameters))
                 for name, parameters in tool_list
             ]
             return ExtractedToolCallInformation(
                 tools_called=True,
                 tool_calls=tool_calls,
-                content=text if len(text) > 0 else None
-            )
+                content=text if len(text) > 0 else None)
 
         return ExtractedToolCallInformation(tools_called=False,
                                             tool_calls=[],
