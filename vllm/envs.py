@@ -90,6 +90,10 @@ if TYPE_CHECKING:
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
+    VLLM_DP_RANK: int = 0
+    VLLM_DP_SIZE: int = 1
+    VLLM_DP_MASTER_IP: str = ""
+    VLLM_DP_MASTER_PORT: int = 0
 
 
 def get_default_cache_root():
@@ -593,6 +597,22 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
     lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
     ("1", "true"),
+
+    # Rank of the process in the data parallel setting
+    "VLLM_DP_RANK":
+    lambda: int(os.getenv("VLLM_DP_RANK", "0")),
+
+    # World size of the data parallel setting
+    "VLLM_DP_SIZE":
+    lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
+
+    # IP address of the master node in the data parallel setting
+    "VLLM_DP_MASTER_IP":
+    lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
+
+    # Port of the master node in the data parallel setting
+    "VLLM_DP_MASTER_PORT":
+    lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
 }
 
 # end-env-vars-definition

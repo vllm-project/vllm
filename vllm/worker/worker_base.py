@@ -566,6 +566,7 @@ class WorkerWrapperBase:
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
             assert self.worker is not None
+            self.worker.init_device()
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:

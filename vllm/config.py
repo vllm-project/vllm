@@ -1287,6 +1287,11 @@ class ParallelConfig:
 
     pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
+    data_parallel_size: int = 1  # Number of data parallel groups.
+    data_parallel_rank: int = 0  # Rank of the data parallel group.
+    # IP of the data parallel master.
+    data_parallel_master_ip: str = "127.0.0.1"
+    data_parallel_master_port: int = 29500  # Port of the data parallel master.
 
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
@@ -1320,9 +1325,26 @@ class ParallelConfig:
     worker_cls: str = "auto"
     sd_worker_cls: str = "auto"
 
+    # world_size is TPxPP, it affects the number of workers we create.
     world_size: int = field(init=False)
+    # world_size_across_dp is TPxPPxDP, it is the size of the world
+    # including data parallelism.
+    world_size_across_dp: int = field(init=False)
 
     rank: int = 0
+
+    def get_next_dp_init_port(self) -> int:
+        """
+        We might need to initialize process groups in multiple
+        processes that is related to data parallelism,
+        e.g. both in the worker and in the engine, which
+        can live in different processes. To avoid port conflicts, we
+        increment the port number each time we need to initialize a
+        new process group related to data parallelism.
+        """
+        answer = self.data_parallel_master_port
+        self.data_parallel_master_port += 1
+        return answer
 
     def compute_hash(self):
         """
@@ -1340,6 +1362,12 @@ class ParallelConfig:
     def __post_init__(self) -> None:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
+
+        self.data_parallel_size = envs.VLLM_DP_SIZE
+        self.data_parallel_rank = envs.VLLM_DP_RANK
+        self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
+        self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+        self.world_size_across_dp = self.world_size * self.data_parallel_size
 
         ray_only_devices = ["tpu"]
         from vllm.platforms import current_platform
