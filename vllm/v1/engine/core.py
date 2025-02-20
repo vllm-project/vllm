@@ -236,6 +236,15 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
+    def sleep(self, level: int = 1):
+        self.model_executor.sleep(level)
+
+    def wake_up(self):
+        self.model_executor.wake_up()
+
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        self.model_executor.add_lora(lora_request)
+
     def setup_grammars(self):
         for req in self.guided_decoding_manager.requests:
             if req.grammar is not None:
@@ -248,9 +257,6 @@ class EngineCore:
                 req.grammar = grammar
                 continue
         self.guided_decoding_manager.allocate_bitmask()
-
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self.model_executor.add_lora(lora_request)
 
 
 class EngineCoreProc(EngineCore):
