@@ -60,7 +60,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class TensorizerConfig:
-    tensorizer_uri: str
+    tensorizer_uri: str = None
     vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
@@ -71,12 +71,16 @@ class TensorizerConfig:
     model_class: Optional[type[torch.nn.Module]] = None
     hf_config: Optional[PretrainedConfig] = None
     dtype: Optional[Union[str, torch.dtype]] = None
+    lora_dir: Optional[str] = None
     _is_sharded: bool = False
 
     def __post_init__(self):
         # check if the configuration is for a sharded vLLM model
         self._is_sharded = isinstance(self.tensorizer_uri, str) \
             and re.search(r'%0\dd', self.tensorizer_uri) is not None
+        if not self.tensorizer_uri and not self.lora_dir:
+            raise ValueError("tensorizer_uri must be provided.")
+        self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         tensorizer_args = {
@@ -140,7 +144,9 @@ class TensorizerArgs:
   
   Args:
       tensorizer_uri: Path to serialized model tensors. Can be a local file 
-          path or a S3 URI.
+          path or a S3 URI. This is a required field unless lora_dir is 
+          provided and the config is meant to be used for the
+          `tensorize_lora_adapter` function.
       vllm_tensorized: If True, indicates that the serialized model is a 
           vLLM model. This is used to determine the behavior of the 
           TensorDeserializer when loading tensors from a serialized model.
@@ -472,3 +478,45 @@ def tensorize_vllm_model(engine_args: EngineArgs,
         "save_tensorized_model",
         kwargs=dict(tensorizer_config=tensorizer_config),
     )
+
+
+def tensorize_lora_adapter(lora_path: str,
+                           tensorizer_config: TensorizerConfig):
+    """
+    Uses tensorizer to serialize a LoRA adapter. Assumes that the files
+    needed to load a LoRA adapter are a safetensors-format file called
+    adapter_model.safetensors and a json config file called adapter_config.json.
+
+    Serializes the files in the tensorizer_config.lora_dir
+    """
+    lora_files = snapshot_download(repo_id=lora_path)
+
+    # Current LoRA loading logic in
+    # vllm.lora.models.LoRAModel.from_local_checkpoint assumes that
+    # the tensors and config filenames are adapter_model.safetensors and
+    # adapter_config.json respectively, so this logic makes the same
+    # assumption
+    tensor_path = os.path.join(lora_files, "adapter_model.safetensors")
+    config_path = os.path.join(lora_files, "adapter_config.json")
+    with open(config_path) as f:
+        config = json.load(f)
+    tensors = safetensors.torch.load_file(tensor_path)
+
+    tensorizer_args = tensorizer_config._construct_tensorizer_args()
+
+    with open_stream(f"{tensorizer_config.lora_dir}/adapter_config.json",
+                     mode="wb+",
+                     **tensorizer_args.stream_params) as f:
+
+        f.write(json.dumps(config).encode("utf-8"))
+
+    lora_uri = (f"{tensorizer_config.lora_dir}"
+                f"/adapter_model.tensors")
+    with open_stream(lora_uri, mode="wb+",
+                     **tensorizer_args.stream_params) as f:
+        serializer = TensorSerializer(f)
+        serializer.write_state_dict(tensors)
+        serializer.close()
+
+    logger.info("Successfully serialized LoRA files to %s",
+                str(tensorizer_config.lora_dir))
