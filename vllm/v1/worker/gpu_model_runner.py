@@ -1432,23 +1432,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_cache_spec
 
-    def swap_blocks(self, h2d_map: Dict[int, int], d2h_map: Dict[int, int]):
+    def swap_blocks(self, d2h_map: Dict[int, int], h2d_map: Dict[int, int]):
         """
-        Swap blocks between CPU and GPU. Both h2d and d2h calls are issued
+        Swap blocks between CPU and GPU. Both d2h and h2d calls are issued
         to the same steam with the former issued first.
         Args:
-            h2d_map: A dictionary mapping CPU block IDs to GPU block IDs.
             d2h_map: A dictionary mapping GPU block IDs to CPU block IDs.
+            h2d_map: A dictionary mapping CPU block IDs to GPU block IDs.
         """
-
-        # Host to device.
-        if len(h2d_map) != 0:
-            h2d_map_t = torch.tensor(list(h2d_map.items()), device="cpu")
-            for src_tensor, dst_tensor in zip(self.cpu_kv_caches,
-                                              self.kv_caches):
-                FlashAttentionBackend.swap_blocks(src_tensor, dst_tensor,
-                                                  h2d_map_t)
-
         # Device to host.
         if len(d2h_map) != 0:
             d2h_map = torch.tensor(list(d2h_map.items()), device="cpu")
@@ -1456,3 +1447,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                               self.cpu_kv_caches):
                 FlashAttentionBackend.swap_blocks(src_tensor, dst_tensor,
                                                   d2h_map)
+        # Host to device.
+        if len(h2d_map) != 0:
+            h2d_map_t = torch.tensor(list(h2d_map.items()), device="cpu")
+            for src_tensor, dst_tensor in zip(self.cpu_kv_caches,
+                                              self.kv_caches):
+                FlashAttentionBackend.swap_blocks(src_tensor, dst_tensor,
+                                                  h2d_map_t)
