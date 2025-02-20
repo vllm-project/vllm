@@ -23,6 +23,15 @@ class HashableDict(dict):
         return hash(frozenset(self.items()))
 
 
+class HashableList(list):
+    """
+    A list that can be hashed by lru_cache.
+    """
+
+    def __hash__(self) -> int:
+        return hash(tuple(self))
+
+
 def _merge_mm_kwargs(model_config: "ModelConfig", **kwargs):
     base_kwargs = model_config.mm_processor_kwargs
     if base_kwargs is None:
@@ -37,7 +46,7 @@ def _merge_mm_kwargs(model_config: "ModelConfig", **kwargs):
         if isinstance(value, dict):
             merged_kwargs[key] = HashableDict(value)
         if isinstance(value, list):
-            merged_kwargs[key] = tuple(value)
+            merged_kwargs[key] = HashableList(value)
     return merged_kwargs
 
 
