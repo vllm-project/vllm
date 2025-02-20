@@ -1354,6 +1354,10 @@ class LLMEngine:
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
 
+        if self.should_execute_dummy_batch:
+            self.should_execute_dummy_batch = False
+            # TODO: execute a dummy batch to sync across ranks
+
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
         virtual_engine = 0
