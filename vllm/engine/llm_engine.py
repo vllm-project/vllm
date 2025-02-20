@@ -13,6 +13,7 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
 import torch
+from torch.distributed import ReduceOp
 from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
@@ -232,6 +233,17 @@ class LLMEngine:
         )
 
         self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
+        if self.need_to_sync_across_dp:
+            from vllm.distributed.utils import (
+                stateless_init_torch_distributed_process_group)
+
+            # use gloo since the engine process might not have cuda device
+            self.dp_group = stateless_init_torch_distributed_process_group(
+                self.parallel_config.data_parallel_master_ip,
+                self.parallel_config.get_next_dp_init_port(),
+                self.parallel_config.data_parallel_rank,
+                self.parallel_config.data_parallel_size,
+                backend="gloo")
 
         logger.info(
             "Initializing a V0 LLM engine (v%s) with config: %s, "
@@ -913,15 +925,29 @@ class LLMEngine:
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        return any(scheduler.has_unfinished_seqs()
-                   for scheduler in self.scheduler)
+        answer = any(scheduler.has_unfinished_seqs()
+                     for scheduler in self.scheduler)
+        if not self.need_to_sync_across_dp:
+            return answer
+        tensor = torch.tensor([answer], dtype=torch.int32, device="cpu")
+        torch.distributed.all_reduce(tensor,
+                                     op=ReduceOp.MAX,
+                                     group=self.dp_group)
+        return bool(tensor.item())
 
     def has_unfinished_requests_for_virtual_engine(
             self, virtual_engine: int) -> bool:
         """
         Returns True if there are unfinished requests for the virtual engine.
         """
-        return self.scheduler[virtual_engine].has_unfinished_seqs()
+        answer = self.scheduler[virtual_engine].has_unfinished_seqs()
+        if not self.need_to_sync_across_dp:
+            return answer
+        tensor = torch.tensor([answer], dtype=torch.int32, device="cpu")
+        torch.distributed.all_reduce(tensor,
+                                     op=ReduceOp.MAX,
+                                     group=self.dp_group)
+        return bool(tensor.item())
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache for all devices."""
