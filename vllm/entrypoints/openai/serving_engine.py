@@ -451,6 +451,8 @@ class OpenAIServing:
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
         return conversation, [request_prompt], [engine_prompt]
 
