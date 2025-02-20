@@ -92,8 +92,9 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
         *,
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
+        **kwargs: object,
     ) -> Qwen2AudioProcessor:
-        return self.ctx.get_hf_processor(Qwen2AudioProcessor)
+        return self.ctx.get_hf_processor(Qwen2AudioProcessor, **kwargs)
 
     def get_feature_extractor(
         self,
