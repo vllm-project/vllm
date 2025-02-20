@@ -301,7 +301,7 @@ steps:
   - vllm/attention
   - tests/kernels
   commands:
-    - pytest -v -s kernels --numprocesses=8 --dist worksteal --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels --numprocesses=4 --dist=worksteal --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
 - label: Tensorizer Test # 11min
