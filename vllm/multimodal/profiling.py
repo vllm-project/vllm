@@ -202,10 +202,11 @@ class MultiModalProfiler(Generic[_I]):
                     "and/or reduce `mm_counts`.", seq_len, total_len,
                     total_placeholders_by_modality)
 
-            prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
+            num_tokens_to_pad = max(total_len, seq_len) - total_len
+            prompt_token_ids.extend([0] * num_tokens_to_pad)
+
             return DummyData(
-                seq_data=SequenceData.from_prompt_token_counts(
-                    (0, max(seq_len, total_len))),
+                seq_data=SequenceData.from_seqs(prompt_token_ids),
                 multi_modal_data=None,
                 multi_modal_placeholders=None,
             )

@@ -15,7 +15,7 @@ dtype = "float"
 llm = LLM(
     model="microsoft/Florence-2-base",
     tokenizer="facebook/bart-base",
-    max_num_seqs=4,
+    max_num_seqs=8,
     dtype=dtype,
     trust_remote_code=True,
 )

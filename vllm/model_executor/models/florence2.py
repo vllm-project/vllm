@@ -28,7 +28,7 @@ from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         BaseMultiModalProcessor,
                                         EncDecMultiModalProcessor,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptReplacementDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -863,11 +863,16 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         pad_token_id = hf_config.pad_token_id
         bos_token_id = hf_config.bos_token_id
         num_image_tokens = self.info.get_max_image_tokens()
+        image_tokens = [pad_token_id] * num_image_tokens
+
         return [
             PromptReplacement(
                 modality="image",
                 target=[bos_token_id],
-                replacement=[pad_token_id] * num_image_tokens + [bos_token_id],
+                replacement=PromptReplacementDetails(
+                    full=image_tokens + [bos_token_id],
+                    features=image_tokens,
+                ),
             )
         ]
 
