@@ -1,7 +1,6 @@
 #pragma once
 
-#if defined(__HIPCC__) && \
-    (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+#if defined(__HIPCC__) && defined(__gfx942__)
   #define __HIP__MI300__
 #endif
 
