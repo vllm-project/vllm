@@ -745,11 +745,6 @@ class VllmRunner:
         load_format: Optional[LoadFormat] = None,
         **kwargs,
     ) -> None:
-        if model_name in MODELS_ON_S3 and not load_format:
-            model_name = (f"{MODEL_WEIGHTS_S3_BUCKET}/{model_name}")
-            load_format = LoadFormat.RUNAI_STREAMER
-        if not load_format:
-            load_format = LoadFormat.AUTO
         self.model = LLM(
             model=model_name,
             task=task,

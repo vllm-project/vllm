@@ -56,7 +56,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.s3_utils import glob as s3_glob
 from vllm.transformers_utils.utils import is_s3
-from vllm.utils import is_pin_memory_available
+from vllm.utils import (MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3,
+                        is_pin_memory_available)
 
 
 @contextmanager
@@ -1394,6 +1395,13 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
+
+    if os.environ.get("VLLM_CI_USE_S3", "0") == "1":
+        model_name = load_config.model_config.model
+        if "s3" not in model_name and model_name in MODELS_ON_S3:
+            s3_path = f"{MODEL_WEIGHTS_S3_BUCKET}/{model_name}"
+            load_config.model_config.model = s3_path
+        return RunaiModelStreamerLoader(load_config)
 
     if isinstance(load_config.load_format, type):
         return load_config.load_format(load_config)
