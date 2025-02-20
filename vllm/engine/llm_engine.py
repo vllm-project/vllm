@@ -231,6 +231,8 @@ class LLMEngine:
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
 
+        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
+
         logger.info(
             "Initializing a V0 LLM engine (v%s) with config: %s, "
             "use_cached_outputs=%s, ",
