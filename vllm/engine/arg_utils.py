@@ -10,7 +10,8 @@ from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
 import torch
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
+from vllm.config import (_INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET,
+                         CacheConfig, CompilationConfig, ConfigFormat,
                          DecodingConfig, DeviceConfig, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, ObservabilityConfig,
@@ -94,6 +95,8 @@ class EngineArgs:
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
+    intial_incremental_detokenization_offset: int = \
+        _INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET
     trust_remote_code: bool = False
     allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
@@ -295,6 +298,13 @@ class EngineArgs:
             '"mistral" will always use the `mistral_common` tokenizer. \n* '
             '"custom" will use --tokenizer to select the '
             'preregistered tokenizer.')
+        parser.add_argument('--intial-incremental-detokenization-offset',
+                            type=int,
+                            default=_INTIAL_INCREMENTAL_DETOKENIZATION_OFFSET,
+                            help='Initial incremental detoakenization '
+                            'offset. Non default value can be used with '
+                            'sentencepiece based tokenizers '
+                            'such as mistral in chat api.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
@@ -1050,6 +1060,8 @@ class EngineArgs:
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
             tokenizer_mode=self.tokenizer_mode,
+            intial_incremental_detokenization_offset=self.
+            intial_incremental_detokenization_offset,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,

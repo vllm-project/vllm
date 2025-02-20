@@ -14,8 +14,11 @@ from .tokenizer_group import BaseTokenizerGroup
 class Detokenizer:
     """Provides methods to decode the output of a model into text."""
 
-    def __init__(self, tokenizer_group: BaseTokenizerGroup):
+    def __init__(self, tokenizer_group: BaseTokenizerGroup,
+                 intial_incremental_detokenization_offset: int):
         self.tokenizer_group = tokenizer_group
+        self.intial_incremental_detokenization_offset = \
+            intial_incremental_detokenization_offset
 
     def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:
         """Returns the HF tokenizer to use for a given sequence."""
@@ -76,7 +79,8 @@ class Detokenizer:
                          skip_special_tokens=prms.skip_special_tokens,
                          spaces_between_special_tokens=prms.
                          spaces_between_special_tokens,
-                     )
+                         intial_incremental_detokenization_offset=self.
+                         intial_incremental_detokenization_offset)
 
                     sample_logprob.decoded_token = new_text
 
@@ -120,6 +124,8 @@ class Detokenizer:
                  tokenizer=tokenizer,
                  prompt_ids=all_input_ids[:-1],
                  skip_special_tokens=prms.skip_special_tokens,
+                 intial_incremental_detokenization_offset=self.
+                 intial_incremental_detokenization_offset,
              )
 
         (new_tokens, new_decoded_token_text, prefix_offset,
@@ -131,7 +137,8 @@ class Detokenizer:
              read_offset=seq.read_offset,
              skip_special_tokens=prms.skip_special_tokens,
              spaces_between_special_tokens=prms.spaces_between_special_tokens,
-         )
+             intial_incremental_detokenization_offset=self.
+             intial_incremental_detokenization_offset)
 
         # Decode logprobs
         logprobs = seq.output_logprobs[-1]
@@ -156,6 +163,8 @@ class Detokenizer:
                         skip_special_tokens=prms.skip_special_tokens,
                         spaces_between_special_tokens=prms.
                         spaces_between_special_tokens,
+                        intial_incremental_detokenization_offset=self.
+                        intial_incremental_detokenization_offset,
                     )
                     sample_logprob.decoded_token = new_text
 
