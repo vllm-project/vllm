@@ -197,5 +197,7 @@ def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
     non-blocking manner.
 
     Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
+
+    Returns the sliced target tensor.
     """
     return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)

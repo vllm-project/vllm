@@ -97,6 +97,8 @@ class Sampler(nn.Module):
             if sampling_metadata.all_greedy:
                 return greedy_sampled
 
+        assert sampling_metadata.temperature is not None
+
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
 
