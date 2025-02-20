@@ -302,9 +302,10 @@ class _AsyncLLMEngine(LLMEngine):
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
-
-            finished_requests_ids = self.scheduler[
-                virtual_engine].get_and_reset_finished_requests_ids()
+            if not scheduler_outputs.is_empty():
+                # this will cause mamba_cache/minimax_cache failed to release finished_requests_ids of the last steps
+                finished_requests_ids = self.scheduler[
+                    virtual_engine].get_and_reset_finished_requests_ids()
 
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
@@ -331,7 +332,6 @@ class _AsyncLLMEngine(LLMEngine):
             # will cause one virtual engine's microbatch to block the pipeline.
             last_sampled_token_ids = \
                 self._get_last_sampled_token_ids(virtual_engine)
-
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
