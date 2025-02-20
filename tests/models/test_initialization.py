@@ -7,6 +7,7 @@ from transformers import PretrainedConfig
 
 from vllm import LLM
 
+from ..conftest import MODELS_ON_S3
 from .registry import HF_EXAMPLE_MODELS
 
 
@@ -18,8 +19,7 @@ def test_can_initialize(model_arch):
 
     # Avoid OOM
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
-        if hf_config.model_type == "deepseek_vl_v2":
-            hf_config.update({"architectures": ["DeepseekVLV2ForCausalLM"]})
+        hf_config.update(model_info.hf_overrides)
 
         if hasattr(hf_config, "text_config"):
             text_config: PretrainedConfig = hf_config.text_config
@@ -43,8 +43,11 @@ def test_can_initialize(model_arch):
 
     with patch.object(LLM.get_engine_class(), "_initialize_kv_caches",
                       _initialize_kv_caches):
+        model_name = model_info.default
+        if model_name in MODELS_ON_S3:
+            model_name = f"s3://vllm-ci-model-weights/{model_name.split('/')[-1]}"
         LLM(
-            model_info.default,
+            model_name,
             tokenizer=model_info.tokenizer,
             tokenizer_mode=model_info.tokenizer_mode,
             speculative_model=model_info.speculative_model,

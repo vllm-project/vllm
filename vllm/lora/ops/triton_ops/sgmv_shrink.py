@@ -14,6 +14,7 @@ import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
 
+from .kernel_utils import do_shrink_kernel
 from .utils import _get_lora_a_ptr
 
 
@@ -62,67 +63,50 @@ def _sgmv_shrink_kernel(
         pid_sk = pid_mix % SPLIT_K
 
     M = tl.load(seq_lens + cur_batch)
-    if pid_m * BLOCK_M > M:
+    if pid_m * BLOCK_M >= M:
         return
     lora_index = tl.load(lora_indices + cur_batch)
     if lora_index == -1:
         return
-    cur_seq_start = tl.load(b_seq_start_loc + cur_batch)
-    offset_m = tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
-    offset_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
-    offset_k = pid_sk * BLOCK_K + tl.arange(0, BLOCK_K)
 
-    ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
-    rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
-    # input ptr
-    a_ptr = (input_ptr + cur_seq_start * input_d0_stride +
-             ram[:, None] * input_d0_stride +
-             offset_k[None, :] * input_d1_stride)
+    m_offset = tl.load(b_seq_start_loc + cur_batch)
 
-    if SLICE_NUM == 1:
-        # current lora ptr
-        cur_lora_ptr = lora_ptr
-    else:
-        # current lora ptr
-        cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
-            tl.pointer_type(input_ptr.dtype.element_ty))
+    cta_m_len = min(BLOCK_M, M - (pid_m * BLOCK_M))
+    cta_m_offset = m_offset + (pid_m * BLOCK_M)
+    offset_m = tl.arange(0, BLOCK_M)
+    ram = cta_m_offset + tl.max_contiguous(
+        tl.multiple_of(offset_m % cta_m_len, BLOCK_M), BLOCK_M)
 
-    b_ptr = (cur_lora_ptr + lora_d0_stride * lora_index +
-             rbn[None, :] * lora_d1_stride +
-             offset_k[:, None] * lora_d2_stride)
-
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_K * SPLIT_K)):
-        if EVEN_K:
-            tiled_a = tl.load(a_ptr)
-            tiled_b = tl.load(b_ptr)
-        else:
-            k_remaining = K - k * (BLOCK_K * SPLIT_K)
-            tiled_a = tl.load(a_ptr,
-                              mask=offset_k[None, :] < k_remaining,
-                              other=0.0)
-            tiled_b = tl.load(b_ptr,
-                              mask=offset_k[:, None] < k_remaining,
-                              other=0.0)
-        accumulator += tl.dot(tiled_a, tiled_b)
-
-        a_ptr += BLOCK_K * SPLIT_K * input_d1_stride
-        b_ptr += BLOCK_K * SPLIT_K * lora_d2_stride
-    offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
-
-    offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
-    cur_out_ptr = (out_ptr if SLICE_NUM == 1 else out_ptr +
-                   slice_id * output_d0_stride)
-    c_ptr = cur_out_ptr + offset_cm[:, None] * output_d1_stride + offset_cn[
-        None, :] * output_d2_stride
-    c_mask = (offset_cm[:, None] < (cur_seq_start + M)) & (offset_cn[None, :]
-                                                           < N)
-    accumulator *= scaling
-    # handles write-back with reduction-splitting
-    if SPLIT_K == 1:
-        tl.store(c_ptr, accumulator, mask=c_mask)
-    else:
-        tl.atomic_add(c_ptr, accumulator, mask=c_mask)
+    do_shrink_kernel(
+        pid_n,
+        pid_sk,
+        slice_id,
+        lora_index,
+        input_ptr,
+        lora_ptr,
+        out_ptr,
+        N,
+        K,
+        cta_m_len,
+        ram,
+        # input strides
+        input_d0_stride,
+        input_d1_stride,
+        # lora strides
+        lora_d0_stride,
+        lora_d1_stride,
+        lora_d2_stride,
+        # output strides
+        output_d0_stride,
+        output_d1_stride,
+        output_d2_stride,
+        scaling,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        EVEN_K,
+        SPLIT_K,
+        SLICE_NUM)
 
 
 @torch.inference_mode()

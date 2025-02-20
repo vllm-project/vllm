@@ -115,6 +115,9 @@ class CpuPlatform(Platform):
         # Environment variables for CPU executor
         #
 
+        # Set default threads num for OpenMP parallel
+        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
@@ -143,3 +146,10 @@ class CpuPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        """
+        Get device specific communicator class for distributed communication.
+        """
+        return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
