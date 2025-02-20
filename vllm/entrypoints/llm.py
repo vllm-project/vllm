@@ -3,6 +3,7 @@
 import itertools
 import warnings
 from contextlib import contextmanager
+from queue import Queue
 from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
                     Tuple, Type, Union, cast, overload)
 
@@ -282,6 +283,7 @@ class LLM:
                                         Sequence[SamplingParams]]] = None,
         *,
         use_tqdm: bool = True,
+        streaming_queue: Optional[Queue[RequestOutput]] = None,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -298,6 +300,7 @@ class LLM:
                                         List[SamplingParams]]] = None,
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
+        streaming_queue: Optional[Queue[RequestOutput]] = None,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -314,6 +317,7 @@ class LLM:
                                         List[SamplingParams]]] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
+        streaming_queue: Optional[Queue[RequestOutput]] = None,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -331,6 +335,7 @@ class LLM:
         *,
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
+        streaming_queue: Optional[Queue[RequestOutput]] = None,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -348,6 +353,7 @@ class LLM:
         *,
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
+        streaming_queue: Optional[Queue[RequestOutput]] = None,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -363,6 +369,7 @@ class LLM:
         sampling_params: None,
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
+        streaming_queue: Optional[Queue[RequestOutput]] = None,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -383,6 +390,7 @@ class LLM:
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
+        streaming_queue: Optional[Queue[RequestOutput]] = None,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -405,6 +413,8 @@ class LLM:
                 When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
             use_tqdm: Whether to use tqdm to display the progress bar.
+            streaming_queue: If provided, the engine will stream outputs to this
+                queue as they become available.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
@@ -465,8 +475,8 @@ class LLM:
             prompt_adapter_request=prompt_adapter_request,
             guided_options=guided_options_request,
             priority=priority)
-
-        outputs = self._run_engine(use_tqdm=use_tqdm)
+        
+        outputs = self._run_engine(use_tqdm=use_tqdm, streaming_queue=streaming_queue)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def collective_rpc(self,
@@ -1376,7 +1386,7 @@ class LLM:
         return params
 
     def _run_engine(
-            self, *, use_tqdm: bool
+            self, *, use_tqdm: bool, streaming_queue: Optional[Queue[RequestOutput]] = None
     ) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
@@ -1398,6 +1408,8 @@ class LLM:
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
+                    if streaming_queue is not None:
+                        streaming_queue.put(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
