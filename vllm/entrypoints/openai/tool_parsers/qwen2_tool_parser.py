@@ -2,12 +2,13 @@
 
 import json
 import re
-from typing import Dict, Sequence, Union
+from typing import Any, Dict, List, Sequence, Tuple, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              ChatCompletionToolsParam,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
@@ -179,7 +180,7 @@ class Qwen2ToolParser(ToolParser):
                 "error")
             return None
 
-    def check_tool_name(self, tool_list: list, tools: list) -> bool:
+    def check_tool_name(self, tool_list: List[Tuple], tools: Union[List[ChatCompletionToolsParam], None]) -> bool:
         ori_tool_name = [t.function.name for t in tools]
         ext_tool_name = [item[0] for item in tool_list]
         match_flag = False
