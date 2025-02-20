@@ -36,7 +36,8 @@ def _merge_mm_kwargs(model_config: "ModelConfig", **kwargs):
     for key, value in merged_kwargs.items():
         if isinstance(value, dict):
             merged_kwargs[key] = HashableDict(value)
-
+        if isinstance(value, list):
+            merged_kwargs[key] = tuple(value)
     return merged_kwargs
 
 
