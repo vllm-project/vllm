@@ -51,6 +51,7 @@ def vllm_to_hf_output(vllm_output: tuple[list[int], str,
     output_ids, output_str, out_logprobs = vllm_output
 
     hf_output_str = "</s><s>" + output_str + "</s>"
+    output_ids = [2, 0] + output_ids
 
     return output_ids, hf_output_str, out_logprobs
 
@@ -95,7 +96,9 @@ def run_test(
                                         vllm_outputs_per_case):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_outputs,
+            outputs_1_lst=[
+                vllm_to_hf_output(outputs) for outputs in vllm_outputs
+            ],
             name_0="hf",
             name_1="vllm",
         )
