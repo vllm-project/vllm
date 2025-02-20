@@ -5,7 +5,7 @@
 package.Vllm = {
     # Please read https://tiny.amazon.com/qeroiywk/BrazilMajorVersionScheme before
     # changing the suggested major version.
-    interfaces = (0.x);
+    interfaces = (0.7.x);
 
     third-party-configuration = {
         # This is important, please do not remove it.
@@ -21,7 +21,7 @@ package.Vllm = {
     build-system = custom-build;
 
     build-tools = {
-        0.x = {
+        0.7.x = {
             BrazilPath = 1.1;
             CFlags = 1.0;
             Chrpath = 1.0;
