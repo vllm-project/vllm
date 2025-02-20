@@ -27,7 +27,7 @@ def mm_k(a_ptr, b_ptr, ak_stride, bk_stride, offset_k, K: tl.constexpr,
         BLOCK_M: M dimension of the output block m x n
         BLOCK_N: N dimension of the output block m x n
         BLOCK_K: K dimension atom
-        EVEN_K: True iff the blocks of A and B can be loaded without any
+        EVEN_K: True if the blocks of A and B can be loaded without any
           masking.
         SPLIT_K: Parameter signifying parallelism in the K dimension. 
         CAST_TYPE: if True, cast the values from the A matrix to the B
@@ -127,7 +127,7 @@ def do_expand_kernel(
     offset_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
 
-    # Identify the row pointers of A and column pointers of B
+    # Identify A and B block pointers
     offset_k = tl.arange(0, BLOCK_K)
     a_ptr = (cur_input_ptr + ram[:, None] * input_d1_stride +
              offset_k[None, :] * input_d2_stride, )
@@ -213,7 +213,7 @@ def do_shrink_kernel(
     offset_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
 
-    # Identify the row pointers of A and column pointers of B
+    # Identify A and B block pointers
     offset_k = pid_sk * BLOCK_K + tl.arange(0, BLOCK_K)
     a_ptr = (input_ptr + ram[:, None] * input_d0_stride +
              offset_k[None, :] * input_d1_stride)
