@@ -1353,7 +1353,7 @@ class Scheduler:
             swapped_in = self._schedule_swapped(budget, curr_loras)
 
             # Schedule new prefills.
-            if len(self.swapped) == 0:
+            if not self.swapped:
                 prefills = self._schedule_prefills(
                     budget,
                     curr_loras,
