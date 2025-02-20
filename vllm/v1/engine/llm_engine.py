@@ -2,6 +2,8 @@
 
 from typing import Dict, List, Mapping, Optional, Type, Union
 
+import torch
+from torch.distributed import ReduceOp
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
@@ -46,6 +48,7 @@ class LLMEngine:
     ) -> None:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
+        self.parallel_config = vllm_config.parallel_config
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -75,6 +78,20 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=False,  # FIXME: implement
         )
+
+        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
+        if self.need_to_sync_across_dp:
+            from vllm.distributed.utils import (
+                stateless_init_torch_distributed_process_group)
+
+            # use gloo since the engine process might not have cuda device
+            self.dp_group = stateless_init_torch_distributed_process_group(
+                self.parallel_config.data_parallel_master_ip,
+                self.parallel_config.get_next_dp_init_port(),
+                self.parallel_config.data_parallel_rank,
+                self.parallel_config.data_parallel_size,
+                backend="gloo")
+        self.should_execute_dummy_batch = False
 
     @classmethod
     def from_engine_args(
@@ -106,7 +123,28 @@ class LLMEngine:
         return self.output_processor.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        return self.output_processor.has_unfinished_requests()
+        has_unfinished = self.output_processor.has_unfinished_requests()
+        if not self.need_to_sync_across_dp:
+            return has_unfinished
+        return self.sync_has_unfinished(has_unfinished)
+
+    def sync_has_unfinished(self, has_unfinished: bool) -> bool:
+        tensor = torch.tensor([has_unfinished],
+                              dtype=torch.int32,
+                              device="cpu")
+        # dp rank 0: has_unfinished_seqs=True
+        # dp rank 1: has_unfinished_seqs=False
+        # aggregated: has_unfinished_seqs=True
+        # so this is an OR operation, i.e. MAX in integers
+        torch.distributed.all_reduce(tensor,
+                                     op=ReduceOp.MAX,
+                                     group=self.dp_group)
+        aggregated_has_unfinished = bool(tensor.item())
+        if not has_unfinished and aggregated_has_unfinished:
+            # current rank has no unfinished seqs, but other ranks do,
+            # so we should execute a dummy batch to sync across ranks
+            self.should_execute_dummy_batch = True
+        return aggregated_has_unfinished
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
@@ -144,6 +182,10 @@ class LLMEngine:
         self.engine_core.add_request(request)
 
     def step(self) -> List[RequestOutput]:
+
+        if self.should_execute_dummy_batch:
+            self.should_execute_dummy_batch = False
+            # TODO: execute a dummy batch to sync across ranks
 
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()
