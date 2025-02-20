@@ -175,6 +175,11 @@ if __name__ == "__main__":
             # "The capital of France is",
             "The future of AI is",
         ]
+        prompts = []
+        filename = "pile.txt"
+        with open(filename, "r") as f:
+            prompts = f.readlines()
+            print(f"Number of prompts: {len(prompts)}")
         gt = None
     # Create a sampling params object.
     sampling_params = SamplingParams(temperature=0, max_tokens=args.osl)
