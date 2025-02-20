@@ -27,3 +27,32 @@ You can download the BurstGPT v1.1 dataset by running:
 ```bash
 wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv
 ```
+
+# Downloading and using the LongBench dataset
+
+To download the configuration for system prompts used for each dataset:
+
+```
+wget https://raw.githubusercontent.com/THUDM/LongBench/refs/heads/main/LongBench/config/dataset2prompt.json
+```
+
+To download the configuration for the max length limited for each dataset:
+
+```
+wget https://raw.githubusercontent.com/THUDM/LongBench/refs/heads/main/LongBench/config/dataset2maxlen.json
+```
+
+An example command to run benchmark_serving.py with LongBench dataset:
+
+```
+python benchmarks/benchmark_serving.py \
+    --backend vllm \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --dataset-name longbench \
+    --longbench-dataset-name narrativeqa \
+    --dataset-to-prompt benchmarks/dataset2prompt.json \
+    --dataset-to-maxlen benchmarks/dataset2maxlen.json \
+    --max-input-len 128000 \
+    --request-rate 0.2 \
+    --num-prompts 200 
+```
