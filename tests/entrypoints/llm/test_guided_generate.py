@@ -281,6 +281,22 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
 
 
 @pytest.mark.skip_global_cleanup
+def test_disable_guided_decoding_fallback(sample_regex, llm):
+    sampling_params = SamplingParams(temperature=0.8,
+                                     top_p=0.95,
+                                     guided_decoding=GuidedDecodingParams(
+                                         regex=sample_regex,
+                                         backend="xgrammar:no-fallback"))
+
+    with pytest.raises(
+            ValueError,
+            match="xgrammar does not support regex guided decoding"):
+        llm.generate(prompts="This should fail",
+                     sampling_params=sampling_params,
+                     use_tqdm=True)
+
+
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_json_object(llm, guided_decoding_backend: str):
     sampling_params = SamplingParams(temperature=1.0,

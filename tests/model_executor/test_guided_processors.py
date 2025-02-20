@@ -109,6 +109,16 @@ def test_multiple_guided_options_not_allowed(sample_json_schema, sample_regex):
         GuidedDecodingParams(json=sample_json_schema, grammar="test grammar")
 
 
+def test_guided_decoding_backend_options():
+    """Test backend-specific options"""
+    params = GuidedDecodingParams(
+        backend="xgrammar:option-1,option-2,option-3")
+    assert params.backend_options() == ["option-1", "option-2", "option-3"]
+
+    no_fallback = GuidedDecodingParams(backend="xgrammar:option-1,no-fallback")
+    assert no_fallback.no_fallback()
+
+
 def test_pickle_xgrammar_tokenizer_data():
 
     # TODO: move to another test file for xgrammar
