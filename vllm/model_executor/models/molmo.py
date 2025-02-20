@@ -52,7 +52,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import JSONTree, json_map_leaves
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -633,7 +634,8 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         return hidden_states, residual
 
 
-class MolmoVisionBackbone(nn.Module):
+class MolmoVisionBackbone(nn.Module, SupportsQuant):
+    packed_modules_mapping = {"merged_linear": ["gate_proj", "up_proj"]}
 
     def __init__(
         self,
@@ -794,7 +796,7 @@ class MolmoVisionBackbone(nn.Module):
 
 
 @support_torch_compile
-class MolmoModel(nn.Module):
+class MolmoModel(nn.Module, SupportsQuant):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1198,8 +1200,8 @@ class MolmoProcessorWrapper:
 
 class MolmoProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(self) -> MolmoProcessorWrapper:
-        processor = self.ctx.get_hf_processor()
+    def get_hf_processor(self, **kwargs: object) -> MolmoProcessorWrapper:
+        processor = self.ctx.get_hf_processor(**kwargs)
         return MolmoProcessorWrapper(processor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -1402,8 +1404,8 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(MolmoMultiModalProcessor,
                                         info=MolmoProcessingInfo,
                                         dummy_inputs=MolmoDummyInputsBuilder)
-class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
-                       SupportsLoRA):
+class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
+                       SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # vision backbone mapping
