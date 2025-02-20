@@ -26,7 +26,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.guided_decoding import GuidedDecodingManager, reset_bitmask
+from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -157,26 +157,25 @@ class EngineCore:
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         # Calculate bitmasks for all active requests
-        self.setup_request_grammars()
+        self.setup_grammars()
 
         scheduler_output = self.scheduler.schedule()
-        # the bitmask allocation for grammars
-        # should be ready at this point.
-        if len(self.guided_decoding_manager.requests) > 0:
-            scheduler_output.grammar_bitmask = \
-                self.guided_decoding_manager.grammar_bitmask
 
         if scheduler_output.total_num_scheduled_tokens == 0:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
+        # the bitmask allocation for grammars
+        # should be ready at this point.
+        # Currently we will broadcast the bitmask
+        if len(self.guided_decoding_manager.requests) > 0:
+            scheduler_output.grammar_bitmask = \
+                self.guided_decoding_manager.grammar_bitmask
+
         output = self.model_executor.execute_model(scheduler_output)
 
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
-
-        if len(self.guided_decoding_manager.requests) > 0:
-            reset_bitmask(scheduler_output.grammar_bitmask)
 
         return engine_core_outputs
 
@@ -237,7 +236,7 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
-    def setup_request_grammars(self):
+    def setup_grammars(self):
         for req in self.guided_decoding_manager.requests:
             if req.grammar is not None:
                 continue

@@ -692,6 +692,9 @@ class Scheduler:
         self._cached_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
+        if request.use_guided_decoding and request.grammar:
+            assert request.grammar.matcher.is_terminated()
+            request.grammar.reset()
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)

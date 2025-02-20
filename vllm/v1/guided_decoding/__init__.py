@@ -62,8 +62,8 @@ class Grammar:
         return self.matcher.accept_token(token)
 
     # this should be ran in parallel with model decoding
-    def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
-        self.matcher.fill_next_token_bitmask(bitmask, idx)
+    def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> bool:
+        return self.matcher.fill_next_token_bitmask(bitmask, idx)
 
     def reset(self):
         self.matcher.reset()
@@ -102,11 +102,13 @@ class GuidedDecodingManager:
                                               Future[torch.Tensor]]] = None
 
     def allocate_bitmask(self) -> None:
-        self._grammar_bitmask = self.executor.submit(
-            xgr.allocate_token_bitmask,
-            self.vllm_config.scheduler_config.max_num_seqs,
-            self.vocab_size,
-        )
+        # NOTE: We will only want to allocate this once
+        if self._grammar_bitmask is None:
+            self._grammar_bitmask = self.executor.submit(
+                xgr.allocate_token_bitmask,
+                self.vllm_config.scheduler_config.max_num_seqs,
+                self.vocab_size,
+            )
 
     def _ensure_bitmask_ready(self) -> bool:
         if isinstance(self._grammar_bitmask, Future):
@@ -137,11 +139,14 @@ class GuidedDecodingManager:
         request.grammar = self.request_key_to_grammar.get(
             request.guided_decoding_key)
         if not request.grammar:
-            request.grammar = self.executor.submit(self._executor_loop, request)
+            request.grammar = self.cache(request)
             return True
         return False
 
-    def _executor_loop(self, request: Request):
+    def cache(self, request: Request):
+        return self.executor.submit(self._executor_loop, request)
+
+    def _executor_loop(self, request: Request) -> Grammar:
         key = request.guided_decoding_key
         self.requests.add(request)
         if key in self.request_key_to_grammar:
