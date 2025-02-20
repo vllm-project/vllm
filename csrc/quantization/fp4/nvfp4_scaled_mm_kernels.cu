@@ -174,8 +174,8 @@ void runGemm(at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
              cudaStream_t stream) {
   typename Fp4GemmSm100<T>::Gemm gemm;
 
-  auto arguments = args_from_options<Fp4GemmSm100<T>>(D, A, B, A_sf, B_sf,
-                                                      alpha, m, n, k);
+  auto arguments =
+      args_from_options<Fp4GemmSm100<T>>(D, A, B, A_sf, B_sf, alpha, m, n, k);
 
   size_t workspace_size = Fp4GemmSm100<T>::Gemm::get_workspace_size(arguments);
   auto const workspace_options =
