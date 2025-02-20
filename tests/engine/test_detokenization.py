@@ -9,7 +9,8 @@ from vllm.sampling_params import SamplingParams
 from ..conftest import MODEL_WEIGHTS_S3_BUCKET
 
 
-@pytest.mark.parametrize("model", [f"{MODEL_WEIGHTS_S3_BUCKET}/distilgpt2"])
+@pytest.mark.parametrize("model",
+                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
 def test_computed_prefix_blocks(model: str):
     # This test checks if the engine generates completions both with and
     # without optional detokenization, that detokenization includes text

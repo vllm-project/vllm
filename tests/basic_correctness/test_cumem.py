@@ -121,7 +121,7 @@ def test_cumem_with_cudagraph():
     "model, use_v1",
     [
         # sleep mode with safetensors
-        (f"{MODEL_WEIGHTS_S3_BUCKET}/Llama-3.2-1B", True),
+        (f"{MODEL_WEIGHTS_S3_BUCKET}/meta-llama/Llama-3.2-1B", True),
         # sleep mode with pytorch checkpoint
         ("facebook/opt-125m", False),
     ])
