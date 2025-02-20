@@ -63,6 +63,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
 
 
 class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
+    """A model runner for AWS Neuron hardware"""
 
     # NEURON has an upper limit on the top_k
     _MAX_NEURON_SAMPLING_TOP_K = 256
