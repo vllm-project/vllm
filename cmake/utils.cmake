@@ -57,9 +57,10 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   # Split into C++ and non-C++ (i.e. CUDA) sources.
   #
   set(SRCS ${ORIG_SRCS})
-  set(CXX_SRCS ${ORIG_SRCS})
-  list(FILTER SRCS EXCLUDE REGEX "\.(cc)|(cpp)|(hip)$")
-  list(FILTER CXX_SRCS INCLUDE REGEX "\.(cc)|(cpp)|(hip)$")
+  set(EXCLUDED_SRCS ${ORIG_SRCS})
+  set(EXCLUDE_REGEX "\.(cc|cpp|hip)$")
+  list(FILTER SRCS EXCLUDE REGEX ${EXCLUDE_REGEX})
+  list(FILTER EXCLUDED_SRCS INCLUDE REGEX ${EXCLUDE_REGEX})
 
   #
   # Generate ROCm/HIP source file names from CUDA file names.
@@ -76,13 +77,13 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   add_custom_target(
     hipify${NAME}
-    COMMAND ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
     DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${SRCS}
     BYPRODUCTS ${HIP_SRCS}
     COMMENT "Running hipify on ${NAME} extension source files.")
 
   # Swap out original extension sources with hipified sources.
-  list(APPEND HIP_SRCS ${CXX_SRCS})
+  list(APPEND HIP_SRCS ${EXCLUDED_SRCS})
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
 endfunction()
 
@@ -259,7 +260,7 @@ endmacro()
 #  in `SRC_CUDA_ARCHS` that is less or equal to the version in `TGT_CUDA_ARCHS`.
 # We have special handling for 9.0a, if 9.0a is in `SRC_CUDA_ARCHS` and 9.0 is
 #  in `TGT_CUDA_ARCHS` then we should remove 9.0a from `SRC_CUDA_ARCHS` and add
-#  9.0a to the result (and remove 9.0 from TGT_CUDA_ARCHS). 
+#  9.0a to the result (and remove 9.0 from TGT_CUDA_ARCHS).
 # The result is stored in `OUT_CUDA_ARCHS`.
 #
 # Example:

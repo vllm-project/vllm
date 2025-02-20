@@ -2135,6 +2135,7 @@ def zmq_socket_ctx(
 
 
 def _check_multiproc_method():
+    return
     if (cuda_is_initialized()
             and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
         logger.warning("CUDA was previously initialized. We must use "

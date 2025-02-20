@@ -230,6 +230,7 @@ class FlashAttentionImpl(AttentionImpl):
             )
             return output
 
+        assert False
         # Cascade attention (rare case).
         cascade_attention(
             output[:num_actual_tokens],
@@ -243,9 +244,9 @@ class FlashAttentionImpl(AttentionImpl):
             suffix_kv_lens=attn_metadata.suffix_kv_lens,
             max_kv_len=attn_metadata.max_seq_len,
             softmax_scale=self.scale,
+            causal=True,
             alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window,
-            logits_soft_cap=self.logits_soft_cap,
+            window_size=self.sliding_window,
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
             fa_version=self.fa_version,
