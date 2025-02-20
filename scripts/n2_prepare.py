@@ -192,9 +192,10 @@ if __name__ == "__main__":
             "The future of AI is",
         ]
 
-        from utils import get_prompts, get_prompt_token_ids
+        from utils import get_prompts, get_prompt_token_ids, get_pile_prompts
 
-        prompts = get_prompts()
+        # prompts = get_prompts()
+        prompts = get_pile_prompts(args.model, num_samples)
         prompt_token_ids = get_prompt_token_ids(
             args.model, prompts, least_tokens
         )
@@ -231,7 +232,7 @@ if __name__ == "__main__":
         prompt_token_ids = output.prompt_token_ids
         generated_text = output.outputs[0].text
         print("====================================")
-        print(f"Prompt: {prompt_token_ids!r}")
+        print(f"Prompt[:-10]: {prompt_token_ids[-10]!r}")
         print(f"Generated text: {generated_text!r}")
         print(f"Ground truth: {gt_i!r}")
         print("====================================")
