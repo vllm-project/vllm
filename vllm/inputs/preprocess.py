@@ -92,7 +92,7 @@ class InputPreprocessor:
 
         return dec_start_token_id
 
-    def _get_default_enc_dec_decoder_prompt(self) -> List[int]:
+    def _maybe_get_default_enc_dec_decoder_prompt(self) -> List[int]:
         '''
         Specifically for encoder/decoder models:
         generate a default decoder prompt for when
@@ -125,8 +125,7 @@ class InputPreprocessor:
         '''
 
         bos_token_id = self.get_bos_token_id()
-        assert bos_token_id is not None
-        return [bos_token_id]
+        return [] if bos_token_id is None else [bos_token_id]
 
     def _prepare_decoder_input_ids_for_generation(
         self,
@@ -158,7 +157,8 @@ class InputPreprocessor:
         if decoder_input_ids is None:
             # no decoder prompt input ->
             # use decoder_start_token_id as decoder_input_ids
-            decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
+            decoder_input_ids = self._maybe_get_default_enc_dec_decoder_prompt(
+            )
 
         if (len(decoder_input_ids) == 0
                 or decoder_input_ids[0] != decoder_start_token_id):

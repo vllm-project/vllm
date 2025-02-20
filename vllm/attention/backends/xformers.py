@@ -159,8 +159,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     def __post_init__(self):
         # Set during the execution of the first attention op.
         # It is a list because it is needed to set per prompt
-        # when alibi slopes is used. It is because of the limitation
-        # from xformer API.
+        # when alibi slopes or custom attention bias are used.
+        # It is because of a limitation from xformer API.
         # will not appear in the __repr__ and __init__
         self.attn_bias: Optional[List[AttentionBias]] = None
         self.encoder_attn_bias: Optional[List[AttentionBias]] = None
@@ -292,7 +292,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 def _get_attn_bias(
     attn_metadata: XFormersMetadata,
     attn_type: str,
-) -> Optional[AttentionBias]:
+) -> Optional[List[AttentionBias]]:
     '''
     Extract appropriate attention bias from attention metadata
     according to attention type.
@@ -548,6 +548,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         assert query.shape[0] == num_prefill_query_tokens
         assert decode_query.shape[0] == num_decode_query_tokens
+        attn_bias = _get_attn_bias(attn_metadata, attn_type)
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
@@ -555,6 +556,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
+                # As prefill metadata are cached on first call, we need to make
+                # sure attn_bias is up to date.
+                if attn_bias:
+                    _set_attn_bias(prefill_meta, attn_bias, attn_type)
                 out = self._run_memory_efficient_xformers_forward(
                     query, key, value, prefill_meta, attn_type=attn_type)
                 assert out.shape == output[:num_prefill_query_tokens].shape
@@ -583,6 +588,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
+                    _get_attn_bias(attn_metadata, attn_type),
                     self.sliding_window,
                     layer._k_scale,
                     layer._v_scale,
@@ -600,6 +606,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
 
+            if attn_bias:
+                assert len(
+                    attn_bias
+                ) == 1, "PagedAttention expects a single bias to be provided\
+                      for all input sequences."
+
+                attn_bias = attn_bias[0]
             output[num_prefill_query_tokens:] = PagedAttention.forward_decode(
                 decode_query,
                 key_cache,
@@ -611,6 +624,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                attn_bias,
                 layer._k_scale,
                 layer._v_scale,
             )
@@ -706,6 +720,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 else:
                     raise ValueError("Unknown AttentionType: %s", attn_type)
 
+                assert isinstance(attn_bias, BlockDiagonalMask)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
@@ -719,10 +734,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
             _set_attn_bias(attn_metadata, attn_bias, attn_type)
 
-        # No alibi slopes.
+        # No alibi slopes and no multi-sequence custom attention bias.
         # TODO(woosuk): Too many view operations. Let's try to reduce
         # them in the future for code readability.
-        if self.alibi_slopes is None:
+        if self.alibi_slopes is None and len(attn_bias) == 1:
             # Add the batch dimension.
             query = query.unsqueeze(0)
             key = key.unsqueeze(0)
@@ -736,14 +751,16 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 scale=self.scale)
             return out.view_as(original_query)
 
-        # Attention with alibi slopes.
+        # Attention with alibi slopes or multiple custom attention bias.
         # FIXME(woosuk): Because xformers does not support dynamic sequence
         # lengths with custom attention bias, we process each prompt one by
         # one. This is inefficient, especially when we have many short prompts.
-        assert attn_metadata.seq_lens is not None
         output = torch.empty_like(original_query)
+        seq_lens = attn_metadata.encoder_seq_lens \
+            if attn_type == AttentionType.ENCODER else attn_metadata.seq_lens
+        assert seq_lens
         start = 0
-        for i, seq_len in enumerate(attn_metadata.seq_lens):
+        for i, seq_len in enumerate(seq_lens):
             end = start + seq_len
             out = xops.memory_efficient_attention_forward(
                 query[None, start:end],
