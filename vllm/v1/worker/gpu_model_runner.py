@@ -969,6 +969,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Apply guided decoding bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
+            if len(self.input_batch.req_ids) < self.input_batch.max_num_reqs:
+                # The bitmask is pre-allocated for the maximum batch size.
+                # When the batch size is smaller, we need to resize the bitmask
+                # to match the batch size.
+                scheduler_output.grammar_bitmask = (
+                    scheduler_output.grammar_bitmask[:len(self.input_batch.
+                                                          req_ids)])
             # TODO: we probably should move this before and
             # after, this might not be correct
             apply_bitmask(
