@@ -14,6 +14,7 @@ import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
 
+from .kernel_utils import do_expand_kernel
 from .utils import _get_lora_b_ptr
 
 
@@ -63,86 +64,56 @@ def _sgmv_expand_kernel(
     curr_N = N if SAME_STRIDE else tl.load(output_hs_ptr + slice_id)
     pid_m = pid // cta_n_num
     pid_n = pid % cta_n_num
+
     M = tl.load(seq_lens + cur_batch)
-    if pid_m * BLOCK_M > M:
+    if pid_m * BLOCK_M >= M:
         return
-    if pid_n * BLOCK_N > curr_N:
+    if pid_n * BLOCK_N >= curr_N:
         return
     lora_index = tl.load(lora_indices + cur_batch)
     if lora_index == -1:
         return
 
-    cur_seq_start = tl.load(b_seq_start_loc + cur_batch)
-    offset_m = tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
-    offset_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
-    offset_k = tl.arange(0, BLOCK_K)
-    ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
-    rbn = tl.max_contiguous(tl.multiple_of(offset_n % curr_N, BLOCK_N),
-                            BLOCK_N)
-    # ls_d*_ptr can be either an integer or a pointer
-    if SAME_STRIDE:
-        # integer
-        cur_lora_d0_stride = ls_d0_ptr
-        cur_lora_d1_stride = ls_d1_ptr
-        cur_lora_d2_stride = ls_d2_ptr
-    else:
-        # pointer
-        cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
-        cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
-        cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
-    if SLICE_NUM == 1:
-        cur_input_ptr = input_ptr
-        cur_lora_ptr = lora_ptr
+    m_offset = tl.load(b_seq_start_loc + cur_batch)
 
-    else:
-        cur_input_ptr = input_ptr + slice_id * input_d0_stride
-        cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
-            tl.pointer_type(out_ptr.dtype.element_ty))
-
-    a_ptr = (cur_input_ptr + cur_seq_start * input_d1_stride +
-             ram[:, None] * input_d1_stride +
-             offset_k[None, :] * input_d2_stride, )
-    b_ptr = (cur_lora_ptr + cur_lora_d0_stride * lora_index +
-             offset_k[:, None] * cur_lora_d2_stride +
-             rbn[None, :] * cur_lora_d1_stride)
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k in range(tl.cdiv(K, BLOCK_K)):
-        if EVEN_K:
-            tiled_a = tl.load(a_ptr)
-            tiled_b = tl.load(b_ptr)
-        else:
-            tiled_a = tl.load(a_ptr,
-                              mask=offset_k[None, :] < K - k * BLOCK_K,
-                              other=0)
-            tiled_b = tl.load(b_ptr,
-                              mask=offset_k[:, None] < K - k * BLOCK_K,
-                              other=0)
-        if CAST_TYPE:
-            tiled_a = tiled_a.to(cur_lora_ptr.dtype.element_ty)
-        accumulator += tl.dot(
-            tiled_a,
-            tiled_b,
-        )
-        a_ptr += BLOCK_K * input_d2_stride
-        b_ptr += BLOCK_K * cur_lora_d2_stride
-
-    tiled_c = accumulator.to(cur_lora_ptr.dtype.element_ty)
-    if SLICE_NUM == 1:
-        cur_slice_start = slice_start_loc
-    else:
-        cur_slice_start = tl.load(slice_start_loc + slice_id)
-
-    offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
-    offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N + cur_slice_start
-    c_ptr = (out_ptr + offset_cm[:, None] * output_d0_stride +
-             offset_cn[None, :] * output_d1_stride)
-    M = tl.load(seq_lens + cur_batch)
-    c_mask = (offset_cm[:, None] < (cur_seq_start + M)) & (
-        offset_cn[None, :] < (cur_slice_start + curr_N))
-    if ADD_INPUTS:
-        tiled_out = tl.load(c_ptr, mask=c_mask)
-        tiled_c += tiled_out
-    tl.store(c_ptr, tiled_c, mask=c_mask)
+    cta_m_len = min(BLOCK_M, M - (pid_m * BLOCK_M))
+    cta_m_offset = m_offset + (pid_m * BLOCK_M)
+    offset_m = tl.arange(0, BLOCK_M)
+    ram = cta_m_offset + tl.max_contiguous(
+        tl.multiple_of(offset_m % cta_m_len, BLOCK_M), BLOCK_M)
+    do_expand_kernel(
+        pid_n,
+        lora_index,
+        slice_id,
+        input_ptr,
+        lora_ptr,
+        out_ptr,
+        curr_N,
+        K,
+        cta_m_len,
+        ram,  # array identifying the rows of Input ptr to operate on
+        slice_start_loc,
+        # input ptr strides
+        input_d0_stride,
+        input_d1_stride,
+        input_d2_stride,
+        # lora ptr strides
+        ls_d0_ptr,
+        ls_d1_ptr,
+        ls_d2_ptr,
+        # out ptr strides
+        output_d0_stride,
+        output_d1_stride,
+        # constants
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        SAME_STRIDE,
+        SLICE_NUM,
+        EVEN_K,
+        CAST_TYPE,
+        ADD_INPUTS,
+    )
 
 
 @torch.inference_mode()
