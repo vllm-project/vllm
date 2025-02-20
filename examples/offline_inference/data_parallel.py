@@ -6,13 +6,10 @@
 import os
 
 from vllm import LLM, SamplingParams
-from vllm.utils import cancel_torchrun_envs
+from vllm.utils import convert_torchrun_envs
 
-# convert torchrun envs to vllm envs, and then delete torchrun envs
-os.environ["VLLM_DP_RANK"] = os.environ["RANK"]
-os.environ["VLLM_DP_SIZE"] = os.environ["WORLD_SIZE"]
-os.environ["VLLM_DP_MASTER_IP"] = os.environ["MASTER_ADDR"]
-os.environ["VLLM_DP_MASTER_PORT"] = os.environ["MASTER_PORT"]
+# convert torchrun envs to vllm envs
+convert_torchrun_envs()
 
 dp_rank = int(os.environ["VLLM_DP_RANK"])
 dp_size = int(os.environ["VLLM_DP_SIZE"])
@@ -21,10 +18,6 @@ GPUs_per_dp_rank = 2
 os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
     str(i) for i in range(dp_rank * GPUs_per_dp_rank, (dp_rank + 1) *
                           GPUs_per_dp_rank))
-
-# it's important to cancel the torchrun envs, so that each vLLM instance
-# can work as expected.
-cancel_torchrun_envs()
 
 # Sample prompts.
 prompts = [
