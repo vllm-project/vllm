@@ -28,7 +28,7 @@ class HashableList(list):
     A list that can be hashed by lru_cache.
     """
 
-    def __hash__(self) -> int:
+    def __hash__(self) -> int:  # type: ignore[override]
         return hash(tuple(self))
 
 
