@@ -27,8 +27,6 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
 
-logger = init_logger(__name__)
-
 try:
     from runai_model_streamer import SafetensorsStreamer
 except (ImportError, OSError):
@@ -38,6 +36,8 @@ except (ImportError, OSError):
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
         "SafetensorsStreamer")
+
+logger = init_logger(__name__)
 
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
