@@ -1039,11 +1039,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in range(num_samples):
             sampled_ids = sampled_token_ids[i]
             if max_gen_len != 1:
-                print(f"BEFORE SAMPLED = {sampled_ids}")
                 sampled_ids = sampled_ids[sampled_ids != INVALID_TOKEN_ID]
-                print(f"AFTER SAMPLED = {sampled_ids}")
             num_sampled_ids = len(sampled_ids)
-            print(f"NUM = {len(sampled_ids)}")
             if num_sampled_ids == 1:  # when does this happen?
                 # Skip speculative decoding.
                 draft_token_ids.append([])
