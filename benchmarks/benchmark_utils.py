@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import os
 from typing import Any, Dict, List
 
@@ -37,3 +38,8 @@ def convert_to_pytorch_benchmark_format(args: argparse.Namespace,
         records.append(record)
 
     return records
+
+
+def write_to_json(filename: str, records: List) -> None:
+    with open(filename, "w") as f:
+        json.dump(records, f)
