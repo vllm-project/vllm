@@ -192,8 +192,7 @@ class LLMEngine:
         request_outputs = processed_outputs.request_outputs
 
         # 4) Process unfinished parallel sampling requests
-        request_outputs = self.parallel_manager.step(request_outputs)
-        return request_outputs
+        return self.parallel_manager.step(request_outputs)
 
     def get_model_config(self):
         return self.model_config
