@@ -326,7 +326,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
         intermediate_tensors = None
-        self.execute_model(model_input, intermediate_tensors)
+        self.execute_model(model_input, None, intermediate_tensors)
         torch.cuda.synchronize()
         return
 
