@@ -47,11 +47,8 @@ class EngineCore:
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
-        logger.info(
-            "Initializing a V1 LLM engine (v%s) with config: %s",
-            VLLM_VERSION,
-            vllm_config,
-        )
+        logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
+                    VLLM_VERSION, vllm_config)
 
         self.log_stats = log_stats
 
@@ -122,11 +119,8 @@ class EngineCore:
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info(
-            ("init engine (profile, create kv cache, "
-             "warmup model) took %.2f seconds"),
-            elapsed,
-        )
+        logger.info(("init engine (profile, create kv cache, "
+                     "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks
 
     def add_request(self, request: EngineCoreRequest):
@@ -283,7 +277,7 @@ class EngineCoreProc(EngineCore):
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
         self.input_queue: queue.Queue[Tuple[EngineCoreRequestType,
-                                            Any]] = (queue.Queue())
+                                            Any]] = queue.Queue()
         self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
