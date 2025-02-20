@@ -689,7 +689,7 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
         size: Optional[dict[str, int]] = None,
-        fps: Optional[float] = None,
+        fps: Optional[Union[float, List[float]]] = None,
         **kwargs: object,
     ) -> Qwen2_5_VLProcessor:
         if fps is not None:
