@@ -22,7 +22,7 @@ repos:
     additional_dependencies: ['tomli']
     args: ['--toml', 'pyproject.toml']
 - repo: https://github.com/PyCQA/isort
-  rev: 5.13.2
+  rev: 0a0b7a830386ba6a31c2ec8316849ae4d1b8240d # 6.0.0
   hooks:
   - id: isort
     exclude: 'vllm/third_party/.*'
