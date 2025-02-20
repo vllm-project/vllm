@@ -69,6 +69,14 @@ def from_layer(layer: nn.Module,
             ret = lora_cls(layer)
             ret.create_lora_weights(max_loras, lora_config, model_config)
             return ret
+
+    # The Case for HFCompatibleLinear
+    if (hasattr(layer, "get_lora_class")
+            and layer.__class__.__name__ == "HFCompatibleLinear"):
+        lora_cls = layer.get_lora_class(lora_config.fully_sharded_loras)
+        ret = lora_cls(layer)
+        ret.create_lora_weights(max_loras, lora_config, model_config)
+        return ret
     return layer
 
 
