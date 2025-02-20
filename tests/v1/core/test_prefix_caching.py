@@ -36,6 +36,7 @@ def test_prefill():
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -50,9 +51,11 @@ def test_prefill():
     unique_token_ids = [3] * 7
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req0))
     assert len(manager.req_to_block_hashes[req0.request_id]) == 3
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, 55, computed_blocks)
     assert [b.block_id for b in blocks] == [0, 1, 2, 3, 4]
@@ -75,10 +78,12 @@ def test_prefill():
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req1))
     assert len(manager.req_to_block_hashes[req1.request_id]) == 3
     assert [b.block_id for b in computed_blocks] == [0, 1, 2]
     assert num_computed_tokens == 3 * 16
+    assert len(computed_cpu_blocks) == 0
     num_new_tokens = 53 - 3 * 16
     blocks = manager.allocate_slots(req1, num_new_tokens, computed_blocks)
     assert [b.block_id for b in blocks] == [5, 6]
@@ -106,10 +111,12 @@ def test_prefill():
     # Incomplete 1 block (6 tokens)
     unique_token_ids = [3] * 6
     req2 = make_request("2", common_token_ids + unique_token_ids)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req2))
     assert len(manager.req_to_block_hashes[req2.request_id]) == 3
     assert [b.block_id for b in computed_blocks] == [0, 1, 2]
     assert num_computed_tokens == 3 * 16
+    assert len(computed_cpu_blocks) == 0
     num_new_tokens = 53 - 3 * 16
     blocks = manager.allocate_slots(req2, num_new_tokens, computed_blocks)
     assert [b.block_id for b in blocks] == [7, 8]
@@ -127,9 +134,11 @@ def test_prefill():
 
     # Cache miss and eviction.
     req3 = make_request("3", [99] * (16 * 9))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req3))
     assert not computed_blocks
     assert num_computed_tokens == 0
+    assert not computed_cpu_blocks
     blocks = manager.allocate_slots(req3, 16 * 9, computed_blocks)
     # This block ID order also checks the eviction order.
     assert [b.block_id for b in blocks] == [9, 4, 3, 6, 5, 8, 7, 2, 1, 0]
@@ -142,6 +151,7 @@ def test_decode():
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -155,9 +165,11 @@ def test_decode():
     # Incomplete 1 block (7 tokens)
     unique_token_ids = [3] * 7
     req0 = make_request("0", common_token_ids + unique_token_ids)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req0))
     assert not computed_blocks
     assert num_computed_tokens == 0
+    assert not computed_cpu_blocks
     blocks = manager.allocate_slots(req0, 55, computed_blocks)
     assert [b.block_id for b in blocks] == [0, 1, 2, 3, 4]
 
@@ -195,6 +207,7 @@ def test_evict():
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -203,8 +216,10 @@ def test_evict():
 
     last_token_id = 5 * 16 + 7
     req0 = make_request("0", list(range(last_token_id)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req0))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, 5 * 16 + 7, computed_blocks)
     assert len(blocks) == 7  # 5 full + 1 partial + 1 preallocated
@@ -212,8 +227,10 @@ def test_evict():
     # 3 blocks.
     req1 = make_request("1", list(range(last_token_id,
                                         last_token_id + 3 * 16)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req1))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req1, 3 * 16, computed_blocks)
     assert len(blocks) == 3  # 3 full blocks
@@ -230,8 +247,10 @@ def test_evict():
 
     # Touch the first 2 blocks.
     req2 = make_request("2", list(range(2 * 16 + 3)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req2))
     assert [b.block_id for b in computed_blocks] == [0, 1]
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 2 * 16
     blocks = manager.allocate_slots(req2, 3, computed_blocks)
     assert [b.block_id for b in blocks] == [6, 5]
@@ -247,6 +266,7 @@ def test_hash_block_correct_reuse():
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=1,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -256,8 +276,10 @@ def test_hash_block_correct_reuse():
     # Allocate 1 block and cache it.
     num_tokens = block_size * 1
     req = make_request("0", list(range(num_tokens)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req, num_tokens, computed_blocks)
     assert len(blocks) == 1
@@ -268,8 +290,10 @@ def test_hash_block_correct_reuse():
     # Allocate a new block that's not full, make sure hash info on the
     # block is cleared.
     req = make_request("1", list(range(num_tokens - 1)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req, num_tokens - 1, computed_blocks)
     assert len(blocks) == 1
@@ -286,6 +310,7 @@ def test_computed_blocks_not_evicted():
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=2,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -295,8 +320,10 @@ def test_computed_blocks_not_evicted():
     # Allocate a block and cache it.
     num_tokens = block_size * 1
     req0 = make_request("0", list(range(num_tokens)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req0))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, num_tokens, computed_blocks)
     assert len(blocks) == 1
@@ -304,8 +331,10 @@ def test_computed_blocks_not_evicted():
 
     # Allocate another block.
     req1 = make_request("1", list(range(num_tokens, num_tokens * 2)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req1))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req1, num_tokens, computed_blocks)
     assert len(blocks) == 1
@@ -318,9 +347,11 @@ def test_computed_blocks_not_evicted():
     # Now if we have a cache hit on the first block, we should evict the second
     # cached block rather than the first one.
     req2 = make_request("2", list(range(num_tokens * 2)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req2))
     assert len(computed_blocks) == 1
     assert computed_blocks[0].block_id == 0
+    assert not computed_cpu_blocks
     assert num_computed_tokens == block_size
 
     blocks = manager.allocate_slots(req2, num_tokens * 2 - num_tokens,
@@ -337,6 +368,7 @@ def test_basic_prefix_caching_disabled():
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=4,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=False,
@@ -345,8 +377,10 @@ def test_basic_prefix_caching_disabled():
 
     req1 = make_request("1", list(range(10)))  # 2 blocks and some more
 
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req1))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req1, 10, computed_blocks)
     assert len(blocks) == 3
@@ -356,16 +390,20 @@ def test_basic_prefix_caching_disabled():
 
     # No caching.
     req2 = make_request("2", list(range(16)))  # shared prefix
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req2))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req2, 16, computed_blocks)
     assert len(blocks) == 4
 
     # New requests should not have any blocks.
     req3 = make_request("3", list(range(4)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req3))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req3, 4, computed_blocks)
     assert not blocks
@@ -380,6 +418,7 @@ def test_preallocate_blocks(num_preallocate_tokens: int, block_size: int):
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=10,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -388,9 +427,11 @@ def test_preallocate_blocks(num_preallocate_tokens: int, block_size: int):
     num_preallocated_blocks = cdiv(num_preallocate_tokens, block_size)
 
     req = make_request("0", list(range(block_size * 30)))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req))
     assert not computed_blocks
     assert num_computed_tokens == 0
+    assert not computed_cpu_blocks
     # Just ask for 1 block.
     blocks = manager.allocate_slots(req, block_size, computed_blocks)
     req.num_computed_tokens = block_size
@@ -416,6 +457,7 @@ def test_cache_blocks():
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=5,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -460,6 +502,7 @@ def test_mm_prefix_caching():
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -489,10 +532,12 @@ def test_mm_prefix_caching():
                         all_token_ids,
                         mm_positions=mm_positions,
                         mm_hashes=mm_hashes)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req0))
 
     # Completed block should have hashes with extra keys.
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     block_hashes = manager.req_to_block_hashes[req0.request_id]
     assert len(block_hashes) == 3
@@ -525,8 +570,10 @@ def test_mm_prefix_caching():
                         all_token_ids,
                         mm_positions=mm_positions,
                         mm_hashes=mm_hashes)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req1))
     assert len(computed_blocks) == 3
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 3 * 16
 
 
@@ -541,6 +588,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=10,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -550,17 +598,21 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     # | Common-0 | Common-1 | Common-2 | ... |
     common_token_ids = [i for i in range(3) for _ in range(16)]
     req0 = make_request("0", common_token_ids)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req0))
     assert not computed_blocks
+    assert not computed_cpu_blocks
     assert num_computed_tokens == 0
     manager.allocate_slots(req0, 48, computed_blocks)
     block_part0 = manager.req_to_blocks[req0.request_id]
 
     # | Common-0 | Common-1 | Common-2 | Req1-3 | Req1-4 | Req1-5 | ... |
     req1 = make_request("1", common_token_ids * 2)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req1))
     assert computed_blocks == block_part0
     assert num_computed_tokens == 3 * 16
+    assert not computed_cpu_blocks
     manager.allocate_slots(req1, 48, computed_blocks)
     block_part1 = manager.req_to_blocks[req1.request_id]
     # | Common-0 | Common-1 | Common-2 | Req1-3 (F) | Req1-4 (F) |
@@ -572,9 +624,11 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     # | Common-0 | Common-1 | Common-2 | Req1-3 (F) | Req1-4 (F) |
     # | Req1-5(F)| Req2-0   | Req2-1   | ... |
     req2 = make_request("2", [7] * block_size * 2)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req2))
     assert not computed_blocks
     assert num_computed_tokens == 0
+    assert not computed_cpu_blocks
     manager.allocate_slots(req2, block_size * 2, computed_blocks)
 
     # Req3 is Req2 + 3 new blocks, so the first 6 blocks are computed,
@@ -582,9 +636,11 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     # In this case, the ref_cnt of the computed blocks should not be changed.
     assert manager.free_block_queue.num_free_blocks == 5
     req3 = make_request("3", common_token_ids * 3)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
+    computed_blocks, computed_cpu_blocks, num_computed_tokens = (
+        manager.get_computed_blocks(req3))
     assert computed_blocks == block_part1
     assert num_computed_tokens == 6 * 16
+    assert not computed_cpu_blocks
     # Req3 cannot be allocated.
     assert manager.allocate_slots(req3, 48, computed_blocks) is None
     # Block 0-2 are used by Req 1.
@@ -597,6 +653,7 @@ def test_reset_prefix_cache():
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
+        num_cpu_blocks=0,
         max_model_len=8192,
         sliding_window=None,
         enable_caching=True,
@@ -613,9 +670,10 @@ def test_reset_prefix_cache():
     unique_token_ids = [4] * 7
     all_token_ids = full_block_token_ids + unique_token_ids
     req1 = make_request("1", all_token_ids)
-    computed_blocks, _ = manager.get_computed_blocks(req1)
+    computed_blocks, computed_cpu_blocks, _ = manager.get_computed_blocks(req1)
     assert len(manager.req_to_block_hashes[req1.request_id]) == 3
     assert len(computed_blocks) == 3
+    assert not computed_cpu_blocks
     blocks = manager.allocate_slots(req1, 7, computed_blocks)
     assert [b.block_id for b in blocks] == [4]
 
