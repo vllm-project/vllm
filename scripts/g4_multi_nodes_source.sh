@@ -32,7 +32,6 @@ block_size=128
 
 # INC
 export QUANT_CONFIG="/mnt/disk3/yiliu4/vllm-fork/scripts"
-export RAY_DEDUP_LOGS=0
 
 # memory footprint tunning params
 export VLLM_GPU_MEMORY_UTILIZATION=0.98

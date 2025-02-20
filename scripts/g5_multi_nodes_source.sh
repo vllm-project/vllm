@@ -36,7 +36,6 @@ export VLLM_GRAPH_PROMPT_RATIO=0
 
 # INC
 export QUANT_CONFIG="/mnt/disk3/yiliu4/vllm-fork/scripts"
-export RAY_DEDUP_LOGS=0
 
 # params
 max_num_batched_tokens=2048
