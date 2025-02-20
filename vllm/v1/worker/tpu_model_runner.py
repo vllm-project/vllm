@@ -28,7 +28,6 @@ from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -124,14 +123,8 @@ class TPUModelRunner:
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-
-        if self.is_multimodal_model:
-            # NOTE: Initialized client is only used for processing dummy
-            # multimodal data into multimodal kwargs for GPU memory profiling.
-            # Only applicable to multimodal models with legacy input mapper.
-            self.mm_input_mapper_profiling = MMInputCacheClient(
-                self.model_config)
-            self.mm_input_mapper_profiling.use_cache = False
+        # TODO: Support M-RoPE (e.g, Qwen2-VL)
+        assert not self.uses_mrope, "TPU does not support M-RoPE yet."
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
@@ -207,8 +200,6 @@ class TPUModelRunner:
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
-
-        # TODO: Support M-RoPE (e.g, Qwen2-VL)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -756,9 +747,6 @@ class TPUModelRunner:
                         input_ids, encoder_outputs)
                 else:
                     inputs_embeds = self.model.get_input_embeddings(input_ids)
-                # TODO(woosuk): Avoid the copy. Optimize.
-                # self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
-                # inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 input_ids = None
             else:
                 # For text-only models, we use token ids as input.
@@ -810,6 +798,10 @@ class TPUModelRunner:
             if decode_data is None:
                 decode_data = self._prepare_decode(pd_info.decode_req_ids)
 
+            # TODO: Once we combine prompts and decodes, we should use the same
+            # choice of input_ids or inputs_embeds throughout execute_model.
+            inputs_embeds = None
+
             # Run forward pass
             with set_forward_context(decode_data.attn_metadata,
                                      self.vllm_config):
@@ -819,7 +811,7 @@ class TPUModelRunner:
                     positions=decode_data.input_positions,
                     attn_metadata=decode_data.attn_metadata,
                     kv_caches=self.kv_caches,
-                    inputs_embeds=None,
+                    inputs_embeds=inputs_embeds,
                 )
 
             # Transfer sampled tokens from TPU to CPU
@@ -887,7 +879,7 @@ class TPUModelRunner:
                                    fullgraph=True,
                                    dynamic=False)
 
-    def dummy_run(
+    def _dummy_run(
         self,
         kv_caches,
         num_tokens: int,
@@ -900,9 +892,19 @@ class TPUModelRunner:
         exec_mode = ExecutionMode(exec_mode)
         if exec_mode.is_prefill():
             seq_len = (seq_len + 15) // 16 * 16
-            token_ids = torch.zeros((num_tokens, seq_len),
-                                    dtype=torch.int32,
-                                    device=self.device)
+
+            if self.is_multimodal_model:
+                input_ids = None
+                inputs_embeds = torch.zeros(
+                    (num_tokens, seq_len, self.hidden_size),
+                    dtype=self.dtype,
+                    device=self.device)
+            else:
+                input_ids = torch.zeros((num_tokens, seq_len),
+                                        dtype=torch.int32,
+                                        device=self.device)
+                inputs_embeds = None
+
             position_ids = torch.zeros((num_tokens, seq_len),
                                        dtype=torch.int32,
                                        device=self.device)
@@ -946,10 +948,14 @@ class TPUModelRunner:
                     effective_query_lens=effective_query_lens,
                 )
         else:
+            # Decode
             assert seq_len == 1
-            token_ids = torch.zeros((num_tokens, seq_len),
+            input_ids = torch.zeros((num_tokens, seq_len),
                                     dtype=torch.int32,
                                     device=self.device)
+            # TODO: Once we combine prompts and decodes, we should use the same
+            # choice of input_ids or inputs_embeds throughout _dummy_run.
+            inputs_embeds = None
             position_ids = torch.zeros((num_tokens, seq_len),
                                        dtype=torch.int32,
                                        device=self.device)
@@ -974,9 +980,6 @@ class TPUModelRunner:
                 context_lens=context_lens,
             )
 
-        # TODO: Run with embeddings
-        inputs_embeds = None
-
         # NOTE(woosuk): There are two stages of compilation: torch.compile and
         # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
         # overhead by reusing the FX graph for different shapes.
@@ -985,13 +988,16 @@ class TPUModelRunner:
         # in the first run, but can be skipped afterwards as we cache the XLA
         # graphs in the disk (VLLM_XLA_CACHE_PATH).
         if exec_mode.is_prefill():
-            # Prefll
-            torch._dynamo.mark_dynamic(token_ids, 1)
+            # Prefill
+            if self.is_multimodal_model:
+                torch._dynamo.mark_dynamic(inputs_embeds, 1)
+            else:
+                torch._dynamo.mark_dynamic(input_ids, 1)
             torch._dynamo.mark_dynamic(position_ids, 1)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
         else:
             # Decode
-            torch._dynamo.mark_dynamic(token_ids, 0)
+            torch._dynamo.mark_dynamic(input_ids, 0)
             torch._dynamo.mark_dynamic(position_ids, 0)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
             torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
@@ -1000,7 +1006,7 @@ class TPUModelRunner:
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
             self.model(
-                input_ids=token_ids,
+                input_ids=input_ids,
                 positions=position_ids,
                 kv_caches=kv_caches,
                 attn_metadata=attn_metadata,
@@ -1017,10 +1023,10 @@ class TPUModelRunner:
         for batch_size in [1]:
             seq_len = 16
             while seq_len <= self.model_config.max_model_len:
-                self.dummy_run(self.kv_caches,
-                               batch_size,
-                               seq_len,
-                               exec_mode=ExecutionMode.PREFILL)
+                self._dummy_run(self.kv_caches,
+                                batch_size,
+                                seq_len,
+                                exec_mode=ExecutionMode.PREFILL)
                 xm.wait_device_ops()
                 logger.info("  batch_size: %d, seq_len: %d", batch_size,
                             seq_len)
@@ -1041,10 +1047,10 @@ class TPUModelRunner:
             for batch_size in [1]:
                 seq_len = 16
                 while seq_len <= self.model_config.max_model_len:
-                    self.dummy_run(self.kv_caches,
-                                   batch_size,
-                                   seq_len,
-                                   exec_mode=ExecutionMode.PREFIX_PREFILL)
+                    self._dummy_run(self.kv_caches,
+                                    batch_size,
+                                    seq_len,
+                                    exec_mode=ExecutionMode.PREFIX_PREFILL)
                     xm.wait_device_ops()
                     logger.info("  batch_size: %d, seq_len: %d", batch_size,
                                 seq_len)
@@ -1065,10 +1071,10 @@ class TPUModelRunner:
         seq_len = 1
         batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
-            self.dummy_run(self.kv_caches,
-                           batch_size,
-                           seq_len,
-                           exec_mode=ExecutionMode.DECODE)
+            self._dummy_run(self.kv_caches,
+                            batch_size,
+                            seq_len,
+                            exec_mode=ExecutionMode.DECODE)
             xm.wait_device_ops()
             logger.info("  batch_size: %d, seq_len: %d", batch_size, seq_len)
 
