@@ -247,10 +247,7 @@ class ModelConfig:
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
-        if hf_config_path:
-            self.hf_config_path = hf_config_path
-        else:
-            self.hf_config_path = self.model
+        self.hf_config_path = hf_config_path
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
