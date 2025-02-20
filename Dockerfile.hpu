@@ -4,7 +4,7 @@ COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm
 
-RUN pip install -v -r requirements-hpu.txt
+RUN pip install -v -r requirements/hpu.txt
 
 ENV no_proxy=localhost,127.0.0.1
 ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
