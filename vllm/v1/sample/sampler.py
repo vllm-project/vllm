@@ -6,8 +6,7 @@ import torch.nn as nn
 
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.penalties import (apply_all_penalties,
-                                          apply_min_token_penalties)
+from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 
@@ -47,8 +46,11 @@ class Sampler(nn.Module):
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
-        # Apply logits bias.
-        logits = self.apply_logits_bias(logits, sampling_metadata)
+
+        # Apply logits processors.
+        for processor in sampling_metadata.logits_procs:
+            logits = processor.apply(logits)
+
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
@@ -103,9 +105,9 @@ class Sampler(nn.Module):
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
 
-        # Apply min_p.
-        if sampling_metadata.min_p is not None:
-            logits = self.apply_min_p(logits, sampling_metadata.min_p)
+        # Apply logits processors.
+        for processor in sampling_metadata.nongreedy_logits_procs:
+            logits = processor.apply(logits)
 
         # Apply top_k and/or top_p.
         random_sampled = self.topk_topp_sampler(
@@ -177,10 +179,6 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        if sampling_metadata.min_tokens:
-            apply_min_token_penalties(logits,
-                                      sampling_metadata.output_token_ids,
-                                      sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
             logits = apply_all_penalties(
@@ -189,40 +187,4 @@ class Sampler(nn.Module):
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
                 sampling_metadata.output_token_ids)
-        return logits
-
-    def apply_min_p(
-        self,
-        logits: torch.Tensor,
-        min_p: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Filters logits using adaptive probability thresholding.
-        """
-        # Convert logits to probability distribution
-        probability_values = torch.nn.functional.softmax(logits, dim=-1)
-        # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values,
-                                       dim=-1,
-                                       keepdim=True)
-        # Reshape min_p for broadcasting
-        adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
-        # Identify valid tokens using threshold comparison
-        valid_token_mask = probability_values >= adjusted_min_p
-        # Apply mask using boolean indexing
-        logits[~valid_token_mask] = -float('inf')
-        return logits
-
-    def apply_logits_bias(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
-        # TODO(houseroad): this implementation is extremely inefficient.
-        # One idea is implement this as a PyTorch C++ op, and we may
-        # even optimize the logit_bias layout.
-        for i, logit_bias in enumerate(sampling_metadata.logit_bias):
-            if logit_bias:
-                for token_id, bias in logit_bias.items():
-                    logits[i, token_id] += bias
         return logits

@@ -1046,9 +1046,6 @@ def swap_positions(b: InputBatch, id_1, id_2):
     b.presence_penalties_cpu[ids] = b.presence_penalties_cpu[rev_ids]
     b.repetition_penalties_cpu[ids] = b.repetition_penalties_cpu[rev_ids]
 
-    b.min_tokens[id_1], b.min_tokens[id_2] = b.min_tokens[id_2], b.min_tokens[
-        id_1]
-
     gen_1 = b.generators.pop(id_1, None)
     gen_2 = b.generators.pop(id_2, None)
     if gen_1 is not None:

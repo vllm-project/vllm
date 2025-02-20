@@ -2,6 +2,7 @@
 
 import gc
 import time
+from itertools import chain
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -31,6 +32,7 @@ from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.sample.logits_processor import BatchUpdate
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
@@ -405,6 +407,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
+        removed = removed_req_indices
+        added = []
         removed_req_indices = sorted(removed_req_indices, reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
@@ -414,11 +418,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 # Append to the end.
                 req_index = None
-            self.input_batch.add_request(req_state, req_index)
+            req_index = self.input_batch.add_request(req_state, req_index)
+            added.append((req_index, req_state.sampling_params,
+                          req_state.output_token_ids))
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
-            self.input_batch.condense(removed_req_indices)
+            moved = self.input_batch.condense(removed_req_indices)
+        else:
+            moved = []
+
+        # Update states of logits processors
+        batch_update = None if not batch_changed else BatchUpdate(
+            removed=removed,
+            moved=moved,
+            added=added,
+            batch_size=self.input_batch.num_reqs,
+        )
+
+        for processor in chain(self.input_batch.logit_procs,
+                               self.input_batch.nongreedy_logits_procs):
+            processor.update_states(batch_update)
 
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()

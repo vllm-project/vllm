@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional
 
 import torch
+
+from vllm.v1.sample.logits_processor import LogitsProcessor
 
 
 @dataclass
@@ -18,7 +20,6 @@ class SamplingMetadata:
 
     top_p: Optional[torch.Tensor]
     top_k: Optional[torch.Tensor]
-    min_p: Optional[torch.Tensor]
 
     generators: Dict[int, torch.Generator]
 
@@ -33,7 +34,5 @@ class SamplingMetadata:
 
     output_token_ids: List[List[int]]
 
-    # req_index -> (min_tokens, stop_token_ids)
-    min_tokens: Dict[int, Tuple[int, Set[int]]]
-
-    logit_bias: List[Optional[Dict[int, float]]]
+    logits_procs: List[LogitsProcessor]
+    nongreedy_logits_procs: List[LogitsProcessor]
