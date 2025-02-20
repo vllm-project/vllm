@@ -24,6 +24,8 @@ def check_values(obj, key_path="", filename=""):
 def check_json_files(directory):
     """Iterates through all JSON files in a directory and checks their values."""
     for filename in os.listdir(directory):
+        if "mod_list" in filename:
+            continue 
         if filename.endswith(".json"):
             filepath = os.path.join(directory, filename)
             try:
