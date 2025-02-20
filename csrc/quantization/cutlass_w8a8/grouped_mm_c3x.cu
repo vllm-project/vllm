@@ -118,7 +118,7 @@ __global__ void get_grouped_mm_data(const int* __restrict__ topk_ids,
                                     int32_t* problem_sizes1,
                                     int32_t* problem_sizes2, int32_t* arg_sort,
                                     int32_t* arg_sort_prim, int topk_length,
-                                    int n, int k) {
+                                    int n, int k, int topk) {
   int expert_id = threadIdx.x;
   int num_experts = blockDim.x;
 
@@ -149,7 +149,7 @@ __global__ void get_grouped_mm_data(const int* __restrict__ topk_ids,
   int end = expert_offsets[expert_id + 1];
   for (int i = 0; i < topk_length; ++i) {
     if (topk_ids[i] == expert_id) {
-      arg_sort[start] = i;
+      arg_sort[start] = i / topk;
       arg_sort_prim[i] = start;
       ++start;
       if (start == end) {
@@ -168,5 +168,5 @@ void get_grouped_mm_data_caller(
       (const int32_t*)topk_ids.data_ptr(), (int32_t*)expert_offsets.data_ptr(),
       (int32_t*)problem_sizes1.data_ptr(), (int32_t*)problem_sizes2.data_ptr(),
       (int32_t*)arg_sort.data_ptr(), (int32_t*)arg_sort_prim.data_ptr(),
-      topk_ids.numel(), n, k);
+      topk_ids.numel(), n, k, topk_ids.size(1));
 }

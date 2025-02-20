@@ -83,21 +83,24 @@ template <typename ElementAB_, typename ElementC_,
           typename EpilogueSchedule>
 struct cutlass_3x_group_gemm {
   using ElementAB = ElementAB_;
-  using ElementC = ElementC_;
+  // TODO check if this works
+  using ElementC = void;
+  using ElementD = ElementC_;
+  //   using ElementC = ElementC_;
   using ElementAccumulator = float;
 
   using EpilogueDescriptor =
       cutlass::epilogue::collective::detail::EpilogueDescriptor<
           TileShape, cutlass::epilogue::collective::EpilogueTileAuto, ElementC,
-          ElementC, EpilogueSchedule>;
+          ElementD, EpilogueSchedule>;
 
-  using Epilogue = Epilogue_<ElementAccumulator, ElementC, EpilogueDescriptor>;
+  using Epilogue = Epilogue_<ElementAccumulator, ElementD, EpilogueDescriptor>;
 
   using StrideC =
       cute::remove_pointer_t<cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>>;
 
   const int AlignmentAB = 128 / cutlass::sizeof_bits<ElementAB>::value;
-  const int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
+  const int AlignmentC = 128 / cutlass::sizeof_bits<ElementD>::value;
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
@@ -105,7 +108,7 @@ struct cutlass_3x_group_gemm {
       typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, OperatorClass, TileShape, ClusterShape,
           cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
-          ElementAccumulator, ElementC, LayoutC*, 4, ElementC, LayoutC*, 4,
+          ElementAccumulator, ElementC, LayoutC*, 4, ElementD, LayoutC*, 4,
           EpilogueSchedule, EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
@@ -160,6 +163,7 @@ void cutlass_group_gemm_caller(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementC = typename Gemm::ElementC;
+  using ElementD = typename Gemm::ElementD;
 
   int groups = (int)expert_offsets.size(0);
   int k_size = a_tensors.size(1);
@@ -218,8 +222,7 @@ void cutlass_group_gemm_caller(
                                    reinterpret_cast<const ElementAccumulator**>(
                                        b_scales_ptrs.data_ptr()),
                                    per_act_token, per_out_ch),
-      reinterpret_cast<const ElementC_Type**>(out_ptrs.data_ptr()),
-      reinterpret_cast<StrideC*>(c_strides.data_ptr()),
+      nullptr, reinterpret_cast<StrideC*>(c_strides.data_ptr()),
       reinterpret_cast<ElementC_Type**>(out_ptrs.data_ptr()),
       reinterpret_cast<StrideC*>(c_strides.data_ptr())};
 

@@ -1268,6 +1268,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     return out_hidden_states
 
 
+#TODO make the grouped gemm kernel consistent with scaled gemm kernel
 def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -1377,6 +1378,10 @@ def cutlass_moe(
     n: int,
     k: int,
     num_groups: int,
+    ab_strides1: torch.Tensor,
+    c_strides1: torch.Tensor,
+    ab_strides2: torch.Tensor,
+    c_strides2: torch.Tensor,
 ):
     topk = topk_ids.shape[1]
     per_act_token = a_scale.numel() != 1
@@ -1398,23 +1403,27 @@ def cutlass_moe(
                                      problem_sizes2, a_map, c_map, num_groups,
                                      n, k)
 
-    rep_a_q = a_q.repeat_interleave(
-        topk, dim=0).view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
-    if per_act_token:
-        rep_a_scales = a_scale.repeat_interleave(topk, dim=0)[a_map]
-    else:
-        rep_a_scales = a_scale
+    # TODO use extend here, or try to create map without repeating and
+    # interleaving
+    # TODO reuse MoE align_block kernel?
+    # rep_a_q = a_q.repeat_interleave(
+    #     topk, dim=0).view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
+    rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
+    rep_a_scales = a_scale[a_map] if per_act_token else a_scale
 
-    c1 = torch.zeros((m * topk, n * 2), device="cuda", dtype=torch.half)
-    c2 = torch.zeros((m * topk, k), device="cuda", dtype=torch.half)
-    ab_strides1 = torch.full((num_groups, ),
-                             a_q.stride(0),
-                             device="cuda",
-                             dtype=torch.int64)
-    c_strides1 = torch.full((num_groups, ),
-                            c1.stride(0),
-                            device="cuda",
-                            dtype=torch.int64)
+    # TODO check if we need zeros here
+    c1 = torch.empty((m * topk, n * 2), device="cuda", dtype=torch.half)
+    c2 = torch.empty((m * topk, k), device="cuda", dtype=torch.half)
+    # TODO move stride creation outside this function, they're going to be
+    # constant for all calls
+    # ab_strides1 = torch.full((num_groups, ),
+    #                          a_q.stride(0),
+    #                          device="cuda",
+    #                          dtype=torch.int64)
+    # c_strides1 = torch.full((num_groups, ),
+    #                         c1.stride(0),
+    #                         device="cuda",
+    #                         dtype=torch.int64)
 
     torch.ops._C.cutlass_grouped_mm(c1, rep_a_q, w1_q, rep_a_scales, w1_scale,
                                     expert_offsets[:-1], problem_sizes1,
@@ -1426,14 +1435,15 @@ def cutlass_moe(
     intemediate_q, intermediate_scales = ops.scaled_fp8_quant(
         intermediate, use_per_token_if_dynamic=per_act_token)
 
-    ab_strides2 = torch.full((num_groups, ),
-                             intemediate_q.stride(0),
-                             device="cuda",
-                             dtype=torch.int64)
-    c_strides2 = torch.full((num_groups, ),
-                            c2.stride(0),
-                            device="cuda",
-                            dtype=torch.int64)
+    # ab_strides2 = torch.full((num_groups, ),
+    #                          intemediate_q.stride(0),
+    #                          device="cuda",
+    #                          dtype=torch.int64)
+    # c_strides2 = torch.full((num_groups, ),
+    #                         c2.stride(0),
+    #                         device="cuda",
+    #                         dtype=torch.int64)
+
     torch.ops._C.cutlass_grouped_mm(c2, intemediate_q, w2_q,
                                     intermediate_scales, w2_scale,
                                     expert_offsets[:-1], problem_sizes2,

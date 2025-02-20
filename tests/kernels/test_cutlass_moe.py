@@ -69,6 +69,11 @@ def test_cutlass_moe_no_graph(
                                device="cuda",
                                dtype=torch.float32)
 
+        ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+        c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
+        ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
+        c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+
         for expert in range(e):
             w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(
                 w1[expert], use_per_token_if_dynamic=per_out_ch)
@@ -92,7 +97,8 @@ def test_cutlass_moe_no_graph(
         torch_output = torch_moe(a_d, w1_d, w2_d, score, topk)
         cutlass_output = cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale,
                                      w2_scale, topk_weights, topk_ids, m, n, k,
-                                     e)
+                                     e, ab_strides1, c_strides1, ab_strides2,
+                                     c_strides2)
 
         print(torch_output)
         print(cutlass_output)
