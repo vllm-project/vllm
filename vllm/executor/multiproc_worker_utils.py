@@ -253,9 +253,8 @@ def _run_worker_process(
     # Flush TunableOp results when TunableOp is enabled and
     # online (in situ) tuning is enabled.
     import torch.cuda.tunable as tunable
-    if ((tunable.is_enabled() is True) and
-        (tunable.tuning_is_enabled() is True) and
-        (tunable.record_untuned_is_enabled() is False)):
+    if (tunable.is_enabled() and tunable.tuning_is_enabled() and
+        not tunable.record_untuned_is_enabled()):
         tunable.write_file()
 
     logger.info("Worker exiting")
