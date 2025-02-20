@@ -192,21 +192,13 @@ if __name__ == "__main__":
             "The future of AI is",
         ]
         prompts = []
-        filename = "pile.txt"
-        with open(filename, "r") as f:
-            prompts = f.readlines()
-            print(f"Number of prompts: {len(prompts)}")
-        from transformers import AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-        prompt_token_ids = []
-        for prompt in prompts:
-            tokens = tokenizer(
-                prompt, return_tensors="pt", truncation=True, max_length=1024
-            )
-            if len(tokens.input_ids[0]) < least_tokens:
-                continue
-            prompt_token_ids.append([x.item() for x in tokens.input_ids[0]])
+        from utils import get_prompts, get_prompt_token_ids
+
+        prompts = get_prompts()
+        prompt_token_ids = get_prompt_token_ids(
+            args.model, prompts, least_tokens
+        )
 
         gt = None
     # Create a sampling params object.
@@ -215,7 +207,7 @@ if __name__ == "__main__":
         top_p=top_p,
         max_tokens=max_new_tokens,
         truncate_prompt_tokens=least_tokens,
-        )
+    )
     model = args.model
 
     llm = LLM(

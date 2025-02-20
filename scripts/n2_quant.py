@@ -46,6 +46,22 @@ args = parser.parse_args()
 # os.environ["RAY_DEDUP_LOGS"] = "1"
 # os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"
 
+# ==-------------------------------------------------------------------------==
+# Calibration parameters
+least_tokens = 1024
+num_samples = 512
+max_new_tokens = 32
+seed = 42
+# https://github.com/deepseek-ai/DeepSeek-R1/blob/main/README.md#deepseek-r1-evaluation
+"""
+... benchmarks requiring sampling, we use a temperature of 0.6, a top-p value of 0.95...
+"""
+temperature = 0.6
+temperature = 0 # greedy sample
+top_p = 0.95
+# ==-------------------------------------------------------------------------==
+
+
 def sample_sonnet_requests(
     dataset_path: str,
     num_requests: int,
@@ -175,14 +191,21 @@ if __name__ == "__main__":
             # "The capital of France is",
             "The future of AI is",
         ]
-        prompts = []
-        filename = "pile.txt"
-        with open(filename, "r") as f:
-            prompts = f.readlines()
-            print(f"Number of prompts: {len(prompts)}")
+
+        from utils import get_prompts, get_prompt_token_ids
+
+        prompts = get_prompts()
+        prompt_token_ids = get_prompt_token_ids(
+            args.model, prompts, least_tokens
+        )
         gt = None
     # Create a sampling params object.
-    sampling_params = SamplingParams(temperature=0, max_tokens=args.osl)
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_new_tokens,
+        truncate_prompt_tokens=least_tokens,
+    )
     model = args.model
 
     llm = LLM(
