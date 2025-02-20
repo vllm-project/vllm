@@ -980,6 +980,9 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         raise AssertionError("This line should be unreachable.")
     
     def _encode_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        dtype = next(self.vision_tower.parameters()).dtype
+        pixel_values = pixel_values.to(dtype)
+
         batch_size, T = pixel_values.size(0), 1
         x = self.vision_tower.forward_features_unpool(pixel_values)
         if self.image_pos_embed is not None:
