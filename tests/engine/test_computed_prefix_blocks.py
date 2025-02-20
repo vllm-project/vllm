@@ -10,7 +10,8 @@ from vllm.sampling_params import SamplingParams
 from ..conftest import MODEL_WEIGHTS_S3_BUCKET
 
 
-@pytest.mark.parametrize("model", [f"{MODEL_WEIGHTS_S3_BUCKET}/distilgpt2"])
+@pytest.mark.parametrize("model",
+                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
 @pytest.mark.parametrize("block_size", [16])
 def test_computed_prefix_blocks(model: str, block_size: int):
     # This test checks if we are able to run the engine to completion

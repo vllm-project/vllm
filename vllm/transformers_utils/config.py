@@ -115,7 +115,14 @@ def list_repo_files(
     token: Union[str, bool, None] = None,
 ) -> list[str]:
 
-    def lookup_files():
+    def lookup_files() -> list[str]:
+        # directly list files if model is local
+        if (local_path := Path(repo_id)).exists():
+            return [
+                str(file.relative_to(local_path))
+                for file in local_path.rglob('*') if file.is_file()
+            ]
+        # if model is remote, use hf_hub api to list files
         try:
             if VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import (
@@ -154,8 +161,8 @@ def file_exists(
 # In offline mode the result can be a false negative
 def file_or_path_exists(model: Union[str, Path], config_name: str,
                         revision: Optional[str]) -> bool:
-    if Path(model).exists():
-        return (Path(model) / config_name).is_file()
+    if (local_path := Path(model)).exists():
+        return (local_path / config_name).is_file()
 
     # Offline mode support: Check if config file is cached already
     cached_filepath = try_to_load_from_cache(repo_id=model,
