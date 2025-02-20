@@ -1173,15 +1173,16 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     config = get_config_func(M)
 
-    intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
+    cache = torch.empty(M * topk_ids.shape[1] * max(N, w2.shape[1]),
+                        device=hidden_states.device,
+                        dtype=hidden_states.dtype)
+    intermediate_cache1 = cache[:M * topk_ids.shape[1] * N].view(
+        (M, topk_ids.shape[1], N))
     intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
-    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
+    intermediate_cache3 = cache[:M * topk_ids.shape[1] * w2.shape[1]].view(
+        (M, topk_ids.shape[1], w2.shape[1]))
 
     if hidden_states.dtype == torch.bfloat16:
         compute_type = tl.bfloat16
