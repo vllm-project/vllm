@@ -23,11 +23,10 @@ First, install Python and ensure you lave the latest pip. For example, on Ubuntu
 
 ```console
 sudo apt-get update  -y
-sudo apt-get install python3
-pip install --upgrade pip
+sudo apt-get install python3-pip
 ```
 
-Second, clone vLLM and install prerequisites for the vLLM OpenVINO backend installation:
+Second, clone vLLM:
 
 ```console
 git clone https://github.com/vllm-project/vllm.git

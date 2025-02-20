@@ -59,6 +59,7 @@ appropriate values. See the parameter descriptions table for more information.
 ### Provision Cloud TPUs with GKE
 
 For more information about using TPUs with GKE, see:
+
 - <https://cloud.google.com/kubernetes-engine/docs/how-to/tpus>
 - <https://cloud.google.com/kubernetes-engine/docs/concepts/tpus>
 - <https://cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus>
@@ -142,23 +143,17 @@ Clone the vLLM repository and go to the vLLM directory:
 git clone https://github.com/vllm-project/vllm.git && cd vllm
 ```
 
-Uninstall the existing `torch` and `torch_xla` packages:
-
-```bash
-pip uninstall torch torch-xla -y
-```
-
 Install build dependencies:
 
 ```bash
-pip install -r requirements-tpu.txt
 sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
 ```
 
-Run the setup script:
+Install `vllm`:
 
 ```bash
-VLLM_TARGET_DEVICE="tpu" python setup.py develop
+export PIP_FIND_LINKS="https://storage.googleapis.com/libtpu-releases/index.html https://storage.googleapis.com/jax-releases/jax_nightly_releases.html https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html"
+VLLM_TARGET_DEVICE="tpu" pip install -e .
 ```
 
 ## Set up using Docker
