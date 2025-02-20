@@ -768,12 +768,15 @@ class Florence2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
+    def get_max_image_tokens(self) -> int:
+        return 577
+
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        return {"image": 577}
+        return {"image": self.get_max_image_tokens()}
 
 
 class Florence2DummyInputsBuilder(BaseDummyInputsBuilder[Florence2ProcessingInfo]):
@@ -815,15 +818,7 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
-        data = mm_data.get("image", [])
-        num_images = 1 if isinstance(data, Image) else len(data)
-        pad_token_id = self.info.get_hf_config().pad_token_id
-        if isinstance(prompt, str):
-            tokenizer = self.info.get_tokenizer()
-            prompt_token_ids = tokenizer.encode(prompt, add_special_tokens=False)
-        else:
-            prompt_token_ids = prompt
-        return [pad_token_id] * num_images + prompt_token_ids
+        return prompt
 
     def create_decoder_prompt(
         self,
@@ -841,7 +836,9 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         if mm_data:
             processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
         else:
-            tokenizer = self.info.get_tokenizer()
+            hf_processor = self.info.get_hf_processor()
+            tokenizer = hf_processor.tokenizer
+            prompt = hf_processor._construct_prompts([prompt])[0]
             processed_outputs = tokenizer(prompt,
                                           add_special_tokens=True,
                                           return_tensors="pt")
@@ -862,12 +859,15 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        pad_token_id = self.info.get_hf_config().pad_token_id
+        hf_config = self.info.get_hf_config()
+        pad_token_id = hf_config.pad_token_id
+        bos_token_id = hf_config.bos_token_id
+        num_image_tokens = self.info.get_max_image_tokens()
         return [
             PromptReplacement(
                 modality="image",
-                target=[pad_token_id],
-                replacement=[pad_token_id] * 577,
+                target=[bos_token_id],
+                replacement=[pad_token_id] * num_image_tokens + [bos_token_id],
             )
         ]
 
