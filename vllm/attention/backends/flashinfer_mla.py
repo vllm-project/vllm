@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type
@@ -125,7 +126,7 @@ class FlashInferMLAState(MLACommonState):
         assert self._is_graph_capturing
         state = self.__class__(self.runner)
         state._workspace_buffer = self._graph_decode_workspace_buffer
-        state._decode_wrapper = self._graph_decode_wrapper
+        state._decode_wrapper = copy.copy(self._graph_decode_wrapper)
         return state
 
     def graph_capture_get_metadata_for_batch(
@@ -197,10 +198,12 @@ class FlashInferMLAState(MLACommonState):
         # In case of multistep chunked-prefill, there might be prefill requests
         # scheduled while CUDA graph mode is enabled. We don't run graph in that
         # case.
+        print("begin_forward", model_input.input_tokens.shape[0])
         if use_cuda_graph and is_decode:
             batch_size = model_input.input_tokens.shape[0]
             state = (self.runner.graph_runners[model_input.virtual_engine]
                      [batch_size].attn_state)
+            print("choosing decode_wrapper", batch_size)
         model_input.attn_metadata.decode_wrapper = state._get_decode_wrapper()
         model_input.attn_metadata.begin_forward()
 
@@ -421,9 +424,17 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder):
             self.paged_kv_indptr.extend([self.paged_kv_indptr[-1]] *
                                         cuda_graph_pad_size)
             self.paged_kv_last_page_len.extend([0] * cuda_graph_pad_size)
-            query_start_loc_host = torch.functional.F.pad(
-                query_start_loc_host, (cuda_graph_pad_size + 1, ),
-                value=query_start_loc_host[-1].item())
+
+            print(cuda_graph_pad_size + 1 - query_start_loc_host.shape[0],
+                  cuda_graph_pad_size + 1, query_start_loc_host.shape[0])
+            if cuda_graph_pad_size + 1 > query_start_loc_host.shape[0]:
+                query_start_loc_host = torch.cat(
+                    (query_start_loc_host,
+                     torch.full((cuda_graph_pad_size + 1 -
+                                 query_start_loc_host.shape[0], ),
+                                fill_value=query_start_loc_host[-1].item(),
+                                dtype=torch.int32,
+                                device="cpu")))
 
         if len(self.paged_kv_indptr) > 0:
             # extend to the maximum number of blocks as returned by the
