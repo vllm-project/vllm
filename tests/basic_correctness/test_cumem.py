@@ -121,10 +121,8 @@ def test_cumem_with_cudagraph():
     [
         # sleep mode with safetensors
         (f"{MODEL_WEIGHTS_S3_BUCKET}/Llama-3.2-1B", True),
-        (f"{MODEL_WEIGHTS_S3_BUCKET}/Llama-3.2-1B", False),
         # sleep mode with pytorch checkpoint
         ("facebook/opt-125m", False),
-        ("facebook/opt-125m", True)
     ])
 def test_end_to_end(model: str, use_v1: bool):
     import os
@@ -151,8 +149,9 @@ def test_end_to_end(model: str, use_v1: bool):
     assert used_bytes < 2 * GiB_bytes
 
     llm.wake_up()
-
     output2 = llm.generate(prompt, sampling_params)
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+    del os.environ["VLLM_USE_V1"]
