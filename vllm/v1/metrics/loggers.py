@@ -15,8 +15,6 @@ from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
 
-_LOCAL_LOGGING_INTERVAL_SEC = 5.0
-
 
 class StatLoggerBase(ABC):
 
@@ -28,8 +26,9 @@ class StatLoggerBase(ABC):
 
 class LoggingStatLogger(StatLoggerBase):
 
-    def __init__(self):
+    def __init__(self, vllm_config: VllmConfig):
         self._reset(time.monotonic())
+        self.vllm_config = vllm_config
 
     def _reset(self, now):
         self.last_log_time = now
@@ -42,9 +41,10 @@ class LoggingStatLogger(StatLoggerBase):
         self.prefix_caching_metrics = PrefixCachingMetrics()
 
     def _local_interval_elapsed(self, now: float) -> bool:
-        # Log every _LOCAL_LOGGING_INTERVAL_SEC.
+        # Log every configured log_stats_interval level
         elapsed_time = now - self.last_log_time
-        return elapsed_time > _LOCAL_LOGGING_INTERVAL_SEC
+        interval = self.vllm_config.observability_config.log_stats_interval
+        return elapsed_time > interval
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
