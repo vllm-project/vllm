@@ -14,7 +14,7 @@ def test_platform_plugins():
     import os
     example_file = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(current_file))),
-        "examples", "offline_inference/basic.py")
+        "examples", "offline_inference/basic/basic.py")
     runpy.run_path(example_file)
 
     # check if the plugin is loaded correctly
