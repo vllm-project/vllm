@@ -103,8 +103,8 @@ class QuantizationConfig(ABC):
                                      user_quant) -> Optional[str]:
         """
            Detects if this quantization method can support a given checkpoint
-           format by overriding the user specified quantization method -- 
-           this method should only be overwritten by subclasses in exceptional 
+           format by overriding the user specified quantization method --
+           this method should only be overwritten by subclasses in exceptional
            circumstances
         """
         return None
@@ -131,7 +131,7 @@ class QuantizationConfig(ABC):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         """Get the quantize method to use for the quantized layer.
-        
+
         Args:
             layer: The layer for the quant method.
             prefix: The full name of the layer in the state dict
