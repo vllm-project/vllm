@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from einops import rearrange
 from PIL.Image import Image
-from transformers import PretrainedConfig, BatchFeature
+from transformers import PretrainedConfig, BatchFeature, CLIPImageProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -769,7 +769,8 @@ class Florence2ProcessingInfo(BaseProcessingInfo):
         return {"image": 1}
 
     def get_max_image_tokens(self) -> int:
-        return 577
+        processor_config = self.ctx.get_hf_image_processor_config()
+        return processor_config["image_seq_length"]
 
     def get_mm_max_tokens_per_item(
         self,
@@ -886,7 +887,10 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        processor_config = vllm_config.model_config.hf_image_processor_config
+
         self.config = config
+        self.processor_config = processor_config
         assert config.vision_config.model_type == 'davit', 'only DaViT is supported for now'
         self.vision_tower = DaViT.from_config(config=config.vision_config)
         self._build_image_projection_layers(config)
@@ -934,7 +938,8 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
 
-        h = w = self.config.projection_dim
+        size = self.processor_config["size"]
+        h, w = size["height"], size["width"]
         expected_dims = (3, h, w)
 
         def _validate_shape(d: torch.Tensor):
