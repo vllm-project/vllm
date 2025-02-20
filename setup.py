@@ -11,12 +11,11 @@ from pathlib import Path
 from shutil import which
 from typing import Dict, List
 
-import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+from setuptools.errors import SetupError
 from setuptools_scm import get_version
-from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
 
 def load_module_from_path(module_name, path):
@@ -47,12 +46,6 @@ elif not (sys.platform.startswith("linux")
         "Building on %s, "
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
-elif (sys.platform.startswith("linux") and torch.version.cuda is None
-      and os.getenv("VLLM_TARGET_DEVICE") is None
-      and torch.version.hip is None):
-    # if cuda or hip is not available and VLLM_TARGET_DEVICE is not set,
-    # fallback to cpu
-    VLLM_TARGET_DEVICE = "cpu"
 
 MAIN_CUDA_VERSION = "12.1"
 
@@ -383,14 +376,12 @@ def _no_device() -> bool:
 
 
 def _is_cuda() -> bool:
-    has_cuda = torch.version.cuda is not None
-    return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu() or _is_hpu()))
+    return VLLM_TARGET_DEVICE == "cuda" and not (_is_neuron() or _is_tpu()
+                                                 or _is_hpu())
 
 
 def _is_hip() -> bool:
-    return (VLLM_TARGET_DEVICE == "cuda"
-            or VLLM_TARGET_DEVICE == "rocm") and torch.version.hip is not None
+    return VLLM_TARGET_DEVICE == "rocm"
 
 
 def _is_neuron() -> bool:
@@ -417,14 +408,17 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
 
-def get_rocm_version():
+def get_rocm_version() -> str:
+    from torch.utils.cpp_extension import ROCM_HOME
+
     # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
     # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
     try:
         librocm_core_file = Path(ROCM_HOME) / "lib" / "librocm-core.so"
         if not librocm_core_file.is_file():
-            return None
-        librocm_core = ctypes.CDLL(librocm_core_file)
+            raise Exception("librocm-core.so is not available")
+
+        librocm_core = ctypes.CDLL(str(librocm_core_file))
         VerErrors = ctypes.c_uint32
         get_rocm_core_version = librocm_core.getROCmVersion
         get_rocm_core_version.restype = VerErrors
@@ -437,12 +431,27 @@ def get_rocm_version():
         minor = ctypes.c_uint32()
         patch = ctypes.c_uint32()
 
-        if (get_rocm_core_version(ctypes.byref(major), ctypes.byref(minor),
-                                  ctypes.byref(patch)) == 0):
-            return f"{major.value}.{minor.value}.{patch.value}"
-        return None
-    except Exception:
-        return None
+        ret = get_rocm_core_version(
+            ctypes.byref(major),
+            ctypes.byref(minor),
+            ctypes.byref(patch),
+        )
+        if ret == 0:
+            version = f"{major.value}.{minor.value}.{patch.value}"
+        else:
+            raise Exception(f"get_rocm_core_version returned: {ret}")
+    except Exception as exc:
+        print(f"failed to get version using librocm-core ({exc}), "
+              "falling back to torch.version.hip")
+
+        import torch
+
+        if torch.version.hip is None:
+            raise SetupError("Couldn't get rocm version") from exc
+
+        version = torch.version.hip
+
+    return version
 
 
 def get_neuronxcc_version():
@@ -460,8 +469,8 @@ def get_neuronxcc_version():
     if match:
         # Return the version string
         return match.group(1)
-    else:
-        raise RuntimeError("Could not find Neuron version in the output")
+
+    raise RuntimeError("Could not find neuron version in the output")
 
 
 def get_nvcc_cuda_version() -> Version:
@@ -469,6 +478,8 @@ def get_nvcc_cuda_version() -> Version:
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
+    from torch.utils.cpp_extension import CUDA_HOME
+
     assert CUDA_HOME is not None, "CUDA_HOME is not set"
     nvcc_output = subprocess.check_output([CUDA_HOME + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
@@ -500,24 +511,26 @@ def get_gaudi_sw_version():
 
 def get_vllm_version() -> str:
     version = get_version(write_to="vllm/_version.py")
-    sep = "+" if "+" not in version else "."  # dev versions might contain +
+    if "sdist" in sys.argv:
+        # skip local version specifiers for source distribution builds
+        return version
+
+    # dev versions might already contain local version specifiers
+    sep = "+" if "+" not in version else "."
 
     if _no_device():
-        if envs.VLLM_TARGET_DEVICE == "empty":
+        if VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
     elif _is_cuda():
         if envs.VLLM_USE_PRECOMPILED:
-            version += f"{sep}precompiled"
-        else:
-            cuda_version = str(get_nvcc_cuda_version())
-            if cuda_version != MAIN_CUDA_VERSION:
-                cuda_version_str = cuda_version.replace(".", "")[:3]
-                # skip this for source tarball, required for pypi
-                if "sdist" not in sys.argv:
-                    version += f"{sep}cu{cuda_version_str}"
+            return f"{version}{sep}precompiled"
+
+        cuda_version = str(get_nvcc_cuda_version())
+        if cuda_version != MAIN_CUDA_VERSION:
+            cuda_version_str = cuda_version.replace(".", "")[:3]
+            version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
-        # Get the Rocm Version
-        rocm_version = get_rocm_version() or torch.version.hip
+        rocm_version = get_rocm_version()
         if rocm_version and rocm_version != MAIN_CUDA_VERSION:
             version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
     elif _is_neuron():
@@ -567,16 +580,6 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-common.txt")
     elif _is_cuda():
         requirements = _read_requirements("requirements-cuda.txt")
-        cuda_major, cuda_minor = torch.version.cuda.split(".")
-        modified_requirements = []
-        for req in requirements:
-            if ("vllm-flash-attn" in req
-                    and not (cuda_major == "12" and cuda_minor == "1")):
-                # vllm-flash-attn is built only for CUDA 12.1.
-                # Skip for other versions.
-                continue
-            modified_requirements.append(req)
-        requirements = modified_requirements
     elif _is_hip():
         requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
@@ -588,7 +591,13 @@ def get_requirements() -> List[str]:
     elif _is_tpu():
         requirements = _read_requirements("requirements-tpu.txt")
     elif _is_cpu():
-        requirements = _read_requirements("requirements-cpu.txt")
+        from platform import machine as _machine
+
+        machine = _machine()
+        if machine == "ppc64le":
+            requirements = _read_requirements("requirements-ppcle64.txt")
+        else:
+            requirements = _read_requirements("requirements-cpu.txt")
     elif _is_xpu():
         requirements = _read_requirements("requirements-xpu.txt")
     else:

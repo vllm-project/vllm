@@ -2,10 +2,12 @@
 -r requirements-common.txt
 
 # Dependencies for CPUs
--r requirements-torch-cpu.txt
+-r requirements-torch-ppcle64.txt
 
 # these must be updated alongside torch
-# required for the image processor of minicpm-o-2_6, phi3v
-torchaudio
-torchvision
+# required for the image processor of phi3v, minicpm-o-2_66
+torchvision==0.20.1
+torchaudio==2.5.1
+
+
 datasets # for benchmark scripts

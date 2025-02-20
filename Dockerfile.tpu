@@ -5,23 +5,25 @@ FROM $BASE_IMAGE
 WORKDIR /workspace/vllm
 
 # Install some basic utilities
-RUN apt-get update && apt-get install -y \
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y \
     git \
     ffmpeg libsm6 libxext6 libgl1
 
-# Build vLLM.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=requirements-build.txt,target=requirements-build.txt \
+    --mount=type=bind,source=requirements-common.txt,target=requirements-common.txt \
+    --mount=type=bind,source=requirements-tpu.txt,target=requirements-tpu.txt \
+    pip install -r requirements-tpu.txt -r requirements-build.txt
+
 COPY . .
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
-ENV VLLM_TARGET_DEVICE="tpu"
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
-    python3 -m pip install \
-        -r requirements-tpu.txt
-RUN python3 setup.py develop
-
+    VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -v -e .
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils
 
