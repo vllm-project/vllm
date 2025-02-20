@@ -81,6 +81,12 @@ class EngineCoreClient(ABC):
     def reset_prefix_cache(self) -> None:
         raise NotImplementedError
 
+    def sleep(self, level: int = 1) -> None:
+        raise NotImplementedError
+
+    def wake_up(self) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
@@ -97,6 +103,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def reset_prefix_cache_async(self) -> None:
+        raise NotImplementedError
+
+    async def sleep_async(self, level: int = 1) -> None:
+        raise NotImplementedError
+
+    async def wake_up_async(self) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -137,6 +149,12 @@ class InprocClient(EngineCoreClient):
 
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
+
+    def sleep(self, level: int = 1) -> None:
+        self.engine_core.sleep(level)
+
+    def wake_up(self) -> None:
+        self.engine_core.wake_up()
 
     def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine_core.add_lora(lora_request)
@@ -252,14 +270,18 @@ class SyncMPClient(MPClient):
         outputs_queue = self.outputs_queue
 
         def process_outputs_socket():
-            while True:
-                (frame, ) = output_socket.recv_multipart(copy=False)
-                outputs = decoder.decode(frame.buffer)
-                if outputs.utility_output:
-                    _process_utility_output(outputs.utility_output,
-                                            utility_results)
-                else:
-                    outputs_queue.put_nowait(outputs)
+            try:
+                while True:
+                    (frame, ) = output_socket.recv_multipart(copy=False)
+                    outputs = decoder.decode(frame.buffer)
+                    if outputs.utility_output:
+                        _process_utility_output(outputs.utility_output,
+                                                utility_results)
+                    else:
+                        outputs_queue.put_nowait(outputs)
+            except zmq.error.ContextTerminated:
+                # Expected when the class is GC'd / during process termination.
+                pass
 
         # Process outputs from engine in separate thread.
         Thread(target=process_outputs_socket, daemon=True).start()
@@ -302,6 +324,12 @@ class SyncMPClient(MPClient):
 
     def add_lora(self, lora_request: LoRARequest) -> None:
         self._call_utility("add_lora", lora_request)
+
+    def sleep(self, level: int = 1) -> None:
+        self._call_utility("sleep", level)
+
+    def wake_up(self) -> None:
+        self._call_utility("wake_up")
 
 
 class AsyncMPClient(MPClient):
@@ -379,6 +407,12 @@ class AsyncMPClient(MPClient):
 
     async def reset_prefix_cache_async(self) -> None:
         await self._call_utility_async("reset_prefix_cache")
+
+    async def sleep_async(self, level: int = 1) -> None:
+        await self._call_utility_async("sleep", level)
+
+    async def wake_up_async(self) -> None:
+        await self._call_utility_async("wake_up")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> None:
         await self._call_utility_async("add_lora", lora_request)
