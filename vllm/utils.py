@@ -58,6 +58,21 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def reset_seed(seed=42):
+    import torch
+    import random
+    import numpy as np
+    print("Using seed: ", seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # multi-GPU.
+    # TODO: for future use
+    # torch.backends.cudnn.benchmark = False
+    # torch.backends.cudnn.deterministic = True
+
 # Exception strings for non-implemented encoder/decoder scenarios
 
 # Reminder: Please update docs/source/features/compatibility_matrix.md

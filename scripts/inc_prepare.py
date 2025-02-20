@@ -11,6 +11,7 @@ import datasets
 
 import os
 from vllm import LLM, SamplingParams
+from vllm.utils import reset_seed
 from datasets import load_dataset
 from tqdm import tqdm
 import transformers
@@ -35,19 +36,6 @@ temperature = 0.6
 top_p = 0.95
 # ==-------------------------------------------------------------------------==
 
-
-def reset_seed(seed=42):
-    import torch
-    import numpy as np
-    print("Using seed: ", seed)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)  # multi-GPU.
-    # TODO: for future use
-    # torch.backends.cudnn.benchmark = False
-    # torch.backends.cudnn.deterministic = True
 
 reset_seed(seed)
 
