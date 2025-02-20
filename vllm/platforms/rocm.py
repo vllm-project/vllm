@@ -2,7 +2,7 @@
 
 import os
 from functools import lru_cache, wraps
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -219,6 +219,36 @@ class RocmPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+    
+    @classmethod
+    def empty_cache(cls) -> None:
+        torch.cuda.empty_cache()
+    
+    @classmethod
+    def reset_peak_memory_stats(cls,
+                                device: Union[torch.types.Device, int] = None
+                                ) -> None:
+        torch.cuda.reset_peak_memory_stats(device)
+
+    @classmethod
+    def memory_stats(cls,
+                     device: Union[torch.types.Device, int] = None
+                    ) -> Dict[str, Any]:
+        return torch.cuda.memory_stats(device)
+
+    @classmethod
+    def mem_get_info(cls,
+                     device: Union[torch.types.Device, int] = None
+                     ) -> Tuple[int, int]:
+        return torch.cuda.mem_get_info(device)
+
+    @classmethod
+    def memory_reserved(cls,
+                        device: Union[torch.types.Device, int] = None
+                        ) -> int:
+        """Return the memory reserved by the current device."""
+        return torch.cuda.memory_reserved(device)
+
 
     @classmethod
     def get_current_memory_usage(cls,

@@ -1907,7 +1907,7 @@ def kill_process_tree(pid: int):
 class MemorySnapshot:
     """Memory snapshot."""
     torch_peak: int = 0
-    cuda_memory: int = 0
+    device_memory: int = 0
     torch_memory: int = 0
     non_torch_memory: int = 0
     timestamp: float = 0.0
@@ -1923,24 +1923,25 @@ class MemorySnapshot:
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.cuda.empty_cache()` or OOM happens.
-        self.torch_peak = torch.cuda.memory_stats().get(
+        from vllm.platforms import current_platform
+        self.torch_peak = current_platform.memory_stats().get(
             "allocated_bytes.all.peak", 0)
 
-        self.cuda_memory = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        self.device_memory = current_platform.mem_get_info(
+        )[1] - current_platform.mem_get_info()[0]
 
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
         # this is used to measure the non-torch memory usage
-        self.torch_memory = torch.cuda.memory_reserved()
+        self.torch_memory = current_platform.memory_reserved()
 
-        self.non_torch_memory = self.cuda_memory - self.torch_memory
+        self.non_torch_memory = self.device_memory - self.torch_memory
         self.timestamp = time.time()
 
     def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
-            cuda_memory=self.cuda_memory - other.cuda_memory,
+            device_memory=self.device_memory - other.device_memory,
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
             timestamp=self.timestamp - other.timestamp,
@@ -2012,9 +2013,10 @@ def memory_profiling(
 
     The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
     """ # noqa
+    from vllm.platforms import current_platform
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+    current_platform.empty_cache()
+    current_platform.reset_peak_memory_stats()
 
     result = MemoryProfilingResult()
 
@@ -2027,7 +2029,7 @@ def memory_profiling(
     yield result
 
     gc.collect()
-    torch.cuda.empty_cache()
+    current_platform.empty_cache()
 
     result.after_profile.measure()
 

@@ -214,12 +214,14 @@ class Worker(LocalOrDistributedWorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        from vllm.platforms import current_platform
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+        current_platform.empty_cache()
+        current_platform.reset_peak_memory_stats()
 
-        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+        free_memory_pre_profile, total_gpu_memory = (
+            current_platform.mem_get_info())
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -271,14 +273,15 @@ class Worker(LocalOrDistributedWorkerBase):
         return num_gpu_blocks, num_cpu_blocks
 
     def _assert_memory_footprint_increased_during_profiling(self):
+        from vllm.platforms import current_platform
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        free_gpu_memory, total = torch.cuda.mem_get_info()
-        cuda_memory = total - free_gpu_memory
-        assert self.baseline_snapshot.cuda_memory < cuda_memory, (
+        free_gpu_memory, total = current_platform.mem_get_info()
+        device_memory = total - free_gpu_memory
+        assert self.baseline_snapshot.device_memory < device_memory, (
             "Error in memory profiling. "
-            f"Initial used memory {self.baseline_snapshot.cuda_memory}, "
-            f"currently used memory {cuda_memory}. "
+            f"Initial used memory {self.baseline_snapshot.device_memory}, "
+            f"currently used memory {device_memory}. "
             f"This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
