@@ -2,11 +2,15 @@
 
 import pytest
 
+from vllm.config import LoadFormat
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 
+from ..conftest import MODEL_WEIGHTS_S3_BUCKET
 
-@pytest.mark.parametrize("model", ["facebook/opt-125m"])
+
+@pytest.mark.parametrize("model",
+                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
 def test_computed_prefix_blocks(model: str):
     # This test checks if the engine generates completions both with and
     # without optional detokenization, that detokenization includes text
@@ -17,7 +21,7 @@ def test_computed_prefix_blocks(model: str):
         "paper clips? Is there an easy to follow video tutorial available "
         "online for free?")
 
-    llm = LLM(model=model)
+    llm = LLM(model=model, load_format=LoadFormat.RUNAI_STREAMER)
     sampling_params = SamplingParams(max_tokens=10,
                                      temperature=0.0,
                                      detokenize=False)

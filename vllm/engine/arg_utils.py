@@ -192,6 +192,7 @@ class EngineArgs:
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
 
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
@@ -371,14 +372,17 @@ class EngineArgs:
             '--guided-decoding-backend',
             type=str,
             default='xgrammar',
-            choices=['outlines', 'lm-format-enforcer', 'xgrammar'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
             'https://github.com/outlines-dev/outlines, '
             'https://github.com/mlc-ai/xgrammar, and '
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
-            ' parameter.')
+            ' parameter.\n'
+            'Backend-sepcific options can be supplied in a comma-separated '
+            'list following a colon after the backend name. Valid backends and '
+            'all available options are: [xgrammar:no-fallback, '
+            'outlines:no-fallback, lm-format-enforcer:no-fallback]')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
@@ -939,6 +943,13 @@ class EngineArgs:
             'arrival deciding any ties).')
 
         parser.add_argument(
+            '--scheduler-cls',
+            default=EngineArgs.scheduler_cls,
+            help='The scheduler class to use. "vllm.core.scheduler.Scheduler" '
+            'is the default scheduler. Can be a class directly or the path to '
+            'a class of form "mod.custom_class".')
+
+        parser.add_argument(
             '--override-neuron-config',
             type=json.loads,
             default=None,
@@ -1273,10 +1284,12 @@ class EngineArgs:
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
+            scheduler_cls=self.scheduler_cls,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
         )
+
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
