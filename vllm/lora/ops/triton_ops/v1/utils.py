@@ -12,7 +12,6 @@ import torch
 @functools.lru_cache(maxsize=100)
 def load_v1_op_config(op_type: str,
                       add_inputs: Optional[bool]) -> Optional[Dict]:
-    # TODO (varun) : op_type should be either 'v1_shrink' or 'v1_expand'
     gpu_name = torch.cuda.get_device_name()
     gpu_name = gpu_name.replace(' ', '_')
     gpu_name = gpu_name.replace('-', '_')
@@ -21,6 +20,7 @@ def load_v1_op_config(op_type: str,
     if op_type == "shrink":
         config_fname = f"{gpu_name}_{op_type.upper()}.json"
     else:
+        assert op_type == "expand"
         config_fname = (f"{gpu_name}_"
                         f"{op_type.upper()}_"
                         f"{str(add_inputs).upper()}.json")
@@ -31,15 +31,13 @@ def load_v1_op_config(op_type: str,
     if not config_path.exists():
         return None
 
-    # TODO (varun) : It feels like there must be a utility to do this !!
-    # load json
+    # Load json
     config_data = None
     with open(str(config_path)) as f:
         config_data = json.load(f)
     return config_data
 
 
-# TODO (varun) : Maybe rename !! Merge with the normal path !!
 @functools.lru_cache(maxsize=100)
 def get_v1_op_configs(
         op_type: str,
