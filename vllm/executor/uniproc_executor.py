@@ -116,7 +116,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             is_driver_worker=is_driver_worker,
         )
         self.collective_rpc("init_worker", args=([kwargs], ))
-        self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:

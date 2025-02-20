@@ -121,7 +121,6 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
             )
             all_kwargs.append(kwargs)
         self._run_workers("init_worker", all_kwargs)
-        self._run_workers("init_device")
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
