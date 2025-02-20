@@ -582,13 +582,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
     lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
 
-    # If set, set `any_whitespace=False` when creating grammar for JSON schema
-    # with xgrammar.
-    # This might be useful when using Mistral models with JSON schema that
-    # can generate endless space for guided decoding.
-    "VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE":
-    lambda: bool(int(os.getenv("VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE", "0"))),
-
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
