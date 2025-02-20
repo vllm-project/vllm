@@ -1655,21 +1655,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
 
-        if self.lora_config:
-            assert model_input.lora_requests is not None
-            assert model_input.lora_mapping is not None
-            self.set_active_loras(model_input.lora_requests,
-                                  model_input.lora_mapping)
-
-        if self.prompt_adapter_config:
-            assert model_input.prompt_adapter_requests is not None
-            assert model_input.prompt_adapter_mapping is not None
-            self.set_active_prompt_adapters(
-                model_input.prompt_adapter_requests,
-                model_input.prompt_adapter_mapping)
-
-        self.attn_state.begin_forward(model_input)
-
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
         prefill_meta = model_input.attn_metadata.prefill_metadata
@@ -1692,16 +1677,46 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # we can skip prefilling on tokens that successfully received KV caches
         # NOTE: The receive operation is blocking
         bypass_model_exec = False
-        if self.need_recv_kv(model_input, kv_caches):
-            hidden_or_intermediate_states, bypass_model_exec, model_input = \
-                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
-                    # model is used to know which layer the current worker
-                    # is working on, so that we can receive KV for only those
-                    # layers.
-                    model_executable,
-                    model_input,
-                    kv_caches=kv_caches
-                )
+
+        # For rebuild hidden or intermediate states
+        # when not all KV caches in the batch are received
+        need_rebuild_states = False
+
+        need_recv_kv_flag = self.need_recv_kv(model_input, kv_caches)
+        if need_recv_kv_flag:
+            recv_hidden_or_intermediate_states, bypass_model_exec_per_request, \
+                model_input = \
+                    get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+                        # model is used to know which layer the current worker
+                        # is working on, so that we can receive KV for only
+                        # those layers.
+                        model_executable,
+                        model_input,
+                        kv_caches=kv_caches
+                    )
+            logger.debug("Received states shape: %s",
+                         recv_hidden_or_intermediate_states.shape)
+            for i in range(recv_hidden_or_intermediate_states.shape[0]):
+                logger.debug("Received states[%d]'s mean value: %s", i,
+                             recv_hidden_or_intermediate_states[i].mean())
+            bypass_model_exec = all(bypass_model_exec_per_request)
+            need_rebuild_states = not all(
+                not value for value in bypass_model_exec_per_request)
+
+        if self.lora_config:
+            assert model_input.lora_requests is not None
+            assert model_input.lora_mapping is not None
+            self.set_active_loras(model_input.lora_requests,
+                                  model_input.lora_mapping)
+
+        if self.prompt_adapter_config:
+            assert model_input.prompt_adapter_requests is not None
+            assert model_input.prompt_adapter_mapping is not None
+            self.set_active_prompt_adapters(
+                model_input.prompt_adapter_requests,
+                model_input.prompt_adapter_mapping)
+
+        self.attn_state.begin_forward(model_input)
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         seqlen_agnostic_kwargs = {
@@ -1732,6 +1747,61 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     **seqlen_agnostic_kwargs,
                     **model_kwargs,
                 )
+
+                if need_recv_kv_flag:
+                    logger.debug("Computed states shape: %s",
+                                 hidden_or_intermediate_states.shape)
+                    for i in range(hidden_or_intermediate_states.shape[0]):
+                        logger.debug("Computed states[%d]'s mean value: %s", i,
+                                     hidden_or_intermediate_states[i].mean())
+
+                # Since we use the original sampling metadata,
+                # we need to combine
+                # the received hidden states and the computed hidden states
+                if need_rebuild_states:
+                    rebuilt_states = []
+                    recv_counter = 0
+                    counter = 0
+                    for idx, bypass in enumerate(
+                            bypass_model_exec_per_request):
+                        if model_input.seq_lens is not None:
+                            seq_len = model_input.seq_lens[idx]
+
+                        if bypass:
+                            # Append intermediate states from
+                            # recv_hidden_or_intermediate_states
+                            rebuilt_states.extend(
+                                recv_hidden_or_intermediate_states[
+                                    recv_counter:recv_counter + seq_len - 1])
+                            recv_counter += seq_len
+
+                            # Append the current hidden or intermediate state
+                            rebuilt_states.append(
+                                hidden_or_intermediate_states[counter])
+                            counter += 1
+                        else:
+                            # Append all states from
+                            # hidden_or_intermediate_states
+                            rebuilt_states.extend(
+                                hidden_or_intermediate_states[counter:counter +
+                                                              seq_len])
+                            counter += seq_len
+
+                    rebuilt_states = [
+                        x.unsqueeze(0) if x.dim() == 1 else x
+                        for x in rebuilt_states
+                    ]
+                    hidden_or_intermediate_states = torch.cat(rebuilt_states,
+                                                              dim=0)
+
+                    logger.debug("Rebuilt states shape: %s",
+                                 hidden_or_intermediate_states.shape)
+                    for i in range(hidden_or_intermediate_states.shape[0]):
+                        logger.debug("Rebuilt states[%d]'s mean value: %s", i,
+                                     hidden_or_intermediate_states[i].mean())
+
+        else:
+            hidden_or_intermediate_states = recv_hidden_or_intermediate_states
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
