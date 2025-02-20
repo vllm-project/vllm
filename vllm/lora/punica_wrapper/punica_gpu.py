@@ -119,10 +119,10 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
                                               self.sampler_indices)
         else:
             # Forward to base class update_metadata
-            super(PunicaWrapperBase,
-                  self).update_metadata(mapping, lora_index_to_id, max_loras,
-                                        vocab_size, extra_vocab_size,
-                                        long_lora_context, **kwargs)
+            PunicaWrapperBase.update_metadata(self, mapping, lora_index_to_id,
+                                              max_loras, vocab_size,
+                                              extra_vocab_size,
+                                              long_lora_context, **kwargs)
 
     def _apply_shrink_prefill(
         self,
