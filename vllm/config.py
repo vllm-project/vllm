@@ -1332,6 +1332,19 @@ class ParallelConfig:
 
     rank: int = 0
 
+    def get_next_dp_init_port(self) -> int:
+        """
+        We might need to initialize process groups in multiple
+        processes that is related to data parallelism,
+        e.g. both in the worker and in the engine, which
+        can live in different processes. To avoid port conflicts, we
+        increment the port number each time we need to initialize a
+        new process group related to data parallelism.
+        """
+        answer = self.data_parallel_master_port
+        self.data_parallel_master_port += 1
+        return answer
+
     def compute_hash(self):
         """
         Provide a hash that uniquely identifies all the configs
