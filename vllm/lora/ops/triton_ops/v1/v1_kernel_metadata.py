@@ -41,9 +41,9 @@ class V1KernelMeta:
                                           dtype=torch.int32,
                                           device=device)
 
-        # +2 for this because, the first index is always 0
-        # for example: let max loras be 3, then lora_token_start_loc,
-        # can be [0, 3, 13, 18, 20].
+        # +2 for this because, the first index is always 0.
+        # using running example, lora_token_start_loc
+        # is [0, 3, 13, 18, 20].
         lora_token_start_loc = torch.zeros(max_loras + 2,
                                            dtype=torch.int32,
                                            device=device)
