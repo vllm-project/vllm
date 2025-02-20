@@ -147,12 +147,6 @@ class OpenAIServingChat(OpenAIServing):
 
             tool_parser = self.tool_parser
 
-            # validation for OpenAI tools
-            # tool_choice = "required" is not supported
-            if request.tool_choice == "required":
-                return self.create_error_response(
-                    "tool_choice = \"required\" is not supported!")
-
             if isinstance(tokenizer, MistralTokenizer):
                 # because of issues with pydantic we need to potentially
                 # re-serialize the tool_calls field of the request
