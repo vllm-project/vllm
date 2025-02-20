@@ -69,6 +69,10 @@ def is_ninja_available() -> bool:
     return which("ninja") is not None
 
 
+def is_cmake_available() -> bool:
+    return which("cmake") is not None
+
+
 class CMakeExtension(Extension):
 
     def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
@@ -635,6 +639,12 @@ else:
         "build_ext":
         repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
+
+setup_requires = []
+if not is_cmake_available():
+    setup_requires += ["cmake>=3.26"]
+if not is_ninja_available():
+    setup_requires += ["ninja"]
 
 setup(
     # static metadata should rather go in pyproject.toml
