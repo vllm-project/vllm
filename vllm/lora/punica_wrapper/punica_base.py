@@ -333,6 +333,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
                                   vocab_size, extra_vocab_size,
                                   long_lora_context)
         if mapping.is_prefill:
+            # Update metadata required for prefill-related operators.
+            self._update_prefill_metada(self.token_lora_indices)
             self.is_prefill = True
         else:
             self.is_prefill = False
