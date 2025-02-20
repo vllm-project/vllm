@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Make sure ignore_eos works.
 
 Run `pytest tests/samplers/test_ignore_eos.py`.
@@ -9,7 +10,7 @@ from vllm import SamplingParams
 
 # We also test with llama because it has generation_config to specify EOS
 # (past regression).
-MODELS = ["facebook/opt-125m", "meta-llama/Llama-2-7b-hf"]
+MODELS = ["distilbert/distilgpt2", "meta-llama/Llama-3.2-1B"]
 
 
 @pytest.mark.parametrize("model", MODELS)

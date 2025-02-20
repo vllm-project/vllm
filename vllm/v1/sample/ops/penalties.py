@@ -1,4 +1,6 @@
-from typing import List, Set, Tuple
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Dict, List, Set, Tuple
 
 import torch
 
@@ -6,18 +8,17 @@ from vllm.model_executor.layers.utils import apply_penalties
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 
 
-def apply_min_token_penalties(logits: torch.Tensor,
-                              output_token_ids: List[List[int]],
-                              stop_token_ids: List[Set[int]],
-                              min_tokens: List[int]) -> None:
+def apply_min_token_penalties(
+        logits: torch.Tensor, output_token_ids: List[List[int]],
+        min_tokens: Dict[int, Tuple[int, Set[int]]]) -> None:
     """
     Applies minimum token penalty by setting the logits of the stop tokens
     to -inf.
     """
     min_tokens_logits_to_penalize: List[Tuple[int, int]] = []
-    for index, min_token in enumerate(min_tokens):
+    for index, (min_token, stop_token_ids) in min_tokens.items():
         if len(output_token_ids[index]) < min_token:
-            for stop_token_id in stop_token_ids[index]:
+            for stop_token_id in stop_token_ids:
                 min_tokens_logits_to_penalize.append((index, stop_token_id))
     if min_tokens_logits_to_penalize:
         logits[tuple(zip(*min_tokens_logits_to_penalize))] = -float("inf")

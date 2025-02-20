@@ -4,9 +4,9 @@
 
 This document outlines some troubleshooting strategies you can consider. If you think you've discovered a bug, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
-```{note}
+:::{note}
 Once you've debugged a problem, remember to turn off any debugging environment variables defined, or simply start a new shell to avoid being affected by lingering debugging settings. Otherwise, the system might be slow with debugging functionalities left activated.
-```
+:::
 
 ## Hangs downloading a model
 
@@ -18,9 +18,9 @@ It's recommended to download the model first using the [huggingface-cli](https:/
 If the model is large, it can take a long time to load it from disk. Pay attention to where you store the model. Some clusters have shared filesystems across nodes, e.g. a distributed filesystem or a network filesystem, which can be slow.
 It'd be better to store the model in a local disk. Additionally, have a look at the CPU memory usage, when the model is too large it might take a lot of CPU memory, slowing down the operating system because it needs to frequently swap between disk and memory.
 
-```{note}
+:::{note}
 To isolate the model downloading and loading issue, you can use the `--load-format dummy` argument to skip loading the model weights. This way, you can check if the model downloading and loading is the bottleneck.
-```
+:::
 
 ## Out of memory
 
@@ -94,20 +94,20 @@ pynccl.disabled = False
 s = torch.cuda.Stream()
 with torch.cuda.stream(s):
     data.fill_(1)
-    pynccl.all_reduce(data, stream=s)
-    value = data.mean().item()
+    out = pynccl.all_reduce(data, stream=s)
+    value = out.mean().item()
     assert value == world_size, f"Expected {world_size}, got {value}"
 
 print("vLLM NCCL is successful!")
 
 g = torch.cuda.CUDAGraph()
 with torch.cuda.graph(cuda_graph=g, stream=s):
-    pynccl.all_reduce(data, stream=torch.cuda.current_stream())
+    out = pynccl.all_reduce(data, stream=torch.cuda.current_stream())
 
 data.fill_(1)
 g.replay()
 torch.cuda.current_stream().synchronize()
-value = data.mean().item()
+value = out.mean().item()
 assert value == world_size, f"Expected {world_size}, got {value}"
 
 print("vLLM NCCL with cuda graph is successful!")
@@ -132,14 +132,14 @@ If the script runs successfully, you should see the message `sanity check is suc
 
 If the test script hangs or crashes, usually it means the hardware/drivers are broken in some sense. You should try to contact your system administrator or hardware vendor for further assistance. As a common workaround, you can try to tune some NCCL environment variables, such as `export NCCL_P2P_DISABLE=1` to see if it helps. Please check [their documentation](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html) for more information. Please only use these environment variables as a temporary workaround, as they might affect the performance of the system. The best solution is still to fix the hardware/drivers so that the test script can run successfully.
 
-```{note}
+:::{note}
 A multi-node environment is more complicated than a single-node one. If you see errors such as `torch.distributed.DistNetworkError`, it is likely that the network/DNS setup is incorrect. In that case, you can manually assign node rank and specify the IP via command line arguments:
 
 - In the first node, run `NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 0 --master_addr $MASTER_ADDR test.py`.
 - In the second node, run `NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 1 --master_addr $MASTER_ADDR test.py`.
 
 Adjust `--nproc-per-node`, `--nnodes`, and `--node-rank` according to your setup, being sure to execute different commands (with different `--node-rank`) on different nodes.
-```
+:::
 
 (troubleshooting-python-multiprocessing)=
 

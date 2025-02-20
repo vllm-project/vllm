@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import re
 
 
@@ -10,6 +12,10 @@ def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
 
         # Check for pattern restrictions
         if "pattern" in obj:
+            return True
+
+        # Check for enum restrictions
+        if "enum" in obj:
             return True
 
         # Check for numeric ranges

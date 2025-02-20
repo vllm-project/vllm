@@ -1,18 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import base64
-from functools import lru_cache, partial
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-import cv2
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import get_video_processor
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.transformers_utils.processor import cached_get_video_processor
 from vllm.utils import PlaceholderModule, is_list_of
 
 from .base import MediaIO, ModalityData
@@ -28,9 +28,6 @@ except ImportError:
     decord = PlaceholderModule("decord")  # type: ignore[assignment]
 
 logger = init_logger(__name__)
-
-cached_get_video_processor = lru_cache(get_video_processor)
-cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 class VideoPlugin(ImagePlugin):
@@ -93,6 +90,8 @@ def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
     new_height, new_width = size
     resized_frames = np.empty((num_frames, new_height, new_width, channels),
                               dtype=frames.dtype)
+    # lazy import cv2 to avoid bothering users who only use text models
+    import cv2
     for i, frame in enumerate(frames):
         resized_frame = cv2.resize(frame, (new_width, new_height))
         resized_frames[i] = resized_frame

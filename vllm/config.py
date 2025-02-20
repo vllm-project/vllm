@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import ast
 import copy
 import enum
@@ -52,17 +54,18 @@ _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
-                     "score", "reward"]
+                     "score", "reward", "transcription"]
 
 _ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
-                        "draft"]
+                        "draft", "transcription"]
 
-RunnerType = Literal["generate", "pooling", "draft"]
+RunnerType = Literal["generate", "pooling", "draft", "transcription"]
 
 _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
     "generate": ["generate"],
     "pooling": ["embed", "classify", "score", "reward"],
     "draft": ["draft"],
+    "transcription": ["transcription"],
 }
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
@@ -81,6 +84,12 @@ class SupportsHash(Protocol):
         ...
 
 
+class ModelImpl(str, enum.Enum):
+    AUTO = "auto"
+    VLLM = "vllm"
+    TRANSFORMERS = "transformers"
+
+
 class ModelConfig:
     """Configuration for the model.
 
@@ -94,8 +103,9 @@ class ModelConfig:
             it; otherwise, you must specify explicitly which task to use.
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
-            available, "slow" will always use the slow tokenizer, and
-            "mistral" will always use the tokenizer from `mistral_common`.
+            available, "slow" will always use the slow tokenizer,
+            "mistral" will always use the tokenizer from `mistral_common`, and
+            "custom" will use --tokenizer to select the preregistered tokenizer.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
         allowed_local_media_path: Allowing API requests to read local images or
@@ -165,6 +175,14 @@ class ModelConfig:
             `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
+        model_impl: Which implementation of the model to use:
+            "auto" will try to use the vLLM implementation if it exists and
+                fall back to the Transformers implementation if no vLLM
+                implementation is available.
+            "vllm" will use the vLLM model implementation.
+            "transformers" will use the Transformers model implementation.
+        override_generation_config: Override the generation config with the
+            given config.
     """
 
     def compute_hash(self) -> str:
@@ -225,6 +243,8 @@ class ModelConfig:
         logits_processor_pattern: Optional[str] = None,
         generation_config: Optional[str] = None,
         enable_sleep_mode: bool = False,
+        override_generation_config: Optional[Dict[str, Any]] = None,
+        model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -236,6 +256,7 @@ class ModelConfig:
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
         self.rope_theta = rope_theta
+        self.model_impl = model_impl
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -368,6 +389,7 @@ class ModelConfig:
         self.logits_processor_pattern = logits_processor_pattern
 
         self.generation_config = generation_config
+        self.override_generation_config = override_generation_config or {}
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -387,7 +409,8 @@ class ModelConfig:
         if is_s3(model) or is_s3(tokenizer):
             if is_s3(model):
                 s3_model = S3Model()
-                s3_model.pull_files(model, allow_pattern=["*config.json"])
+                s3_model.pull_files(
+                    model, allow_pattern=["*.model", "*.py", "*.json"])
                 self.model_weights = self.model
                 self.model = s3_model.dir
 
@@ -447,10 +470,10 @@ class ModelConfig:
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
-        if tokenizer_mode not in ["auto", "slow", "mistral"]:
+        if tokenizer_mode not in ["auto", "slow", "mistral", "custom"]:
             raise ValueError(
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
-                "either 'auto', 'slow' or 'mistral'.")
+                "either 'auto', 'slow', 'mistral' or 'custom'.")
         self.tokenizer_mode = tokenizer_mode
 
     def _get_preferred_task(
@@ -463,6 +486,8 @@ class ModelConfig:
             return "embed"
         if ModelRegistry.is_cross_encoder_model(architectures):
             return "score"
+        if ModelRegistry.is_transcription_model(architectures):
+            return "transcription"
 
         suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
@@ -495,6 +520,8 @@ class ModelConfig:
         runner_support: Dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
+            "transcription":
+            ModelRegistry.is_transcription_model(architectures),
             "generate": ModelRegistry.is_text_generation_model(architectures),
             "pooling": ModelRegistry.is_pooling_model(architectures),
         }
@@ -732,17 +759,25 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 
+    @property
+    def is_deepseek_mla(self) -> bool:
+        return (hasattr(self.hf_text_config, "model_type")) \
+                and (self.hf_text_config.model_type in \
+                    ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'))\
+                and (self.hf_text_config.kv_lora_rank is not None)
+
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config,
-                   "model_type") and (self.hf_text_config.model_type
-                                      in ('deepseek_v2', 'deepseek_v3')):
+        if self.is_deepseek_mla:
             qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
                                        0)
-            qk_nope_head_dim = getattr(self.hf_text_config, "qk_nope_head_dim",
-                                       0)
-            if qk_rope_head_dim and qk_nope_head_dim:
-                return qk_rope_head_dim + qk_nope_head_dim
+            if self.use_mla:
+                return self.hf_text_config.kv_lora_rank + qk_rope_head_dim
+            else:
+                qk_nope_head_dim = getattr(self.hf_text_config,
+                                           "qk_nope_head_dim", 0)
+                if qk_rope_head_dim and qk_nope_head_dim:
+                    return qk_rope_head_dim + qk_nope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -801,6 +836,10 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
+        if self.use_mla:
+            # When using MLA during decode it becomes MQA
+            return 1
+
         total_num_kv_heads = self.get_total_num_kv_heads()
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
@@ -817,8 +856,12 @@ class ModelConfig:
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
-        total_num_hidden_layers = getattr(self.hf_text_config,
-                                          "num_hidden_layers", 0)
+        if self.hf_text_config.model_type == "deepseek_mtp":
+            total_num_hidden_layers = getattr(self.hf_text_config,
+                                              "num_nextn_predict_layers", 0)
+        else:
+            total_num_hidden_layers = getattr(self.hf_text_config,
+                                              "num_hidden_layers", 0)
         pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
@@ -904,8 +947,13 @@ class ModelConfig:
         """
         if self.generation_config is None:
             # When generation_config is not set
-            return {}
-        config = self.try_get_generation_config()
+            config = {}
+        else:
+            config = self.try_get_generation_config()
+
+        # Overriding with given generation config
+        config.update(self.override_generation_config)
+
         available_params = [
             "repetition_penalty",
             "temperature",
@@ -945,6 +993,10 @@ class ModelConfig:
     def is_cross_encoder(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_cross_encoder_model(architectures)
+
+    @property
+    def use_mla(self) -> bool:
+        return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:
@@ -1330,6 +1382,9 @@ class ParallelConfig:
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
 
+        if self.distributed_executor_backend is None and self.world_size == 1:
+            self.distributed_executor_backend = "uni"
+
         self._verify_args()
 
     @property
@@ -1380,6 +1435,17 @@ class SchedulerConfig:
     # Maximum length of a sequence (including prompt and generated text).
     max_model_len: int = 8192
 
+    # Maximum number of sequences that can be partially prefilled concurrently
+    max_num_partial_prefills: int = 1
+
+    # Maximum number of "very long prompt" sequences that can be prefilled
+    # concurrently (long is defined by long_prefill_threshold)
+    max_long_partial_prefills: int = 1
+
+    # calculate context length that determines which sequences are
+    # considered "long"
+    long_prefill_token_threshold: int = 0
+
     # The number of slots to allocate per sequence per
     # step, beyond the known token ids. This is used in speculative
     # decoding to store KV activations of tokens which may or may not be
@@ -1428,6 +1494,10 @@ class SchedulerConfig:
     policy: str = "fcfs"
 
     chunked_prefill_enabled: bool = field(init=False)
+
+    # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
+    # or "mod.custom_class".
+    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
 
     def compute_hash(self) -> str:
         """
@@ -1487,6 +1557,18 @@ class SchedulerConfig:
                 self.max_num_batched_tokens)
 
         self.chunked_prefill_enabled = self.enable_chunked_prefill
+        if self.max_num_partial_prefills > 1:
+            if self.long_prefill_token_threshold == 0:
+                self.long_prefill_token_threshold = int(self.max_model_len *
+                                                        0.04)
+
+            logger.info(
+                "Concurrent partial prefills enabled with "
+                "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
+                "long_prefill_token_threshold=%d",
+                self.max_num_partial_prefills, self.max_long_partial_prefills,
+                self.long_prefill_token_threshold)
+
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1517,6 +1599,29 @@ class SchedulerConfig:
                 "num_scheduler_steps "
                 f"({self.num_scheduler_steps}) must be greater than or "
                 "equal to 1.")
+
+        if self.max_num_partial_prefills < 1:
+            raise ValueError(
+                f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
+                "must be greater than or equal to 1.")
+        elif self.max_num_partial_prefills > 1:
+            if not self.chunked_prefill_enabled:
+                raise ValueError("Chunked prefill must be enabled to set "
+                                 "max_num_partial_prefills > 1.")
+
+            if self.long_prefill_token_threshold > self.max_model_len:
+                raise ValueError(
+                    "long_prefill_token_threshold "
+                    f"({self.long_prefill_token_threshold}) cannot be greater "
+                    f"than the max_model_len ({self.max_model_len}).")
+
+        if (self.max_long_partial_prefills
+                < 1) or (self.max_long_partial_prefills
+                         > self.max_num_partial_prefills):
+            raise ValueError(
+                f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
+                "must be greater than or equal to 1 and less than or equal to "
+                f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
 
     @property
     def is_multi_step(self) -> bool:
@@ -1591,6 +1696,18 @@ class SpeculativeConfig:
         factors: List[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
+
+    @staticmethod
+    def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+        if hf_config.model_type == "deepseek_v3":
+            hf_config.model_type = "deepseek_mtp"
+        if hf_config.model_type == "deepseek_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["DeepSeekMTPModel"]
+            })
+        return hf_config
 
     @staticmethod
     def maybe_create_spec_config(
@@ -1674,12 +1791,18 @@ class SpeculativeConfig:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
         """
-
         if speculative_model is None:
             if num_speculative_tokens is not None:
-                raise ValueError("num_speculative_tokens was provided without "
-                                 "speculative_model.")
-            return None
+                if target_model_config.hf_text_config.model_type \
+                        == "deepseek_v3":
+                    # use the draft model from the same model:
+                    speculative_model = target_model_config.model
+                else:
+                    raise ValueError(
+                        "num_speculative_tokens was provided without "
+                        "speculative_model.")
+            else:
+                return None
 
         if (speculative_disable_by_batch_size is not None
                 and speculative_disable_by_batch_size < 2):
@@ -1733,14 +1856,23 @@ class SpeculativeConfig:
                 max_seq_len_to_capture=target_model_config.
                 max_seq_len_to_capture,
                 max_logprobs=target_model_config.max_logprobs,
+                hf_overrides=SpeculativeConfig.hf_config_override,
             )
 
             draft_hf_config = draft_model_config.hf_config
 
+            # Detect EAGLE prefix to replace hf_config for EAGLE draft_model
+            if "eagle-" in draft_model_config.model.lower():
+                from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                if isinstance(draft_model_config.hf_config, EAGLEConfig):
+                    pass
+                else:
+                    eagle_config = EAGLEConfig(draft_model_config.hf_config)
+                    draft_model_config.hf_config = eagle_config
+
             if (num_speculative_tokens is not None
                     and hasattr(draft_hf_config, "num_lookahead_tokens")):
                 draft_hf_config.num_lookahead_tokens = num_speculative_tokens
-
             n_predict = getattr(draft_hf_config, "n_predict", None)
             if n_predict is not None:
                 if num_speculative_tokens is None:
@@ -1854,8 +1986,9 @@ class SpeculativeConfig:
                 speculative_draft_tensor_parallel_size = 1
                 if target_parallel_config.tensor_parallel_size > 1:
                     logger.warning(
-                        "MLPSpeculator cannot currently be run with tp>1; "
-                        "setting speculative_draft_tensor_parallel_size=1")
+                        "%s cannot currently be run with tp>1; "
+                        "setting speculative_draft_tensor_parallel_size=1",
+                        draft_hf_config.model_type)
             else:
                 speculative_draft_tensor_parallel_size = \
                     target_parallel_config.tensor_parallel_size
@@ -2983,7 +3116,8 @@ class VllmConfig:
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
     # some opaque config, only used to provide additional information
-    # for the hash computation, mainly used for testing and debugging.
+    # for the hash computation, mainly used for testing, debugging or out of
+    # tree config registration.
     additional_config: SupportsHash = field(default=None,
                                             init=True)  # type: ignore
     instance_id: str = ""
@@ -3001,15 +3135,6 @@ class VllmConfig:
         the final hidden states.
         """
         factors: List[Any] = []
-        # summarize system state
-        from torch._inductor.codecache import CacheBase
-        system_factors = CacheBase.get_system()
-        factors.append(system_factors)
-
-        # summarize pytorch state
-        from torch._inductor.codecache import torch_key
-        torch_factors = torch_key()
-        factors.append(torch_factors)
 
         # summarize vllm config
         vllm_factors: List[Any] = []
@@ -3198,6 +3323,16 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         current_platform.check_and_update_config(self)
+
+        # If MLA is enabled, force disable chunked prefill and prefix caching
+        if self.model_config and self.model_config.use_mla:
+            logger.info("MLA is enabled; forcing chunked prefill and prefix "
+                        "caching to be disabled.")
+            self.scheduler_config.enable_chunked_prefill = False
+            self.scheduler_config.chunked_prefill_enabled = False
+
+            if self.cache_config is not None:
+                self.cache_config.enable_prefix_caching = False
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]

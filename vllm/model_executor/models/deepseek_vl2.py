@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
@@ -26,13 +28,13 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
                                                           MlpProjectorConfig,
                                                           VisionEncoderConfig)
 from vllm.transformers_utils.processors.deepseek_vl2 import (
     DeepseekVLV2Processor)
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -131,8 +133,8 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
-    def get_hf_processor(self) -> DeepseekVLV2Processor:
-        return self.ctx.get_hf_processor(DeepseekVLV2Processor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(DeepseekVLV2Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -163,7 +165,11 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
                                 image_width=x[1], image_height=x[0]))
         return ImageSize(width=width, height=height)
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         max_image_size = self.get_image_size_with_most_features()
         max_image_tokens = self.get_num_image_tokens(
             image_height=max_image_size.height,
@@ -302,13 +308,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.text_config = config.text_config
 
         model_config = vllm_config.model_config
-        tokenizer = cached_get_tokenizer(
-            model_config.tokenizer,
-            tokenizer_mode=model_config.tokenizer_mode,
-            tokenizer_revision=model_config.tokenizer_revision,
-            trust_remote_code=model_config.trust_remote_code,
-        )
-        self.image_token_id = tokenizer.vocab.get(_IMAGE_TOKEN)
+        tokenizer = cached_tokenizer_from_config(model_config)
+        self.image_token_id = tokenizer.vocab[_IMAGE_TOKEN]
 
         self.vision = self._init_vision_module(self.vision_config,
                                                quant_config,

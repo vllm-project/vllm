@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM for Whisper models using greedy sampling.
 
 Run `pytest tests/models/encoder_decoder/audio/test_whisper.py`.

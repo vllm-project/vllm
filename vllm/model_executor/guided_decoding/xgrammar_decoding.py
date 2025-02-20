@@ -1,10 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # noqa: UP007
 from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, List
 
 import torch
 from transformers import PreTrainedTokenizerFast
@@ -12,7 +15,9 @@ from transformers import PreTrainedTokenizerFast
 try:
     import xgrammar as xgr
     from xgrammar.base import _core as xgr_core
+    xgr_installed = True
 except ImportError:
+    xgr_installed = False
     pass
 
 from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
@@ -224,10 +229,38 @@ class GrammarConfig:
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
             )
+        elif guided_params.choice:
+            choice_str = GrammarConfig.choice_as_grammar(guided_params.choice)
+            try:
+                xgr.Grammar.from_ebnf(choice_str)
+            except RuntimeError as err:
+                raise ValueError(str(err)) from err
+
+            return cls(
+                grammar_str=choice_str,
+                vocab_size=model_config.hf_text_config.vocab_size,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data,
+            )
         else:
             raise ValueError(
                 "Currently only support JSON and EBNF grammar mode for xgrammar"
             )
+
+    @staticmethod
+    def escape_ebnf_string(s: str) -> str:
+        """Escape special characters in a EBNF string."""
+        # Escape double quotes and backslashes
+        return re.sub(r'(["\\])', r'\\\1', s)
+
+    @staticmethod
+    def choice_as_grammar(choice: List[str] | None) -> str:
+        if choice is None:
+            raise ValueError("Choice is not set")
+        escaped_choices = (GrammarConfig.escape_ebnf_string(c) for c in choice)
+        grammar = ('root ::= ' + ' | '.join(f'"{c}"' for c in escaped_choices))
+        return grammar
 
 
 @dataclass
@@ -307,8 +340,8 @@ class XGrammarLogitsProcessor:
         # Note: In this method, if the tensors have different dimensions
         # on CPU device fails, but on GPU it runs without error. Hence the
         # unsqueeze above for scores, to match the token bitmask shape
-        xgr.apply_token_bitmask_inplace(scores,
-                                        self.token_bitmask.to(scores.device))
+        xgr.apply_token_bitmask_inplace(
+            scores, self.token_bitmask.to(scores.device, non_blocking=True))
         if device_type != "cuda":
             scores = scores.to(dtype).to(device_type).squeeze()
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test the different finish_reason="stop" situations during generation:
     1. One of the provided stop strings
     2. One of the provided stop tokens
@@ -11,7 +12,7 @@ import transformers
 
 from vllm import SamplingParams
 
-MODEL = "facebook/opt-350m"
+MODEL = "distilbert/distilgpt2"
 STOP_STR = "."
 SEED = 42
 MAX_TOKENS = 1024

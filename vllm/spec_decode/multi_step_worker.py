@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 import weakref
 from typing import Dict, List, Set, Tuple
@@ -5,6 +7,7 @@ from typing import Dict, List, Set, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
                            SequenceGroupMetadata)
@@ -384,3 +387,14 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
                 execute_model_req.seq_group_metadata_list):
             raise NotImplementedError(
                 "MultiStepWorker does not support beam search.")
+
+    def maybe_load_lm_head_weight(
+        self,
+        lm_head_weight: torch.Tensor,
+    ) -> None:
+        weight_loader = getattr(
+            self.worker.model_runner.model_runner.model.lm_head.weight,
+            "weight_loader", default_weight_loader)
+        weight_loader(
+            self.worker.model_runner.model_runner.model.lm_head.weight,
+            lm_head_weight)

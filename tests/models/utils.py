@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -246,13 +248,16 @@ def check_logprobs_close(
                     warnings.warn(fail_msg, stacklevel=2)
 
 
-def build_model_context(model_name: str,
-                        task: TaskOption = "auto",
-                        tokenizer_name: Optional[str] = None,
-                        trust_remote_code: bool = False,
-                        dtype: Optional[Union[str, torch.dtype]] = None,
-                        mm_processor_kwargs: Optional[Dict] = None,
-                        limit_mm_per_prompt: Optional[Dict] = None):
+def build_model_context(
+    model_name: str,
+    task: TaskOption = "auto",
+    tokenizer_name: Optional[str] = None,
+    trust_remote_code: bool = False,
+    dtype: Optional[Union[str, torch.dtype]] = None,
+    mm_processor_kwargs: Optional[Dict] = None,
+    limit_mm_per_prompt: Optional[Dict] = None,
+    disable_mm_preprocessor_cache: bool = True,
+):
     """Creates an InputContext for a given model.
 
     Args:
@@ -281,5 +286,6 @@ def build_model_context(model_name: str,
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
+        disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
     )
     return InputContext(model_config)

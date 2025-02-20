@@ -10,17 +10,14 @@ wheel
 jinja2
 ray[default]
 
-# Install torch, torch_xla
+# Install torch_xla
+--pre
+--extra-index-url https://download.pytorch.org/whl/nightly/cpu
+--find-links https://storage.googleapis.com/libtpu-wheels/index.html
 --find-links https://storage.googleapis.com/libtpu-releases/index.html
 --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-# Note: This torch whl can be slightly different from the official torch nightly whl
-# since they are not built on the same commit (but on the same day). This difference may cause C++ undefined symbol issue
-# if some change between the 2 commits introduce some C++ API change.
-# Here we install the exact torch whl from which torch_xla is built from, to avoid potential C++ undefined symbol issue.
-torch @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-2.7.0.dev20250124-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
-torch @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-2.7.0.dev20250124-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
-torch @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-2.7.0.dev20250124-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
-torch_xla[pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.7.0.dev20250124-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
-torch_xla[pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.7.0.dev20250124-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
-torch_xla[pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.7.0.dev20250124-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
+torch==2.6.0.dev20241216+cpu
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.7.0.dev20250124-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.7.0.dev20250124-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.7.0.dev20250124-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
