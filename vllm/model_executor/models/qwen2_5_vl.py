@@ -33,18 +33,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
-from transformers.models.qwen2_5_vl import (Qwen2_5_VLImageProcessor,
-                                            Qwen2_5_VLProcessor)
+from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.distributed import parallel_state
+from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -207,11 +207,12 @@ class Qwen2_5_VisionAttention(nn.Module):
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        world_size = parallel_state.get_tensor_model_parallel_world_size()
+        self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
         self.num_attention_heads_per_partition = dist_utils.divide(
-            num_heads, world_size)
+            num_heads, self.tp_size)
 
         self.qkv = ColumnParallelLinear(input_size=embed_dim,
                                         output_size=3 * projection_size,
@@ -231,6 +232,29 @@ class Qwen2_5_VisionAttention(nn.Module):
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
             )
 
+    def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        # [s, b, 3 * head * head_dim]
+        seq_len, bs, _ = qkv.shape
+        if self.tp_size > 1:
+            qkv = tensor_model_parallel_all_gather(qkv)
+
+        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
+        q, k, v = qkv.chunk(3, dim=2)
+
+        # 3 * [s, b, head * head_dim]
+        if self.tp_size > 1:
+            splitter = partial(dist_utils.split_tensor_along_last_dim,
+                               num_partitions=self.tp_size)
+            q = splitter(q)[self.tp_rank]
+            k = splitter(k)[self.tp_rank]
+            v = splitter(v)[self.tp_rank]
+
+        # 3 * [s, b, head * head_dim] -> 3 * [s, b, head, head_dim]
+        new_shape = (seq_len, bs, self.num_attention_heads_per_partition,
+                     self.hidden_size_per_attention_head)
+        q, k, v = (x.view(*new_shape) for x in (q, k, v))
+        return q, k, v
+
     def forward(
         self,
         x: torch.Tensor,
@@ -240,22 +264,20 @@ class Qwen2_5_VisionAttention(nn.Module):
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
 
-        # [s, b, head * 3 * head_dim] --> [s, b, head, 3 * head_dim]
-        new_x_shape = x.size()[:-1] + (
-            self.num_attention_heads_per_partition,
-            3 * self.hidden_size_per_attention_head,
-        )
-        x = x.view(*new_x_shape)
-
-        # [s, b, head, 3 * head_dim] --> 3 [s, b, head, head_dim]
-        q, k, v = dist_utils.split_tensor_along_last_dim(x, 3)
+        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
+        q, k, v = self.split_qkv(x)
         batch_size = q.shape[1]
 
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
                    for x in (q, k, v))
         if rotary_pos_emb is not None:
-            q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
-            k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
+            use_flash_attn = self.attn_backend == _Backend.FLASH_ATTN
+            q = apply_rotary_pos_emb_vision(q,
+                                            rotary_pos_emb,
+                                            use_flash_attn=use_flash_attn)
+            k = apply_rotary_pos_emb_vision(k,
+                                            rotary_pos_emb,
+                                            use_flash_attn=use_flash_attn)
 
         if self.attn_backend == _Backend.FLASH_ATTN:
             # from vllm_flash_attn.flash_attn_interface import (
@@ -279,20 +301,23 @@ class Qwen2_5_VisionAttention(nn.Module):
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
         elif self.attn_backend == _Backend.TORCH_SDPA:
-            seq_length = q.size(1)
-            q, k, v = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-            attention_mask = torch.zeros([1, seq_length, seq_length],
-                                         device=q.device,
-                                         dtype=torch.bool)
+            # Execute attention entry by entry for speed & less VRAM.
+            outputs = []
             for i in range(1, len(cu_seqlens)):
-                attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
-                               cu_seqlens[i - 1]:cu_seqlens[i]] = True
-            output = F.scaled_dot_product_attention(q,
-                                                    k,
-                                                    v,
-                                                    attention_mask,
-                                                    dropout_p=0.0)
-            context_layer = rearrange(output, "b h s d -> b s h d ")
+                start_idx = cu_seqlens[i - 1]
+                end_idx = cu_seqlens[i]
+                q_i = q[:, start_idx:end_idx]
+                k_i = k[:, start_idx:end_idx]
+                v_i = v[:, start_idx:end_idx]
+                q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+                                 for x in [q_i, k_i, v_i])
+                output_i = F.scaled_dot_product_attention(q_i,
+                                                          k_i,
+                                                          v_i,
+                                                          dropout_p=0.0)
+                output_i = rearrange(output_i, "b h s d -> b s h d ")
+                outputs.append(output_i)
+            context_layer = torch.cat(outputs, dim=1)
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
@@ -308,25 +333,6 @@ class Qwen2_5_VisionAttention(nn.Module):
 
         output, _ = self.proj(context_layer)
         return output
-
-
-class Qwen2RMSNorm(nn.Module):
-
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance +
-                                                    self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
 class Qwen2_5_VisionBlock(nn.Module):
@@ -499,8 +505,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             hidden_size=self.hidden_size,
         )
 
-        # NOTE: We use torch native RMSNorm here for precision purposes.
-        norm_layer = partial(Qwen2RMSNorm, eps=norm_eps)
+        norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
@@ -665,24 +670,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if name.endswith("qkv.weight"):
-                    visual_num_heads = self.num_heads
-                    visual_embed_dim = self.hidden_size
-                    head_size = visual_embed_dim // visual_num_heads
-                    loaded_weight = loaded_weight.view(3, visual_num_heads,
-                                                       head_size,
-                                                       visual_embed_dim)
-                    loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1, visual_embed_dim)
-                elif name.endswith("qkv.bias"):
-                    visual_num_heads = self.num_heads
-                    visual_embed_dim = self.hidden_size
-                    head_size = visual_embed_dim // visual_num_heads
-                    loaded_weight = loaded_weight.view(3, visual_num_heads,
-                                                       head_size)
-                    loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1)
-
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
@@ -701,39 +688,20 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
-        fps: Optional[float] = 2.0,
+        size: Optional[dict[str, int]] = None,
+        fps: Optional[Union[float, List[float]]] = None,
+        **kwargs: object,
     ) -> Qwen2_5_VLProcessor:
-        hf_processor = self.ctx.get_hf_processor(Qwen2_5_VLProcessor)
-        image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
+        if fps is not None:
+            kwargs["fps"] = fps
 
-        if min_pixels:
-            image_processor.min_pixels = min_pixels
-        if max_pixels:
-            image_processor.max_pixels = max_pixels
-        if max_pixels or min_pixels:
-            image_processor.size = {
-                "min_pixels": image_processor.min_pixels,
-                "max_pixels": image_processor.max_pixels,
-            }
-
-        return hf_processor
-
-    def get_image_processor(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        fps: Optional[float] = 2.0,
-    ) -> Qwen2_5_VLImageProcessor:
-        hf_processor = self.get_hf_processor(
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-            fps=fps,
+        return self.ctx.get_hf_processor(
+            Qwen2_5_VLProcessor,
+            image_processor=self.get_image_processor(min_pixels=min_pixels,
+                                                     max_pixels=max_pixels,
+                                                     size=size),
+            **kwargs,
         )
-        image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
-        return image_processor
 
 
 class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
@@ -760,19 +728,23 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "q_proj",
             "k_proj",
             "v_proj",
-        ]
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
     }
-
-    # LoRA specific attributes, TODO: double check
+    # LoRA specific attributes
     supported_lora_modules = [
+        # language model
         "qkv_proj",
         "o_proj",
         "gate_up_proj",
-        "down_proj",
-        "gate_proj"
-        "up_proj",
+        "down_proj",  # Same name with vision encoder
         # vision tower
         "qkv",
+        "gate_proj",
+        "up_proj",
         "attn.proj",  # Distinguish patch_embed.proj
         "fc1",
         "fc2",
@@ -780,6 +752,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         "mlp.0",
         "mlp.2"
     ]
+
     embedding_modules = {}
     embedding_padding_modules = []
 

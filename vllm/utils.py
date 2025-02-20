@@ -15,7 +15,6 @@ import ipaddress
 import multiprocessing
 import os
 import re
-import resource
 import signal
 import socket
 import subprocess
@@ -34,8 +33,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
-                    NamedTuple, Optional, Tuple, Type, TypeVar, Union,
-                    overload)
+                    NamedTuple, Optional, Tuple, Type, TypeVar, Union)
 from uuid import uuid4
 
 import cloudpickle
@@ -827,38 +825,6 @@ JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
 
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Dict[str, JSONTree[T]],
-) -> Dict[str, JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: List[JSONTree[T]],
-) -> List[JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Tuple[JSONTree[T], ...],
-) -> Tuple[JSONTree[U], ...]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: JSONTree[T],
-) -> JSONTree[U]:
-    ...
-
-
 def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
     if isinstance(value, dict):
         return {k: json_map_leaves(func, v) for k, v in value.items()}
@@ -976,11 +942,16 @@ def current_stream() -> torch.cuda.Stream:
     the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
     from C/C++ code.
     """
+    from vllm.platforms import current_platform
     global _current_stream
     if _current_stream is None:
         # when this function is called before any stream is set,
         # we return the default stream.
-        _current_stream = torch.cuda.current_stream()
+        # On ROCm using the default 0 stream in combination with RCCL
+        # is hurting performance. Therefore creating a dedicated stream
+        # per process
+        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
+        ) else torch.cuda.current_stream()
     return _current_stream
 
 
@@ -2070,6 +2041,11 @@ def memory_profiling(
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
 def set_ulimit(target_soft_limit=65535):
+    if sys.platform.startswith('win'):
+        logger.info("Windows detected, skipping ulimit adjustment.")
+        return
+
+    import resource
     resource_type = resource.RLIMIT_NOFILE
     current_soft, current_hard = resource.getrlimit(resource_type)
 
@@ -2239,34 +2215,56 @@ def import_pynvml():
         This causes errors when both of them are installed.
         Starting from version 12.0, it migrates to a new module
         named `pynvml_utils` to avoid the conflict.
-    
-    TL;DR: if users have pynvml<12.0 installed, it will cause problems.
-    Otherwise, `import pynvml` will import the correct module.
-    We take the safest approach here, to manually import the correct
-    `pynvml.py` module from the `nvidia-ml-py` package.
+    It is so confusing that many packages in the community use the
+    unofficial one by mistake, and we have to handle this case.
+    For example, `nvcr.io/nvidia/pytorch:24.12-py3` uses the unofficial
+    one, and it will cause errors, see the issue
+    https://github.com/vllm-project/vllm/issues/12847 for example.
+    After all the troubles, we decide to copy the official `pynvml`
+    module to our codebase, and use it directly.
     """
-    if TYPE_CHECKING:
-        import pynvml
-        return pynvml
-    if "pynvml" in sys.modules:
-        import pynvml
-        if pynvml.__file__.endswith("__init__.py"):
-            # this is pynvml < 12.0
-            raise RuntimeError(
-                "You are using a deprecated `pynvml` package. "
-                "Please uninstall `pynvml` or upgrade to at least"
-                " version 12.0. See https://pypi.org/project/pynvml "
-                "for more information.")
-        return sys.modules["pynvml"]
-    import importlib.util
-    import os
-    import site
-    for site_dir in site.getsitepackages():
-        pynvml_path = os.path.join(site_dir, "pynvml.py")
-        if os.path.exists(pynvml_path):
-            spec = importlib.util.spec_from_file_location(
-                "pynvml", pynvml_path)
-            pynvml = importlib.util.module_from_spec(spec)
-            sys.modules["pynvml"] = pynvml
-            spec.loader.exec_module(pynvml)
-            return pynvml
+    import vllm.third_party.pynvml as pynvml
+    return pynvml
+
+
+def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
+    """
+    A replacement for `abc.ABC`.
+    When we use `abc.ABC`, subclasses will fail to instantiate
+    if they do not implement all abstract methods.
+    Here, we only require `raise NotImplementedError` in the
+    base class, and log a warning if the method is not implemented
+    in the subclass.
+    """
+
+    original_init = cls.__init__
+
+    def find_unimplemented_methods(self: object):
+        unimplemented_methods = []
+        for attr_name in dir(self):
+            # bypass inner method
+            if attr_name.startswith('_'):
+                continue
+
+            try:
+                attr = getattr(self, attr_name)
+                # get the func of callable method
+                if callable(attr):
+                    attr_func = attr.__func__
+            except AttributeError:
+                continue
+            src = inspect.getsource(attr_func)
+            if "NotImplementedError" in src:
+                unimplemented_methods.append(attr_name)
+        if unimplemented_methods:
+            method_names = ','.join(unimplemented_methods)
+            msg = (f"Methods {method_names} not implemented in {self}")
+            logger.warning(msg)
+
+    @wraps(original_init)
+    def wrapped_init(self, *args, **kwargs) -> None:
+        original_init(self, *args, **kwargs)
+        find_unimplemented_methods(self)
+
+    type.__setattr__(cls, '__init__', wrapped_init)
+    return cls
