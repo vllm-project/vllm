@@ -259,8 +259,7 @@ class AsyncLLM(EngineClient):
                       trace_headers=trace_headers,
                       prompt_adapter_request=prompt_adapter_request,
                       priority=priority)
-        n = sampling_params.n
-        if n is None or n == 1:
+        if sampling_params.n is None or sampling_params.n == 1:
             return self._generate(**kwargs)
         else:
             # Special handling for parallel sampling requests
