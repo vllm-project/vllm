@@ -425,7 +425,7 @@ def _decode_grouped_att_m_fwd(
     extra_kargs = {}
     num_stages = 2
     if is_hip_:
-        # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+        # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html#triton-kernel-performance-optimization
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
         extra_kargs = {
             "waves_per_eu": 1,
