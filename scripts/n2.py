@@ -230,10 +230,10 @@ if __name__ == "__main__":
     for output_i in range(len(outputs)):
         output = outputs[output_i]
         gt_i = None if gt is None else gt[output_i]
-        prompt = output.prompt
+        prompt_token_ids = output.prompt_token_ids
         generated_text = output.outputs[0].text
         print("====================================")
-        print(f"Prompt: {prompt!r}")
+        print(f"Prompt: {prompt_token_ids!r}")
         print(f"Generated text: {generated_text!r}")
         print(f"Ground truth: {gt_i!r}")
         print("====================================")
