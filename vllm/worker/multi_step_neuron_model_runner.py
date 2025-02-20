@@ -8,6 +8,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.worker.neuron_model_runner import NeuronModelRunner, ModelInputForNeuron
 
 class MultiStepNeuronModelRunner(NeuronModelRunner):
+    """A model runner for multi step decoding using the transformers_neuronx framework"""
 
     def __init__(
         self,

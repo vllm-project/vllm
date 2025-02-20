@@ -8,6 +8,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.worker.neuronx_distributed_model_runner import NeuronxDistributedModelRunner
 
 class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
+    """A model runner for multi step decoding using the neuronx-distributed-inference framework"""
 
     def __init__(
         self,
