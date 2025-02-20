@@ -77,7 +77,6 @@ echo "Commands:$commands"
 #ignore certain kernels tests
 if [[ $commands == *" kernels "* ]]; then
   commands="${commands} \
-  --ignore=kernels/test_attention.py \
   --ignore=kernels/test_attention_selector.py \
   --ignore=kernels/test_blocksparse_attention.py \
   --ignore=kernels/test_causal_conv1d.py \
