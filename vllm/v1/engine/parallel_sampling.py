@@ -38,13 +38,16 @@ class ParallelSamplingRequest:
     request_id: str
     sampling_params: SamplingParams
     cached_child_sampling_params: Optional[SamplingParams]
-    request_output: Optional[RequestOutput] = None
+    request_output: Optional[RequestOutput]
+    num_completions: int
 
     def __init__(self, request_id: str,
                  sampling_params: SamplingParams) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
         self.cached_child_sampling_params = None
+        self.request_output = None
+        self.num_completions = 0
 
     def _get_child_sampling_params(
         self,
@@ -95,6 +98,7 @@ class ParallelSamplingRequest:
                             child request.   
           index: index within `n` child    
         """
+        self.num_completions += 1
         new_completion = child_req_output.outputs[0]
         new_completion.index = index
         if self.request_output is None:
@@ -112,6 +116,7 @@ class ParallelSamplingRequest:
     def _get_final_request_output(self) -> RequestOutput:
         """Invariant: parent completion outputs sorted by index"""
         assert self.request_output is not None
+        self.request_output.finished = True
         self.request_output.outputs = sorted(self.request_output.outputs,
                                              key=lambda x: x.index)
         return self.request_output
@@ -160,6 +165,11 @@ class ParallelSamplingRequest:
             # stream=true: return child completions immediately
             child_req_output.request_id = self.request_id
             child_req_output.outputs[0].index = index
+            if child_req_output.finished:
+                # Parent request is complete if all child requests are
+                # complete.
+                self.num_completions += 1
+                child_req_output.finished = (self.num_completions == self.n)
             return child_req_output
 
         # stream=false: aggregate child completions
@@ -196,11 +206,6 @@ class ParallelSamplingRequest:
         async for out in child_gen:
             if req_out := self.process_output(out, index):
                 yield req_out
-
-    @property
-    def num_completions(self) -> int:
-        assert self.request_output is not None
-        return len(self.request_output.outputs)
 
     @property
     def n(self) -> int:
