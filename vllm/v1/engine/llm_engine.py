@@ -169,6 +169,12 @@ class LLMEngine:
     def reset_prefix_cache(self):
         self.engine_core.reset_prefix_cache()
 
+    def sleep(self, level: int = 1):
+        self.engine_core.sleep(level)
+
+    def wake_up(self):
+        self.engine_core.wake_up()
+
     def get_tokenizer_group(
         self,
         group_type: Type[_G] = BaseTokenizerGroup,

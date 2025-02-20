@@ -31,8 +31,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
                                          RPCResetPrefixCacheRequest,
-                                         RPCStartupRequest, RPCStartupResponse,
-                                         RPCUProfileRequest)
+                                         RPCSleepRequest, RPCStartupRequest,
+                                         RPCStartupResponse,
+                                         RPCUProfileRequest, RPCWakeUpRequest)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -684,6 +685,16 @@ class MQLLMEngineClient(EngineClient):
         await self._send_one_way_rpc_request(
             request=RPCResetPrefixCacheRequest.RESET_PREFIX_CACHE,
             socket=self.input_socket)
+
+    async def sleep(self, level: int = 1) -> None:
+        """Sleep the engine for a given level"""
+        return await self._send_one_way_rpc_request(
+            request=RPCSleepRequest(level), socket=self.input_socket)
+
+    async def wake_up(self) -> None:
+        """Wake up the engine"""
+        return await self._send_one_way_rpc_request(
+            request=RPCWakeUpRequest.WAKE_UP, socket=self.input_socket)
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""

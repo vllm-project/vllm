@@ -361,6 +361,12 @@ class AsyncLLM(EngineClient):
     async def reset_prefix_cache(self) -> None:
         await self.engine_core.reset_prefix_cache_async()
 
+    async def sleep(self, level: int = 1) -> None:
+        await self.engine_core.sleep_async(level)
+
+    async def wake_up(self) -> None:
+        await self.engine_core.wake_up_async()
+
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         await self.engine_core.add_lora_async(lora_request)
