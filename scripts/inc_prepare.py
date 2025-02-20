@@ -36,6 +36,21 @@ top_p = 0.95
 # ==-------------------------------------------------------------------------==
 
 
+def reset_seed(seed=42):
+    import torch
+    import numpy as np
+    print("Using seed: ", seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # multi-GPU.
+    # TODO: for future use
+    # torch.backends.cudnn.benchmark = False
+    # torch.backends.cudnn.deterministic = True
+
+reset_seed(seed)
+
 # get file location
 file_path = os.path.abspath(__file__)
 dataset_path = os.path.join(os.path.dirname(file_path), "../benchmarks")
@@ -115,6 +130,7 @@ if __name__ == "__main__":
         trust_remote_code=True,
         quantization="inc_p",
         max_model_len=16384,
+        weights_load_device="cpu",
         dtype="bfloat16",
     )
 

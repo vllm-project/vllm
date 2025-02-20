@@ -400,7 +400,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Note: The w13_weight was removed by INC.
         # num_experts = layer.w13_weight.shape[0]
         num_experts = layer.num_experts
-        if hasattr(layer, "w13_weight"):
+        if hasattr(layer, "w13_weight") and layer.w13_weight is not None:
             assert (
                 layer.w13_weight.shape[0] == num_experts
             ), f"Expected {layer.w13_weight.shape[0]} experts, got {num_experts}"
