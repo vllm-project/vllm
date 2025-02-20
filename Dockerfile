@@ -41,8 +41,11 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # Create and activate venv
-RUN uv venv
-ENV PATH="/workspace/.venv/bin:$PATH"
+RUN uv venv --python ${PYTHON_VERSION} --seed /opt/venv
+# Use the virtual environment automatically
+ENV VIRTUAL_ENV=/opt/venv
+# Place entry points in the environment at the front of the path
+ENV PATH="/opt/venv/bin:$PATH"
 
 # arm64 (GH200) build follows the practice of "use existing pytorch" build,
 # we need to install torch and torchvision from the nightly builds first,
@@ -179,8 +182,11 @@ ENV PATH="/root/.local/share/uv/python/install/current/bin:$PATH"
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 # Create and activate venv
-RUN uv venv
-ENV PATH="/vllm-workspace/.venv/bin:$PATH"
+RUN uv venv --python ${PYTHON_VERSION} --seed /opt/venv
+# Use the virtual environment automatically
+ENV VIRTUAL_ENV=/opt/venv
+# Place entry points in the environment at the front of the path
+ENV PATH="/opt/venv/bin:$PATH"
 
 # arm64 (GH200) build follows the practice of "use existing pytorch" build,
 # we need to install torch and torchvision from the nightly builds first,
