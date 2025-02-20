@@ -67,6 +67,9 @@ class ModelRunnerOutput:
     # each request due to speculative/jump decoding.
     sampled_token_ids: List[List[int]]
 
+    # num_reqs x num_spec_tokens
+    spec_token_ids: Optional[List[List[int]]]
+
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]

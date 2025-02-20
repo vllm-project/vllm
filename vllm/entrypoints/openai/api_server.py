@@ -258,7 +258,8 @@ async def build_async_engine_client_from_engine_args(
 
 async def validate_json_request(raw_request: Request):
     content_type = raw_request.headers.get("content-type", "").lower()
-    if content_type != "application/json":
+    media_type = content_type.split(";", maxsplit=1)[0]
+    if media_type != "application/json":
         raise HTTPException(
             status_code=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
             detail="Unsupported Media Type: Only 'application/json' is allowed"
@@ -624,6 +625,24 @@ if envs.VLLM_SERVER_DEV_MODE:
         await engine_client(raw_request).reset_prefix_cache()
         return Response(status_code=200)
 
+    @router.post("/sleep")
+    async def sleep(raw_request: Request):
+        # get POST params
+        level = raw_request.query_params.get("level", "1")
+        logger.info("sleep the engine with level %s", level)
+        await engine_client(raw_request).sleep(int(level))
+        # FIXME: in v0 with frontend multiprocessing, the sleep command
+        # is sent but does not finish yet when we return a response.
+        return Response(status_code=200)
+
+    @router.post("/wake_up")
+    async def wake_up(raw_request: Request):
+        logger.info("wake up the engine")
+        await engine_client(raw_request).wake_up()
+        # FIXME: in v0 with frontend multiprocessing, the wake-up command
+        # is sent but does not finish yet when we return a response.
+        return Response(status_code=200)
+
 
 @router.post("/invocations", dependencies=[Depends(validate_json_request)])
 async def invocations(raw_request: Request):
@@ -797,7 +816,9 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
 
     resolved_chat_template = load_chat_template(args.chat_template)
-    logger.info("Using supplied chat template:\n%s", resolved_chat_template)
+    if resolved_chat_template is not None:
+        logger.info("Using supplied chat template:\n%s",
+                    resolved_chat_template)
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
