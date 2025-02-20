@@ -124,6 +124,7 @@ class TPUWorker:
             runner_kv_caches)
 
         self.model_runner.dummy_run(
+            runner_kv_caches,
             num_tokens=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
             exec_mode=ExecutionMode.PREFILL,

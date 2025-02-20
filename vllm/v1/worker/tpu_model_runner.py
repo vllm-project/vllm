@@ -621,7 +621,8 @@ class TPUModelRunner:
                                      self.vllm_config):
                 assert self.model is not None
                 selected_token_ids = self.model(prompt_data.input_tokens,
-                                                prompt_data.input_positions)
+                                                prompt_data.input_positions,
+                                                self.kv_caches)
 
             # In parallel to TPU execution, prepare the next iteration
             if i < num_prompts - 1:
@@ -658,7 +659,8 @@ class TPUModelRunner:
                                      self.vllm_config):
                 assert self.model is not None
                 selected_token_ids = self.model(decode_data.input_tokens,
-                                                decode_data.input_positions)
+                                                decode_data.input_positions,
+                                                self.kv_caches)
 
             # Transfer sampled tokens from TPU to CPU
             decode_token_ids_cpu = selected_token_ids.cpu()
@@ -727,6 +729,7 @@ class TPUModelRunner:
 
     def dummy_run(
         self,
+        kv_caches,
         num_tokens: int,
         seq_len: Optional[int] = None,
         exec_mode: Optional[ExecutionMode] = None,
@@ -833,7 +836,7 @@ class TPUModelRunner:
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
-            self.model(token_ids, position_ids)
+            self.model(token_ids, position_ids, kv_caches)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -845,7 +848,8 @@ class TPUModelRunner:
         for batch_size in [1]:
             seq_len = 16
             while seq_len <= self.model_config.max_model_len:
-                self.dummy_run(batch_size,
+                self.dummy_run(self.kv_caches,
+                               batch_size,
                                seq_len,
                                exec_mode=ExecutionMode.PREFILL)
                 xm.wait_device_ops()
@@ -868,7 +872,8 @@ class TPUModelRunner:
             for batch_size in [1]:
                 seq_len = 16
                 while seq_len <= self.model_config.max_model_len:
-                    self.dummy_run(batch_size,
+                    self.dummy_run(self.kv_caches,
+                                   batch_size,
                                    seq_len,
                                    exec_mode=ExecutionMode.PREFIX_PREFILL)
                     xm.wait_device_ops()
@@ -891,7 +896,10 @@ class TPUModelRunner:
         seq_len = 1
         batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
-            self.dummy_run(batch_size, seq_len, exec_mode=ExecutionMode.DECODE)
+            self.dummy_run(self.kv_caches,
+                           batch_size,
+                           seq_len,
+                           exec_mode=ExecutionMode.DECODE)
             xm.wait_device_ops()
             logger.info("  batch_size: %d, seq_len: %d", batch_size, seq_len)
 
