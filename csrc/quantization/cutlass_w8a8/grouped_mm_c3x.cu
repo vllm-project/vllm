@@ -113,12 +113,12 @@ void cutlass_grouped_mm_sm90(
   }
 }
 
-__global__ void get_a_expert_offsets(const int* __restrict__ topk_ids,
-                                     int32_t* expert_offsets,
-                                     int32_t* problem_sizes1,
-                                     int32_t* problem_sizes2, int32_t* arg_sort,
-                                     int32_t* arg_sort_prim, int topk_length,
-                                     int n, int k) {
+__global__ void get_grouped_mm_data(const int* __restrict__ topk_ids,
+                                    int32_t* expert_offsets,
+                                    int32_t* problem_sizes1,
+                                    int32_t* problem_sizes2, int32_t* arg_sort,
+                                    int32_t* arg_sort_prim, int topk_length,
+                                    int n, int k) {
   int expert_id = threadIdx.x;
   int num_experts = blockDim.x;
 
@@ -164,7 +164,7 @@ void get_grouped_mm_data_caller(
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& arg_sort, torch::Tensor& arg_sort_prim,
     const int64_t num_experts, const int64_t n, const int64_t k) {
-  get_a_expert_offsets<<<1, num_experts>>>(
+  get_grouped_mm_data<<<1, num_experts>>>(
       (const int32_t*)topk_ids.data_ptr(), (int32_t*)expert_offsets.data_ptr(),
       (int32_t*)problem_sizes1.data_ptr(), (int32_t*)problem_sizes2.data_ptr(),
       (int32_t*)arg_sort.data_ptr(), (int32_t*)arg_sort_prim.data_ptr(),
