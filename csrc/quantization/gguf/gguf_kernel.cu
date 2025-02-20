@@ -299,11 +299,13 @@ torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
           W.stride(0), col, row, tokens, padded, row, top_k,
           sorted_token_ids.sizes()[0], stream);
       break;
-      // case 11:
-      //   ggml_mul_mat_q3_K_q8_1_cuda(
-      //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-      //       (half*)Y.data_ptr(), col, row, tokens, padded, row, stream);
-      //   break;
+    case 11:
+      ggml_moe_q3_K_q8_1_cuda(
+          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
+          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+          W.stride(0), col, row, tokens, padded, row, top_k,
+          sorted_token_ids.sizes()[0], stream);
+      break;
       // case 12:
       //   ggml_mul_mat_q4_K_q8_1_cuda(
       //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),

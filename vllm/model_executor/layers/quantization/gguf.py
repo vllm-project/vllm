@@ -136,15 +136,17 @@ def _fused_moe_gguf(
     top_k = topk_ids.shape[1]
     out_hidden_states = torch.empty_like(x)
     # TODO get real block size
-    BLOCK_SIZE = 128
+    BLOCK_SIZE = 4
 
     sorted_token_ids, expert_ids, _ = moe_align_block_size(
         topk_ids, BLOCK_SIZE, E)
     out = ops.ggml_moe_a8(x, w1, sorted_token_ids, expert_ids, qweight_type, N,
-                          top_k)
+                          top_k, num_tokens)
     out = act(out)
     out = ops.ggml_moe_a8(out, w2, sorted_token_ids, expert_ids, qweight_type2,
-                          N, top_k)
+                          w2.shape[1], 1, num_tokens * top_k)
+    out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
+        topk_weights.view(num_tokens, top_k, 1))
     ops.moe_sum(out, out_hidden_states)
     return out_hidden_states
 
@@ -311,10 +313,10 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
         final_hidden_states = torch.empty_like(x)
-        # final_hidden_states_kern = _fused_moe_gguf(
-        #     x, layer.w13_qweight, layer.w2_qweight, topk_weights, topk_ids,
-        #     layer.w13_qweight_type.weight_type,
-        #     layer.w2_qweight_type.weight_type, self.act)
+        final_hidden_states_kern = _fused_moe_gguf(
+            x, layer.w13_qweight, layer.w2_qweight, topk_weights, topk_ids,
+            layer.w13_qweight_type.weight_type,
+            layer.w2_qweight_type.weight_type, self.act)
         for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
             inp = x[tok].reshape((1, ) + x.shape[1:])
             current_hidden_state = None
@@ -334,7 +336,15 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                 else:
                     current_hidden_state.add_(current_state)
             final_hidden_states[tok] = current_hidden_state
-        # assert torch.allclose(final_hidden_states, final_hidden_states_kern)
+        print(
+            "running with weight type", layer.w13_qweight_type.weight_type,
+            layer.w2_qweight_type.weight_type, "all close: ",
+            torch.allclose(final_hidden_states,
+                           final_hidden_states_kern,
+                           atol=1e-2), "mean abs diff: ",
+            torch.abs(final_hidden_states - final_hidden_states_kern).mean(),
+            "max abs diff: ",
+            torch.abs(final_hidden_states - final_hidden_states_kern).max())
         return final_hidden_states
 
 

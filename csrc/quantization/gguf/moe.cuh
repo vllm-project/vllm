@@ -268,3 +268,68 @@ static void ggml_moe_q2_K_q8_1_cuda(const void* inp, const void* w, half* dst,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
 }
+
+#if defined(USE_ROCM)
+  #define MMQ_X_Q3_K 64
+  #define MMQ_Y_Q3_K 128
+  #define NWARPS_Q3_K 8
+#else
+  #define MMQ_X_Q3_K 4
+  #define MMQ_Y_Q3_K 32
+  #define NWARPS_Q3_K 4
+#endif
+
+template <bool need_check>
+static __global__ void
+#if defined(USE_ROCM)
+__launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q3_K, 2)
+#endif
+    moe_q3_K(const void* __restrict__ vx, const void* __restrict__ vy,
+             half* __restrict__ dst, const int* sorted_token_ids,
+             const int* expert_ids, const int exp_stride, const int ncols_x,
+             const int nrows_x, const int ncols_y, const int nrows_y,
+             const int nrows_dst, const int top_k) {
+
+  const int mmq_x = MMQ_X_Q3_K;
+  const int mmq_y = MMQ_Y_Q3_K;
+  const int nwarps = NWARPS_Q3_K;
+
+  moe_q<QK_K, QR3_K, QI3_K, false, block_q3_K, mmq_x, mmq_y, nwarps,
+        allocate_tiles_q3_K<mmq_y>, load_tiles_q3_K<mmq_y, nwarps, need_check>,
+        VDR_Q3_K_Q8_1_MMQ, vec_dot_q3_K_q8_1_mul_mat>(
+      vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
+      ncols_y, nrows_y, nrows_dst, top_k);
+}
+
+static void ggml_moe_q3_K_q8_1_cuda(const void* inp, const void* w, half* dst,
+                                    const int* sorted_token_ids,
+                                    const int* expert_ids, const int exp_stride,
+                                    const int ncols_x, const int nrows_x,
+                                    const int ncols_y, const int nrows_y,
+                                    const int nrows_dst, const int top_k,
+                                    const int tokens_post_padded,
+                                    cudaStream_t stream) {
+  const int mmq_x = MMQ_X_Q3_K;
+  const int mmq_y = MMQ_Y_Q3_K;
+  const int nwarps = NWARPS_Q3_K;
+
+  const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
+  // const int block_num_y = (ncols_y * top_k + mmq_x - 1) / mmq_x;
+  const int block_num_y = (tokens_post_padded) / mmq_x;
+  const dim3 block_nums(block_num_x, block_num_y, 1);
+  const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
+  // printf("running block size %d %d, grid size %d %d \n", WARP_SIZE_GGUF,
+  // nwarps, block_num_x, block_num_y);
+
+  if (nrows_x % mmq_y == 0) {
+    constexpr bool need_check = false;
+    moe_q3_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+        w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
+        ncols_y, nrows_y, nrows_dst, top_k);
+  } else {
+    constexpr bool need_check = true;
+    moe_q3_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+        w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
+        ncols_y, nrows_y, nrows_dst, top_k);
+  }
+}
