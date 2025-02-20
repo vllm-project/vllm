@@ -9,17 +9,10 @@ from vllm import LLM, SamplingParams
 from vllm.utils import cancel_torchrun_envs
 
 # convert torchrun envs to vllm envs, and then delete torchrun envs
-
-del os.environ["LOCAL_RANK"]  # not used in DP
-
 os.environ["VLLM_DP_RANK"] = os.environ["RANK"]
-del os.environ["RANK"]
 os.environ["VLLM_DP_SIZE"] = os.environ["WORLD_SIZE"]
-del os.environ["WORLD_SIZE"]
 os.environ["VLLM_DP_MASTER_IP"] = os.environ["MASTER_ADDR"]
-del os.environ["MASTER_ADDR"]
 os.environ["VLLM_DP_MASTER_PORT"] = os.environ["MASTER_PORT"]
-del os.environ["MASTER_PORT"]
 
 dp_rank = int(os.environ["VLLM_DP_RANK"])
 dp_size = int(os.environ["VLLM_DP_SIZE"])
@@ -50,7 +43,12 @@ end = start + promts_per_rank
 prompts = prompts[start:end]
 
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+# since we are doing data parallel, every rank can have different
+# sampling params. here we set different max_tokens for different
+# ranks for demonstration.
+sampling_params = SamplingParams(temperature=0.8,
+                                 top_p=0.95,
+                                 max_tokens=16 * (dp_rank + 1))
 
 # Create an LLM.
 llm = LLM(model="facebook/opt-125m", tensor_parallel_size=2)
