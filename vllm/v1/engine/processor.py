@@ -3,7 +3,7 @@
 import time
 from typing import Mapping, Optional, Union
 
-from vllm.config import CacheConfig, LoRAConfig, ModelConfig
+from vllm.config import CacheConfig, DecodingConfig, LoRAConfig, ModelConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs
@@ -27,6 +27,7 @@ class Processor:
         model_config: ModelConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        decoding_config: DecodingConfig,
         tokenizer: BaseTokenizerGroup,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
@@ -35,6 +36,7 @@ class Processor:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.decoding_config = decoding_config
         self.tokenizer = tokenizer
 
         self.generation_config_fields = model_config.try_get_generation_config(
@@ -83,6 +85,18 @@ class Processor:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
 
+    def _validate_guided_decoding(
+            self, params: Union[SamplingParams, PoolingParams]) -> None:
+        if not isinstance(params, SamplingParams):
+            return
+        if self.decoding_config.guided_decoding_backend != "xgrammar":
+            raise ValueError(
+                "Only xgrammar guided decoding is supported in V1.")
+        if (params.guided_decoding and params.guided_decoding.backend
+                and params.guided_decoding.backend != 'xgrammar'):
+            raise ValueError(
+                "Only xgrammar guided decoding is supported in V1.")
+
     def process_inputs(
         self,
         request_id: str,
@@ -100,6 +114,7 @@ class Processor:
 
         self._validate_logprobs(params)
         self._validate_lora(lora_request)
+        self._validate_guided_decoding(params)
 
         if arrival_time is None:
             arrival_time = time.time()
