@@ -1,7 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
-import time
-
 import pytest
 import torch
 
@@ -146,9 +143,6 @@ def test_end_to_end(model: str, use_v1: bool):
     # which is difficult to measure in the test. therefore, we only
     # test sleep level 1 here.
     llm.sleep(level=1)
-    if use_v1:
-        # v1 returns before sleep finishes
-        time.sleep(30)
 
     free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
     used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
@@ -157,9 +151,6 @@ def test_end_to_end(model: str, use_v1: bool):
     assert used_bytes < 2 * GiB_bytes
 
     llm.wake_up()
-    if use_v1:
-        # v1 returns before wake_up finishes
-        time.sleep(30)
 
     output2 = llm.generate(prompt, sampling_params)
 
