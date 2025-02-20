@@ -159,7 +159,10 @@ class GuidedDecodingManager:
             if not isinstance(grammar_spec, str):
                 ctx = self.compiler.compile_builtin_json_grammar()
             else:
-                ctx = self.compiler.compile_json_schema(grammar_spec)
+                # TODO -- allow any_whitespace to be configurable
+                # pending merge of https://github.com/vllm-project/vllm/pull/12744
+                ctx = self.compiler.compile_json_schema(grammar_spec,
+                                                        any_whitespace=False)
         elif request_type == GuidedDecodingOptions.grammar:
             ctx = self.compiler.compile_grammar(grammar_spec)
         # elif request_type == GuidedDecodingOptions.regex:
