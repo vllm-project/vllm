@@ -396,7 +396,7 @@ class WhisperEncoder(nn.Module):
             hidden_states.append(embeds)
         hidden_states = torch.cat(hidden_states)
 
-        for idx, encoder_layer in enumerate(self.layers):
+        for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
 
         hidden_states = self.layer_norm(hidden_states)
@@ -633,6 +633,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         decoder_outputs = self.model(
             input_features=audio_input["input_features"],
             input_ids=input_ids,
+            positions=positions,
         )
         return decoder_outputs
 
