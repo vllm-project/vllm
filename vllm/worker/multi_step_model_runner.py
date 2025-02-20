@@ -538,6 +538,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         # Execute the model
         output = self._base_model_runner.execute_model(frozen_model_input,
+                                                       None,
                                                        intermediate_tensors,
                                                        num_steps=1)
 
