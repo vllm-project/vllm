@@ -57,7 +57,6 @@ MODELS_ON_S3 = [
     "ArthurZ/Ilama-3.2-1B",
     "llava-hf/llava-1.5-7b-hf",
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    "JackFram/llama-160m",
     "ai21labs/Jamba-tiny-random",
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
     "nm-testing/Phi-3-mini-128k-instruct-FP8",
