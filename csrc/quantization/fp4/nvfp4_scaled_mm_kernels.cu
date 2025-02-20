@@ -348,13 +348,13 @@ void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
               A_sf.sizes()[0], "x", A_sf.sizes()[1], " and ", B_sf.sizes()[0],
               "x", B_sf.sizes()[1], ")");
   TORCH_CHECK(A_sf.sizes()[0] == rounded_m && A_sf.sizes()[1] == rounded_k,
-              "scale_a must be padded and swizzled to a shape (",
-              rounded_m, "x", rounded_k, "), but got a shape (",
-              A_sf.sizes()[0], "x", A_sf.sizes()[1], ")");
+              "scale_a must be padded and swizzled to a shape (", rounded_m,
+              "x", rounded_k, "), but got a shape (", A_sf.sizes()[0], "x",
+              A_sf.sizes()[1], ")");
   TORCH_CHECK(B_sf.sizes()[0] == rounded_n && B_sf.sizes()[1] == rounded_k,
-              "scale_b must be padded and swizzled to a shape (",
-              rounded_n, "x", rounded_k, "), but got a shape (",
-              B_sf.sizes()[0], "x", B_sf.sizes()[1], ")");
+              "scale_b must be padded and swizzled to a shape (", rounded_n,
+              "x", rounded_k, "), but got a shape (", B_sf.sizes()[0], "x",
+              B_sf.sizes()[1], ")");
 
   auto out_dtype = D.dtype();
   at::cuda::CUDAGuard device_guard{(char)A.get_device()};
