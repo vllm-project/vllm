@@ -141,7 +141,9 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        return torch.cuda.get_device_name(device_id)
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        handle = amdsmi_get_processor_handles()[physical_device_id]
+        return amdsmi_get_gpu_asic_info(handle)["market_name"]
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
