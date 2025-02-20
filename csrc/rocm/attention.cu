@@ -252,7 +252,7 @@ __device__ __forceinline__ floatx4 to_float_fp8x4(const _B8x4& inp) {
   // to convert 2 packed fp8 to 2 packed fp32 values.
   // However, in MI200 platforms, we only have v_cvt_f32_fp8
   // to convert fp8 values individually. So we added
-  // #else case for fewer instructions (# inst=2) in MI300+, 
+  // #else case for fewer instructions (# inst=2) in MI300+,
   // and fallback to
   // #if case for other platforms (# inst=4).
   #if defined(__gfx90a__)
@@ -515,7 +515,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   int vphysical_block_number[VTLOOP][VBLOCKS_PER_LANE];
 
-  // after changes
   // fetch v physical block numbers
   for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
     for (int vblock_depth = 0; vblock_depth < VBLOCKS_PER_LANE;
@@ -694,12 +693,17 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
           from_floatx4<scalar_t>(d_out[token_depth]);
     }
   }
+
   // write out partition max_logits and exp_sum
   if (threadIdx.x < GQA_RATIO) {
     const int qhead_idx = lane16id;
-    const int64_t offset =
-        seq_idx * total_num_heads * max_num_partitions +
-        (wg_start_head_idx + qhead_idx) * max_num_partitions + partition_idx;
+    const int64_t offset = static_cast<int64_t>(seq_idx) *
+                               static_cast<int64_t>(total_num_heads) *
+                               static_cast<int64_t>(max_num_partitions) +
+                           (static_cast<int64_t>(wg_start_head_idx) +
+                            static_cast<int64_t>(qhead_idx)) *
+                               static_cast<int64_t>(max_num_partitions) +
+                           static_cast<int64_t>(partition_idx);
     max_logits[offset] = partition_qk_max;
     exp_sums[offset] = partition_exp_sum;
   }
@@ -1490,9 +1494,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       __fdividef(1.0f, shared_global_exp_sum + 1e-6f);
   acc *= inv_global_exp_sum;
 
-  const int64_t seq_idx64 = static_cast<int64_t>(seq_idx);
-  OUTT* out_ptr =
-      out + seq_idx64 * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
+  OUTT* out_ptr = out + static_cast<int64_t>(seq_idx) * num_heads * HEAD_SIZE +
+                  static_cast<int64_t>(head_idx) * HEAD_SIZE;
   if constexpr (std::is_same<OUTT, bit8_t>::value) {
     out_ptr[threadIdx.x] = hip_fp8(acc).data;
   } else {
