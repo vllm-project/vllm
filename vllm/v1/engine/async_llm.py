@@ -51,8 +51,6 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
-        self.enable_prefix_caching = (
-            vllm_config.cache_config.enable_prefix_caching)
 
         self.log_requests = log_requests
         self.log_stats = log_stats
@@ -254,27 +252,20 @@ class AsyncLLM(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
+        kwargs = dict(prompt=prompt,
+                      sampling_params=sampling_params,
+                      request_id=request_id,
+                      lora_request=lora_request,
+                      trace_headers=trace_headers,
+                      prompt_adapter_request=prompt_adapter_request,
+                      priority=priority)
         n = sampling_params.n
         if n is None or n == 1:
-            return self._generate(
-                prompt=prompt,
-                sampling_params=sampling_params,
-                request_id=request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-                priority=priority)
+            return self._generate(**kwargs)
         else:
             # Special handling for parallel sampling requests
-            return generate_parallel_sampling_async(
-                generate=self._generate,
-                prompt=prompt,
-                sampling_params=sampling_params,
-                request_id=request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-                priority=priority)
+            return generate_parallel_sampling_async(generate=self._generate,
+                                                    **kwargs)
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""

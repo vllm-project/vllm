@@ -49,7 +49,7 @@ class LLMEngine:
         self.cache_config = vllm_config.cache_config
 
         # Bookkeeping for parallel sampling requests
-        self.parallel_mgr = SyncParallelSamplingManager()
+        self.parallel_manager = SyncParallelSamplingManager()
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -107,7 +107,7 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     def get_num_unfinished_requests(self) -> int:
-        return self.parallel_mgr.get_num_unfinished_requests(
+        return self.parallel_manager.get_num_unfinished_requests(
             self.output_processor.get_num_unfinished_requests())
 
     def has_unfinished_requests(self) -> bool:
@@ -135,29 +135,22 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
         """Add request."""
+        kwargs = dict(request_id=request_id,
+                      prompt=prompt,
+                      params=params,
+                      arrival_time=arrival_time,
+                      lora_request=lora_request,
+                      trace_headers=trace_headers,
+                      prompt_adapter_request=prompt_adapter_request,
+                      priority=priority)
         # Handle parallel sampling requests differently.
         if params is None or isinstance(params,
                                         PoolingParams) or params.n == 1:
-            self._add_request(request_id=request_id,
-                              prompt=prompt,
-                              params=params,
-                              arrival_time=arrival_time,
-                              lora_request=lora_request,
-                              trace_headers=trace_headers,
-                              prompt_adapter_request=prompt_adapter_request,
-                              priority=priority)
+            self._add_request(**kwargs)
         else:
             # Special handling for parallel sampling requests
-            self.parallel_mgr.add_request_parallel_sampling(
-                add_request=self._add_request,
-                request_id=request_id,
-                prompt=prompt,
-                params=params,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-                priority=priority)
+            self.parallel_manager.add_request_parallel_sampling(
+                add_request=self._add_request, **kwargs)
 
     def _add_request(
         self,
@@ -185,9 +178,6 @@ class LLMEngine:
         self.engine_core.add_request(request)
 
     def step(self) -> List[RequestOutput]:
-        # Schedule reset of parallel sampling logic
-        # in between generate() runs
-        self.parallel_mgr.schedule_reset()
 
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()
@@ -202,7 +192,7 @@ class LLMEngine:
         request_outputs = processed_outputs.request_outputs
 
         # 4) Process unfinished parallel sampling requests
-        request_outputs = self.parallel_mgr.step(request_outputs)
+        request_outputs = self.parallel_manager.step(request_outputs)
         return request_outputs
 
     def get_model_config(self):

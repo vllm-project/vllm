@@ -67,15 +67,15 @@ class ParallelSamplingRequest:
             # Reuse child sampling_params data structure
             return self.cached_child_sampling_params
         # Build child sampling_params
-        c_sampling_params = copy(self.sampling_params)
-        c_sampling_params.n = 1
+        child_sampling_params = copy(self.sampling_params)
+        child_sampling_params.n = 1
         if seed is None:
             # Cache child sampling_params for later reuse
-            self.cached_child_sampling_params = c_sampling_params
+            self.cached_child_sampling_params = child_sampling_params
         else:
             # Each child gets a clone with a unique seed
-            c_sampling_params.seed = seed + index
-        return c_sampling_params
+            child_sampling_params.seed = seed + index
+        return child_sampling_params
 
     def _add_output(
         self,
@@ -218,25 +218,9 @@ class SyncParallelSamplingManager:
         self.parent_reqs: Dict[str, ParallelSamplingRequest] = {}
         # Child req ID -> (child req index, parent req ID)
         self.child_reqs: Dict[str, Tuple[int, str]] = {}
-        # Flag to reset parallel sampling bookkeeping logic
-        # between engine runs
-        self._do_reset = False
-
-    def _reset_if_needed(self) -> None:
-        """Reset at beginning of sync generate()"""
-        if self._do_reset:
-            self.parent_reqs.clear()
-            self.child_reqs.clear()
-            self._do_reset = False
-
-    def schedule_reset(self) -> None:
-        """Schedule reset for the next time a parent request is added."""
-        if self.parent_reqs:
-            self._do_reset = True
 
     def _register_parent_request(self, req: ParallelSamplingRequest) -> None:
         """Register parallel sampling parent request."""
-        self._reset_if_needed()
         self.parent_reqs[req.request_id] = req
 
     def _register_child_request(self, req_id: str, child_req_id: str,
@@ -280,11 +264,11 @@ class SyncParallelSamplingManager:
         self._register_parent_request(req)
         # Add n child requests with unique request IDs & random seeds and n=1
         for idx in range(req.n):
-            c_req_id, c_params = req.get_child_info(idx)
-            self._register_child_request(request_id, c_req_id, idx)
-            add_request(request_id=c_req_id,
+            child_req_id, child_params = req.get_child_info(idx)
+            self._register_child_request(request_id, child_req_id, idx)
+            add_request(request_id=child_req_id,
                         prompt=prompt,
-                        params=c_params,
+                        params=child_params,
                         arrival_time=arrival_time,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
@@ -315,23 +299,23 @@ class SyncParallelSamplingManager:
             # Return unmodified
             return outputs
         agg_outputs = []
-        for c_out in outputs:
-            c_req_id = c_out.request_id
-            if cdx_req_id := self.child_reqs.get(c_req_id, None):
+        for output in outputs:
+            req_id = output.request_id
+            if child_req_entry := self.child_reqs.get(req_id, None):
                 # For each parallel sampling child request output:
-                (cdx, req_id) = cdx_req_id
-                req = self.parent_reqs[req_id]
+                (index, parent_req_id) = child_req_entry
+                req = self.parent_reqs[parent_req_id]
                 # Update parallel sampling request
-                if out := req.process_output(c_out, cdx):
+                if out := req.process_output(output, index):
                     # Return parent request output if complete;
                     # cleanup parent request bookkeeping.
                     agg_outputs.append(out)
-                    del self.parent_reqs[req_id]
+                    del self.parent_reqs[parent_req_id]
                 # Cleanup child request bookkeeping.
-                del self.child_reqs[c_req_id]
+                del self.child_reqs[req_id]
             else:
                 # Not a parallel sampling request output
-                agg_outputs.append(c_out)
+                agg_outputs.append(output)
         return agg_outputs
 
 
@@ -351,11 +335,11 @@ async def generate_parallel_sampling_async(
     # Aggregate generators for n child requests
     gens: List[AsyncGenerator[RequestOutput, None]] = []
     for idx in range(parent_req.n):
-        c_req_id, c_params = parent_req.get_child_info(idx)
+        child_req_id, child_params = parent_req.get_child_info(idx)
         child_gen = generate(
             prompt=prompt,
-            sampling_params=c_params,
-            request_id=c_req_id,
+            sampling_params=child_params,
+            request_id=child_req_id,
             lora_request=lora_request,
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
