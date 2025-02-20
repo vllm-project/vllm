@@ -76,7 +76,7 @@ class OpenAIServingScores(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        model_name = request.model
+        model_name = self._get_model_name(request.model)
         request_id = f"score-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
         truncate_prompt_tokens = request.truncate_prompt_tokens
