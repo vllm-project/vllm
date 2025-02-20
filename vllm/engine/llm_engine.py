@@ -244,6 +244,7 @@ class LLMEngine:
                 self.parallel_config.data_parallel_rank,
                 self.parallel_config.data_parallel_size,
                 backend="gloo")
+        self.should_execute_dummy_batch = False
 
         logger.info(
             "Initializing a V0 LLM engine (v%s) with config: %s, "
@@ -925,29 +926,39 @@ class LLMEngine:
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        answer = any(scheduler.has_unfinished_seqs()
-                     for scheduler in self.scheduler)
+        has_unfinished = any(scheduler.has_unfinished_seqs()
+                             for scheduler in self.scheduler)
         if not self.need_to_sync_across_dp:
-            return answer
-        tensor = torch.tensor([answer], dtype=torch.int32, device="cpu")
-        torch.distributed.all_reduce(tensor,
-                                     op=ReduceOp.MAX,
-                                     group=self.dp_group)
-        return bool(tensor.item())
+            return has_unfinished
+        return self.sync_has_unfinished(has_unfinished)
 
     def has_unfinished_requests_for_virtual_engine(
             self, virtual_engine: int) -> bool:
         """
         Returns True if there are unfinished requests for the virtual engine.
         """
-        answer = self.scheduler[virtual_engine].has_unfinished_seqs()
+        has_unfinished = self.scheduler[virtual_engine].has_unfinished_seqs()
         if not self.need_to_sync_across_dp:
-            return answer
-        tensor = torch.tensor([answer], dtype=torch.int32, device="cpu")
+            return has_unfinished
+        return self.sync_has_unfinished(has_unfinished)
+
+    def sync_has_unfinished(self, has_unfinished: bool) -> bool:
+        tensor = torch.tensor([has_unfinished],
+                              dtype=torch.int32,
+                              device="cpu")
+        # dp rank 0: has_unfinished_seqs=True
+        # dp rank 1: has_unfinished_seqs=False
+        # aggregated: has_unfinished_seqs=True
+        # so this is an OR operation, i.e. MAX in integers
         torch.distributed.all_reduce(tensor,
                                      op=ReduceOp.MAX,
                                      group=self.dp_group)
-        return bool(tensor.item())
+        aggregated_has_unfinished = bool(tensor.item())
+        if not has_unfinished and aggregated_has_unfinished:
+            # current rank has no unfinished seqs, but other ranks do,
+            # so we should execute a dummy batch to sync across ranks
+            self.should_execute_dummy_batch = True
+        return aggregated_has_unfinished
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache for all devices."""
