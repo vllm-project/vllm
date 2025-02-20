@@ -6,6 +6,7 @@
 import os
 
 from vllm import LLM, SamplingParams
+from vllm.utils import cancel_torchrun_envs
 
 # convert torchrun envs to vllm envs, and then delete torchrun envs
 
@@ -27,6 +28,8 @@ GPUs_per_dp_rank = 2
 os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
     str(i) for i in range(dp_rank * GPUs_per_dp_rank, (dp_rank + 1) *
                           GPUs_per_dp_rank))
+
+cancel_torchrun_envs()
 
 # Sample prompts.
 prompts = [
