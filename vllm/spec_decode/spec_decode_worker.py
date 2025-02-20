@@ -11,8 +11,8 @@ import torch.nn as nn
 from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.communication_op import (broadcast_tensor_dict,
                                                get_tp_group,
-                                               model_parallel_is_initialized,
                                                tensor_model_parallel_gather)
+from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.sampler import SamplerOutput
