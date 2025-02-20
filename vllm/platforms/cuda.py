@@ -74,6 +74,7 @@ class CudaPlatformBase(Platform):
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    communicate_backend: str = "nccl"
 
     @classmethod
     def get_device_capability(cls,
@@ -237,6 +238,20 @@ class CudaPlatformBase(Platform):
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
 
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Usage of this function is discouraged in favor of device. In most cases 
+        it’s better to use `vllm.current_platform.device_control_env_var` environmental variable.
+        """
+        raise torch.cuda.set_device(device)
+
+    @classmethod
+    def device_count(cls) -> int:
+        """
+        Return the number of devices available.
+        """
+        raise torch.cuda.device_count()
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
