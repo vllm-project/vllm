@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from functools import partial
 from typing import Optional, Type
 
 import pytest
@@ -11,9 +10,8 @@ from vllm.inputs.data import ExplicitEncoderDecoderPrompt, TextPrompt
 from vllm.multimodal.image import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import _ImageAssets, HfRunner, PromptImageInput, VllmRunner
+from ....conftest import HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
-
 
 MODELS = ["microsoft/Florence-2-base"]
 # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
@@ -33,14 +31,16 @@ PROMPTS = [
 
 
 def get_hf_images_prompts(
-        prompts_: list[ExplicitEncoderDecoderPrompt[str, TextPrompt]],
-    ) -> tuple[list[ExplicitEncoderDecoderPrompt[str, str]], list[Image.Image]]:
+    prompts_: list[ExplicitEncoderDecoderPrompt[str, TextPrompt]],
+) -> tuple[list[ExplicitEncoderDecoderPrompt[str, str]], list[Image.Image]]:
     prompts, images = [], []
     for prompt in prompts_:
         encoder_prompt = prompt["encoder_prompt"]
-        prompts.append(ExplicitEncoderDecoderPrompt(
-            encoder_prompt=encoder_prompt["prompt"],
-            decoder_prompt=None,))
+        prompts.append(
+            ExplicitEncoderDecoderPrompt(
+                encoder_prompt=encoder_prompt["prompt"],
+                decoder_prompt=None,
+            ))
         images.append(encoder_prompt["multi_modal_data"]["image"])
     return prompts, images
 
@@ -68,31 +68,29 @@ def run_test(
     distributed_executor_backend: Optional[str] = None,
 ) -> None:
     with vllm_runner(model,
+                     max_num_seqs=8,
                      tokenizer_name=TOKENIZER,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True) as vllm_model:
         vllm_outputs_per_case = [
-            vllm_model.generate_encoder_decoder_greedy_logprobs(prompts,
-                                                max_tokens,
-                                                num_logprobs=num_logprobs)
+            vllm_model.generate_encoder_decoder_greedy_logprobs(
+                prompts, max_tokens, num_logprobs=num_logprobs)
             for prompts in inputs
         ]
 
-    inputs = [get_hf_images_prompts(prompts) for prompts in inputs]
+    hf_inputs = [get_hf_images_prompts(prompts) for prompts in inputs]
 
     with hf_runner(model, dtype=dtype, skip_tokenizer_init=True) as hf_model:
         hf_model.model.get_output_embeddings = lambda: \
             hf_model.model.language_model.lm_head
         hf_outputs_per_case = [
-            hf_model.generate_encoder_decoder_greedy_logprobs_limit(prompts,
-                                                    max_tokens,
-                                                    num_logprobs=num_logprobs,
-                                                    images=images)
-            for prompts, images in inputs
+            hf_model.generate_encoder_decoder_greedy_logprobs_limit(
+                prompts, max_tokens, num_logprobs=num_logprobs, images=images)
+            for prompts, images in hf_inputs
         ]
-    
+
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_case,
                                         vllm_outputs_per_case):
         check_logprobs_close(
@@ -120,19 +118,20 @@ def run_test(
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner: Type[HfRunner], vllm_runner: Type[VllmRunner], image_assets: _ImageAssets, model: str, size_factors: list[int], dtype: str, max_tokens: int,
+def test_models(hf_runner: Type[HfRunner], vllm_runner: Type[VllmRunner],
+                image_assets: _ImageAssets, model: str,
+                size_factors: list[int], dtype: str, max_tokens: int,
                 num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [
-        [
-            ExplicitEncoderDecoderPrompt(
-                encoder_prompt=TextPrompt(prompt=prompt, multi_modal_data={"image": rescale_image_size(image, factor)}),
-                decoder_prompt="",
-            )
-            for factor in size_factors
- 
-        ] for image, prompt in itertools.product(images, PROMPTS)]
+    inputs_per_image = [[
+        ExplicitEncoderDecoderPrompt(
+            encoder_prompt=TextPrompt(
+                prompt=prompt,
+                multi_modal_data={"image": rescale_image_size(image, factor)}),
+            decoder_prompt="",
+        ) for factor in size_factors
+    ] for image, prompt in itertools.product(images, PROMPTS)]
     run_test(
         hf_runner,
         vllm_runner,
