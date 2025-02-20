@@ -493,7 +493,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 batch_size=batch_size,
                 dtype=self.model_config.dtype,
                 device=self.device)
-        self.execute_model(model_input, intermediate_tensors)
+        self.execute_model(model_input, None, intermediate_tensors)
         torch.xpu.synchronize()
         return
 
