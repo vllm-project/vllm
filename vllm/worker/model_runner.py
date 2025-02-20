@@ -1677,11 +1677,22 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
+        previous_hidden_states = kwargs.get("previous_hidden_states")
         if prefill_meta is None and decode_meta.use_cuda_graph:
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
+            if previous_hidden_states is not None:
+                previous_hidden_states = torch.cat([
+                    previous_hidden_states,
+                    torch.empty([
+                        graph_batch_size - previous_hidden_states.shape[0],
+                        *previous_hidden_states.shape[1:]
+                    ],
+                                dtype=previous_hidden_states.dtype,
+                                device=previous_hidden_states.device)
+                ])
         else:
             model_executable = self.model
 
@@ -1708,7 +1719,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
-        previous_hidden_states = kwargs.get("previous_hidden_states")
         model_kwargs = {}
         if previous_hidden_states is not None:
             model_kwargs["previous_hidden_states"] = previous_hidden_states

@@ -97,11 +97,15 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
             for _ in range(sample_len):
+                if expanded_request.previous_hidden_states is not None:
+                    self.worker.model_runner.return_hidden_states = True
                 model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
                 model_output = model_output[0]
+                self._maybe_update_previous_hidden_states(
+                    model_output, expanded_request)
 
                 self._append_new_tokens(
                     model_output, expanded_request.seq_group_metadata_list,
@@ -114,6 +118,23 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         filtered_model_outputs = self._filter_model_output(
             model_outputs, indices_of_seq_with_bonus_tokens)
         return filtered_model_outputs, True
+
+    @staticmethod
+    def _maybe_update_previous_hidden_states(
+            model_output: SamplerOutput,
+            expanded_request: ExecuteModelRequest) -> None:
+        """
+        Updates the previous hidden states in an expanded request
+        in-place with the hidden states from the model output. 
+        """
+        if expanded_request.previous_hidden_states is not None:
+            seq_group_meta_with_hidden = [
+                sg for sg in expanded_request.seq_group_metadata_list
+                if sg.do_sample
+            ]
+            expanded_request.previous_hidden_states = HiddenStates(
+                model_output.hidden_states, seq_group_meta_with_hidden,
+                expanded_request.previous_hidden_states.hidden_states)
 
     @staticmethod
     def _expand_execute_model_request(
