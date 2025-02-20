@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import copy
-from typing import (AsyncGenerator, Callable, Dict, List, Mapping, Optional,
+from typing import (AsyncGenerator, Dict, List, Mapping, Optional, Protocol,
                     Tuple, Union)
 
 from vllm.inputs import PromptType
@@ -12,16 +12,32 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils import merge_async_iterators
 
-AsyncGenerateMethodType = Callable[[
-    PromptType, SamplingParams, str, Optional[LoRARequest], Optional[Mapping[
-        str, str]], Optional[PromptAdapterRequest], int
-], AsyncGenerator[RequestOutput, None]]
 
-SyncAddRequestMethodType = Callable[[
-    str, PromptType, Union[SamplingParams, PoolingParams], Optional[float],
-    Optional[LoRARequest], Optional[Mapping[
-        str, str]], Optional[PromptAdapterRequest], int
-], None]
+class AsyncGenerateMethodType(Protocol):
+
+    def __call__(self,
+                 prompt: PromptType,
+                 sampling_params: SamplingParams,
+                 request_id: str,
+                 lora_request: Optional[LoRARequest] = None,
+                 trace_headers: Optional[Mapping[str, str]] = None,
+                 prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+                 priority: int = 0) -> AsyncGenerator[RequestOutput, None]:
+        ...
+
+
+class SyncAddRequestMethodType(Protocol):
+
+    def __call__(self,
+                 request_id: str,
+                 prompt: PromptType,
+                 params: Union[SamplingParams, PoolingParams],
+                 arrival_time: Optional[float] = None,
+                 lora_request: Optional[LoRARequest] = None,
+                 trace_headers: Optional[Mapping[str, str]] = None,
+                 prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+                 priority: int = 0) -> None:
+        ...
 
 
 class ParallelSamplingRequest:
