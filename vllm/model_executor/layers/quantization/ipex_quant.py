@@ -96,13 +96,14 @@ class IPEXConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        if not current_platform.is_cpu() and not current_platform.is_xpu():
-            return None
+        # not use IPEXConfig
+        # if not current_platform.is_cpu() and not current_platform.is_xpu():
+        #     return None
 
-        quant_method = hf_quant_cfg.get("quant_method", "").lower()
+        # quant_method = hf_quant_cfg.get("quant_method", "").lower()
 
-        if quant_method in ["awq", "gptq"]:
-            return cls.get_name()
+        # if quant_method in ["awq", "gptq"]:
+        #     return cls.get_name()
 
         return None
 
