@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Utilities for selecting and loading neuron models."""
+"""Utilities for selecting and loading Neuron models in transformers-neuronx framework."""
 import ast
 import copy
 import importlib
 import os
-from typing import Dict, List, Optional, Tuple, List
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -115,7 +115,8 @@ class NeuronCausalLM(nn.Module):
 
 
 class NeuronSpeculationCausalLM(nn.Module):
-
+    """A Neuron-optimized causal language model with speculative decoding."""
+    
     SPECULATION_TERMINATION_ID = -1
 
     def __init__(
@@ -192,6 +193,7 @@ def _get_buckets(env: str, default_value: List[int]) -> List[int]:
 def _get_default_neuron_config(model_config: ModelConfig,
                                parallel_config: ParallelConfig,
                                scheduler_config: SchedulerConfig):
+    """Generate a neuron config based on vllm config args."""
     from transformers_neuronx.config import ContinuousBatchingConfig
     from transformers_neuronx.constants import LAYOUT_BSH
 
@@ -221,6 +223,7 @@ def _get_default_neuron_config_for_speculation(
     parallel_config: ParallelConfig,
     scheduler_config: SchedulerConfig
 ):
+    """Generate a neuron config for speculative decoding based on vllm config args."""
     from transformers_neuronx.config import ContinuousBatchingConfig
     from transformers_neuronx.constants import LAYOUT_BSH
 
@@ -250,6 +253,7 @@ def _is_neuron_on_device_sampling_disabled(model_config: ModelConfig) -> bool:
 
 def _get_neuron_config_after_override(default_neuron_config,
                                       overridden_neuron_config):
+    """Update default neuron config values with override args"""
     from transformers_neuronx.config import NeuronConfig
     overridden_neuron_config = overridden_neuron_config or {}
     default_neuron_config.update(overridden_neuron_config)
@@ -259,7 +263,7 @@ def _get_neuron_config_after_override(default_neuron_config,
 def get_neuron_model(model_config: ModelConfig,
                      parallel_config: ParallelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
-
+    """Initializes a neuron-optimized model for inference."""
     # Create a model instance.
     model = NeuronCausalLM(
         model_config.hf_config,
@@ -293,6 +297,10 @@ def get_neuron_speculation_model(
     scheduler_config: SchedulerConfig,
     speculation_config: SpeculativeConfig
 ) -> None:
+    """Initializes a neuron-optimized speculation model for inference.
+    
+    This method is only applicable for speculation with a standalone draft model.
+    """
     from transformers_neuronx.fused_speculation import FusedSpeculativeDecoder
 
     # For Eagle SD, we need to pass in additional parameters in neuron config.
@@ -359,6 +367,7 @@ def get_neuron_eagle_speculation_model(model_config: ModelConfig,
                                        parallel_config: ParallelConfig,
                                        scheduler_config: SchedulerConfig,
                                        speculation_config: SpeculativeConfig) -> None:
+    """Initializes a neuron-optimized EAGLE speculation model for inference."""
     from transformers_neuronx.eagle_speculation import EagleSpeculativeDecoder
  
     # Create target model instance.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Utilities for selecting and loading Neuron models in neuronx-distributed-inference framework."""
 import copy
 import hashlib
 import importlib
@@ -276,6 +278,7 @@ def compile_model(neuron_model, traced_model_path):
 
 
 class NeuronSpeculationCausalLM(nn.Module):
+    """A Neuron-optimized causal language model with speculative decoding."""
     def __init__(
         self,
         config: PretrainedConfig,
@@ -386,8 +389,7 @@ class NeuronSpeculationCausalLM(nn.Module):
         except (FileNotFoundError, ValueError) as e:
             logger.warning(f"Exception: {e}")
             logger.warning(f"Failed to load the model from {compiled_model_path}, Recompiling...")
-        if draft_model_name_or_path == model_name_or_path:
-            draft_checkpoint_download = False
+        draft_checkpoint_download = not draft_model_name_or_path == model_name_or_path
         if not os.path.exists(model_name_or_path):
             hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
             saved_path = os.path.join("local-models", model_name_or_path)
@@ -420,7 +422,7 @@ def _get_model_architecture(config: PretrainedConfig) -> str:
 def _get_default_neuron_config(model_config: ModelConfig,
                                parallel_config: ParallelConfig,
                                scheduler_config: SchedulerConfig):
-
+    """Generate a neuron config based on vllm config args."""
     logger.info(f"Initializing OnDeviceSampling config with global_topk=64")
     on_device_sampling_config = OnDeviceSamplingConfig(global_topk=64,
                                                     dynamic=True,
@@ -447,6 +449,7 @@ def _get_default_neuron_speculation_config(model_config: ModelConfig,
                                            parallel_config: ParallelConfig,
                                            scheduler_config: SchedulerConfig,
                                            speculation_config: SpeculativeConfig):
+    """Generate a neuron config for speculative decoding based on vllm config args."""
     neuron_config = dict(
         tp_degree=parallel_config.tensor_parallel_size,
         batch_size=scheduler_config.max_num_seqs,
@@ -465,6 +468,7 @@ def _get_default_neuron_speculation_config(model_config: ModelConfig,
 
 def _get_neuron_config_after_override(default_neuron_config,
                                       overridden_neuron_config):
+    """Update default neuron config values with override args"""
     overridden_neuron_config = overridden_neuron_config or {}
     default_neuron_config.update(overridden_neuron_config)
     return default_neuron_config
@@ -472,6 +476,7 @@ def _get_neuron_config_after_override(default_neuron_config,
 def get_neuron_model(model_config: ModelConfig,
                      parallel_config: ParallelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
+    """Initializes a neuron-optimized model for inference."""
     model_arch = _get_model_architecture(model_config.hf_config)
     if model_arch == "MllamaForConditionalGeneration":
         model = NeuronMllamaForCausalLM(model_config.hf_config)
@@ -490,6 +495,10 @@ def get_neuron_speculation_model(model_config: ModelConfig,
                                  parallel_config: ParallelConfig,
                                  scheduler_config: SchedulerConfig,
                                  speculation_config: SpeculativeConfig):
+    """Initializes a neuron-optimized speculation model for inference.
+    
+    This model handles speculation using both a draft model and an EAGLE draft. 
+    """
     model = NeuronSpeculationCausalLM(model_config.hf_config)
     default_neuron_config_args = _get_default_neuron_speculation_config(
         model_config, parallel_config, scheduler_config, speculation_config)
