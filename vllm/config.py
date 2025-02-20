@@ -305,7 +305,7 @@ class ModelConfig:
         if self.enable_sleep_mode and not current_platform.is_cuda():
             raise ValueError("Sleep mode is only supported on CUDA devices.")
 
-        hf_config = get_config(self.hf_config_path, trust_remote_code,
+        hf_config = get_config(self.hf_config_path or self.model, trust_remote_code,
                                revision, code_revision, config_format)
 
         if hf_overrides_kw:
