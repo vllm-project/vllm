@@ -109,14 +109,20 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
             extra_vocab_size: int,
             long_lora_context: Optional["LongContextLoRAContext"] = None,
             **kwargs):
-        self.update_base_metadata(mapping, lora_index_to_id, max_loras,
-                                  vocab_size, extra_vocab_size,
-                                  long_lora_context)
+
         if env.VLLM_USE_V1:
+            self.is_prefill = mapping.is_prefill
+            self.update_base_metadata(mapping, lora_index_to_id, max_loras,
+                                      vocab_size, extra_vocab_size,
+                                      long_lora_context)
             self._v1_prepare_metadata_tensors(self.token_lora_indices,
                                               self.sampler_indices)
         else:
-            self._update_prefill_metada(self.token_lora_indices)
+            # Forward to base class update_metadata
+            super(PunicaWrapperBase,
+                  self).update_metadata(mapping, lora_index_to_id, max_loras,
+                                        vocab_size, extra_vocab_size,
+                                        long_lora_context, **kwargs)
 
     def _apply_shrink_prefill(
         self,
