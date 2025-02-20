@@ -141,10 +141,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
                                         extras={"tiny": "ai21labs/Jamba-tiny-dev"}),  # noqa: E501
-    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Meta-Llama-3-8B"),
+    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct"),
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
+    "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1",
+                                         is_available_online=False),
     "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),  # noqa: E501
     "MiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-2B-sft-bf16",
                                          trust_remote_code=True),
@@ -171,7 +173,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
                                        trust_remote_code=True),
-    "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct"),
+    "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct",
+                                        extras={"2.5": "Qwen/Qwen2.5-7B-Instruct"}), # noqa: E501
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b",
                                      is_available_online=False),
@@ -293,6 +296,9 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                    speculative_model="abhigoyal/vllm-medusa-llama-68m-random"),  # noqa: E501
     "MLPSpeculatorPreTrainedModel": _HfExamplesInfo("JackFram/llama-160m",
                                                     speculative_model="ibm-ai-platform/llama-160m-accelerator"),  # noqa: E501
+    "DeepSeekMTPModel": _HfExamplesInfo("luccafong/deepseek_mtp_main_random",
+                                        speculative_model="luccafong/deepseek_mtp_draft_random",  # noqa: E501
+                                        trust_remote_code=True),
 }
 
 _FALLBACK_MODEL = {

@@ -17,7 +17,7 @@ class ExpertsInt8Config(QuantizationConfig):
     """Config class for Int8 experts quantization."""
 
     def __init__(self) -> None:
-        pass
+        super().__init__()
 
     @classmethod
     def get_name(cls) -> str:

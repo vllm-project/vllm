@@ -28,6 +28,7 @@ class ModelOptFp8Config(QuantizationConfig):
         self,
         is_checkpoint_fp8_serialized: bool = False,
     ) -> None:
+        super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
             logger.warning("Detected ModelOpt fp8 checkpoint. Please note that"

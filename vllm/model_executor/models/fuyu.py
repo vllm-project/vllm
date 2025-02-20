@@ -71,8 +71,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(FuyuConfig)
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(FuyuProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(FuyuProcessor, **kwargs)
 
     def get_image_processor(self) -> FuyuImageProcessor:
         return self.get_hf_processor().image_processor
@@ -104,6 +104,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
         image_processor = self.get_image_processor()
         target_width = image_processor.size["width"]
         target_height = image_processor.size["height"]
+        patch_width = image_processor.patch_size["width"]
+        patch_height = image_processor.patch_size["height"]
 
         if not (image_width <= target_width and image_height <= target_height):
             height_scale_factor = target_height / image_height
@@ -113,8 +115,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
             image_height = int(image_height * optimal_scale_factor)
             image_width = int(image_width * optimal_scale_factor)
 
-        ncols = math.ceil(image_width / 30)
-        nrows = math.ceil(image_height / 30)
+        ncols = math.ceil(image_width / patch_width)
+        nrows = math.ceil(image_height / patch_height)
         return ncols, nrows
 
     def get_image_size_with_most_features(self) -> ImageSize:

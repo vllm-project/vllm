@@ -416,18 +416,15 @@ class GLM4VProcessor:
 
 class GLM4VProcessingInfo(BaseProcessingInfo):
 
-    def get_tokenizer(self):
-        tokenizer = self.ctx.tokenizer
-        assert isinstance(tokenizer, PreTrainedTokenizer)
-        return tokenizer
-
     def get_hf_config(self):
         return self.ctx.get_hf_config(ChatGLMConfig)
 
-    def get_hf_processor(self) -> GLM4VProcessor:
-        return GLM4VProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
+    def get_hf_processor(self, **kwargs: object) -> GLM4VProcessor:
+        return self.ctx.init_processor(
+            GLM4VProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -483,6 +480,14 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
 
 
 class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
+
+    def _hf_processor_applies_repl(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
 
     def _get_mm_fields_config(
         self,
