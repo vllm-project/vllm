@@ -334,6 +334,28 @@ void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
   TORCH_CHECK(n % alignment == 0, "Expected n to be divisible by ", alignment,
               ", but got b shape: (", B.sizes()[0], "x", B.sizes()[1], ").");
 
+  auto round_up = [](int x, int y) { return (x + y - 1) / y * y; };
+  int rounded_m = round_up(m, 128);
+  int rounded_n = round_up(n, 128);
+  // Since k is divisible by 32 (alignment), k / 16 is guaranteed to be an
+  // integer.
+  int rounded_k = round_up(k / 16, 4);
+
+  TORCH_CHECK(A_sf.dim() == 2, "scale_a must be a matrix");
+  TORCH_CHECK(B_sf.dim() == 2, "scale_b must be a matrix");
+  TORCH_CHECK(A_sf.sizes()[1] == B_sf.sizes()[1],
+              "scale_a and scale_b shapes cannot be multiplied (",
+              A_sf.sizes()[0], "x", A_sf.sizes()[1], " and ", B_sf.sizes()[0],
+              "x", B_sf.sizes()[1], ")");
+  TORCH_CHECK(A_sf.sizes()[0] == rounded_m && A_sf.sizes()[1] == rounded_k,
+              "scale_a must be padded and swizzled to a shape (",
+              rounded_m, "x", rounded_k, "), but got a shape (",
+              A_sf.sizes()[0], "x", A_sf.sizes()[1], ")");
+  TORCH_CHECK(B_sf.sizes()[0] == rounded_n && B_sf.sizes()[1] == rounded_k,
+              "scale_b must be padded and swizzled to a shape (",
+              rounded_n, "x", rounded_k, "), but got a shape (",
+              B_sf.sizes()[0], "x", B_sf.sizes()[1], ")");
+
   auto out_dtype = D.dtype();
   at::cuda::CUDAGuard device_guard{(char)A.get_device()};
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
