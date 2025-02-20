@@ -986,46 +986,65 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Get the valid generated tokens.
-        sampled_token_ids = sampler_output.sampled_token_ids
-        max_gen_len = sampled_token_ids.shape[-1]
-        if max_gen_len == 1:
-            # No spec decode tokens.
-            valid_sampled_token_ids = sampled_token_ids.tolist()
-        else:
-            # Includes spec decode tokens.
-            valid_mask = sampled_token_ids != INVALID_TOKEN_ID
-            gen_lens = valid_mask.sum(dim=1).tolist()
-            # TODO(woosuk): Optimize this.
-            valid_sampled_token_ids = [
-                seq.tolist()
-                for seq in sampled_token_ids[valid_mask].split(gen_lens)
-            ]
+        sampled_token_ids = sampler_output.sampled_token_ids.cpu().numpy()
+        #max_gen_len = sampled_token_ids.shape[-1]
+
+        #if max_gen_len == 1:
+        #    # No spec decode tokens.
+        #    valid_sampled_token_ids = sampled_token_ids.tolist()
+        #    #valid_sampled_token_ids = sampled_token_ids.tocpu() # Keep as Tensor/numpy array
+        #else:
+        #    # Includes spec decode tokens.
+        #    valid_mask = sampled_token_ids != INVALID_TOKEN_ID
+        #    gen_lens = valid_mask.sum(dim=1).tolist()
+        #    # TODO(woosuk): Optimize this.
+        #    valid_sampled_token_ids = [
+        #        seq.tolist()
+        #        for seq in sampled_token_ids[valid_mask].split(gen_lens)
+        #    ]
 
         if not self.use_spec_decode:
             spec_token_ids = None
         else:
             spec_token_ids = self.generate_draft_token_ids(
-                valid_sampled_token_ids)
+                sampled_token_ids)
 
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=valid_sampled_token_ids,
+            sampled_token_ids=sampled_token_ids,
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
 
+    # pass in unmodified tensor with lengths instead of converted tensor
     def generate_draft_token_ids(
         self,
-        sampled_token_ids: List[List[int]],
-    ) -> List[List[int]]:
+        sampled_token_ids: np.ndarray
+    ) -> List[List[int]]:  # TODO: return ndarray
         # TODO(woosuk): Optimize.
+        num_samples = sampled_token_ids.shape[0]
+        max_gen_len = sampled_token_ids.shape[1]
+
         draft_token_ids: List[List[int]] = []
-        for i, sampled_ids in enumerate(sampled_token_ids):
+        #draft_token_ids: np.ndarray = np.full((num_samples, max_gen_len), INVALID_TOKEN_ID, dtype=int)
+
+        valid_mask = sampled_token_ids != INVALID_TOKEN_ID
+        #gen_lens = np.sum(valid_mask, 1).tolist()
+
+        #print(f"gen_lens = {gen_lens} {sampled_token_ids}")
+
+        for i in range(num_samples):
+            sampled_ids = sampled_token_ids[i]
+            if max_gen_len != 1:
+                print(f"BEFORE SAMPLED = {sampled_ids}")
+                sampled_ids = sampled_ids[sampled_ids != INVALID_TOKEN_ID]
+                print(f"AFTER SAMPLED = {sampled_ids}")
             num_sampled_ids = len(sampled_ids)
-            if not num_sampled_ids:
+            print(f"NUM = {len(sampled_ids)}")
+            if num_sampled_ids == 1:  # when does this happen?
                 # Skip speculative decoding.
                 draft_token_ids.append([])
                 continue
@@ -1042,8 +1061,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:
+                #assert len(drafter_output) <= max_gen_len
+                #draft_token_ids[i] = drafter_output
                 draft_token_ids.append(drafter_output.tolist())
-        return draft_token_ids
+
+        return draft_token_ids #.tolist() # TBD
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

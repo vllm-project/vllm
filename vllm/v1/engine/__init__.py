@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import msgspec
+import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
@@ -128,6 +129,8 @@ class EngineCoreOutputs(
     request_ids: List[str]
     new_token_id_offsets: Optional[List[int]]
     new_token_ids: List[int]
+    #new_token_id_offsets: List[int] #Optional[List[int]]
+    #new_token_ids: torch.Tensor #List[int]
 
     # req_id -> LogprobsLists
     new_logprobs: Dict[str, LogprobsLists]

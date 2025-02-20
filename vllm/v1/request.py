@@ -65,6 +65,9 @@ class Request:
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
 
+        self._num_tokens = len(self.all_token_ids)
+        self._num_output_tokens = len(self.output_token_ids)
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         return cls(
@@ -101,20 +104,25 @@ class Request:
     ) -> None:
         if isinstance(token_ids, int):
             token_ids = [token_ids]
+            num_new_tokens = 1
+        else:
+            num_new_tokens = len(token_ids)
         self._output_token_ids.extend(token_ids)
         self._all_token_ids.extend(token_ids)
+        self._num_output_tokens += num_new_tokens
+        self._num_tokens += num_new_tokens
 
     @property
     def num_tokens(self) -> int:
-        return len(self._all_token_ids)
+        return self._num_tokens
 
     @property
     def num_tokens_with_spec(self) -> int:
-        return len(self._all_token_ids) + len(self.spec_token_ids)
+        return self._num_tokens + len(self.spec_token_ids)
 
     @property
     def num_output_tokens(self) -> int:
-        return len(self._output_token_ids)
+        return self._num_output_tokens
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional, Union
 
 import torch
-
+import numpy as np
 
 class LogprobsLists(NamedTuple):
 
@@ -65,10 +65,10 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: List[List[int]]
+    sampled_token_ids: np.ndarray
 
     # num_reqs x num_spec_tokens
-    spec_token_ids: Optional[List[List[int]]]
+    spec_token_ids: Optional[List[List[int]]]  # TODO: ndarray
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]

@@ -28,6 +28,9 @@ from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
                                      StatLoggerBase)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
+import cProfile as profile
+import pyinstrument
+
 logger = init_logger(__name__)
 
 

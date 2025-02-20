@@ -294,6 +294,7 @@ class EngineCoreProc(EngineCore):
 
         finally:
             if engine_core is not None:
+                engine_core.scheduler.profiler.print_stats('cumulative')
                 engine_core.shutdown()
 
     def run_busy_loop(self):

@@ -153,7 +153,7 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
                             assert sample.value == expected_value, (
                                 f"{metric_name_w_suffix} expected value of "
                                 f"{expected_value} did not match found value "
-                                f"{sample.value}")
+                                f"{sample.value}, use_v1={use_v1}")
                             break
                     assert found_suffix, (
                         f"Did not find {metric_name_w_suffix} in prom endpoint"

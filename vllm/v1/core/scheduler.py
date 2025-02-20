@@ -18,6 +18,11 @@ from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
+import cProfile
+import pyinstrument
+import torch
+import numpy as np
+
 logger = init_logger(__name__)
 
 
@@ -95,6 +100,8 @@ class Scheduler:
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
+
+        self.profiler = cProfile.Profile()
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
@@ -475,6 +482,16 @@ class Scheduler:
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
     ) -> EngineCoreOutputs:
+        self.profiler.enable()
+        res = self._update_from_output(scheduler_output, model_runner_output)
+        self.profiler.disable()
+        return res
+
+    def _update_from_output(
+        self,
+        scheduler_output: "SchedulerOutput",
+        model_runner_output: "ModelRunnerOutput",
+    ) -> EngineCoreOutputs:
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
@@ -507,6 +524,13 @@ class Scheduler:
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
+
+            # MASK
+
+            #print(f"TY = {type(generated_token_ids)} {generated_token_ids} {sampled_token_ids}")
+            if not isinstance(generated_token_ids, np.ndarray):
+                generated_token_ids = [generated_token_ids]
+
             if req_id not in scheduler_output.scheduled_spec_decode_tokens:
                 # When the request's num_computed_tokens catches up
                 # its num_tokens, the request generates output tokens.
@@ -525,9 +549,11 @@ class Scheduler:
                 scheduled_spec_token_ids = (
                     scheduler_output.scheduled_spec_decode_tokens[req_id])
 
+                num_generated_token_ids = len(generated_token_ids)
+
                 num_computed_tokens_step = num_scheduled_tokens[req_id] - (
                     len(scheduled_spec_token_ids) + 1 -
-                    len(generated_token_ids))
+                    num_generated_token_ids)
                 request.num_computed_tokens += num_computed_tokens_step
 
             cached_encoder_input_ids = (
@@ -550,11 +576,17 @@ class Scheduler:
             stopped = False
             new_logprobs = None
             new_token_ids: List[int] = []
+            num_new_tokens = 0
 
             if request.num_computed_tokens >= request.num_tokens:
+                # This loop seems inefficient.
+                #print(f"G = {generated_token_ids}")
                 for output_token_id in generated_token_ids:
+                    output_token_id = int(output_token_id)
+                    #print(f"{output_token_id}, {type(output_token_id)}")
                     request.append_output_token_ids(output_token_id)
                     new_token_ids.append(output_token_id)
+                    num_new_tokens = num_new_tokens + 1
 
                     # Check for stop and update request state.
                     # This must be called before we make the EngineCoreOutput.
@@ -569,10 +601,6 @@ class Scheduler:
                     # NOTE: once we support N tokens per step (spec decode),
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
-
-                num_new_tokens = 1
-            else:
-                num_new_tokens = 0
 
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or req_id in prompt_logprobs_dict:
@@ -669,6 +697,8 @@ class Scheduler:
                 self.waiting.remove(request)
             request.status = finished_status
             self._free_request(request)
+
+        #self.profiler.print_stats('cumulative')
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
