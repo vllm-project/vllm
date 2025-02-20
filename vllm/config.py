@@ -3441,7 +3441,7 @@ class VllmConfig:
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:
 
-                possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
+                possible_sizes = [1, 2, 4, 8, 16]
                 # find the minimum size that is larger than max_num_seqs,
                 # which then becomes the max_batchsize_to_capture
                 larger_sizes = [
@@ -3463,8 +3463,7 @@ class VllmConfig:
             batch_size_capture_list = []
             if self.model_config is not None and \
                 not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
+                batch_size_capture_list = [1, 2, 4, 8, 16]
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
