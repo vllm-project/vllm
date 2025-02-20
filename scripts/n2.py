@@ -156,6 +156,7 @@ seed = 42
 ... benchmarks requiring sampling, we use a temperature of 0.6, a top-p value of 0.95...
 """
 temperature = 0.6
+temperature = 0 # greedy sample
 top_p = 0.95
 # ==-------------------------------------------------------------------------==
 
@@ -195,6 +196,18 @@ if __name__ == "__main__":
         with open(filename, "r") as f:
             prompts = f.readlines()
             print(f"Number of prompts: {len(prompts)}")
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+        prompt_tokens = []
+        for prompt in prompts:
+            tokens = tokenizer(
+                prompt, return_tensors="pt", truncation=True, max_length=1024
+            )
+            if len(tokens.input_ids[0]) < least_tokens:
+                continue
+            prompt_tokens.append([x.item() for x in tokens.input_ids[0]])
+
         gt = None
     # Create a sampling params object.
     sampling_params = SamplingParams(
@@ -218,7 +231,9 @@ if __name__ == "__main__":
 
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(
+        prompts=None, sampling_params=sampling_params, prompt_tokens=tokens
+    )
     # Print the outputs.
     for output_i in range(len(outputs)):
         output = outputs[output_i]
