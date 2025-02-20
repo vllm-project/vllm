@@ -1261,7 +1261,7 @@ class GGUFModelLoader(BaseModelLoader):
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
-        if model_type == "deepseek_v3":
+        if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             # GGUF layer map assumes that we will have a merged expert weights
             # so we need to map them manually
