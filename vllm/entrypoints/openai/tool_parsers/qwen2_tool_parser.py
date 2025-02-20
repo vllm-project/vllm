@@ -2,7 +2,7 @@
 
 import json
 import re
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Dict, List, Sequence, Tuple, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -180,7 +180,11 @@ class Qwen2ToolParser(ToolParser):
                 "error")
             return None
 
-    def check_tool_name(self, tool_list: List[Tuple], tools: Union[List[ChatCompletionToolsParam], None]) -> bool:
+    def check_tool_name(
+            self, tool_list: List[Tuple],
+            tools: Union[List[ChatCompletionToolsParam], None]) -> bool:
+        if tools is None:
+            tools = []
         ori_tool_name = [t.function.name for t in tools]
         ext_tool_name = [item[0] for item in tool_list]
         match_flag = False
