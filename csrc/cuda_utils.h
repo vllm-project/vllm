@@ -25,3 +25,13 @@
 int64_t get_device_attribute(int64_t attribute, int64_t device_id);
 
 int64_t get_max_shared_memory_per_block_device_attribute(int64_t device_id);
+
+namespace cuda_utils {
+
+template <typename T>
+HOST_DEVICE_INLINE constexpr std::enable_if_t<std::is_integral_v<T>, T>
+ceil_div(T a, T b) {
+  return (a + b - 1) / b;
+}
+
+};  // namespace cuda_utils
