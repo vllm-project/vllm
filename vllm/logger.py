@@ -10,7 +10,7 @@ from logging import Logger
 from logging.config import dictConfig
 from os import path
 from types import MethodType
-from typing import Any, Optional, cast
+from typing import Any, Dict, Optional, cast
 
 import vllm.envs as envs
 
@@ -18,12 +18,13 @@ VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
 VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
+VLLM_LOG_FILTER_PATTERNS = envs.VLLM_LOG_FILTER_PATTERNS
 
 _FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
            "%(filename)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
-DEFAULT_LOGGING_CONFIG = {
+DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
     "formatters": {
         "vllm": {
             "class": "vllm.logging_utils.NewLineFormatter",
@@ -31,10 +32,19 @@ DEFAULT_LOGGING_CONFIG = {
             "format": _FORMAT,
         },
     },
+    # Custom filter uses () to specify its callable
+    # https://docs.python.org/3/howto/logging-cookbook.html#configuring-filters-with-dictconfig # noqa: E501
+    "filters": {
+        "vllm_redact": {
+            "()": "vllm.logging_utils.RedactFilter",
+            "patterns": VLLM_LOG_FILTER_PATTERNS,
+        },
+    },
     "handlers": {
         "vllm": {
             "class": "logging.StreamHandler",
             "formatter": "vllm",
+            "filters": ["vllm_redact"],
             "level": VLLM_LOGGING_LEVEL,
             "stream": "ext://sys.stdout",
         },
@@ -112,6 +122,20 @@ def _configure_vllm_root_logger() -> None:
             raise ValueError("Invalid logging config. Expected Dict, got %s.",
                              type(custom_config).__name__)
         logging_config = custom_config
+
+    if VLLM_LOG_FILTER_PATTERNS:
+        try:
+            log_filter_patterns = json.loads(VLLM_LOG_FILTER_PATTERNS)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Invalid JSON format in VLLM_LOG_FILTER_PATTERNS. "
+                "Ensure it's a valid JSON array of strings, e.g., "
+                "'[\"pattern1\", \"pattern2\"]'.") from exc
+    else:
+        log_filter_patterns = []
+
+    DEFAULT_LOGGING_CONFIG["filters"]["vllm_redact"][
+        "patterns"] = log_filter_patterns
 
     for formatter in logging_config.get("formatters", {}).values():
         # This provides backwards compatibility after #10134.
