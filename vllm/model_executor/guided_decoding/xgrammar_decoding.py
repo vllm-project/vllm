@@ -182,7 +182,7 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
-            any_whitespace = 'disable_any_whitespace' not in \
+            any_whitespace = 'disable-any-whitespace' not in \
                     guided_params.backend_options()
             # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
