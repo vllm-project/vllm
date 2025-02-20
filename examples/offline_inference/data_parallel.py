@@ -29,6 +29,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
     str(i) for i in range(dp_rank * GPUs_per_dp_rank, (dp_rank + 1) *
                           GPUs_per_dp_rank))
 
+# it's important to cancel the torchrun envs, so that each vLLM instance
+# can work as expected.
 cancel_torchrun_envs()
 
 # Sample prompts.
