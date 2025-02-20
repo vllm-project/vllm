@@ -5,12 +5,12 @@ import pytest
 import torch
 
 import vllm.lora.ops.triton_ops  # noqa: F401
-import vllm.lora.v1.ops.triton_ops  # noqa: F401
+import vllm.lora.ops.triton_ops.v1  # noqa: F401
 from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
                                      bgmv_shrink, sgmv_expand,
                                      sgmv_expand_slice, sgmv_shrink)
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
-from vllm.lora.v1.punica_wrapper.punica_gpu_v1 import V1KernelMeta
+from vllm.lora.ops.triton_ops.v1 import V1KernelMeta
 from vllm.platforms import current_platform
 
 from .utils import (PunicaTensors, assert_close, generate_data,
@@ -342,7 +342,6 @@ def check_v1_shrink(batches: int, num_loras: int, rank: int, hidden_size: int,
     v1_meta = V1KernelMeta.make(max_loras=num_loras,
                                 max_num_tokens=token_nums,
                                 device='cuda')
-    v1_meta.reset()
     v1_meta.prepare_tensors(data.token_lora_mapping)
 
     # Preventing cache error pointer.
@@ -352,7 +351,7 @@ def check_v1_shrink(batches: int, num_loras: int, rank: int, hidden_size: int,
             data.inputs_tensor,
             data.lora_weights,
             data.our_out_tensor,
-            *v1_meta.meta_args(num_tokens=token_nums),
+            *v1_meta.meta_args(token_nums=token_nums),
             scaling,
         )
 
@@ -396,7 +395,6 @@ def check_v1_expand(batches: int, num_loras: int, rank: int, hidden_size: int,
     v1_meta = V1KernelMeta.make(max_loras=num_loras,
                                 max_num_tokens=token_nums,
                                 device='cuda')
-    v1_meta.reset()
     v1_meta.prepare_tensors(data.token_lora_mapping)
 
     with _dict_lock:
@@ -404,7 +402,7 @@ def check_v1_expand(batches: int, num_loras: int, rank: int, hidden_size: int,
         torch.ops.vllm.v1_expand(data.inputs_tensor,
                                  data.lora_weights,
                                  data.our_out_tensor,
-                                 *v1_meta.meta_args(num_tokens=token_nums),
+                                 *v1_meta.meta_args(token_nums=token_nums),
                                  offset_start=0,
                                  add_inputs=add_inputs)
 
