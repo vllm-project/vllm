@@ -252,14 +252,18 @@ class SyncMPClient(MPClient):
         outputs_queue = self.outputs_queue
 
         def process_outputs_socket():
-            while True:
-                (frame, ) = output_socket.recv_multipart(copy=False)
-                outputs = decoder.decode(frame.buffer)
-                if outputs.utility_output:
-                    _process_utility_output(outputs.utility_output,
-                                            utility_results)
-                else:
-                    outputs_queue.put_nowait(outputs)
+            try:
+                while True:
+                    (frame, ) = output_socket.recv_multipart(copy=False)
+                    outputs = decoder.decode(frame.buffer)
+                    if outputs.utility_output:
+                        _process_utility_output(outputs.utility_output,
+                                                utility_results)
+                    else:
+                        outputs_queue.put_nowait(outputs)
+            except zmq.error.ContextTerminated:
+                # Expected when the class is GC'd / during process termination.
+                pass
 
         # Process outputs from engine in separate thread.
         Thread(target=process_outputs_socket, daemon=True).start()
