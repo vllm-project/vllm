@@ -234,13 +234,13 @@ class SyncParallelSamplingManager:
         if self.parent_reqs:
             self._do_reset = True
 
-    def register_parent_request(self, req: ParallelSamplingRequest) -> None:
+    def _register_parent_request(self, req: ParallelSamplingRequest) -> None:
         """Register parallel sampling parent request."""
         self._reset_if_needed()
         self.parent_reqs[req.request_id] = req
 
-    def register_child_request(self, req_id: str, child_req_id: str,
-                               index: int) -> None:
+    def _register_child_request(self, req_id: str, child_req_id: str,
+                                index: int) -> None:
         """Register parallel sampling child request with parent.
         
         Args:
@@ -249,6 +249,47 @@ class SyncParallelSamplingManager:
           index: child request index within `n` child requests
         """
         self.child_reqs[child_req_id] = (index, req_id)
+
+    def get_num_unfinished_requests(self, num_core_reqs: int) -> int:
+        """Get the number of unfinished requests, correcting for parallel
+           sampling.
+        
+        Args:
+          num_core_reqs: The number of unfinished requests in the engine core.
+        
+        Returns:
+          Number of unfinished requests, where each parallel sampling req 
+          counts as 1
+        """
+        return num_core_reqs + len(self.parent_reqs) - len(self.child_reqs)
+
+    def add_request_parallel_sampling(
+        self,
+        add_request: SyncAddRequestMethodType,
+        request_id: str,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> None:
+        """Add sync parallel sampling request."""
+        req = ParallelSamplingRequest(request_id, params)
+        self._register_parent_request(req)
+        # Add n child requests with unique request IDs & random seeds and n=1
+        for idx in range(req.n):
+            c_req_id, c_params = req.get_child_info(idx)
+            self._register_child_request(request_id, c_req_id, idx)
+            add_request(request_id=c_req_id,
+                        prompt=prompt,
+                        params=c_params,
+                        arrival_time=arrival_time,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        prompt_adapter_request=prompt_adapter_request,
+                        priority=priority)  # type: ignore
 
     def step(
         self,
@@ -293,19 +334,6 @@ class SyncParallelSamplingManager:
                 agg_outputs.append(c_out)
         return agg_outputs
 
-    def get_num_unfinished_requests(self, num_core_reqs: int) -> int:
-        """Get the number of unfinished requests, correcting for parallel
-           sampling.
-        
-        Args:
-          num_core_reqs: The number of unfinished requests in the engine core.
-        
-        Returns:
-          Number of unfinished requests, where each parallel sampling req 
-          counts as 1
-        """
-        return num_core_reqs + len(self.parent_reqs) - len(self.child_reqs)
-
 
 async def generate_parallel_sampling_async(
     generate: AsyncGenerateMethodType,
@@ -339,32 +367,3 @@ async def generate_parallel_sampling_async(
     # Merge generators
     async for _, out in merge_async_iterators(*gens):
         yield out
-
-
-def add_request_parallel_sampling(
-    add_request: SyncAddRequestMethodType,
-    parallel_mgr: SyncParallelSamplingManager,
-    request_id: str,
-    prompt: PromptType,
-    params: Union[SamplingParams, PoolingParams],
-    arrival_time: Optional[float] = None,
-    lora_request: Optional[LoRARequest] = None,
-    trace_headers: Optional[Mapping[str, str]] = None,
-    prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    priority: int = 0,
-) -> None:
-    """Add sync parallel sampling request."""
-    req = ParallelSamplingRequest(request_id, params)
-    parallel_mgr.register_parent_request(req)
-    # Add n child requests with unique request IDs & random seeds and n=1
-    for idx in range(req.n):
-        c_req_id, c_params = req.get_child_info(idx)
-        parallel_mgr.register_child_request(request_id, c_req_id, idx)
-        add_request(request_id=c_req_id,
-                    prompt=prompt,
-                    params=c_params,
-                    arrival_time=arrival_time,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request,
-                    priority=priority)  # type: ignore

@@ -21,8 +21,7 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
-from vllm.v1.engine.parallel_sampling import (SyncParallelSamplingManager,
-                                              add_request_parallel_sampling)
+from vllm.v1.engine.parallel_sampling import SyncParallelSamplingManager
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
@@ -149,9 +148,8 @@ class LLMEngine:
                               priority=priority)
         else:
             # Special handling for parallel sampling requests
-            add_request_parallel_sampling(
+            self.parallel_mgr.add_request_parallel_sampling(
                 add_request=self._add_request,
-                parallel_mgr=self.parallel_mgr,
                 request_id=request_id,
                 prompt=prompt,
                 params=params,
