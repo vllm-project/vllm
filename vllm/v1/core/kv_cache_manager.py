@@ -103,10 +103,10 @@ class KVCacheManager:
 
         # The following swap maps are accumulated over a scheduling step.
         # Then they are "flushed" as part of the scheduler output.
-        # CPU block ID -> GPU block ID
-        self.step_h2d_swap_map: Dict[int, int] = {}
         # GPU block ID -> CPU block ID
         self.step_d2h_swap_map: Dict[int, int] = {}
+        # CPU block ID -> GPU block ID
+        self.step_h2d_swap_map: Dict[int, int] = {}
         # CPU blocks in use in this scheduling step i.e. source block for
         # swap-in and destination block for swap-out.
         self.step_cpu_block_in_use: Set[int] = set()
@@ -419,8 +419,8 @@ class KVCacheManager:
 
     def end_schedule_step(self) -> None:
         """A callback hook that is called when a scheduling step ends."""
-        self.step_h2d_swap_map.clear()
         self.step_d2h_swap_map.clear()
+        self.step_h2d_swap_map.clear()
         self.step_cpu_block_in_use.clear()
 
     def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:

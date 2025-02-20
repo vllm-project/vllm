@@ -113,7 +113,7 @@ class SchedulerOutput:
     free_encoder_input_ids: List[Tuple[str, int]]
 
     # Block swap maps for the current scheduling step.
-    # CPU block ID -> GPU block ID
-    h2d_swap_map: Dict[int, int]
     # GPU block ID -> CPU block ID
     d2h_swap_map: Dict[int, int]
+    # CPU block ID -> GPU block ID
+    h2d_swap_map: Dict[int, int]

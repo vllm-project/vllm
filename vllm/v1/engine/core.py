@@ -169,8 +169,8 @@ class EngineCore:
         # where we can get the intersection of h2d destinations and d2h
         # sources and just do d2d copies.
         self.model_executor.swap_blocks(
-            scheduler_output.h2d_swap_map,
             scheduler_output.d2h_swap_map,
+            scheduler_output.h2d_swap_map,
         )
 
         output = self.model_executor.execute_model(scheduler_output)

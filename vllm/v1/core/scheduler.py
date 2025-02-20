@@ -377,8 +377,8 @@ class Scheduler:
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            h2d_swap_map=self.kv_cache_manager.step_h2d_swap_map,
             d2h_swap_map=self.kv_cache_manager.step_d2h_swap_map,
+            h2d_swap_map=self.kv_cache_manager.step_h2d_swap_map,
         )
 
         self.kv_cache_manager.end_schedule_step()
