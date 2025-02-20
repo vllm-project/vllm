@@ -199,14 +199,14 @@ if __name__ == "__main__":
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-        prompt_tokens = []
+        prompt_token_ids = []
         for prompt in prompts:
             tokens = tokenizer(
                 prompt, return_tensors="pt", truncation=True, max_length=1024
             )
             if len(tokens.input_ids[0]) < least_tokens:
                 continue
-            prompt_tokens.append([x.item() for x in tokens.input_ids[0]])
+            prompt_token_ids.append([x.item() for x in tokens.input_ids[0]])
 
         gt = None
     # Create a sampling params object.
@@ -232,7 +232,7 @@ if __name__ == "__main__":
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(
-        prompts=None, sampling_params=sampling_params, prompt_tokens=tokens
+        prompts=None, sampling_params=sampling_params, prompt_token_ids=prompt_token_ids
     )
     # Print the outputs.
     for output_i in range(len(outputs)):
