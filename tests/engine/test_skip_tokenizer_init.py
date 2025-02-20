@@ -6,11 +6,9 @@ from vllm.config import LoadFormat
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 
-from ..conftest import MODEL_WEIGHTS_S3_BUCKET
-
 
 @pytest.mark.parametrize("model",
-                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
+                         ["distilbert/distilgpt2"])
 def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
     # of tokenizer and detokenizer. The generated output is expected to contain

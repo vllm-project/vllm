@@ -2276,9 +2276,12 @@ MODELS_ON_S3 = [
     "meta-llama/Meta-Llama-3-8B",
     "meta-llama/Llama-3.2-1B",
     "meta-llama/Llama-3.2-1B-Instruct",
+    "google/gemma-2-2b-it",
+    "google/gemma-1.1-2b-it",
     "openai-community/gpt2",
     "ArthurZ/Ilama-3.2-1B",
     "llava-hf/llava-1.5-7b-hf",
+    "llava-hf/llava-v1.6-mistral-7b-hf",
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     "ai21labs/Jamba-tiny-random",
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
@@ -2330,6 +2333,8 @@ MODELS_ON_S3 = [
     "nm-testing/TinyLlama-1.1B-Chat-v1.0-INT8-Dynamic-IA-Per-Tensor-Weight-testing",
     "nm-testing/TinyLlama-1.1B-Chat-v1.0-2of4-Sparse-Dense-Compressor",
     "nm-testing/llama2.c-stories42M-pruned2.4-compressed",
+    "Qwen/Qwen2.5-1.5B-Instruct",
+    "openai-community/gpt2",
 ]
 
 MODEL_WEIGHTS_S3_BUCKET = "s3://vllm-ci-model-weights"

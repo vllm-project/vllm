@@ -18,7 +18,7 @@ from typing_extensions import TypeVar, deprecated
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
-                         VllmConfig)
+                         VllmConfig, LoadFormat)
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
@@ -58,7 +58,7 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import (Counter, Device, deprecate_kwargs,
-                        resolve_obj_by_qualname, weak_bind)
+                        resolve_obj_by_qualname, weak_bind, MODELS_ON_S3, MODEL_WEIGHTS_S3_BUCKET)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -241,6 +241,10 @@ class LLMEngine:
 
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
+
+        if envs.VLLM_CI_USE_S3 and self.model_config.model in MODELS_ON_S3:
+            self.model_config.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model_config.model}"
+            self.load_config.load_format = LoadFormat.RUNAI_STREAMER
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()

@@ -11,7 +11,7 @@ from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 
-MODEL_NAME = "s3://vllm-ci-model-weights/zephyr-7b-beta"
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 PROMPTS = [
     "Hello, my name is",

@@ -9,7 +9,7 @@ from vllm import LLM, RequestOutput, SamplingParams
 from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_NAME = "s3://vllm-ci-model-weights/distilgpt2"
+MODEL_NAME = "distilbert/distilgpt2"
 
 PROMPTS = [
     "Hello, my name is",

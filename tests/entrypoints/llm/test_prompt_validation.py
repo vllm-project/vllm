@@ -15,7 +15,7 @@ def v1(run_with_both_engines):
 
 
 def test_empty_prompt():
-    llm = LLM(model="s3://vllm-ci-model-weights/gpt2",
+    llm = LLM(model="openai-community/gpt2",
               load_format=LoadFormat.RUNAI_STREAMER,
               enforce_eager=True)
     with pytest.raises(ValueError, match='Prompt cannot be empty'):
@@ -24,7 +24,7 @@ def test_empty_prompt():
 
 @pytest.mark.skip_v1
 def test_out_of_vocab_token():
-    llm = LLM(model="s3://vllm-ci-model-weights/gpt2",
+    llm = LLM(model="openai-community/gpt2",
               load_format=LoadFormat.RUNAI_STREAMER,
               enforce_eager=True)
     with pytest.raises(ValueError, match='out of vocabulary'):

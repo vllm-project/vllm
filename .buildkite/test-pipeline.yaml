@@ -53,13 +53,13 @@ steps:
   - tests/standalone_tests/lazy_imports.py
   commands:
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s mq_llm_engine # MQLLMEngine
-  - pytest -v -s async_engine # AsyncLLMEngine
+  - VLLM_CI_USE_S3=1 pytest -v -s mq_llm_engine # MQLLMEngine
+  - VLLM_CI_USE_S3=1 pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
-  - pytest -v -s test_inputs.py
-  - pytest -v -s multimodal
-  - pytest -v -s test_utils.py # Utils
-  - pytest -v -s worker # Worker
+  - VLLM_CI_USE_S3=1 pytest -v -s test_inputs.py
+  - VLLM_CI_USE_S3=1 pytest -v -s multimodal
+  - VLLM_CI_USE_S3=1 pytest -v -s test_utils.py # Utils
+  - VLLM_CI_USE_S3=1 pytest -v -s worker # Worker
 
 - label: Python-only Installation Test
   source_file_dependencies:
@@ -78,10 +78,10 @@ steps:
   - tests/basic_correctness/test_preemption
   - tests/basic_correctness/test_cumem.py
   commands:
-  - pytest -v -s basic_correctness/test_cumem.py
-  - pytest -v -s basic_correctness/test_basic_correctness.py
-  - pytest -v -s basic_correctness/test_cpu_offload.py
-  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
+  - VLLM_CI_USE_S3=1 pytest -v -s basic_correctness/test_cumem.py
+  - VLLM_CI_USE_S3=1 pytest -v -s basic_correctness/test_basic_correctness.py
+  - VLLM_CI_USE_S3=1 pytest -v -s basic_correctness/test_cpu_offload.py
+  - VLLM_CI_USE_S3=1 VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
 - label: Chunked Prefill Test
   source_file_dependencies:
@@ -112,14 +112,14 @@ steps:
   - tests/entrypoints/test_chat_utils
   - tests/entrypoints/offline_mode
   commands:
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
-  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
-  - pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
+  - VLLM_CI_USE_S3=1 pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - VLLM_CI_USE_S3=1 pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
+  - VLLM_CI_USE_S3=1 pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
+  - VLLM_CI_USE_S3=1 pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
+  - VLLM_CI_USE_S3=1 pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/correctness/
-  - pytest -v -s entrypoints/test_chat_utils.py
-  - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
+  - VLLM_CI_USE_S3=1 pytest -v -s entrypoints/test_chat_utils.py
+  - VLLM_CI_USE_S3=1 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
@@ -152,13 +152,13 @@ steps:
   - tests/metrics
   - tests/tracing
   commands:
-  - pytest -v -s metrics
+  - VLLM_CI_USE_S3=1 pytest -v -s metrics
   - "pip install \
       'opentelemetry-sdk>=1.26.0,<1.27.0' \
       'opentelemetry-api>=1.26.0,<1.27.0' \
       'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' \
       'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0'"
-  - pytest -v -s tracing
+  - VLLM_CI_USE_S3=1 pytest -v -s tracing
 
 ##### fast check tests  #####
 #####  1 GPU test  #####
@@ -183,9 +183,9 @@ steps:
   - tests/test_config
   - tests/test_logger
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py
+  - VLLM_CI_USE_S3=1 pytest -v -s engine test_sequence.py test_config.py test_logger.py
   # OOM in the CI unless we run this separately
-  - pytest -v -s tokenization
+  - VLLM_CI_USE_S3=1 pytest -v -s tokenization
 
 - label: V1 Test
   #mirror_hardwares: [amd]
@@ -244,8 +244,8 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s samplers
-    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
+    - VLLM_CI_USE_S3=1 pytest -v -s samplers
+    - VLLM_CI_USE_S3=1 VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LogitsProcessor Test # 5min
   mirror_hardwares: [amd]
@@ -276,7 +276,7 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_minicpmv_tp.py
   parallelism: 4
 
-- label: "PyTorch Fullgraph Smoke Test" # 9min
+- label: PyTorch Fullgraph Smoke Test # 9min
   fast_check: true
   source_file_dependencies:
   - vllm/
@@ -287,7 +287,7 @@ steps:
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
 
-- label: "PyTorch Fullgraph Test" # 18min
+- label: PyTorch Fullgraph Test # 18min
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -328,7 +328,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   - tests/quantization
-  command: VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
+  command: VLLM_CI_USE_S3=1 VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
 
 - label: LM Eval Small Models # 53min
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -370,9 +370,9 @@ steps:
   - vllm/
   - tests/models
   commands:
-    - pytest -v -s models/test_transformers.py
-    - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_initialization.py
+    - VLLM_CI_USE_S3=1 pytest -v -s models/test_transformers.py
+    - VLLM_CI_USE_S3=1 pytest -v -s models/test_registry.py
+    - VLLM_CI_USE_S3=1 pytest -v -s models/test_initialization.py
 
 - label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]

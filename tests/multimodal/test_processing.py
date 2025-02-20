@@ -554,7 +554,7 @@ def test_find_mm_placeholders(
 
 
 @pytest.mark.parametrize(
-    "model_id", ["s3://vllm-ci-model-weights/llava-v1.6-mistral-7b-hf"])
+    "model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize(
     ("limit", "num_supported", "is_valid"),
     [(0, 0, True), (0, 1, True), (1, 0, False), (1, 1, True), (1, 2, True),
@@ -594,7 +594,7 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
 
 
 @pytest.mark.parametrize(
-    "model_id", ["s3://vllm-ci-model-weights/llava-v1.6-mistral-7b-hf"])
+    "model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize(
     ("num_images", "limit", "is_valid"),
     [(0, 0, True), (0, 1, True), (1, 0, False), (1, 1, True), (1, 2, True),

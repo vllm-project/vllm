@@ -593,6 +593,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
     lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
     ("1", "true"),
+
+    # Whether to use S3 path for model loading in CI via RunAI Streamer
+    "VLLM_CI_USE_S3":
+    lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
 }
 
 # end-env-vars-definition
