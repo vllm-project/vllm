@@ -244,14 +244,14 @@ class CudaPlatformBase(Platform):
         Usage of this function is discouraged in favor of device. In most cases 
         it’s better to use `vllm.current_platform.device_control_env_var` environmental variable.
         """
-        raise torch.cuda.set_device(device)
+        return torch.cuda.set_device(device)
 
     @classmethod
     def device_count(cls) -> int:
         """
         Return the number of devices available.
         """
-        raise torch.cuda.device_count()
+        return torch.cuda.device_count()
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
