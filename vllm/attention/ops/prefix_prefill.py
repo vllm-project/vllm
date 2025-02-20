@@ -16,7 +16,7 @@ NUM_WARPS = 4 if current_platform.is_rocm() else 8
 # To check compatibility
 IS_TURING = current_platform.get_device_capability() == (7, 5)
 
-if triton.__version__ >= "2.1.0":
+if triton.__version__ >= "3.2.0":
     @triton.autotune(
         configs=[
             triton.Config({ 'BLOCK_M': block_m, 'BLOCK_N': block_n,
@@ -25,7 +25,8 @@ if triton.__version__ >= "2.1.0":
             for block_m in [32, 64, 128] for block_n in [32, 64, 128] \
             for num_warps in [4, 8] for num_stages in [1, 2]
         ],
-        key=["BLOCK_SIZE"],
+        key=["BLOCK_M", "BLOCK_N", "BLOCK_SIZE",
+             "BLOCK_DMODEL_PADDED", "BLOCK_DMODEL"]
     )
     @triton.jit
     def _fwd_kernel(
@@ -40,7 +41,7 @@ if triton.__version__ >= "2.1.0":
         v_scale,
         B_Start_Loc,
         B_Seqlen,
-        x,
+        x: tl.constexpr,
         Out,
         stride_b_loc_b,
         stride_b_loc_s,
@@ -59,7 +60,7 @@ if triton.__version__ >= "2.1.0":
         stride_k_cache_bs,
         stride_k_cache_h,
         stride_k_cache_d,
-        stride_k_cache_bl,
+        stride_k_cache_bl: tl.constexpr,
         stride_k_cache_x,
         stride_v_cache_bs,
         stride_v_cache_h,
