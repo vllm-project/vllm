@@ -29,7 +29,7 @@ def _test_processing_correctness(
     model_config = ModelConfig(
         model_id,
         task="auto",
-        tokenizer=model_id,
+        tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode="auto",
         trust_remote_code=model_info.trust_remote_code,
         seed=0,
@@ -154,6 +154,7 @@ def _test_processing_correctness(
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
     "deepseek-ai/deepseek-vl2-tiny",
+    "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "THUDM/glm-4v-9b",
     "h2oai/h2ovl-mississippi-800m",
