@@ -13,10 +13,13 @@ from vllm.config import ModelConfig, ModelImpl
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.bitsandbytes import (
+    BitsAndBytesConfig)
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_classification_model,
                                                  as_embedding_model,
                                                  as_reward_model)
+from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -169,3 +172,15 @@ def configure_quant_config(quant_config: QuantizationConfig,
             "The model class %s has not defined `packed_modules_mapping`, "
             "this may lead to incorrect mapping of quantized or ignored "
             "modules", model_class.__name__)
+    if getattr(model_class, "hf_to_vllm_mapper", None) is None:
+        return
+    hf_to_vllm_mapper: WeightsMapper = model_class.hf_to_vllm_mapper
+    if isinstance(quant_config,
+                  BitsAndBytesConfig) and (llm_int8_skip_modules :=
+                                           quant_config.llm_int8_skip_modules):
+        new_modules_lst = []
+        for skip_module in llm_int8_skip_modules:
+            module_name = hf_to_vllm_mapper._map_name(skip_module)
+            new_modules_lst.append(module_name)
+        quant_config.llm_int8_skip_modules = new_modules_lst
+        pass
