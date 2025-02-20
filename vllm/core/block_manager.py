@@ -243,7 +243,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         block_table = self.block_tables[seq.seq_id]
 
-        block_table.append_token_ids(
+        new_block_ids = block_table.append_token_ids(
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
@@ -251,6 +251,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
+        
+        if len(new_cows) > 0:
+            logger.debug(f"Appended slots (COW) for sequence {seq.seq_id}")
+            
+        if len(new_block_ids) > 0:
+            logger.debug(f"Appended slots for sequence {seq.seq_id} at {new_block_ids}")
         return new_cows
 
     def free(self, seq: Sequence) -> None:
@@ -269,11 +275,11 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self._computed_blocks_tracker.remove_seq(seq_id)
 
         # Free table/blocks
-        self.block_tables[seq_id].free()
+        block_ids = self.block_tables[seq_id].free()
         del self.block_tables[seq_id]
         
         # log the freeing with the logger
-        logger.debug(f"Freed block for sequence {seq_id}")
+        logger.debug(f"Freed block for sequence {seq_id} at {block_ids}")
 
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id
@@ -400,8 +406,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 list(seq_physical_block_id_mapping.items()))
             
             # log the swapping with the logger
-        logger.debug(f"Swapped in blocks for sequences {seq_ids}")
-        # logger.debug(f"Swapped in blocks for sequences {seq_ids}, with physical block id mapping {physical_block_id_mapping}")
+        cpu_locations = [physical_block_id_mapping[i][0] for i in range(len(physical_block_id_mapping))]
+        gpu_locations = [physical_block_id_mapping[i][1] for i in range(len(physical_block_id_mapping))]
+        logger.debug(f"Swapped in blocks for sequences {seq_ids} from CPU {cpu_locations} to GPU {gpu_locations}")
 
         return physical_block_id_mapping
 
@@ -457,9 +464,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             physical_block_id_mapping.extend(
                 list(seq_physical_block_id_mapping.items()))
             
-            # log the swapping with the logger
-        logger.debug(f"Swapped out blocks for sequences {seq_ids}")
-        # logger.debug(f"Swapped out blocks for sequences {seq_ids}, with physical block id mapping {physical_block_id_mapping}")
+        # log the swapping with the logger
+        gpu_locations = [physical_block_id_mapping[i][0] for i in range(len(physical_block_id_mapping))]
+        cpu_locations = [physical_block_id_mapping[i][1] for i in range(len(physical_block_id_mapping))]
+        logger.debug(f"Swapped out blocks for sequences {seq_ids} from GPU {gpu_locations} to CPU {cpu_locations}")
 
         return physical_block_id_mapping
 

@@ -126,7 +126,7 @@ class BlockTable:
                          token_ids: List[int],
                          num_lookahead_slots: int = 0,
                          num_computed_slots: Optional[int] = None,
-                         extra_hash: Optional[int] = None) -> None:
+                         extra_hash: Optional[int] = None) -> List[int]:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -169,7 +169,7 @@ class BlockTable:
 
         # Ensure there are enough empty slots for the new tokens plus
         # lookahead slots
-        self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
+        new_block_ids = self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots,
                                     extra_hash=extra_hash)
 
@@ -181,10 +181,13 @@ class BlockTable:
             self._blocks.append_token_ids(first_block_idx + i, token_block)
 
         self._num_full_slots += len(token_ids)
+        
+        return new_block_ids
+        
 
     def ensure_num_empty_slots(self,
                                num_empty_slots: int,
-                               extra_hash: Optional[int] = None) -> None:
+                               extra_hash: Optional[int] = None) -> List[int]:
         """Ensures that the BlockTable has at least the specified number of
         empty slots available.
 
@@ -204,19 +207,23 @@ class BlockTable:
         device = Device.GPU
         assert self._is_allocated
 
+        new_block_ids = []
         if self._num_empty_slots >= num_empty_slots:
-            return
+            return new_block_ids
 
         slots_to_allocate = num_empty_slots - self._num_empty_slots
         blocks_to_allocate = cdiv(slots_to_allocate, self._block_size)
 
         for _ in range(blocks_to_allocate):
             assert len(self._blocks) > 0
-            self._blocks.append(
-                self._allocator.allocate_mutable_block(
+            new_block = self._allocator.allocate_mutable_block(
                     prev_block=self._blocks[-1],
                     device=device,
-                    extra_hash=extra_hash))
+                    extra_hash=extra_hash)
+            self._blocks.append(new_block)
+            new_block_ids.append(new_block.block_id)
+            
+        return new_block_ids
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
@@ -241,7 +248,7 @@ class BlockTable:
             max_block_sliding_window=self._max_block_sliding_window,
         )
 
-    def free(self) -> None:
+    def free(self) -> List[int]:
         """Frees the memory occupied by the blocks in the BlockTable.
 
         This method iterates over all the blocks in the `_blocks` list and calls
@@ -249,9 +256,12 @@ class BlockTable:
         occupied by each block. After freeing all the blocks, the `_blocks` list
         is set to `None`.
         """
+        block_ids = [block.block_id for block in self.blocks]
         for block in self.blocks:
             self._allocator.free(block)
         self._blocks.reset()
+        
+        return block_ids
 
     @property
     def physical_block_ids(self) -> List[int]:
