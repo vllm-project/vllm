@@ -13,7 +13,7 @@ from vllm.executor.multiproc_worker_utils import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
+from vllm.utils import (_run_task_with_lock, device_count_stateless,
                         get_distributed_init_method, get_ip, get_open_port,
                         make_async, run_method, update_environment_variables)
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -35,7 +35,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         world_size = parallel_config.world_size
         tensor_parallel_size = parallel_config.tensor_parallel_size
 
-        cuda_device_count = cuda_device_count_stateless()
+        cuda_device_count = device_count_stateless()
         # Use confusing message for more common TP-only case.
         if tensor_parallel_size > cuda_device_count:
             raise RuntimeError(
