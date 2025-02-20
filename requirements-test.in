@@ -5,6 +5,7 @@ pytest-forked
 pytest-asyncio
 pytest-rerunfailures
 pytest-shard
+pytest-xdist
 
 # testing utils
 awscli

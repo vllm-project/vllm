@@ -120,6 +120,8 @@ encodec==0.1.1
     # via vocos
 evaluate==0.4.3
     # via lm-eval
+execnet==2.1.1
+    # via pytest-xdist
 fastparquet==2024.11.0
     # via genai-perf
 fastrlock==0.8.2
@@ -440,6 +442,7 @@ pytest==8.3.3
     #   pytest-mock
     #   pytest-rerunfailures
     #   pytest-shard
+    #   pytest-xdist
 pytest-asyncio==0.24.0
     # via -r requirements-test.in
 pytest-forked==1.6.0
@@ -449,6 +452,8 @@ pytest-mock==3.14.0
 pytest-rerunfailures==14.0
     # via -r requirements-test.in
 pytest-shard==0.1.2
+    # via -r requirements-test.in
+pytest-xdist==3.6.1
     # via -r requirements-test.in
 python-dateutil==2.9.0.post0
     # via
