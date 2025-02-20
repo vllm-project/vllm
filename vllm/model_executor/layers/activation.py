@@ -89,6 +89,19 @@ class SiluAndMul(CustomOp):
         self.op(out, x)
         return out
 
+    def forward_neuron(self, x: torch.Tensor) -> torch.Tensor:
+        # TODO(gnovack): clean this up
+        d = x.shape[-1] // 2
+        if len(x.shape) == 3:
+            s = x[:, :, :d] * torch.nn.functional.sigmoid(x[:, :, :d])
+            return s * x[:, :, d:]
+        elif len(x.shape) == 2:
+            s = x[:, :d] * torch.nn.functional.sigmoid(x[:, :d])
+            return s * x[:, d:]
+        else:
+            raise NotImplementedError(
+                "Expected input to have either 3 or 2 dims")
+
 
 @CustomOp.register("mul_and_silu")
 class MulAndSilu(CustomOp):
