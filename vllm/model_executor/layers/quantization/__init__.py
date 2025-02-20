@@ -22,6 +22,7 @@ QUANTIZATION_METHODS: List[str] = [
     "gptq_marlin",
     "awq_marlin",
     "gptq",
+    "gptq_allspark",
     "compressed-tensors",
     "bitsandbytes",
     "qqq",
@@ -92,6 +93,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .fp8 import Fp8Config
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
+    from .gptq_allspark import GPTQAllSparkConfig
     from .gptq_marlin import GPTQMarlinConfig
     from .gptq_marlin_24 import GPTQMarlin24Config
     from .hqq_marlin import HQQMarlinConfig
@@ -118,6 +120,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "gguf": GGUFConfig,
         "gptq_marlin_24": GPTQMarlin24Config,
         "gptq_marlin": GPTQMarlinConfig,
+        "gptq_allspark": GPTQAllSparkConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
