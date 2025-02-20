@@ -312,6 +312,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=("Additional kwargs to pass to the template renderer. "
                      "Will be accessible by the chat template."),
     )
+    mm_processor_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
         description=("If specified, the output will follow the JSON schema."),
