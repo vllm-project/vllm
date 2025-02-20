@@ -44,7 +44,7 @@ wait_for_server() {
 # You can also adjust --kv-ip and --kv-port for distributed inference.
 
 # prefilling instance, which is the KV producer
-CUDA_VISIBLE_DEVICES=0 vllm serve unsloth/Meta-Llama-3.1-8B-Instruct \
+CUDA_VISIBLE_DEVICES=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --port 8100 \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
@@ -52,7 +52,7 @@ CUDA_VISIBLE_DEVICES=0 vllm serve unsloth/Meta-Llama-3.1-8B-Instruct \
     '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' &
 
 # decoding instance, which is the KV consumer
-CUDA_VISIBLE_DEVICES=1 vllm serve unsloth/Meta-Llama-3.1-8B-Instruct \
+CUDA_VISIBLE_DEVICES=1 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --port 8200 \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
@@ -78,7 +78,7 @@ sleep 1
 output1=$(curl -X POST -s http://localhost:8000/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
-"model": "unsloth/Meta-Llama-3.1-8B-Instruct",
+"model": "meta-llama/Llama-3.1-8B-Instruct",
 "prompt": "San Francisco is a",
 "max_tokens": 10,
 "temperature": 0
@@ -87,7 +87,7 @@ output1=$(curl -X POST -s http://localhost:8000/v1/completions \
 output2=$(curl -X POST -s http://localhost:8000/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
-"model": "unsloth/Meta-Llama-3.1-8B-Instruct",
+"model": "meta-llama/Llama-3.1-8B-Instruct",
 "prompt": "Santa Clara is a",
 "max_tokens": 10,
 "temperature": 0
