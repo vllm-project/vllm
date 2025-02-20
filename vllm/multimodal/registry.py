@@ -11,7 +11,8 @@ import torch.nn as nn
 from vllm.envs import VLLM_MM_INPUT_CACHE_SIZE
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               cached_tokenizer_from_config)
 from vllm.utils import ClassRegistry
 
 from .audio import AudioPlugin
@@ -21,7 +22,6 @@ from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          ProcessingCache)
 from .profiling import BaseDummyInputsBuilder, MultiModalProfiler
-from .utils import cached_get_tokenizer
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -256,10 +256,7 @@ class MultiModalRegistry:
         on underlying model configuration.
         """
         if self.has_processor(model_config):
-            tokenizer = cached_get_tokenizer(
-                model_config.tokenizer,
-                trust_remote_code=model_config.trust_remote_code,
-            )
+            tokenizer = cached_tokenizer_from_config(model_config)
             processor = self.create_processor(model_config, tokenizer)
             seq_len = model_config.max_model_len
             mm_limits = self.get_mm_limits_per_prompt(model_config)
@@ -374,10 +371,7 @@ class MultiModalRegistry:
             This should be called after :meth:`init_mm_limits_per_prompt`.
         """
         if self.has_processor(model_config):
-            tokenizer = cached_get_tokenizer(
-                model_config.tokenizer,
-                trust_remote_code=model_config.trust_remote_code,
-            )
+            tokenizer = cached_tokenizer_from_config(model_config)
             processor = self.create_processor(model_config, tokenizer)
             profiler = MultiModalProfiler(processor)
             return profiler.get_mm_limits()
