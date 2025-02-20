@@ -233,7 +233,8 @@ if __name__ == "__main__":
         prompt_token_ids = output.prompt_token_ids
         generated_text = output.outputs[0].text
         print("====================================")
-        print(f"Prompt[:-10]: {prompt_token_ids[-10]!r}")
+        print(f"Prompt[:10]: {prompt_token_ids[:10]!r}")
+        print(f"Prompt[:-10]: {prompt_token_ids[:-10]!r}")
         print(f"Generated text: {generated_text!r}")
         print(f"Ground truth: {gt_i!r}")
         print("====================================")
