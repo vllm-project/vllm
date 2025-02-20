@@ -84,6 +84,12 @@ class SupportsHash(Protocol):
         ...
 
 
+class SupportsMetricsInfo(Protocol):
+
+    def metrics_info(self) -> Dict[str, str]:
+        ...
+
+
 class ModelImpl(str, enum.Enum):
     AUTO = "auto"
     VLLM = "vllm"
