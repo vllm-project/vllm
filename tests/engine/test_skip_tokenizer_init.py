@@ -7,8 +7,7 @@ from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 
 
-@pytest.mark.parametrize("model",
-                         ["distilbert/distilgpt2"])
+@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
     # of tokenizer and detokenizer. The generated output is expected to contain

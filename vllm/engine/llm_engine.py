@@ -16,9 +16,9 @@ import torch
 from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+from vllm.config import (DecodingConfig, LoadFormat, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
-                         VllmConfig, LoadFormat)
+                         VllmConfig)
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
@@ -57,8 +57,8 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import (Counter, Device, deprecate_kwargs,
-                        resolve_obj_by_qualname, weak_bind, MODELS_ON_S3, MODEL_WEIGHTS_S3_BUCKET)
+from vllm.utils import (MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3, Counter, Device,
+                        deprecate_kwargs, resolve_obj_by_qualname, weak_bind)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -243,7 +243,7 @@ class LLMEngine:
         self.use_cached_outputs = use_cached_outputs
 
         if envs.VLLM_CI_USE_S3 and self.model_config.model in MODELS_ON_S3:
-            self.model_config.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model_config.model}"
+            self.model_config.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model_config.model}"  # noqa: E501
             self.load_config.load_format = LoadFormat.RUNAI_STREAMER
 
         if not self.model_config.skip_tokenizer_init:

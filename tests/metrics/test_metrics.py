@@ -15,7 +15,6 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
 
-
 MODELS = [
     "distilbert/distilgpt2",
 ]

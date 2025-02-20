@@ -166,9 +166,7 @@ class ModelTransfer:
 
 def main():
     # Configuration
-    MODEL_ID = [
-        "HuggingFaceH4/zephyr-7b-beta"
-    ]
+    MODEL_ID = ["HuggingFaceH4/zephyr-7b-beta"]
     S3_BUCKET = "vllm-ci-model-weights"
     # Local directory to temporarily store the model
     LOCAL_DIR = "/home/ec2-user/models"

@@ -135,13 +135,11 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         # Print spec metrics.
         "disable_log_stats": False,
     }])
-@pytest.mark.parametrize(
-    "per_test_common_llm_kwargs",
-    [
-        {
-            "model_name": "JackFram/llama-160m",
-        },
-    ])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [
+    {
+        "model_name": "JackFram/llama-160m",
+    },
+])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs",
                          [{
@@ -263,13 +261,11 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
     }])
-@pytest.mark.parametrize(
-    "per_test_common_llm_kwargs",
-    [
-        {
-            "model_name": "JackFram/llama-160m",
-        },
-    ])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [
+    {
+        "model_name": "JackFram/llama-160m",
+    },
+])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {

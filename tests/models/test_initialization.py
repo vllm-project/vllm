@@ -7,7 +7,6 @@ from transformers import PretrainedConfig
 
 from vllm import LLM
 
-from ..conftest import MODELS_ON_S3
 from .registry import HF_EXAMPLE_MODELS
 
 
