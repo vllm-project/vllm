@@ -115,7 +115,14 @@ def list_repo_files(
     token: Union[str, bool, None] = None,
 ) -> list[str]:
 
-    def lookup_files():
+    def lookup_files() -> list[str]:
+        # directly list files if model is local
+        if (local_path := Path(repo_id)).exists():
+            return [
+                str(file.relative_to(local_path))
+                for file in local_path.rglob('*') if file.is_file()
+            ]
+        # if model is remote, use hf_hub api to list files
         try:
             if VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import (
@@ -144,7 +151,6 @@ def file_exists(
     revision: Optional[str] = None,
     token: Union[str, bool, None] = None,
 ) -> bool:
-
     file_list = list_repo_files(repo_id,
                                 repo_type=repo_type,
                                 revision=revision,
@@ -155,8 +161,8 @@ def file_exists(
 # In offline mode the result can be a false negative
 def file_or_path_exists(model: Union[str, Path], config_name: str,
                         revision: Optional[str]) -> bool:
-    if Path(model).exists():
-        return (Path(model) / config_name).is_file()
+    if (local_path := Path(model)).exists():
+        return (local_path / config_name).is_file()
 
     # Offline mode support: Check if config file is cached already
     cached_filepath = try_to_load_from_cache(repo_id=model,
@@ -498,14 +504,13 @@ def get_sentence_transformer_tokenizer_config(model: str,
             if encoder_dict:
                 break
 
-    if not encoder_dict:
+    if not encoder_dict and not model.startswith("/"):
         try:
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
                                          revision=revision,
                                          token=HF_TOKEN)
-        except Exception as e:
-            logger.error("Error getting repo files", e)
+        except Exception:
             repo_files = []
 
         for config_name in sentence_transformer_config_files:

@@ -28,7 +28,7 @@ def test_collective_rpc(tp_size, backend):
         def echo_rank(self):
             return self.rank
 
-    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
+    llm = LLM(model="s3://vllm-ci-model-weights/Llama-3.2-1B-Instruct",
               enforce_eager=True,
               load_format="dummy",
               tensor_parallel_size=tp_size,

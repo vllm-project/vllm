@@ -24,7 +24,7 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, TokenizerPoolConfig
+from vllm.config import LoadFormat, TaskOption, TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -46,6 +46,71 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 _SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
+
+MODELS_ON_S3 = [
+    "distilbert/distilgpt2",
+    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Meta-Llama-3-8B",
+    "meta-llama/Llama-3.2-1B",
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "openai-community/gpt2",
+    "ArthurZ/Ilama-3.2-1B",
+    "llava-hf/llava-1.5-7b-hf",
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "ai21labs/Jamba-tiny-random",
+    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
+    "nm-testing/Phi-3-mini-128k-instruct-FP8",
+    "nm-testing/Qwen2-0.5B-Instruct-FP8-SkipQKV",
+    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
+    "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
+    "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue",
+    "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symFalse",
+    "AMead10/Llama-3.2-1B-Instruct-AWQ",
+    "shuyuej/Llama-3.2-1B-Instruct-GPTQ",
+    "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head",
+    "ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-10-25-2024",
+    "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
+    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8",
+    "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test",
+    "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
+    "nm-testing/tinyllama-oneshot-w8-channel-a8-tensor",
+    "nm-testing/asym-w8w8-int8-static-per-tensor-tiny-llama",
+    "neuralmagic/Llama-3.2-1B-quantized.w8a8",
+    "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Asym",
+    "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Sym",
+    "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym",
+    "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
+    "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2",
+    "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2-asym",
+    "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
+    "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2-asym",
+    "nm-testing/tinyllama-oneshot-w4a16-channel-v2",
+    "nm-testing/tinyllama-oneshot-w4a16-group128-v2",
+    "nm-testing/tinyllama-oneshot-w8a16-per-channel",
+    "nm-testing/llama7b-one-shot-2_4-w4a16-marlin24-t",
+    "nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test",
+    "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme",
+    "nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-2of4-testing",
+    "nm-testing/Meta-Llama-3-8B-Instruct-FP8-Static-Per-Tensor-testing",
+    "nm-testing/Meta-Llama-3-8B-Instruct-FP8-Static-testing",
+    "nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-IA-Per-Tensor-Weight-testing",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_per_tok_dyn_act_fp8-BitM",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_tensor_act_fp8-BitM",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_per_tok_dyn_act_fp8-BitM",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_tensor_act_fp8-BitM",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_per_tok_dyn_act_int8-BitM",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_tensor_act_int8-BitM",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_per_tok_dyn_act_int8-BitM",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_tensor_act_int8-BitM",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-INT8-Dynamic-IA-Per-Channel-Weight-testing",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-INT8-Static-testing",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-INT8-Dynamic-IA-Per-Tensor-Weight-testing",
+    "nm-testing/TinyLlama-1.1B-Chat-v1.0-2of4-Sparse-Dense-Compressor",
+    "nm-testing/llama2.c-stories42M-pruned2.4-compressed",
+]
+
+MODEL_WEIGHTS_S3_BUCKET = "s3://vllm-ci-model-weights"
+
 _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]
@@ -677,8 +742,14 @@ class VllmRunner:
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
+        load_format: Optional[LoadFormat] = None,
         **kwargs,
     ) -> None:
+        if model_name in MODELS_ON_S3 and not load_format:
+            model_name = (f"{MODEL_WEIGHTS_S3_BUCKET}/{model_name}")
+            load_format = LoadFormat.RUNAI_STREAMER
+        if not load_format:
+            load_format = LoadFormat.AUTO
         self.model = LLM(
             model=model_name,
             task=task,
@@ -693,6 +764,7 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
+            load_format=load_format,
             **kwargs,
         )
 
