@@ -26,7 +26,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.guided_decoding import GuidedDecodingManager
+from vllm.v1.guided_decoding import GuidedDecodingManager, reset_bitmask
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -174,6 +174,10 @@ class EngineCore:
 
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
+
+        if len(self.guided_decoding_manager.requests) > 0:
+            reset_bitmask(scheduler_output.grammar_bitmask)
+
         return engine_core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:

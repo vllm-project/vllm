@@ -441,7 +441,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.refresh_sampling_metadata()
 
     def _prepare_inputs(
-        self, scheduler_output: "SchedulerOutput"
+        self,
+        scheduler_output: "SchedulerOutput",
     ) -> Tuple[FlashAttentionMetadata, torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -968,6 +969,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Apply guided decoding bitmasks if present
+        print(scheduler_output.guided_decoding_request_ids, scheduler_output.grammar_bitmask[0])
         if scheduler_output.grammar_bitmask is not None:
             if len(self.input_batch.req_ids) < self.input_batch.max_num_reqs:
                 # The bitmask is pre-allocated for the maximum batch size.

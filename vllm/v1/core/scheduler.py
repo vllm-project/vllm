@@ -583,12 +583,10 @@ class Scheduler:
                                      "Expect undefined behavior. This may be"
                                      " caused by spec decode + structured "
                                      "output.")
+                    print(sampled_token_ids)
                     token_id = sampled_token_ids[index][0]
                     # accept token will also advance the FSM
-                    can_accept_token = request.grammar.accept_token(token_id)
-                    if not can_accept_token:
-                        self._free_request(request)
-                        continue
+                    request.grammar.accept_token(token_id)
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:

@@ -125,6 +125,7 @@ class GuidedDecodingManager:
 
     @property
     def is_bitmask_ready(self) -> bool:
+        self._ensure_bitmask_ready()
         if isinstance(self._grammar_bitmask, Future):
             return not self._grammar_bitmask.running(
             ) and self._grammar_bitmask.done()
@@ -136,12 +137,9 @@ class GuidedDecodingManager:
         request.grammar = self.request_key_to_grammar.get(
             request.guided_decoding_key)
         if not request.grammar:
-            request.grammar = self.cache(request)
+            request.grammar = self.executor.submit(self._executor_loop, request)
             return True
         return False
-
-    def cache(self, request: Request):
-        return self.executor.submit(self._executor_loop, request)
 
     def _executor_loop(self, request: Request):
         key = request.guided_decoding_key
