@@ -21,6 +21,9 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+DEFAULT_WORLD_SIZE = "1"
+DEFAULT_NEURON_RANK_ID = "0"
+DEFAULT_ENABLE_NEURON_MULTI_NODE = "False"
 
 class NeuronFramework(enum.Enum):
     TRANSFORMERS_NEURONX = "transformers-neuronx"
@@ -85,19 +88,28 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         local_rank: int,
         rank: int,
         distributed_init_method: str,
-        enable_neuron_multi_node: bool = False,
-        world_size: int = 1,
-        is_driver_worker: bool = False,
+        is_driver_worker: bool = False
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
+
+        self.enable_neuron_multi_node = os.getenv("ENABLE_NEURON_MULTI_NODE", DEFAULT_ENABLE_NEURON_MULTI_NODE).lower() == "true"
+
+        if self.enable_neuron_multi_node:
+            self.world_size = int(os.getenv("WORLD_SIZE", DEFAULT_WORLD_SIZE))
+            self.rank = int(os.getenv("NEURON_RANK_ID", DEFAULT_NEURON_RANK_ID))
+            self.distributed_init_method = "env://"
+            self.is_driver_worker = self.rank == 0
+            logger.info(f"Rank: {self.rank}, distributed_init_method: {self.distributed_init_method}, is_driver_worker: {self.is_driver_worker}")
+                
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
+
         neuron_framework = get_neuron_framework_to_use()
 
         if neuron_framework == NeuronFramework.TRANSFORMERS_NEURONX:
@@ -162,7 +174,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     @property
     def do_metadata_broadcast(self) -> bool:
-        return False
+        return self.enable_neuron_multi_node and self.world_size > 1
 
     @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
@@ -190,13 +202,17 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         vLLM still needs the environment inited when TP/PP > 1
         """
         init_distributed_environment(
-            world_size=1,
+            world_size=self.world_size,
             rank=self.rank,
             local_rank=self.local_rank,
             distributed_init_method=self.distributed_init_method,
             backend="gloo",
         )
+        
+        # The equation must hold: world_size === TP * PP
         ensure_model_parallel_initialized(
-            1,
-            1,
+            tensor_model_parallel_size=self.world_size,
+            # pipeline parallelism is not yet supported
+            pipeline_model_parallel_size=1,
+            backend="gloo",
         )
