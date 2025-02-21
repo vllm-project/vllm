@@ -2268,25 +2268,3 @@ def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
 
     type.__setattr__(cls, '__init__', wrapped_init)
     return cls
-
-
-def convert_torchrun_envs():
-
-    # convert torchrun envs to vllm envs, and then delete torchrun envs
-    os.environ["VLLM_DP_RANK"] = os.environ["RANK"]
-    os.environ["VLLM_DP_SIZE"] = os.environ["WORLD_SIZE"]
-    os.environ["VLLM_DP_MASTER_IP"] = os.environ["MASTER_ADDR"]
-    os.environ["VLLM_DP_MASTER_PORT"] = os.environ["MASTER_PORT"]
-
-    # sync with https://github.com/pytorch/pytorch/blob/76ad19a5492e7d86f57d63f3a84407d8d6f01667/torch/distributed/elastic/agent/server/local_elastic_agent.py#L291
-    for env in [
-            "LOCAL_RANK", "RANK", "GROUP_RANK", "ROLE_RANK", "ROLE_NAME",
-            "LOCAL_WORLD_SIZE", "WORLD_SIZE", "GROUP_WORLD_SIZE",
-            "ROLE_WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT",
-            "TORCHELASTIC_RESTART_COUNT", "TORCHELASTIC_MAX_RESTARTS",
-            "TORCHELASTIC_RUN_ID", "TORCHELASTIC_USE_AGENT_STORE",
-            "TORCH_NCCL_ASYNC_ERROR_HANDLING",
-            "TORCH_NCCL_ASYNC_ERROR_HANDLING"
-    ]:
-        if env in os.environ:
-            del os.environ[env]
