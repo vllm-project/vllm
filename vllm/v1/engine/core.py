@@ -149,6 +149,8 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
+        self.guided_decoding_manager.remove_requests(request_ids)
+
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
@@ -176,6 +178,9 @@ class EngineCore:
 
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
+
+        if len(self.guided_decoding_manager.requests) > 0:
+            self.guided_decoding_manager.reset_bitmask()
 
         return engine_core_outputs
 
@@ -251,8 +256,7 @@ class EngineCore:
                 continue
 
             # Check if grammar is ready in cache
-            grammar = self.guided_decoding_manager.request_key_to_grammar.get(
-                req.guided_decoding_key)
+            grammar = self.guided_decoding_manager[req.guided_decoding_key]
             if grammar is not None:
                 req.grammar = grammar
                 continue

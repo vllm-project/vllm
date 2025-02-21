@@ -76,6 +76,9 @@ class Scheduler:
         # Request id -> CachedRequestData
         self._cached_reqs_data: Dict[str, CachedRequestData] = {}
 
+        # The list of guided decoding request left within the queue
+        self.guided_decoding_requests: List[Request] = []
+
         # Encoder-related.
         # Calculate encoder cache size if applicable
         # NOTE: For now we use the same budget for both compute and space.
@@ -139,14 +142,15 @@ class Scheduler:
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
-            if request.status == RequestStatus.WAITING_FOR_FSM:
-                # wait for grammar to be ready
-                req_index += 1
-                continue
+            # Guided decoding related.
+            if request.use_guided_decoding:
+                if request.status == RequestStatus.WAITING_FOR_FSM:
+                    # Still waiting for FSM initialization
+                    req_index += 1
+                    continue
 
-            if request.use_guided_decoding \
-                and request.request_id not in guided_decoding_request_ids:
-                guided_decoding_request_ids[request.request_id] = req_index
+                if request.request_id not in guided_decoding_request_ids:
+                    guided_decoding_request_ids[request.request_id] = req_index
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
@@ -229,25 +233,22 @@ class Scheduler:
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             num_to_skip: int = 0
-            while self.waiting and token_budget > 0:
+            while num_to_skip < len(self.waiting) and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
-                    break
-
-                if num_to_skip >= len(self.waiting):
                     break
 
                 request = self.waiting[num_to_skip]
 
-                if request.status == RequestStatus.WAITING_FOR_FSM:
-                    if request.grammar and request.is_grammar_ready:
-                        request.status = RequestStatus.WAITING
-                        request.grammar.prefilled = True
-                    num_to_skip += 1
-                    continue
-
-                if request.use_guided_decoding \
-                    and request.request_id not in guided_decoding_request_ids:
+                if request.use_guided_decoding:
                     guided_decoding_request_ids[request.request_id] = req_index
+
+                    if request.status == RequestStatus.WAITING_FOR_FSM:
+                        if request.grammar and request.is_grammar_ready:
+                            request.status = RequestStatus.WAITING
+                            request.grammar.prefilled = True
+                        else:
+                            num_to_skip += 1
+                            continue
 
                 #
                 # Check that adding the request still respects the max_loras
@@ -572,21 +573,21 @@ class Scheduler:
 
             # Handle guided decoding FSM advancement if applicable
             if (request.use_guided_decoding and request.grammar
-                    and request.is_grammar_ready
-                    and not request.grammar.prefilled):
+                    and request.is_grammar_ready):
                 index = model_runner_output.req_id_to_index.get(req_id)
                 if index is not None:
-                    # TODO - fix spec decode + structured output compatibility
-                    if len(sampled_token_ids[index]) > 1:
-                        logger.error("Structured output does not currently "
-                                     "support more than one token at a time. "
-                                     "Expect undefined behavior. This may be"
-                                     " caused by spec decode + structured "
-                                     "output.")
-                    print(sampled_token_ids)
-                    token_id = sampled_token_ids[index][0]
-                    # accept token will also advance the FSM
-                    request.grammar.accept_token(token_id)
+                    token_ids = sampled_token_ids[index]
+                    if len(token_ids) > 1:
+                        logger.error(
+                            "Structured output does not currently support more than one token at a time. Only the first token will be used."
+                        )
+                    token_id = token_ids[0]
+                    # accept_token advances the FSM
+                    accepted = request.grammar.accept_token(token_id)
+                    if not accepted:
+                        logger.error(
+                            "Failed to advance FSM for request %s with token %d",
+                            req_id, token_id)
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
@@ -693,7 +694,6 @@ class Scheduler:
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
         if request.use_guided_decoding and request.grammar:
-            assert request.grammar.matcher.is_terminated()
             request.grammar.reset()
 
     def get_num_unfinished_requests(self) -> int:

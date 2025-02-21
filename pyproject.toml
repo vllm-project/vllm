@@ -87,6 +87,8 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
+    # line length
+    "E501",
     # Loop control variable not used within loop body
     "B007",
     # f-string format

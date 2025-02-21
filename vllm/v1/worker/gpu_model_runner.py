@@ -968,21 +968,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
+        # NOTE: We are currently broadcasting the bitmask
+        # to each worker
+        grammar_bitmask = scheduler_output.grammar_bitmask
+
         # Apply guided decoding bitmasks if present
-        if scheduler_output.grammar_bitmask is not None:
-            # if len(self.input_batch.req_ids) < self.input_batch.max_num_reqs:
-            #     # The bitmask is pre-allocated for the maximum batch size.
-            #     # When the batch size is smaller, we need to resize the bitmask
-            #     # to match the batch size.
-            #     scheduler_output.grammar_bitmask = (
-            #         scheduler_output.grammar_bitmask[:len(self.input_batch.
-            #                                               req_ids)])
+        if grammar_bitmask is not None:
+            if len(self.input_batch.req_ids) < self.input_batch.max_num_reqs:
+                # The bitmask is pre-allocated for the maximum batch size.
+                # When the batch size is smaller, we need to resize the bitmask
+                # to match the batch size.
+                grammar_bitmask = grammar_bitmask[:len(self.input_batch.req_ids
+                                                       )]
             # TODO: we probably should move this before and
             # after, this might not be correct
             apply_bitmask(
-                logits,
-                scheduler_output.grammar_bitmask.to(self.device,
-                                                    non_blocking=True),
+                logits, grammar_bitmask.to(self.device, non_blocking=True),
                 list(scheduler_output.guided_decoding_request_ids.values()))
 
         # Sample the next token and get logprobs if needed.

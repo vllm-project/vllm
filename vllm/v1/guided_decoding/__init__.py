@@ -101,6 +101,9 @@ class GuidedDecodingManager:
         self._grammar_bitmask: Optional[Union[torch.Tensor,
                                               Future[torch.Tensor]]] = None
 
+    def __getitem__(self, key: GuidedDecodingKey) -> Optional[Grammar]:
+        return self.request_key_to_grammar.get(key)
+
     def allocate_bitmask(self) -> None:
         # NOTE: We will only want to allocate this once
         if self._grammar_bitmask is None:
@@ -132,6 +135,15 @@ class GuidedDecodingManager:
             return not self._grammar_bitmask.running(
             ) and self._grammar_bitmask.done()
         return self._grammar_bitmask is not None
+
+    def reset_bitmask(self):
+        reset_bitmask(self.grammar_bitmask)
+
+    def remove_requests(self, request_ids: List[str]) -> None:
+        self.requests = {
+            req
+            for req in self.requests if req.request_id not in request_ids
+        }
 
     def should_cache(self, request: Request):
         if not request.use_guided_decoding:
