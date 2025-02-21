@@ -160,7 +160,6 @@ class LLMEngine:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
-            self.engine_core.execute_dummy_batch()
             return []
 
         # 1) Get EngineCoreOutput from the EngineCore.
@@ -188,10 +187,10 @@ class LLMEngine:
         self.engine_core.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
-        self.engine_core.sleep(level)  # type: ignore
+        self.engine_core.sleep(level)
 
     def wake_up(self):
-        self.engine_core.wake_up()  # type: ignore
+        self.engine_core.wake_up()
 
     def get_tokenizer_group(
         self,
