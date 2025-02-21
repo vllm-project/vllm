@@ -49,12 +49,14 @@ class Executor(ExecutorBase):
                              f"{distributed_executor_backend}")
         return executor_class
 
-    def initialize(self, kv_cache_configs: List[KVCacheConfig]) -> None:
+    def initialize_from_config(self,
+                               kv_cache_configs: List[KVCacheConfig]) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_cache", args=(kv_cache_configs, ))
+        self.collective_rpc("initialize_from_config",
+                            args=(kv_cache_configs, ))
         self.collective_rpc("compile_or_warm_up_model")
 
     def determine_available_memory(self) -> int:  # in bytes

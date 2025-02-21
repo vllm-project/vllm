@@ -567,6 +567,10 @@ class WorkerWrapperBase:
             self.worker = worker_class(**kwargs)
             assert self.worker is not None
 
+    def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
+        kv_cache_config = kv_cache_configs[self.rpc_rank]
+        self.worker.initialize_from_config(kv_cache_config)
+
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
             target = self if self.worker is None else self.worker
