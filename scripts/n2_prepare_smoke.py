@@ -196,16 +196,16 @@ if __name__ == "__main__":
 
         # prompts = get_prompts()
         # Got the unseen prompts.
-        smoke_num_samples = 10
-        prompts = get_pile_prompts(args.model, num_samples * 2)
-        smoke_prompts = [
-            "Hello, my name is",
-            "The president of the United States is",
-            "The capital of France is",
-            "The future of AI is",
-        ]
+        # smoke_num_samples = 10
+        # prompts = get_pile_prompts(args.model, num_samples * 2)
+        # smoke_prompts = [
+        #     "Hello, my name is",
+        #     "The president of the United States is",
+        #     "The capital of France is",
+        #     "The future of AI is",
+        # ]
 
-        smoke_prompts = smoke_prompts + prompts[-smoke_num_samples:]
+        # smoke_prompts = smoke_prompts + prompts[-smoke_num_samples:]
         smoke_prompts = get_prompts()
         prompt_token_ids = get_prompt_token_ids(
             args.model, smoke_prompts, least_tokens
