@@ -842,7 +842,7 @@ class Florence2MultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
-        return [2]
+        return [self.info.get_hf_config().eos_token_id]
 
     def _call_hf_processor(
         self,
@@ -867,7 +867,7 @@ class Florence2MultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(pixel_values=MultiModalFieldConfig.batched("image"), )
+        return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
     def _get_prompt_replacements(
         self,
