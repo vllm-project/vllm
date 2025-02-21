@@ -226,7 +226,7 @@ if __name__ == "__main__":
         tensor_parallel_size=args.tp_size,
         distributed_executor_backend='ray',
         trust_remote_code=True,
-        quantization='inc_q',
+        quantization='inc_p',
         weights_load_device="cpu",
         max_model_len=16384,
         dtype="bfloat16",
