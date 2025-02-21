@@ -86,6 +86,7 @@ class OutputProcessor:
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: Dict[str, RequestState] = {}
+        self.has_dummy_batch = False
 
     def is_request_active(self, request_id: str) -> bool:
         return request_id in self.request_states
@@ -94,7 +95,7 @@ class OutputProcessor:
         return len(self.request_states)
 
     def has_unfinished_requests(self) -> bool:
-        return len(self.request_states) > 0
+        return len(self.request_states) > 0 or self.has_dummy_batch
 
     def abort_requests(
         self,
@@ -147,6 +148,12 @@ class OutputProcessor:
         
         **********************************************************
         """
+
+        if engine_core_outputs and engine_core_outputs[0].is_dummy_batch:
+            self.has_dummy_batch = True
+            return OutputProcessorOutput(request_outputs=[], reqs_to_abort=[])
+        else:
+            self.has_dummy_batch = False
 
         request_outputs: List[RequestOutput] = []
         reqs_to_abort: List[str] = []

@@ -22,8 +22,9 @@ from vllm.transformers_utils.config import (
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
-from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType, UtilityOutput)
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
@@ -157,7 +158,9 @@ class EngineCore:
         if not has_unfinished and aggregated_has_unfinished:
             output = self.model_executor.execute_model(
                 SchedulerOutput(is_dummy_batch=True))
-            return None
+            return EngineCoreOutputs(
+                outputs=[EngineCoreOutput(is_dummy_batch=True)],
+                scheduler_stats=self.scheduler.make_stats())
 
         if not aggregated_has_unfinished:
             return EngineCoreOutputs(
