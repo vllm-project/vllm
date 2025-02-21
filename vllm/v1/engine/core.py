@@ -147,7 +147,7 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def step(self) -> EngineCoreOutputs:
+    def step(self) -> Optional[EngineCoreOutputs]:
         """Schedule, execute, and make output."""
 
         has_unfinished = self.scheduler.has_unfinished_requests()
@@ -157,8 +157,7 @@ class EngineCore:
         if not has_unfinished and aggregated_has_unfinished:
             output = self.model_executor.execute_model(
                 SchedulerOutput(is_dummy_batch=True))
-            return EngineCoreOutputs(
-                outputs=[], scheduler_stats=self.scheduler.make_stats())
+            return None
 
         if not aggregated_has_unfinished:
             return EngineCoreOutputs(
