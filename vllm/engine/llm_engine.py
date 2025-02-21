@@ -231,13 +231,6 @@ class LLMEngine:
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
 
-        # important: init dp group before init the model_executor
-        self.parallel_config = vllm_config.parallel_config
-        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
-        self.should_execute_dummy_batch = False
-        if self.need_to_sync_across_dp:
-            self.dp_group = self.parallel_config.stateless_init_dp_group()
-
         logger.info(
             "Initializing a V0 LLM engine (v%s) with config: %s, "
             "use_cached_outputs=%s, ",
@@ -918,15 +911,8 @@ class LLMEngine:
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        has_unfinished = any(scheduler.has_unfinished_seqs()
+        return any(scheduler.has_unfinished_seqs()
                    for scheduler in self.scheduler)
-        if not self.need_to_sync_across_dp:
-            return has_unfinished
-        aggregated_has_unfinished = ParallelConfig.\
-        sync_has_unfinished_across_dp(self.dp_group, has_unfinished)
-        if not has_unfinished and aggregated_has_unfinished:
-            self.should_execute_dummy_batch = True
-        return aggregated_has_unfinished
 
     def has_unfinished_requests_for_virtual_engine(
             self, virtual_engine: int) -> bool:
@@ -1328,11 +1314,6 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
-
-        if self.should_execute_dummy_batch:
-            self.should_execute_dummy_batch = False
-            self.model_executor.collective_rpc("execute_dummy_batch")
-            return []
 
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
