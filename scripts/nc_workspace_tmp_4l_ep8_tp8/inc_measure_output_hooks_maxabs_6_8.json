@@ -1,0 +1,2131 @@
+{
+    "GlobalRank": null,
+    "LocalRank": 6,
+    "Mode": "DynamicRange",
+    "Nodes": {
+        "model.layers.0.self_attn.q_a_proj": {
+            "inputs": [
+                [
+                    [
+                        6.34375
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.23828125
+                    ]
+                ]
+            }
+        },
+        "model.layers.0.self_attn.q_b_proj": {
+            "inputs": [
+                [
+                    [
+                        16.875
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.22265625
+                    ]
+                ]
+            }
+        },
+        "model.layers.0.self_attn.kv_a_proj_with_mqa": {
+            "inputs": [
+                [
+                    [
+                        6.34375
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.84765625
+                    ]
+                ]
+            }
+        },
+        "model.layers.0.self_attn.kv_b_proj": {
+            "inputs": [
+                [
+                    [
+                        0.4296875
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1513671875
+                    ]
+                ]
+            }
+        },
+        "model.layers.0.self_attn.o_proj": {
+            "inputs": [
+                [
+                    [
+                        0.023193359375
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.4375
+                    ]
+                ]
+            }
+        },
+        "model.layers.0.self_attn.attn.impl.matmul_qk": {
+            "inputs": [
+                [
+                    [
+                        1.3671875
+                    ]
+                ],
+                [
+                    [
+                        27.5
+                    ]
+                ]
+            ]
+        },
+        "model.layers.0.self_attn.attn.impl.matmul_av": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        0.06689453125
+                    ]
+                ]
+            ]
+        },
+        "model.layers.0.self_attn.attn.impl.batch2block_matmul": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        59.75
+                    ]
+                ]
+            ]
+        },
+        "model.layers.0.self_attn.attn.impl.block2batch_matmul": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        13.1875
+                    ]
+                ]
+            ]
+        },
+        "model.layers.0.self_attn.attn.impl.fused_scaled_dot_product_attention": {
+            "inputs": [
+                [
+                    [
+                        9.375
+                    ]
+                ],
+                [
+                    [
+                        27.5
+                    ]
+                ],
+                [
+                    [
+                        0.06689453125
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.023193359375
+                    ]
+                ],
+                [
+                    [
+                        1.0
+                    ]
+                ]
+            ]
+        },
+        "model.layers.0.mlp.gate_up_proj": {
+            "inputs": [
+                [
+                    [
+                        30.125
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.310546875
+                    ]
+                ]
+            }
+        },
+        "model.layers.0.mlp.down_proj": {
+            "inputs": [
+                [
+                    [
+                        0.9765625
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.546875
+                    ]
+                ]
+            }
+        },
+        "model.layers.1.self_attn.q_a_proj": {
+            "inputs": [
+                [
+                    [
+                        5.8125
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1328125
+                    ]
+                ]
+            }
+        },
+        "model.layers.1.self_attn.q_b_proj": {
+            "inputs": [
+                [
+                    [
+                        7.0625
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.23828125
+                    ]
+                ]
+            }
+        },
+        "model.layers.1.self_attn.kv_a_proj_with_mqa": {
+            "inputs": [
+                [
+                    [
+                        5.8125
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.50390625
+                    ]
+                ]
+            }
+        },
+        "model.layers.1.self_attn.kv_b_proj": {
+            "inputs": [
+                [
+                    [
+                        0.1044921875
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.140625
+                    ]
+                ]
+            }
+        },
+        "model.layers.1.self_attn.o_proj": {
+            "inputs": [
+                [
+                    [
+                        0.0255126953125
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.291015625
+                    ]
+                ]
+            }
+        },
+        "model.layers.1.self_attn.attn.impl.matmul_qk": {
+            "inputs": [
+                [
+                    [
+                        3.796875
+                    ]
+                ],
+                [
+                    [
+                        9.1875
+                    ]
+                ]
+            ]
+        },
+        "model.layers.1.self_attn.attn.impl.matmul_av": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        0.0322265625
+                    ]
+                ]
+            ]
+        },
+        "model.layers.1.self_attn.attn.impl.batch2block_matmul": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        192.0
+                    ]
+                ]
+            ]
+        },
+        "model.layers.1.self_attn.attn.impl.block2batch_matmul": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        33.0
+                    ]
+                ]
+            ]
+        },
+        "model.layers.1.self_attn.attn.impl.fused_scaled_dot_product_attention": {
+            "inputs": [
+                [
+                    [
+                        36.75
+                    ]
+                ],
+                [
+                    [
+                        9.1875
+                    ]
+                ],
+                [
+                    [
+                        0.0322265625
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.0252685546875
+                    ]
+                ],
+                [
+                    [
+                        1.0
+                    ]
+                ]
+            ]
+        },
+        "model.layers.1.mlp.gate_up_proj": {
+            "inputs": [
+                [
+                    [
+                        28.125
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.291015625
+                    ]
+                ]
+            }
+        },
+        "model.layers.1.mlp.down_proj": {
+            "inputs": [
+                [
+                    [
+                        0.765625
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.38671875
+                    ]
+                ]
+            }
+        },
+        "model.layers.2.self_attn.q_a_proj": {
+            "inputs": [
+                [
+                    [
+                        5.90625
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.208984375
+                    ]
+                ]
+            }
+        },
+        "model.layers.2.self_attn.q_b_proj": {
+            "inputs": [
+                [
+                    [
+                        6.75
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.205078125
+                    ]
+                ]
+            }
+        },
+        "model.layers.2.self_attn.kv_a_proj_with_mqa": {
+            "inputs": [
+                [
+                    [
+                        5.90625
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.439453125
+                    ]
+                ]
+            }
+        },
+        "model.layers.2.self_attn.kv_b_proj": {
+            "inputs": [
+                [
+                    [
+                        0.08056640625
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.12158203125
+                    ]
+                ]
+            }
+        },
+        "model.layers.2.self_attn.o_proj": {
+            "inputs": [
+                [
+                    [
+                        0.0224609375
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.2578125
+                    ]
+                ]
+            }
+        },
+        "model.layers.2.self_attn.attn.impl.matmul_qk": {
+            "inputs": [
+                [
+                    [
+                        1.875
+                    ]
+                ],
+                [
+                    [
+                        8.25
+                    ]
+                ]
+            ]
+        },
+        "model.layers.2.self_attn.attn.impl.matmul_av": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        0.0322265625
+                    ]
+                ]
+            ]
+        },
+        "model.layers.2.self_attn.attn.impl.batch2block_matmul": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        302.0
+                    ]
+                ]
+            ]
+        },
+        "model.layers.2.self_attn.attn.impl.block2batch_matmul": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        57.0
+                    ]
+                ]
+            ]
+        },
+        "model.layers.2.self_attn.attn.impl.fused_scaled_dot_product_attention": {
+            "inputs": [
+                [
+                    [
+                        14.375
+                    ]
+                ],
+                [
+                    [
+                        8.25
+                    ]
+                ],
+                [
+                    [
+                        0.0322265625
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.0224609375
+                    ]
+                ],
+                [
+                    [
+                        1.0
+                    ]
+                ]
+            ]
+        },
+        "model.layers.2.mlp.gate_up_proj": {
+            "inputs": [
+                [
+                    [
+                        39.5
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.267578125
+                    ]
+                ]
+            }
+        },
+        "model.layers.2.mlp.down_proj": {
+            "inputs": [
+                [
+                    [
+                        0.20703125
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.431640625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.self_attn.q_a_proj": {
+            "inputs": [
+                [
+                    [
+                        7.9375
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.21484375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.self_attn.q_b_proj": {
+            "inputs": [
+                [
+                    [
+                        5.84375
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1982421875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.self_attn.kv_a_proj_with_mqa": {
+            "inputs": [
+                [
+                    [
+                        7.9375
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.640625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.self_attn.kv_b_proj": {
+            "inputs": [
+                [
+                    [
+                        0.1337890625
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.2158203125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.self_attn.o_proj": {
+            "inputs": [
+                [
+                    [
+                        0.072265625
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.306640625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.self_attn.attn.impl.matmul_qk": {
+            "inputs": [
+                [
+                    [
+                        1.9296875
+                    ]
+                ],
+                [
+                    [
+                        8.0625
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.self_attn.attn.impl.matmul_av": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        0.076171875
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.self_attn.attn.impl.batch2block_matmul": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        92.5
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.self_attn.attn.impl.block2batch_matmul": {
+            "inputs": [
+                [
+                    [
+                        1.0
+                    ]
+                ],
+                [
+                    [
+                        21.0
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.self_attn.attn.impl.fused_scaled_dot_product_attention": {
+            "inputs": [
+                [
+                    [
+                        15.125
+                    ]
+                ],
+                [
+                    [
+                        8.0625
+                    ]
+                ],
+                [
+                    [
+                        0.076171875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.057373046875
+                    ]
+                ],
+                [
+                    [
+                        1.0
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.gate": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.248046875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.017333984375
+                    ]
+                ],
+                [
+                    [
+                        0.09228515625
+                    ]
+                ],
+                [
+                    [
+                        0.3125
+                    ]
+                ],
+                [
+                    [
+                        0.421875
+                    ]
+                ],
+                [
+                    [
+                        0.1845703125
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w13_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.061279296875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w13_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.0546875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w13_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.119140625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w13_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.0615234375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w2_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.10009765625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w2_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1328125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w2_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.18359375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w2_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.07470703125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.01446533203125
+                    ]
+                ],
+                [
+                    [
+                        0.58203125
+                    ]
+                ],
+                [
+                    [
+                        0.3359375
+                    ]
+                ],
+                [
+                    [
+                        0.166015625
+                    ]
+                ],
+                [
+                    [
+                        0.3125
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w13_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.08837890625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w13_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.07470703125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w13_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.07470703125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w13_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.07421875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w2_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.10205078125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w2_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1396484375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w2_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.328125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w2_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1318359375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.009765625
+                    ]
+                ],
+                [
+                    [
+                        0.1875
+                    ]
+                ],
+                [
+                    [
+                        0.36328125
+                    ]
+                ],
+                [
+                    [
+                        0.42578125
+                    ]
+                ],
+                [
+                    [
+                        0.73828125
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w13_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.072265625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w13_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.07958984375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w13_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.072265625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w13_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1318359375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w2_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.162109375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w2_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.11962890625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w2_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.134765625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w2_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.11376953125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.0185546875
+                    ]
+                ],
+                [
+                    [
+                        0.6015625
+                    ]
+                ],
+                [
+                    [
+                        0.134765625
+                    ]
+                ],
+                [
+                    [
+                        0.205078125
+                    ]
+                ],
+                [
+                    [
+                        0.087890625
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w13_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.099609375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w13_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.0888671875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w13_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.046142578125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w13_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.06298828125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w2_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.19140625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w2_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1650390625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w2_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.103515625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w2_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1005859375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.0216064453125
+                    ]
+                ],
+                [
+                    [
+                        0.546875
+                    ]
+                ],
+                [
+                    [
+                        0.404296875
+                    ]
+                ],
+                [
+                    [
+                        0.46484375
+                    ]
+                ],
+                [
+                    [
+                        1.1328125
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w13_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.099609375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w13_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.08154296875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w13_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.11474609375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w13_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.09228515625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w2_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1279296875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w2_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.08154296875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w2_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1767578125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w2_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.12353515625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.01177978515625
+                    ]
+                ],
+                [
+                    [
+                        0.1650390625
+                    ]
+                ],
+                [
+                    [
+                        0.15625
+                    ]
+                ],
+                [
+                    [
+                        0.78125
+                    ]
+                ],
+                [
+                    [
+                        0.2470703125
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w13_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.083984375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w13_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.07568359375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w13_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1103515625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w13_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.154296875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w2_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1142578125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w2_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.12353515625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w2_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.2001953125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w2_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.09814453125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.00762939453125
+                    ]
+                ],
+                [
+                    [
+                        0.70703125
+                    ]
+                ],
+                [
+                    [
+                        0.46875
+                    ]
+                ],
+                [
+                    [
+                        0.283203125
+                    ]
+                ],
+                [
+                    [
+                        0.6640625
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w13_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.06298828125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w13_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.047607421875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w13_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.11376953125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w13_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.07861328125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w2_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1416015625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w2_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.05224609375
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w2_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w2_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.197265625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.00836181640625
+                    ]
+                ],
+                [
+                    [
+                        0.1708984375
+                    ]
+                ],
+                [
+                    [
+                        0.1328125
+                    ]
+                ],
+                [
+                    [
+                        0.267578125
+                    ]
+                ],
+                [
+                    [
+                        0.3984375
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w13_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.06689453125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w13_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.053955078125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w13_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1279296875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w13_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.26953125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w2_list.0": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.1533203125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w2_list.1": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.091796875
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w2_list.2": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.16015625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w2_list.3": {
+            "inputs": [
+                [
+                    [
+                        0.0
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.10595703125
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.shared_experts.gate_up_proj": {
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.5390625
+                    ]
+                ]
+            }
+        },
+        "model.layers.3.mlp.shared_experts.down_proj": {
+            "inputs": [
+                [
+                    [
+                        0.09130859375
+                    ]
+                ]
+            ],
+            "params": {
+                "weight": [
+                    [
+                        0.2275390625
+                    ]
+                ]
+            }
+        }
+    }
+}
