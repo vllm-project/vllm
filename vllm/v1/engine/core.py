@@ -14,7 +14,7 @@ import psutil
 import zmq
 import zmq.asyncio
 
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
@@ -22,9 +22,8 @@ from vllm.transformers_utils.config import (
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreRequest, EngineCoreRequestType,
-                            UtilityOutput)
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
+                            EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
@@ -47,11 +46,7 @@ class EngineCore:
         log_stats: bool,
     ):
         assert vllm_config.model_config.runner_type != "pooling"
-        self.parallel_config = vllm_config.parallel_config
-        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
-        self.should_execute_dummy_batch = False
-        if self.need_to_sync_across_dp:
-            self.dp_group = self.parallel_config.stateless_init_dp_group()
+
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
@@ -151,18 +146,7 @@ class EngineCore:
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
-        has_unfinished = self.scheduler.has_unfinished_requests()
-        if self.need_to_sync_across_dp:
-            aggregated_has_unfinished = ParallelConfig.\
-            sync_has_unfinished_across_dp(self.dp_group, has_unfinished)
-        if not has_unfinished and aggregated_has_unfinished:
-            output = self.model_executor.execute_model(
-                SchedulerOutput(is_dummy_batch=True))
-            return EngineCoreOutputs(
-                outputs=[EngineCoreOutput(is_dummy_batch=True)],
-                scheduler_stats=self.scheduler.make_stats())
-
-        if not aggregated_has_unfinished:
+        if not self.scheduler.has_unfinished_requests():
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
