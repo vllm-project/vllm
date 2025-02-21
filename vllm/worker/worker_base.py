@@ -389,7 +389,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
-        if execute_model_req.is_dummy_batch:
+        if execute_model_req is not None and execute_model_req.is_dummy_batch:
             self.model_runner._dummy_run(1)
             return []
         start_time = time.perf_counter()
