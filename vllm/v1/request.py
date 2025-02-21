@@ -118,18 +118,6 @@ class Request:
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
 
-    def get_num_evicted_tokens(self) -> int:
-        """Returns the number of tokens that were evicted from KV cache."""
-        return self.metrics.num_evicted_tokens
-
-    def increment_evicted_tokens(self, num_tokens: int = 1) -> None:
-        """Increments the count of evicted tokens.
-        
-        Args:
-            num_tokens: Number of tokens that were evicted from KV cache.
-        """
-        self.metrics.num_evicted_tokens += num_tokens
-
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
