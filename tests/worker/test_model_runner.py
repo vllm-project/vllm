@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List
 
 import pytest
@@ -9,25 +11,26 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_open_port
-from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
+from vllm.worker.model_runner import ModelRunner
 
 
 def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
     model_runner = ModelRunner(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
-        lora_config=engine_config.lora_config,
-        prompt_adapter_config=engine_config.prompt_adapter_config,
-        observability_config=engine_config.observability_config,
+        vllm_config=engine_config,
         is_driver_worker=True,
     )
     return model_runner
+
+
+def test_deepseek_mla_attn_backend_module():
+    model_runner = _create_model_runner(
+        "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+        trust_remote_code=True,
+        enable_chunked_prefill=False,
+    )
+    assert model_runner.attn_backend.__name__ == "TritonMLABackend"
 
 
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
@@ -46,7 +49,7 @@ def test_prepare_prompt(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(list(range(seq_len)))
+        seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -77,7 +80,7 @@ def test_prepare_prompt(batch_size):
     device = model_runner.device
     assert attn_metadata.num_prefills > 0
     assert attn_metadata.num_decode_tokens == 0
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_lens_tensor,
         torch.tensor(seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.seq_lens == seq_lens
@@ -90,7 +93,7 @@ def test_prepare_prompt(batch_size):
     for seq_len in seq_lens:
         start_idx += seq_len
         start_loc.append(start_idx)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
 
@@ -102,10 +105,10 @@ def test_prepare_prompt(batch_size):
         start_idx += seq_len
         seq_start_loc.append(start_idx)
 
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.context_lens_tensor,
         torch.zeros(attn_metadata.context_lens_tensor.shape[0],
                     dtype=torch.int,
@@ -114,7 +117,7 @@ def test_prepare_prompt(batch_size):
     expected = torch.tensor([[] for _ in range(len(seq_group_metadata_list))],
                             dtype=torch.int32,
                             device=model_runner.device)
-    assert torch.allclose(attn_metadata.block_tables, expected)
+    torch.testing.assert_close(attn_metadata.block_tables, expected)
     # Cuda graph should not be used for prerill.
     assert attn_metadata.use_cuda_graph is False
 
@@ -163,7 +166,7 @@ def test_prepare_decode_cuda_graph(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
-        seq_data = SequenceData(list(range(context_len)))
+        seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)
@@ -184,7 +187,8 @@ def test_prepare_decode_cuda_graph(batch_size):
         model_input.attn_metadata, model_input.attn_metadata.slot_mapping)
     assert len(slot_mapping) == len(input_tokens)
 
-    expected_bs = _get_graph_batch_size(len(seq_group_metadata_list))
+    expected_bs = model_runner.vllm_config.pad_for_cudagraph(
+        len(seq_group_metadata_list))
     # Verify input metadata is correct for prompts.
     device = model_runner.device
     assert attn_metadata.num_prefills == 0
@@ -201,7 +205,7 @@ def test_prepare_decode_cuda_graph(batch_size):
         # decode has only 1 token for query.
         start_idx += 1
         start_loc.append(start_idx)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
 
@@ -210,15 +214,15 @@ def test_prepare_decode_cuda_graph(batch_size):
     for seq_len in seq_lens:
         start_idx += seq_len
         seq_start_loc.append(start_idx)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_start_loc,
         torch.tensor(seq_start_loc, dtype=torch.int32, device=device))
 
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.context_lens_tensor,
         torch.tensor(context_lens, dtype=torch.int, device=device))
     assert attn_metadata.max_decode_seq_len == max(seq_lens)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_lens_tensor[:len(seq_lens)],
         torch.tensor(seq_lens, dtype=torch.int, device=device))
 
@@ -237,10 +241,8 @@ def test_prepare_decode_cuda_graph(batch_size):
 
     # Verify Sampling
     expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for _ in context_lens:
+    for selected_token_start_idx, _ in enumerate(context_lens):
         expected_selected_token_indices.append(selected_token_start_idx)
-        selected_token_start_idx += 1
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
         seq_lens,
@@ -324,7 +326,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(list(range(seq_len)))
+        seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -340,8 +342,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     for i in range(prefill_batch_size, batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
-        prompt_toks = list(range(context_len))
-        seq_data = SequenceData(prompt_toks)
+        seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.append_token_id(1, 0)
         seq_data.update_num_computed_tokens(context_len)
         seq_group_metadata = SequenceGroupMetadata(

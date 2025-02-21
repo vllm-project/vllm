@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
+from fractions import Fraction
 from typing import Callable, Optional, Union
 
 import torch
@@ -5,6 +8,7 @@ from torch.nn import Parameter
 
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.model_executor.utils import _make_synced_weight_loader
 
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
@@ -36,14 +40,32 @@ class BasevLLMParameter(Parameter):
         :returns: a torch.nn.parameter
         """
 
+        # During weight loading, we often do something like:
+        # narrowed_tensor = param.data.narrow(0, offset, len)
+        # narrowed_tensor.copy_(real_weight)
+        # expecting narrowed_tensor and param.data to share the same storage.
+        # However, on TPUs, narrowed_tensor will lazily propagate to the base
+        # tensor, which is param.data, leading to the redundant memory usage.
+        # This sometimes causes OOM errors during model loading. To avoid this,
+        # we sync the param tensor after its weight loader is called.
+        from vllm.platforms import current_platform
+        if current_platform.is_tpu():
+            weight_loader = _make_synced_weight_loader(weight_loader)
+
         self._weight_loader = weight_loader
 
     @property
     def weight_loader(self):
         return self._weight_loader
 
+    def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
+        cond1 = self.data.ndim == 1 and self.data.numel() == 1
+        cond2 = loaded_weight.ndim == 0 and loaded_weight.numel() == 1
+        return (cond1 and cond2)
+
     def _assert_and_load(self, loaded_weight: torch.Tensor):
-        assert self.data.shape == loaded_weight.shape
+        assert (self.data.shape == loaded_weight.shape
+                or self._is_1d_and_scalar(loaded_weight))
         self.data.copy_(loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
@@ -208,9 +230,16 @@ class PerTensorScaleParameter(BasevLLMParameter):
         if isinstance(shard_id, int):
             return shard_id
 
+        # if not int, assume shard_id for qkv
+        # map to int and return
         assert isinstance(shard_id, str)
         assert shard_id in self.qkv_idxs
         return self.qkv_idxs[shard_id]
+
+    # For row parallel layers, no sharding needed
+    # load weight into parameter as is
+    def load_row_parallel_weight(self, *args, **kwargs):
+        super().load_row_parallel_weight(*args, **kwargs)
 
     def load_merged_column_weight(self, *args, **kwargs):
         self._load_into_shard_id(*args, **kwargs)
@@ -219,7 +248,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
         self._load_into_shard_id(*args, **kwargs)
 
     def load_column_parallel_weight(self, *args, **kwargs):
-        self._load_into_shard_id(*args, **kwargs)
+        super().load_row_parallel_weight(*args, **kwargs)
 
     def _load_into_shard_id(self, loaded_weight: torch.Tensor,
                             shard_id: Union[str, int], **kwargs):
@@ -250,7 +279,7 @@ class PackedColumnParameter(_ColumnvLLMParameter):
     """
 
     def __init__(self,
-                 packed_factor: int,
+                 packed_factor: Union[int, Fraction],
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
                  **kwargs):
@@ -291,7 +320,7 @@ class PackedvLLMParameter(ModelWeightParameter):
     """
 
     def __init__(self,
-                 packed_factor: int,
+                 packed_factor: Union[int, Fraction],
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
                  **kwargs):
@@ -318,6 +347,73 @@ class PackedvLLMParameter(ModelWeightParameter):
             shard_offset=shard_offset,
             packed_factor=self.packed_factor,
             marlin_tile_size=self.marlin_tile_size)
+
+
+class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
+    """
+    Parameter class for weight scales loaded for weights with
+    block-wise quantization. Uses both column and row parallelism.
+    """
+
+    pass
+
+
+def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
+                          output_dim: int, **kwargs) -> BasevLLMParameter:
+    """
+    Permute a parameter's layout to the specified input and output dimensions, 
+    useful for forcing the parameter into a known layout, for example, if I need
+    a packed (quantized) weight matrix to be in the layout 
+        {input_dim = 0, output_dim = 1, packed_dim = 0}
+    then I can call:
+        permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
+    to ensure x is in the correct layout (permuting it to the correct layout if 
+    required, asserting if it cannot get it to the correct layout)
+    """
+
+    curr_input_dim = getattr(param, "input_dim", None)
+    curr_output_dim = getattr(param, "output_dim", None)
+
+    if curr_input_dim is None or curr_output_dim is None:
+        assert param.data.dim() == 2,\
+            "permute_param_layout_ only supports 2D parameters when either "\
+            "input_dim or output_dim is not set"
+
+    # if one of the dimensions is not set, set it to the opposite of the other
+    #  we can only do this since we asserted the parameter is 2D above
+    if curr_input_dim is None:
+        assert curr_output_dim is not None,\
+            "either input or output dim must be set"
+        curr_input_dim = (curr_output_dim + 1) % 2
+    if curr_output_dim is None:
+        assert curr_input_dim is not None,\
+            "either input or output dim must be set"
+        curr_output_dim = (curr_input_dim + 1) % 2
+
+    # create permutation from the current layout to the layout with
+    # self.input_dim at input_dim and self.output_dim at output_dim preserving
+    # other dimensions
+    perm = [
+        i for i in range(param.data.dim())
+        if i not in [curr_input_dim, curr_output_dim]
+    ]
+    perm.insert(input_dim, curr_input_dim)
+    perm.insert(output_dim, curr_output_dim)
+
+    if "packed_dim" in kwargs:
+        assert hasattr(param, "packed_dim") and\
+            param.packed_dim == perm[kwargs["packed_dim"]],\
+            "permute_param_layout_ currently doesn't support repacking"
+
+    param.data = param.data.permute(*perm)
+    if hasattr(param, "_input_dim"):
+        param._input_dim = input_dim
+    if hasattr(param, "_output_dim"):
+        param._output_dim = output_dim
+    if "packed_dim" in kwargs and hasattr(param, "_packed_dim"):
+        param._packed_dim = kwargs["packed_dim"]
+
+    return param
 
 
 def _adjust_shard_indexes_for_marlin(shard_size, shard_offset,

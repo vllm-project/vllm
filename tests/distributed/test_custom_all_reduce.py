@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import random
 
@@ -22,7 +24,7 @@ for i, v in enumerate(test_sizes):
 
 @ray.remote(num_gpus=1, max_calls=1)
 def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
-    del os.environ["CUDA_VISIBLE_DEVICES"]
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -50,7 +52,7 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
 
     for sz in test_sizes:
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            with graph_capture() as graph_capture_context:
+            with graph_capture(device=device) as graph_capture_context:
                 # use integers so result matches NCCL exactly
                 inp1 = torch.randint(1,
                                      16, (sz, ),
@@ -72,13 +74,13 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
                         out2 = tensor_model_parallel_all_reduce(inp2)
                         dist.all_reduce(inp2, group=group)
             graph.replay()
-            assert torch.allclose(out1, inp1)
-            assert torch.allclose(out2, inp2)
+            torch.testing.assert_close(out1, inp1)
+            torch.testing.assert_close(out2, inp2)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
 def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
-    del os.environ["CUDA_VISIBLE_DEVICES"]
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -95,14 +97,14 @@ def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
     inp = torch.ones(sz, dtype=torch.float32, device=device)
     out = inp
     for _ in range(num_communication):
-        out = fa.all_reduce_unreg(out)
-    assert torch.allclose(out, inp * (tp_size**num_communication))
+        out = fa.all_reduce(out, registered=False)
+    torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
     inp = torch.ones(sz * 4, dtype=torch.bfloat16, device=device)
     out = inp
     for _ in range(num_communication):
-        out = fa.all_reduce_unreg(out)
-    assert torch.allclose(out, inp * (tp_size**num_communication))
+        out = fa.all_reduce(out, registered=False)
+    torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
 
 @pytest.mark.parametrize("tp_size", [2])

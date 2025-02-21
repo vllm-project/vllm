@@ -26,6 +26,7 @@
 #include <iostream>
 
 #include "common/base.h"
+#include "core/registration.h"
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   #include "common/mem.h"
@@ -95,8 +96,8 @@ __device__ inline FragB dequant(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
-  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
+  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   const int SUB = 0x64086408;
@@ -1065,4 +1066,8 @@ torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                             thread_n, sms, marlin_dense::max_par);
 
   return c;
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("marlin_gemm", &marlin_gemm);
 }

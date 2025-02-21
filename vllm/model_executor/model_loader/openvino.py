@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # ruff: noqa: SIM117
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -11,13 +13,13 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
-from vllm.config import DeviceConfig, ModelConfig
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import (LogitsProcessor,
                                                          _prune_hidden_states)
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -52,25 +54,15 @@ def _modify_cache_parameters(model: ov.Model, kv_cache_dtype: ov.Type,
         shape = parameter.get_partial_shape()
         # use real block size if available, just a placeholder
         # to provide the expected rank
-        x_size = 1
         num_blocks = ov.Dimension()
         block_size = ov.Dimension()
         head_size = ov.Dimension()
-        # TODO: Negotiate required layout with plugins (CPU is ~OK, GPU is TBD),
-        # pass more parameters to this function to set more static dimensions
         if input_name.startswith("key_cache."):
             cpu_shape = [num_blocks, shape[1], block_size, head_size]
-            gpu_shape = [
-                num_blocks,
-                shape[1],
-                shape[2].get_length() //
-                x_size if shape[2].is_static else ov.Dimension(),
-                block_size,
-                x_size,
-            ]
+            gpu_shape = [num_blocks, shape[1], shape[2], block_size]
         elif input_name.startswith("value_cache."):
             cpu_shape = [num_blocks, shape[1], block_size, head_size]
-            gpu_shape = [num_blocks, shape[1], shape[2], block_size]
+            gpu_shape = [num_blocks, shape[1], block_size, shape[2]]
         else:
             continue
         parameter.set_partial_shape(
@@ -105,12 +97,12 @@ def _require_model_export(model_id, revision=None, subfolder=None):
         return True
 
 
-class OpenVINOCasualLM(nn.Module):
+class OpenVINOCausalLM(nn.Module):
 
     def __init__(
         self,
+        ov_core: ov.Core,
         model_config: ModelConfig,
-        device_config: DeviceConfig,
         kv_cache_dtype: ov.Type,
     ) -> None:
         super().__init__()
@@ -142,12 +134,12 @@ class OpenVINOCasualLM(nn.Module):
             trust_remote_code=model_config.trust_remote_code,
         )
 
+        ov_device = envs.VLLM_OPENVINO_DEVICE
         paged_attention_transformation(pt_model.model)
         _modify_cache_parameters(pt_model.model, kv_cache_dtype,
-                                 device_config.device.type == "cpu")
+                                 current_platform.is_openvino_cpu())
 
-        core = ov.Core()
-        ov_compiled = core.compile_model(pt_model.model, "CPU")
+        ov_compiled = ov_core.compile_model(pt_model.model, ov_device)
         self.ov_request = ov_compiled.create_infer_request()
 
     def forward(
@@ -194,12 +186,12 @@ class OpenVINOCasualLM(nn.Module):
 
 
 def get_model(
-    model_config: ModelConfig,
-    device_config: DeviceConfig,
+    vllm_config: VllmConfig,
     kv_cache_dtype: ov.Type,
     **kwargs,
 ) -> torch.nn.Module:
-    lora_config = kwargs.get("lora_config", None)
+    lora_config = kwargs.get("lora_config")
+    ov_core = kwargs.get("ov_core")
     if lora_config:
         raise ValueError(
             "OpenVINO modeling does not support LoRA, "
@@ -207,4 +199,6 @@ def get_model(
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
 
-    return OpenVINOCasualLM(model_config, device_config, kv_cache_dtype)
+    with set_current_vllm_config(vllm_config):
+        return OpenVINOCausalLM(ov_core, vllm_config.model_config,
+                                kv_cache_dtype)

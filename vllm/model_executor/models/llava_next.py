@@ -1,60 +1,50 @@
-import itertools
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+# SPDX-License-Identifier: Apache-2.0
+
+from abc import abstractmethod
+from functools import cached_property
+from typing import (Final, Iterable, List, Literal, Mapping, Optional,
+                    Protocol, Set, Tuple, TypedDict, TypeVar, Union)
 
 import torch
 import torch.nn as nn
-from PIL import Image
-from transformers import CLIPVisionConfig, LlavaNextConfig, SiglipVisionConfig
+from transformers import BatchFeature, LlavaNextConfig, LlavaNextProcessor
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.config import VllmConfig
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
+from vllm.multimodal.parse import ImageSize
+from vllm.sequence import IntermediateTensors
 
-from .clip import (CLIPVisionModel, dummy_image_for_clip,
-                   dummy_seq_data_for_clip, get_clip_image_feature_size,
-                   get_clip_patch_grid_length, input_processor_for_clip)
-from .interfaces import SupportsMultiModal
-from .llava import LlavaMultiModalProjector
-from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
-                     dummy_seq_data_for_siglip, get_siglip_image_feature_size,
-                     get_siglip_patch_grid_length, input_processor_for_siglip)
-from .utils import (filter_weights, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
-
-logger = init_logger(__name__)
-
-_KEYS_TO_MODIFY_MAPPING = {
-    "language_model.lm_head": "lm_head",
-    "language_model.model": "language_model",
-}
-
-# Result in the max possible feature size (2x2 grid of 336x336px tiles)
-MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
+from .clip import CLIPVisionModel
+from .interfaces import SupportsMultiModal, SupportsPP
+from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
+                    LlavaDummyInputsBuilder, LlavaLikeConfig,
+                    LlavaMultiModalProjector, init_vision_tower_for_llava)
+from .siglip import SiglipVisionModel
+from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix)
 
 
 class LlavaNextImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: Union[torch.Tensor, List[torch.Tensor]]
     """
-    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
+    Shape:
+    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
 
-    Note that `num_patches` may be different for each batch, in which case
-    the data is passed as a list instead of a batched tensor.
+    Note that `num_patches` may be different per batch and image,
+    in which case the data is passed as a list instead of a batched tensor.
     """
 
     image_sizes: NotRequired[torch.Tensor]
     """
-    Shape: `(batch_size, 2)`
+    Shape: `(batch_size * num_images, 2)`
 
     This should be in `(height, width)` format.
     """
@@ -63,7 +53,7 @@ class LlavaNextImagePixelInputs(TypedDict):
 class LlavaNextImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
-    """Shape: `(batch_size, image_feature_size, hidden_size)`
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
@@ -73,238 +63,215 @@ LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
                              LlavaNextImageEmbeddingInputs]
 
 
-# Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L79
-def _get_llava_next_num_unpadded_features(
-    original_height: int,
-    original_width: int,
-    npatches: int,
-    num_patch_height: int,
-    num_patch_width: int,
-) -> Tuple[int, int]:
-    current_height = npatches * num_patch_height
-    current_width = npatches * num_patch_width
-
-    aspect_ratio = original_width / original_height
-    current_aspect_ratio = current_width / current_height
-
-    if aspect_ratio > current_aspect_ratio:
-        new_height = (original_height * current_width) // original_width
-        padding = (current_height - new_height) // 2
-        current_height -= padding * 2
-    else:
-        new_width = (original_width * current_height) // original_height
-        padding = (current_width - new_width) // 2
-        current_width -= padding * 2
-
-    unpadded_features = current_height * current_width
-    newline_features = current_height
-    return (unpadded_features, newline_features)
+class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
+    image_grid_pinpoints: Final[list[list[int]]]
 
 
-# Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L106
-def get_llava_next_image_feature_size(
-    hf_config: LlavaNextConfig,
-    *,
-    input_height: int,
-    input_width: int,
-) -> int:
-    vision_config = hf_config.vision_config
+class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
 
-    if isinstance(vision_config, CLIPVisionConfig):
-        num_patches = get_clip_patch_grid_length(
-            image_size=vision_config.image_size,
-            patch_size=vision_config.patch_size,
-        )
-        base_feature_size = get_clip_image_feature_size(vision_config)
-    elif isinstance(vision_config, SiglipVisionConfig):
-        num_patches = get_siglip_patch_grid_length(
-            image_size=vision_config.image_size,
-            patch_size=vision_config.patch_size,
-        )
-        base_feature_size = get_siglip_image_feature_size(vision_config)
-    else:
-        msg = f"Unsupported vision config: {type(vision_config)}"
-        raise NotImplementedError(msg)
+    def get_hf_config(self) -> LlavaNextLikeConfig:
+        return self.ctx.get_hf_config(LlavaNextConfig)
 
-    strategy = hf_config.vision_feature_select_strategy
-    if strategy == "default":
-        base_feature_size -= 1
-    elif strategy == "full":
-        pass
-    else:
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
+    def get_hf_processor(self, **kwargs: object):
+        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor, **kwargs)
 
-    num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-        image_size=(input_height, input_width),
-        grid_pinpoints=hf_config.image_grid_pinpoints,
-        patch_size=vision_config.image_size,
-    )
+        # In case patch_size is omitted from `processor_config.json`
+        # e.g. for E5-V: https://huggingface.co/royokong/e5-v
+        if hf_processor.patch_size is None:
+            patch_size = self.get_vision_encoder_info().get_patch_size()
+            hf_processor.patch_size = patch_size
 
-    (
-        unpadded_feature_size,
-        newline_feature_size,
-    ) = _get_llava_next_num_unpadded_features(input_height, input_width,
-                                              num_patches, num_patch_height,
-                                              num_patch_width)
+        return hf_processor
 
-    return unpadded_feature_size + newline_feature_size + base_feature_size
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_encoder_info = self.get_vision_encoder_info()
 
-
-def get_max_llava_next_image_tokens(ctx: InputContext):
-    return get_llava_next_image_feature_size(
-        ctx.get_hf_config(LlavaNextConfig),
-        input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
-        input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-    )
-
-
-def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
-    hf_config = ctx.get_hf_config(LlavaNextConfig)
-    vision_config = hf_config.vision_config
-
-    image_feature_size = get_max_llava_next_image_tokens(ctx)
-
-    if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = dummy_seq_data_for_clip(
-            vision_config,
-            seq_len,
-            image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
+        base_feature_size = self._apply_feature_select_strategy(
+            hf_config.vision_feature_select_strategy,
+            vision_encoder_info.get_num_image_tokens(
+                image_width=image_width,
+                image_height=image_height,
+            ),
         )
 
-        mm_data = dummy_image_for_clip(
-            vision_config,
-            image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-            image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+            image_size=(image_height, image_width),
+            grid_pinpoints=hf_config.image_grid_pinpoints,
+            patch_size=vision_encoder_info.get_image_size(),
         )
 
-        return seq_data, mm_data
-    elif isinstance(vision_config, SiglipVisionConfig):
-        seq_data = dummy_seq_data_for_siglip(
-            vision_config,
-            seq_len,
-            image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
+        (
+            unpadded_feature_size,
+            newline_feature_size,
+        ) = self._get_num_unpadded_features(
+            original_height=image_height,
+            original_width=image_width,
+            npatches=vision_encoder_info.get_patch_grid_length(),
+            num_patch_height=num_patch_height,
+            num_patch_width=num_patch_width,
         )
 
-        mm_data = dummy_image_for_siglip(
-            vision_config,
-            image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-            image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        return unpadded_feature_size + newline_feature_size + base_feature_size
+
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
+    def _get_num_unpadded_features(
+        self,
+        *,
+        original_height: int,
+        original_width: int,
+        npatches: int,
+        num_patch_height: int,
+        num_patch_width: int,
+    ) -> tuple[int, int]:
+        current_height = npatches * num_patch_height
+        current_width = npatches * num_patch_width
+
+        aspect_ratio = original_width / original_height
+        current_aspect_ratio = current_width / current_height
+
+        if aspect_ratio > current_aspect_ratio:
+            new_height = (original_height * current_width) // original_width
+            padding = (current_height - new_height) // 2
+            current_height = current_height - (2 * padding)
+        else:
+            new_width = (original_width * current_height) // original_height
+            padding = (current_width - new_width) // 2
+            current_width = current_width - (2 * padding)
+
+        unpadded_features = current_height * current_width
+        newline_features = current_height
+
+        return (unpadded_features, newline_features)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self.get_hf_config()
+
+        largest_feature_size, largest_feature_pinpoint = 0, None
+        for (height, width) in hf_config.image_grid_pinpoints:
+            feat_size = self.get_num_image_tokens(image_width=width,
+                                                  image_height=height)
+            if feat_size > largest_feature_size:
+                largest_feature_size = feat_size
+                largest_feature_pinpoint = ImageSize(width=width,
+                                                     height=height)
+
+        if largest_feature_size == 0 or largest_feature_pinpoint is None:
+            raise ValueError("Cannot have a largest feature size of 0!")
+
+        return largest_feature_pinpoint
+
+
+_I = TypeVar("_I", bound=LlavaNextProcessingInfo)
+
+
+class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
+
+    # Copied from BaseMultiModalProcessor
+    @abstractmethod
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        raise NotImplementedError
+
+
+class LlavaNextMultiModalProcessor(
+        BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo]):
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-        return seq_data, mm_data
 
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
+@MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor,
+                                        info=LlavaNextProcessingInfo,
+                                        dummy_inputs=LlavaDummyInputsBuilder)
+class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                        SupportsPP):
 
-
-def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
-
-    model_config = ctx.model_config
-    hf_config = ctx.get_hf_config(LlavaNextConfig)
-    vision_config = hf_config.vision_config
-
-    image_data = multi_modal_data["image"]
-    if isinstance(image_data, Image.Image):
-        width, height = image_data.size
-
-        image_feature_size = get_llava_next_image_feature_size(
-            hf_config,
-            input_height=height,
-            input_width=width,
-        )
-    elif isinstance(image_data, torch.Tensor):
-        image_feature_size = image_data.shape[0]
-    else:
-        raise TypeError(f"Invalid image type: {type(image_data)}")
-
-    vision_config = hf_config.vision_config
-
-    if isinstance(vision_config, CLIPVisionConfig):
-        return input_processor_for_clip(
-            model_config,
-            vision_config,
-            llm_inputs,
-            image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
-        )
-    elif isinstance(vision_config, SiglipVisionConfig):
-        return input_processor_for_siglip(
-            model_config,
-            vision_config,
-            llm_inputs,
-            image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
-        )
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
-def _init_vision_tower(hf_config: LlavaNextConfig):
-    vision_config = hf_config.vision_config
-
-    # Initialize the vision tower only up to the required feature layer
-    vision_feature_layer = hf_config.vision_feature_layer
-    if vision_feature_layer < 0:
-        num_hidden_layers = hf_config.vision_config.num_hidden_layers \
-            + vision_feature_layer + 1
-    else:
-        num_hidden_layers = vision_feature_layer + 1
-
-    if isinstance(vision_config, CLIPVisionConfig):
-        return CLIPVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
-    elif isinstance(vision_config, SiglipVisionConfig):
-        return SiglipVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
-@MULTIMODAL_REGISTRY.register_image_input_mapper()
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_next_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next)
-class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
-
-    def __init__(self,
-                 config: LlavaNextConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+
+        vision_feature_layer = config.vision_feature_layer
+        # Determine the layer up to which we will initialize the vision tower
+        if isinstance(vision_feature_layer, int):
+            vision_hidden_size = config.vision_config.hidden_size
+            self.feature_sample_layers = None
+        # Used for multimodal granite models to control encoder outputs
+        elif isinstance(vision_feature_layer, (list, tuple)):
+            vision_hidden_size = config.vision_config.hidden_size * len(
+                vision_feature_layer)
+            self.feature_sample_layers = vision_feature_layer
+        else:
+            raise TypeError(
+                f"vision_layer_feature type: {type(vision_feature_layer)}"
+                " is not supported")
 
         self.config = config
         self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = _init_vision_tower(config)
-        self.multi_modal_projector = LlavaMultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
-            text_hidden_size=config.text_config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act)
-
-        self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
-
+        self.vision_tower = init_vision_tower_for_llava(
+            config,
+            quant_config,
+            require_post_norm=False,
+            prefix=maybe_prefix(prefix, "vision_tower"))
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
+        self.multi_modal_projector = LlavaMultiModalProjector(
+            vision_hidden_size=vision_hidden_size,
+            text_hidden_size=config.text_config.hidden_size,
+            projector_hidden_act=config.projector_hidden_act,
+            multimodal_projector_bias=config.multimodal_projector_bias)
+
+        self.language_model = init_vllm_registered_model(
+            vllm_config=vllm_config,
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
+
+    @cached_property
+    def sampler(self):
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+
+        return get_sampler()
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != [2]:
-            raise ValueError(
-                f"The expected image sizes shape is batch dimension plus "
-                f"{[2]}. You supplied {data.shape}.")
+        expected_dims = (2, )
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape)
+
+            if actual_dims != expected_dims:
+                expected_expr = str(expected_dims)
+                raise ValueError(
+                    f"The expected shape of image sizes per image per batch "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
 
         return data
 
@@ -321,7 +288,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
             if actual_dims != expected_dims:
                 expected_expr = ("num_patches", *map(str, expected_dims))
                 raise ValueError(
-                    "The expected shape of pixel values in each batch element "
+                    "The expected shape of pixel values per image per batch "
                     f"is {expected_expr}. You supplied {tuple(d.shape)}.")
 
         for d in data:
@@ -343,14 +310,15 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            if not isinstance(image_sizes, torch.Tensor):
+            if not isinstance(image_sizes, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image sizes. "
                                  f"Got type: {type(image_sizes)}")
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(pixel_values),
-                image_sizes=self._validate_image_sizes(image_sizes),
+                data=self._validate_pixel_values(flatten_bn(pixel_values)),
+                image_sizes=self._validate_image_sizes(
+                    flatten_bn(image_sizes, concat=True)),
             )
 
         if image_embeds is not None:
@@ -360,7 +328,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
 
             return LlavaNextImageEmbeddingInputs(
                 type="image_embeds",
-                data=image_embeds,
+                data=flatten_bn(image_embeds),
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -383,7 +351,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values)
+        image_features = vision_tower(
+            pixel_values, feature_sample_layers=self.feature_sample_layers)
 
         return self._select_image_features(
             image_features,
@@ -419,7 +388,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                     self.config.image_grid_pinpoints,
                     self.config.vision_config.image_size,
                 )
-                other_patch_embeds = other_patch_embeds \
+                num_patches = num_patch_height * num_patch_width
+
+                # Image patches might be padded for batch processing
+                other_patch_embeds = other_patch_embeds[:num_patches] \
                     .view(num_patch_height, num_patch_width, height, width, -1)
 
                 if "unpad" in strategy:
@@ -460,7 +432,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
     def _process_image_pixels(
         self,
         inputs: LlavaNextImagePixelInputs,
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         assert self.vision_tower is not None
 
         pixel_values = inputs["data"]
@@ -481,16 +453,13 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
         stacked_image_features = self._image_pixels_to_features(
             self.vision_tower, stacked_pixel_values)
 
-        return [
-            self.multi_modal_projector(image_features) for image_features in
-            torch.split(stacked_image_features, num_patches_per_batch)
-        ]
+        return torch.split(self.multi_modal_projector(stacked_image_features),
+                           num_patches_per_batch)
 
     def _process_image_input(
         self,
         image_input: LlavaNextImageInputs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
-
         if image_input["type"] == "image_embeds":
             return [image_input["data"]]
 
@@ -511,6 +480,30 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
             for i, patch_features_batch in enumerate(patch_embeddings)
         ]
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        vision_embeddings = self._process_image_input(image_input)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+
+        if multimodal_embeddings is None:
+            return self.language_model.get_input_embeddings(input_ids)
+
+        inputs_embeds = embed_multimodal(
+            input_ids,
+            self.config.image_token_index,
+            self.language_model.model.get_input_embeddings,
+            multimodal_embeddings,
+        )
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -518,8 +511,9 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for LlaVA-NeXT.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -539,7 +533,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
         9047, 13566, 29901]`.
 
         To reserve space in KV cache, we have to insert placeholder tokens
-        before they are inputted to the model, so the input processor prepends 
+        before they are inputted to the model, so the input processor prepends
         additional image tokens (denoted as `32000`), resulting in:
         `[1, 319, 13563, 1546, 263, 12758, 5199, 322, 385, 23116, 21082, 20255,
         29889, 450, 20255, 4076, 8444, 29892, 13173, 29892, 322, 1248, 568,
@@ -560,32 +554,27 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                 batch.
             pixel_values: The pixels in each grid patch for each input image.
             image_sizes: The original `(height, width)` for each input image.
-        
+
         See also:
             :class:`LlavaNextImageInputs`
         """
-        image_input = self._parse_and_validate_image_input(**kwargs)
-
-        if image_input is not None:
-            vision_embeddings = self._process_image_input(image_input)
-            inputs_embeds = self.language_model.model.get_input_embeddings(
-                input_ids)
-
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
-                self.config.image_token_index)
-
-            input_ids = None
-        else:
+        if intermediate_tensors is not None:
             inputs_embeds = None
+
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
                                                   kv_caches,
                                                   attn_metadata,
-                                                  None,
+                                                  intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
-
         return hidden_states
 
     def compute_logits(
@@ -603,33 +592,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
-        vit_weights, mlp_weights, newline_weights, llm_weights = itertools.tee(
-            weights, 4)
-
-        # load vision encoder
-        vit_weights = filter_weights(vit_weights, "vision_tower")
-        self.vision_tower.load_weights(vit_weights)
-
-        # load mlp projector
-        mlp_weights = filter_weights(mlp_weights, "multi_modal_projector")
-        mlp_params_dict = dict(self.multi_modal_projector.named_parameters())
-        for name, loaded_weight in mlp_weights:
-            param = mlp_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load newline
-        newline_weights = filter_weights(newline_weights, "image_newline")
-        for name, loaded_weight in newline_weights:
-            assert name == ""
-            param = self.image_newline
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load llm backbone
-        llm_weights = filter_weights(llm_weights, "language_model")
-        self.language_model.load_weights(llm_weights)
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

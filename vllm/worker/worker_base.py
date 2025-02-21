@@ -1,40 +1,97 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
-import importlib
 import os
 import time
-from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
+from abc import abstractmethod
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
+import cloudpickle
 import torch
+import torch.nn as nn
 
-from vllm.config import ObservabilityConfig
+from vllm.config import (ObservabilityConfig, VllmConfig,
+                         set_current_vllm_config)
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
-from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
-                           SamplerOutput)
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
-                        update_environment_variables)
-from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
+                        resolve_obj_by_qualname, run_method,
+                        update_environment_variables,
+                        warn_for_unimplemented_methods)
+from vllm.worker.model_runner_base import (BroadcastableModelInput,
+                                           ModelRunnerBase,
+                                           ModelRunnerInputBase)
 
 logger = init_logger(__name__)
 
 
-class WorkerBase(ABC):
+@warn_for_unimplemented_methods
+class WorkerBase:
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
     """
 
-    @abstractmethod
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+    ) -> None:
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
+        self.compilation_config = vllm_config.compilation_config
+        from vllm.platforms import current_platform
+        self.current_platform = current_platform
+
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
         """
         raise NotImplementedError
 
-    @abstractmethod
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        """Initialize the KV cache with the given size in blocks.
+        """
+        raise NotImplementedError
+
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
+
+    def load_model(self) -> None:
+        """Load model onto target device."""
+        raise NotImplementedError
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
+        raise NotImplementedError
+
+    def start_worker_execution_loop(self) -> None:
+        """Execute model loop in parallel worker.
+
+        You can stop the loop by executing a driver worker with an empty output.
+        See `stop_remote_worker_execution_loop` for more details.
+        """
+        with self.current_platform.inference_mode():
+            while True:
+                output = self.execute_model(execute_model_req=None)
+                if output is None:
+                    return None
+
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
@@ -49,54 +106,87 @@ class WorkerBase(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """Initialize the KV cache with the given size in blocks.
-        """
-        raise NotImplementedError
-
-    @current_platform.inference_mode()
-    def start_worker_execution_loop(self) -> None:
-        """Execute model loop in parallel worker.
-
-        You can stop the loop by executing a driver worker with an empty output.
-        See `stop_remote_worker_execution_loop` for more details.
-        """
-        while True:
-            output = self.execute_model(execute_model_req=None)
-            if output is None:
-                return None
-
-    @abstractmethod
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
-        raise NotImplementedError
-
-    @abstractmethod
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
         """
         raise NotImplementedError
 
-    @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def list_loras(self) -> Set[int]:
         raise NotImplementedError
+
+    @property
+    def vocab_size(self) -> int:
+        """Get vocabulary size from model configuration."""
+        return self.model_config.get_vocab_size()
+
+
+class DelegateWorkerBase(WorkerBase):
+    """
+    A class that delegates all methods to another WorkerBase instance. This is
+    useful for creating a WorkerBase that wraps another WorkerBase instance,
+    e.g. speculative decoding.
+    """
+    worker: WorkerBase
+
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ) -> None:
+        vllm_config: VllmConfig = kwargs.get("vllm_config")
+        cls = resolve_obj_by_qualname(vllm_config.parallel_config.worker_cls)
+        self.worker = cls(*args, **kwargs)
+
+    def init_device(self) -> None:
+        self.worker.init_device()
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        return self.worker.determine_num_available_blocks()
+
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def load_model(self) -> None:
+        """Load model onto target device."""
+        self.worker.load_model()
+
+    def get_model(self) -> nn.Module:
+        return self.worker.get_model()
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
+        return self.worker.execute_model(execute_model_req)
+
+    def get_cache_block_size_bytes(self) -> int:
+        return self.worker.get_cache_block_size_bytes()
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.worker.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.worker.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.worker.pin_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.worker.list_loras()
+
+    def __getattr__(self, attr):
+        return getattr(self.worker, attr)
 
 
 class LoraNotSupportedWorkerBase(WorkerBase):
@@ -220,7 +310,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         raise NotImplementedError
 
     def _get_worker_input_from_broadcast(
-            self) -> Optional[Tuple[ModelRunnerInputBase, WorkerInput]]:
+        self
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+            str, torch.Tensor]]]:
         """ Get the worker input from the broadcasted tensor dict. """
         assert self.do_metadata_broadcast
         assert not self.is_driver_worker
@@ -233,11 +325,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             self.model_runner.make_model_input_from_broadcasted_tensor_dict(
                 broadcast_data))
 
-        return model_input, worker_input
+        kwargs = extract_previous_hidden_states(broadcast_data)
+
+        return model_input, worker_input, kwargs
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Tuple[ModelRunnerInputBase, WorkerInput]:
+    ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
         """ Get the driver input and broadcast it to other workers.  """
         assert self.is_driver_worker
 
@@ -249,17 +343,26 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 execute_model_req.virtual_engine,
                 execute_model_req.finished_requests_ids))
 
+        kwargs = extract_previous_hidden_states(execute_model_req)
+
         if self.do_metadata_broadcast:
             broadcast_data = worker_input.as_broadcastable_tensor_dict()
             broadcast_data.update(model_input.as_broadcastable_tensor_dict())
+            broadcast_data.update(kwargs)
             broadcast_tensor_dict(broadcast_data, src=0)
 
-        return model_input, worker_input
+        if execute_model_req.async_callback:
+            model_input = dataclasses.replace(  # type: ignore
+                model_input,
+                async_callback=execute_model_req.async_callback)
+
+        return model_input, worker_input, kwargs
 
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[Tuple[ModelRunnerInputBase, WorkerInput]]:
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+            str, torch.Tensor]]]:
         """
         Prepare the inputs to ModelRunner and workers.
         """
@@ -277,9 +380,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         else:
             return self._get_worker_input_from_broadcast()
 
+    def get_model(self) -> nn.Module:
+        return self.model_runner.get_model()
+
     def execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
@@ -289,8 +395,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if inputs is None:
             return None
 
-        model_input, worker_input = inputs
+        model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
+        if (execute_model_req is not None and execute_model_req.spec_step_idx):
+            kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
 
@@ -310,12 +418,18 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     "model_execute_time", torch.tensor(0)).item()
 
         output = self.model_runner.execute_model(
-            model_input, self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None, intermediate_tensors,
-            num_steps)
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
+            num_steps=num_steps,
+            **kwargs,
+        )
+
         model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
+            assert isinstance(output, IntermediateTensors)
             if (self.observability_config is not None
                     and self.observability_config.collect_model_execute_time):
                 output.tensors["model_execute_time"] = torch.tensor(
@@ -358,42 +472,67 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
+        kwargs = extract_previous_hidden_states(execute_model_req)
+
         return self.model_runner.execute_model(
-            model_input, self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None, intermediate_tensors)
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
+            **kwargs,
+        )
 
 
 class WorkerWrapperBase:
     """
-    The whole point of this class is to lazily initialize the worker.
+    This class represents one process in an executor/engine. It is responsible
+    for lazily initializing the worker and handling the worker's lifecycle.
     We first instantiate the WorkerWrapper, which remembers the worker module
     and class name. Then, when we call `update_environment_variables`, and the
     real initialization happens in `init_worker`.
-
-    If worker_class_fn is specified, it will be executed to get the worker
-    class.
-    Otherwise, the worker class will be obtained by dynamically importing it
-    using worker_module_name and worker_class_name.
     """
 
     def __init__(
         self,
-        worker_module_name: str,
-        worker_class_name: str,
-        trust_remote_code: bool = False,
-        worker_class_fn: Optional[Callable[[],
-                                           Type[WorkerBase]]] = None) -> None:
-        self.worker_module_name = worker_module_name
-        self.worker_class_name = worker_class_name
-        self.worker_class_fn = worker_class_fn
+        vllm_config: VllmConfig,
+        rpc_rank: int = 0,
+    ) -> None:
+        """
+        Initialize the worker wrapper with the given vllm_config and rpc_rank.
+        Note: rpc_rank is the rank of the worker in the executor. In most cases,
+        it is also the rank of the worker in the distributed group. However,
+        when multiple executors work together, they can be different.
+        e.g. in the case of SPMD-style offline inference with TP=2,
+        users can launch 2 engines/executors, each with only 1 worker.
+        All workers have rpc_rank=0, but they have different ranks in the TP
+        group.
+        """
+        self.rpc_rank = rpc_rank
         self.worker: Optional[WorkerBase] = None
-        if trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
-            init_cached_hf_modules()
+        # do not store this `vllm_config`, `init_worker` will set the final
+        # one. TODO: investigate if we can remove this field in
+        # `WorkerWrapperBase`, `init_cached_hf_modules` should be
+        # unnecessary now.
+        if vllm_config.model_config is not None:
+            # it can be None in tests
+            trust_remote_code = vllm_config.model_config.trust_remote_code
+            if trust_remote_code:
+                # note: lazy import to avoid importing torch before initializing
+                from vllm.utils import init_cached_hf_modules
+                init_cached_hf_modules()
 
-    @staticmethod
-    def update_environment_variables(envs: Dict[str, str]) -> None:
+    def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
+        """
+        Adjust the rpc_rank based on the given mapping.
+        It is only used during the initialization of the executor,
+        to adjust the rpc_rank of workers after we create all workers.
+        """
+        if self.rpc_rank in rank_mapping:
+            self.rpc_rank = rank_mapping[self.rpc_rank]
+
+    def update_environment_variables(self, envs_list: List[Dict[str,
+                                                                str]]) -> None:
+        envs = envs_list[self.rpc_rank]
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
@@ -401,39 +540,66 @@ class WorkerWrapperBase:
             del os.environ[key]
         update_environment_variables(envs)
 
-    def init_worker(self, *args, **kwargs):
+    def init_worker(self, all_kwargs: List[Dict[str, Any]]) -> None:
         """
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
-        enable_trace_function_call_for_thread()
-
-        # see https://github.com/NVIDIA/nccl/issues/1234
-        os.environ['NCCL_CUMEM_ENABLE'] = '0'
+        kwargs = all_kwargs[self.rpc_rank]
+        self.vllm_config = kwargs.get("vllm_config", None)
+        assert self.vllm_config is not None, (
+            "vllm_config is required to initialize the worker")
+        enable_trace_function_call_for_thread(self.vllm_config)
 
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
-        if self.worker_class_fn:
-            worker_class = self.worker_class_fn()
+        if isinstance(self.vllm_config.parallel_config.worker_cls, str):
+            worker_class = resolve_obj_by_qualname(
+                self.vllm_config.parallel_config.worker_cls)
         else:
-            mod = importlib.import_module(self.worker_module_name)
-            worker_class = getattr(mod, self.worker_class_name)
+            assert isinstance(self.vllm_config.parallel_config.worker_cls,
+                              bytes)
+            worker_class = cloudpickle.loads(
+                self.vllm_config.parallel_config.worker_cls)
+        with set_current_vllm_config(self.vllm_config):
+            # To make vLLM config available during worker initialization
+            self.worker = worker_class(**kwargs)
+            assert self.worker is not None
 
-        self.worker = worker_class(*args, **kwargs)
-        assert self.worker is not None
-
-    def execute_method(self, method, *args, **kwargs):
+    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
             target = self if self.worker is None else self.worker
-            executor = getattr(target, method)
-            return executor(*args, **kwargs)
+            return run_method(target, method, args, kwargs)
         except Exception as e:
             # if the driver worker also execute methods,
             # exceptions in the rest worker may cause deadlock in rpc like ray
             # see https://github.com/vllm-project/vllm/issues/3455
             # print the error and inform the user to solve the error
-            msg = (f"Error executing method {method}. "
+            msg = (f"Error executing method {method!r}. "
                    "This might cause deadlock in distributed execution.")
             logger.exception(msg)
             raise e
+
+    def __getattr__(self, attr):
+        return getattr(self.worker, attr)
+
+
+def extract_previous_hidden_states(
+        data: Union[ExecuteModelRequest, Dict[str, torch.Tensor]]) -> \
+            Dict[str, torch.Tensor]:
+    """If data contains previous_hidden_states, extract it. This returns a dict
+    which can be used directly as additional kwargs in any following 
+    execute_model calls. This is used in draft models like EAGLE."""
+    output = {}
+
+    # When called from non-driver worker, data is dict but when called from
+    # driver worker, data is ExecuteModelRequest.
+    if isinstance(data, dict):
+        if "previous_hidden_states" in data:
+            output["previous_hidden_states"] = data["previous_hidden_states"]
+    elif data.previous_hidden_states is not None:
+        output["previous_hidden_states"] = data.previous_hidden_states\
+            .hidden_states
+
+    return output

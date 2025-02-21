@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 LM eval harness on model to compare vs HF baseline computed offline.
 Configs are found in configs/$MODEL.yaml
@@ -49,10 +50,15 @@ def test_lm_eval_correctness():
     results = launch_lm_eval(eval_config)
 
     # Confirm scores match ground truth.
+    success = True
     for task in eval_config["tasks"]:
         for metric in task["metrics"]:
             ground_truth = metric["value"]
             measured_value = results["results"][task["name"]][metric["name"]]
             print(f'{task["name"]} | {metric["name"]}: '
                   f'ground_truth={ground_truth} | measured={measured_value}')
-            assert numpy.isclose(ground_truth, measured_value, rtol=RTOL)
+            success = success and numpy.isclose(
+                ground_truth, measured_value, rtol=RTOL)
+
+    # Assert at the end, print all scores even on failure for debugging.
+    assert success

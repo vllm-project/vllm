@@ -1,11 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List
 
 import pytest
 
 import vllm
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
-
-from .conftest import cleanup
 
 MODEL_PATH = "baichuan-inc/Baichuan-7B"
 
@@ -41,6 +42,14 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 def test_baichuan_lora(baichuan_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
@@ -63,12 +72,11 @@ def test_baichuan_lora(baichuan_lora_files):
         assert output2[i] == expected_lora_output[i]
 
 
-@pytest.mark.skip("Requires multiple GPUs")
 @pytest.mark.parametrize("fully_sharded", [True, False])
-def test_baichuan_tensor_parallel_equality(baichuan_lora_files, fully_sharded):
-    # Cannot use as it will initialize torch.cuda too early...
-    # if torch.cuda.device_count() < 4:
-    #     pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
+def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
+                                           num_gpus_available, fully_sharded):
+    if num_gpus_available < 4:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
 
     llm_tp1 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
@@ -81,7 +89,7 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files, fully_sharded):
     output_tp1 = do_sample(llm_tp1, baichuan_lora_files, lora_id=1)
 
     del llm_tp1
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     llm_tp2 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
@@ -94,7 +102,7 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files, fully_sharded):
     output_tp2 = do_sample(llm_tp2, baichuan_lora_files, lora_id=2)
 
     del llm_tp2
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     assert output_tp1 == output_tp2
 
@@ -109,6 +117,6 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files, fully_sharded):
     output_tp4 = do_sample(llm_tp4, baichuan_lora_files, lora_id=2)
 
     del llm_tp4
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     assert output_tp1 == output_tp4

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Callable, Dict, Optional, Set
 
 
@@ -42,7 +44,7 @@ def list_adapters(registered_adapters: Dict[int, Any]) -> Dict[int, Any]:
 
 def get_adapter(adapter_id: int,
                 registered_adapters: Dict[int, Any]) -> Optional[Any]:
-    return registered_adapters.get(adapter_id, None)
+    return registered_adapters.get(adapter_id)
 
 
 ## worker functions

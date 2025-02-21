@@ -1,5 +1,4 @@
 include LICENSE
-include requirements-adag.txt
 include requirements-common.txt
 include requirements-cuda.txt
 include requirements-rocm.txt

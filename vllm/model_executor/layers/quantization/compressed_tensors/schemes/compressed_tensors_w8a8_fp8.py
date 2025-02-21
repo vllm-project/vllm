@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Callable, List, Optional
 
 import torch
@@ -7,10 +9,12 @@ from torch.nn import Parameter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, cutlass_fp8_supported, requantize_with_max_scale)
+    apply_fp8_linear, cutlass_fp8_supported, maybe_create_device_identity,
+    normalize_e4m3fn_to_e4m3fnuz, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
+from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -38,22 +42,47 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 logical_widths=layer.logical_widths,
             )
 
+            if current_platform.is_rocm():
+                input_scale = getattr(layer, 'input_scale', None)
+
+                weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                    weight=weight,
+                    weight_scale=max_w_scale,
+                    input_scale=input_scale)
+                if input_scale is not None:
+                    layer.input_scale = Parameter(input_scale,
+                                                  requires_grad=False)
+
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight = layer.weight
+
+            if current_platform.is_rocm():
+                input_scale = getattr(layer, 'input_scale', None)
+
+                weight, weight_scale, input_scale = \
+                    normalize_e4m3fn_to_e4m3fnuz(
+                        weight=weight,
+                        weight_scale=layer.weight_scale,
+                        input_scale=input_scale)
+                if input_scale is not None:
+                    layer.input_scale = Parameter(input_scale,
+                                                  requires_grad=False)
+            else:
+                weight_scale = layer.weight_scale.data
+
             layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
-            layer.weight_scale = Parameter(layer.weight_scale.data,
-                                           requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
         else:
             raise ValueError(f"Unknown quantization strategy {self.strategy}")
 
         # INPUT SCALE
-        if self.is_static_input_scheme:
+        if self.is_static_input_scheme and hasattr(layer, 'input_scale'):
             layer.input_scale = Parameter(layer.input_scale.max(),
                                           requires_grad=False)
         else:
@@ -64,6 +93,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
+        maybe_create_device_identity()
+
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 

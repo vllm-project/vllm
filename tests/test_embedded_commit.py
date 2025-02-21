@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import vllm
 
 
 def test_embedded_commit_defined():
-    assert vllm.__commit__ != "COMMIT_HASH_PLACEHOLDER"
-    # 7 characters is the length of a short commit hash
-    assert len(vllm.__commit__) >= 7
+    assert hasattr(vllm, "__version__")
+    assert hasattr(vllm, "__version_tuple__")
+    assert vllm.__version__ != "dev"
+    assert vllm.__version_tuple__ != (0, 0, "dev")

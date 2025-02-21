@@ -1,26 +1,6 @@
 #include "marlin.cuh"
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-
-namespace marlin {
-
-template <int const num_threads, int const num_bits, bool const has_perm>
-__global__ void gptq_marlin_repack_kernel(
-    uint32_t const* __restrict__ b_q_weight_ptr,
-    uint32_t const* __restrict__ perm_ptr, uint32_t* __restrict__ out_ptr,
-    int size_k, int size_n) {}
-
-}  // namespace marlin
-
-torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
-                                 int64_t size_k, int64_t size_n,
-                                 int64_t num_bits) {
-  TORCH_CHECK_NOT_IMPLEMENTED(
-      false, "marlin_repack_from_gptq(..) requires CUDA_ARCH >= 8.0");
-  return torch::empty({1, 1});
-}
-
-#else
+#include "core/registration.h"
 
 namespace marlin {
 
@@ -174,13 +154,13 @@ __global__ void gptq_marlin_repack_kernel(
       uint32_t b1_vals[tile_ints];
       uint32_t b2_vals[tile_ints];
 
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < tile_ints; i++) {
         b1_vals[i] = sh_stage_int_ptr[cur_n + sh_stride * i];
         b2_vals[i] = sh_stage_int_ptr[cur_n + 8 + sh_stride * i];
       }
 
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < 4; i++) {
         int cur_elem = tc_row + tc_offsets[i];
         int cur_int = cur_elem / pack_factor;
@@ -200,7 +180,7 @@ __global__ void gptq_marlin_repack_kernel(
       constexpr int pack_idx[8] = {0, 2, 4, 6, 1, 3, 5, 7};
 
       uint32_t res = 0;
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < 8; i++) {
         res |= vals[pack_idx[i]] << (i * 4);
       }
@@ -212,7 +192,7 @@ __global__ void gptq_marlin_repack_kernel(
 
       uint32_t res1 = 0;
       uint32_t res2 = 0;
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < 4; i++) {
         res1 |= vals[pack_idx[i]] << (i * 8);
         res2 |= vals[4 + pack_idx[i]] << (i * 8);
@@ -224,14 +204,14 @@ __global__ void gptq_marlin_repack_kernel(
   };
 
   auto start_pipes = [&](int k_tile_id, int n_tile_id) {
-  #pragma unroll
+#pragma unroll
     for (int pipe = 0; pipe < repack_stages - 1; pipe++) {
       fetch_to_shared(pipe, k_tile_id, n_tile_id + pipe);
     }
 
     wait_for_stage();
   };
-  #pragma unroll
+#pragma unroll
   for (int k_tile_id = start_k_tile; k_tile_id < finish_k_tile; k_tile_id++) {
     int n_tile_id = 0;
 
@@ -242,7 +222,7 @@ __global__ void gptq_marlin_repack_kernel(
     start_pipes(k_tile_id, n_tile_id);
 
     while (n_tile_id < n_tiles) {
-  #pragma unroll
+#pragma unroll
       for (int pipe = 0; pipe < repack_stages; pipe++) {
         fetch_to_shared((pipe + repack_stages - 1) % repack_stages, k_tile_id,
                         n_tile_id + pipe + repack_stages - 1);
@@ -256,17 +236,17 @@ __global__ void gptq_marlin_repack_kernel(
 
 }  // namespace marlin
 
-  #define CALL_IF(NUM_BITS, HAS_PERM)                                         \
-    else if (num_bits == NUM_BITS && has_perm == HAS_PERM) {                  \
-      cudaFuncSetAttribute(                                                   \
-          marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, \
-                                            HAS_PERM>,                        \
-          cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);       \
-      marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS,     \
-                                        HAS_PERM>                             \
-          <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(       \
-              b_q_weight_ptr, perm_ptr, out_ptr, size_k, size_n);             \
-    }
+#define CALL_IF(NUM_BITS, HAS_PERM)                                         \
+  else if (num_bits == NUM_BITS && has_perm == HAS_PERM) {                  \
+    cudaFuncSetAttribute(                                                   \
+        marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, \
+                                          HAS_PERM>,                        \
+        cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);       \
+    marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS,     \
+                                      HAS_PERM>                             \
+        <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(       \
+            b_q_weight_ptr, perm_ptr, out_ptr, size_k, size_n);             \
+  }
 
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
@@ -341,4 +321,22 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
   return out;
 }
 
-#endif
+torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                      torch::Tensor& perm, c10::SymInt size_k,
+                                      c10::SymInt size_n, int64_t num_bits) {
+  int const pack_factor = 32 / num_bits;
+  auto options = torch::TensorOptions()
+                     .dtype(b_q_weight.dtype())
+                     .device(b_q_weight.device());
+  return torch::empty_symint(
+      {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
+      options);
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("gptq_marlin_repack", &gptq_marlin_repack);
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, Meta, m) {
+  m.impl("gptq_marlin_repack", &gptq_marlin_repack_meta);
+}

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test the communication operators.
 
 Run `pytest tests/distributed/test_comm_ops.py`.
@@ -21,7 +22,7 @@ def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    del os.environ["CUDA_VISIBLE_DEVICES"]
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -34,7 +35,7 @@ def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
     expected = torch.sum(torch.stack(all_tensors, dim=0), dim=0)
     t = all_tensors[rank % tp_size]
     t = tensor_model_parallel_all_reduce(t)
-    assert torch.allclose(t, expected)
+    torch.testing.assert_close(t, expected)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -43,7 +44,7 @@ def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    del os.environ["CUDA_VISIBLE_DEVICES"]
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -62,7 +63,7 @@ def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
         expected = torch.cat(all_tensors, dim=all_gather_dimension)
         t = all_tensors[rank % tp_size]
         t = tensor_model_parallel_all_gather(t, all_gather_dimension)
-        assert torch.allclose(t, expected)
+        torch.testing.assert_close(t, expected)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -71,7 +72,7 @@ def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    del os.environ["CUDA_VISIBLE_DEVICES"]
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -96,18 +97,18 @@ def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
     else:
         recv_dict = broadcast_tensor_dict(src=0)
         assert len(recv_dict) == len(test_dict)
-        assert torch.allclose(recv_dict["a"], test_dict["a"])
-        assert torch.allclose(recv_dict["b"], test_dict["b"])
+        torch.testing.assert_close(recv_dict["a"], test_dict["a"])
+        torch.testing.assert_close(recv_dict["b"], test_dict["b"])
         assert recv_dict["c"] == test_dict["c"]
         assert recv_dict["d"] == test_dict["d"]
         assert recv_dict["e"] == test_dict["e"]
-        assert torch.allclose(recv_dict["f"], test_dict["f"])
+        torch.testing.assert_close(recv_dict["f"], test_dict["f"])
 
 
 @ray.remote(num_gpus=1, max_calls=1)
 def send_recv_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
                                       distributed_init_port: str):
-    del os.environ["CUDA_VISIBLE_DEVICES"]
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -136,18 +137,18 @@ def send_recv_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
 
     if not get_pp_group().is_first_rank:
         assert len(recv_dict) == len(test_dict)
-        assert torch.allclose(recv_dict["a"], test_dict["a"])
-        assert torch.allclose(recv_dict["b"], test_dict["b"])
+        torch.testing.assert_close(recv_dict["a"], test_dict["a"])
+        torch.testing.assert_close(recv_dict["b"], test_dict["b"])
         assert recv_dict["c"] == test_dict["c"]
         assert recv_dict["d"] == test_dict["d"]
         assert recv_dict["e"] == test_dict["e"]
-        assert torch.allclose(recv_dict["f"], test_dict["f"])
+        torch.testing.assert_close(recv_dict["f"], test_dict["f"])
 
 
 @ray.remote(num_gpus=1, max_calls=1)
 def send_recv_test_worker(tp_size: int, pp_size: int, rank: int,
                           distributed_init_port: str):
-    del os.environ["CUDA_VISIBLE_DEVICES"]
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -163,7 +164,7 @@ def send_recv_test_worker(tp_size: int, pp_size: int, rank: int,
         get_pp_group().send(test_tensor)
 
     if not get_pp_group().is_first_rank:
-        assert torch.allclose(test_tensor, recv_tensor)
+        torch.testing.assert_close(test_tensor, recv_tensor)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,

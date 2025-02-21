@@ -1,9 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from typing import Dict, List, Optional, TypedDict, Union
 
 from pydantic import BaseModel
 
 
+# These classes are deprecated, see SamplingParams
 class LLMGuidedOptions(TypedDict, total=False):
     guided_json: Union[Dict, BaseModel, str]
     guided_regex: str

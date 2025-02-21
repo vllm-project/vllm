@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 '''
 Worker-related helper functions.
 '''
@@ -12,6 +13,9 @@ def assert_enc_dec_mr_supported_scenario(
     Asserted that the provided encoder/decoder model runner instance reflects
     a supported scenario.
     '''
+
+    # Reminder: Please update docs/source/features/compatibility_matrix.md
+    # If the feature combo become valid
 
     if enc_dec_mr.cache_config.enable_prefix_caching:
         raise NotImplementedError(
@@ -39,17 +43,9 @@ def assert_enc_dec_mr_supported_scenario(
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_PP'])
 
-    if enc_dec_mr.multimodal_config is not None:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_MM'])
-
     if enc_dec_mr.scheduler_config.num_lookahead_slots > 0:
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_SPEC_DEC'])
-
-    if not enc_dec_mr.model_config.enforce_eager:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CUDA_GRAPH'])
 
     if enc_dec_mr.prompt_adapter_config is not None:
         raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_ERR_STRS[

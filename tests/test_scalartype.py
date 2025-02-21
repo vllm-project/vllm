@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 import torch
 
@@ -9,6 +11,7 @@ from vllm.scalar_type import scalar_types
     (0, 15, scalar_types.uint4),
     (-8, 7, scalar_types.uint4b8),
     (-128, 127, scalar_types.uint8b128),
+    (-6., 6., scalar_types.float4_e2m1fn),
     (-28., 28., scalar_types.float6_e3m2f),
     (torch.int8, scalar_types.int8),
     (torch.uint8, scalar_types.uint8),
@@ -32,5 +35,5 @@ def test_scalar_type_min_max(type_tuple):
             max = torch.iinfo(torch_type).max
 
     print(t, min, max, t.min(), t.max())
-    assert min == t.min()
-    assert max == t.max()
+    assert min == t.min(), f"min: {min} != {t.min()}"
+    assert max == t.max(), f"max: {max} != {t.max()}"

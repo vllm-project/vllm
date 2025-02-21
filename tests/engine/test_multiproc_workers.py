@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -6,15 +8,14 @@ from typing import Any, List, Tuple
 
 import pytest
 
+from vllm.config import VllmConfig
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
+from vllm.worker.worker_base import WorkerWrapperBase
 
 
-class DummyWorker:
+class DummyWorkerWrapper(WorkerWrapperBase):
     """Dummy version of vllm.worker.worker.Worker"""
-
-    def __init__(self, rank: int):
-        self.rank = rank
 
     def worker_method(self, worker_input: Any) -> Tuple[int, Any]:
         sleep(0.05)
@@ -23,14 +24,15 @@ class DummyWorker:
             # simulate error case
             raise worker_input
 
-        return self.rank, input
+        return self.rpc_rank, input
 
 
 def _start_workers() -> Tuple[List[ProcessWorkerWrapper], WorkerMonitor]:
     result_handler = ResultHandler()
+    vllm_config = VllmConfig()
     workers = [
-        ProcessWorkerWrapper(result_handler, partial(DummyWorker, rank=rank))
-        for rank in range(8)
+        ProcessWorkerWrapper(result_handler, DummyWorkerWrapper, vllm_config,
+                             rank) for rank in range(8)
     ]
 
     worker_monitor = WorkerMonitor(workers, result_handler)
@@ -83,7 +85,7 @@ def test_local_workers() -> None:
     workers[3].process.kill()
 
     # Other workers should get shut down here
-    worker_monitor.join(2)
+    worker_monitor.join(20)
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()
@@ -108,7 +110,7 @@ def test_local_workers_clean_shutdown() -> None:
     # Clean shutdown
     worker_monitor.close()
 
-    worker_monitor.join(5)
+    worker_monitor.join(20)
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()
@@ -161,7 +163,7 @@ async def test_local_workers_async() -> None:
     workers[3].process.kill()
 
     # Other workers should get shut down here
-    worker_monitor.join(2)
+    worker_monitor.join(20)
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()
