@@ -479,6 +479,9 @@ class Worker(LocalOrDistributedWorkerBase):
     def max_model_len(self) -> int:
         return self.model_config.max_model_len
 
+    def execute_dummy_batch(self) -> None:
+        self.model_runner._dummy_run(1)
+
     @property
     def vocab_size(self) -> int:
         return self.model_runner.vocab_size
