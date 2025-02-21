@@ -1980,14 +1980,14 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             and self.inc_initialized_successfully
             and not getattr(self, "_is_inc_finalized", False)
         )
-        rank_debug(f"can finalize inc: {can_finalize_inc}")
+        rank_debug(f"can finalize inc: {can_finalize_inc}", target_rank=0)
         if can_finalize_inc:
             from neural_compressor.torch.quantization import (
                 finalize_calibration)
             finalize_calibration(self.model.model)
-            import time
-            # FIXME: (Yi) Maybe no need to sleep here
-            time.sleep(5)
+            # import time
+            # # FIXME: (Yi) Maybe no need to sleep here
+            # time.sleep(5)
             self._is_inc_finalized = True
         torch.distributed.barrier()
 
