@@ -183,7 +183,7 @@ package_data = {
 cmdclass = {}
 
 setup(
-    name="vllm",
+    name="vllm-neuronx",
     version=get_vllm_version(),
     author="vLLM Team",
     license="Apache 2.0",
