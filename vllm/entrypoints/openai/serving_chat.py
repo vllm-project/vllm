@@ -9,6 +9,7 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from fastapi import Request
+from pydantic import TypeAdapter
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -21,8 +22,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, PromptTokenUsageInfo,
-    RequestResponseMetadata, ToolCall, UsageInfo)
+    DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
+    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
                                                        ReasoningParserManager)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
@@ -734,9 +735,10 @@ class OpenAIServingChat(OpenAIServing):
 
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
-            elif (not self.enable_auto_tools
-                  or not self.tool_parser) and not isinstance(
-                      request.tool_choice, ChatCompletionNamedToolChoiceParam):
+            elif (not self.enable_auto_tools or not self.tool_parser) and \
+                (not isinstance(request.tool_choice,
+                                ChatCompletionNamedToolChoiceParam
+                                ) and request.tool_choice != "required"):
                 message = ChatMessage(role=role, content=output.text)
 
             # if the request uses tools and specified a tool choice
@@ -752,6 +754,24 @@ class OpenAIServingChat(OpenAIServing):
                         tool_call_class(function=FunctionCall(
                             name=request.tool_choice.function.name,
                             arguments=output.text))
+                    ])
+
+            elif request.tool_choice and request.tool_choice == "required":
+                tool_call_class = MistralToolCall if isinstance(
+                    tokenizer, MistralTokenizer) else ToolCall
+
+                # the fields of FunctionDefinition are a superset of the
+                # tool call outputs and can be used for parsing
+                tool_calls = TypeAdapter(
+                    List[FunctionDefinition]).validate_json(output.text)
+                message = ChatMessage(
+                    role=role,
+                    content="",
+                    tool_calls=[
+                        tool_call_class(function=FunctionCall(
+                            name=tool_call.name,
+                            arguments=json.dumps(tool_call.parameters)))
+                        for tool_call in tool_calls
                     ])
 
             # if the request doesn't use tool choice
