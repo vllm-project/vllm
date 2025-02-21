@@ -576,7 +576,7 @@ class TPUModelRunner():
                                 dtype=torch.int32,
                                 device=self.device)
         position_ids = torch.zeros(num_tokens,
-                                   dtype=torch.int64,
+                                   dtype=torch.int32,
                                    device=self.device)
         slot_mapping = torch.zeros(num_tokens,
                                    dtype=torch.int64,
