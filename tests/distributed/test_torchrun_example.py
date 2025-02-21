@@ -49,7 +49,7 @@ test_consistent_across_ranks(
     llm.llm_engine.vllm_config.cache_config.num_gpu_blocks)
 test_consistent_across_ranks(
     len(llm.llm_engine.model_executor.driver_worker.worker.model_runner.model.
-        parameters))
+        parameters()))
 
 # all ranks should have the same outputs
 for output in outputs:
