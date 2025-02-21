@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
@@ -80,34 +80,39 @@ class SchedulerOutput:
     # List of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
     # need to re-send it every scheduling step.
-    scheduled_new_reqs: List[NewRequestData]
+    scheduled_new_reqs: List[NewRequestData] = field(default_factory=list)
     # List of the requests that have been scheduled before.
     # Since the request's data is already cached in the worker processes,
     # we only send the diff to minimize the communication cost.
-    scheduled_cached_reqs: List[CachedRequestData]
+    scheduled_cached_reqs: List[CachedRequestData] = field(
+        default_factory=list)
 
     # req_id -> num_scheduled_tokens
     # Number of tokens scheduled for each request.
-    num_scheduled_tokens: Dict[str, int]
+    num_scheduled_tokens: Dict[str, int] = field(default_factory=dict)
     # Total number of tokens scheduled for all requests.
     # Equal to sum(num_scheduled_tokens.values())
-    total_num_scheduled_tokens: int
+    total_num_scheduled_tokens: int = 0
     # req_id -> spec_token_ids
     # If a request does not have any spec decode tokens, it will not be
     # included in the dictionary.
-    scheduled_spec_decode_tokens: Dict[str, List[int]]
+    scheduled_spec_decode_tokens: Dict[str,
+                                       List[int]] = field(default_factory=dict)
     # req_id -> encoder input indices that need processing.
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
-    scheduled_encoder_inputs: Dict[str, List[int]]
+    scheduled_encoder_inputs: Dict[str,
+                                   List[int]] = field(default_factory=dict)
     # Number of common prefix blocks for all requests.
     # This can be used for cascade attention.
-    num_common_prefix_blocks: int
+    num_common_prefix_blocks: int = 0
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.
-    finished_req_ids: Set[str]
+    finished_req_ids: Set[str] = field(default_factory=set)
     # List of (req_id, encoder_input_index) tuples.
     # Used to free the encoder cache.
-    free_encoder_input_ids: List[Tuple[str, int]]
+    free_encoder_input_ids: List[Tuple[str, int]] = field(default_factory=list)
+
+    is_dummy_batch: bool = False

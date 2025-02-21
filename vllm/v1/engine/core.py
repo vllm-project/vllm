@@ -14,7 +14,7 @@ import psutil
 import zmq
 import zmq.asyncio
 
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
@@ -46,7 +46,11 @@ class EngineCore:
         log_stats: bool,
     ):
         assert vllm_config.model_config.runner_type != "pooling"
-
+        self.parallel_config = vllm_config.parallel_config
+        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
+        self.should_execute_dummy_batch = False
+        if self.need_to_sync_across_dp:
+            self.dp_group = self.parallel_config.stateless_init_dp_group()
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
@@ -146,7 +150,17 @@ class EngineCore:
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
-        if not self.scheduler.has_unfinished_requests():
+        has_unfinished = self.scheduler.has_unfinished_requests()
+        if self.need_to_sync_across_dp:
+            aggregated_has_unfinished = ParallelConfig.\
+            sync_has_unfinished_across_dp(self.dp_group, has_unfinished)
+        if not has_unfinished and aggregated_has_unfinished:
+            output = self.model_executor.execute_model(
+                SchedulerOutput(is_dummy_batch=True))
+            return EngineCoreOutputs(
+                outputs=[], scheduler_stats=self.scheduler.make_stats())
+
+        if aggregated_has_unfinished:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
