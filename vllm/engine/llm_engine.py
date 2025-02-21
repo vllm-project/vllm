@@ -1639,7 +1639,8 @@ class LLMEngine:
             self.scheduler_config.max_num_seqs,
             self.scheduler_config.max_num_batched_tokens)
         total_tokens_in_current_batch_requests: List[int] = []
-        total_tokens_in_queue: int = 0
+        total_tokens_in_queue = sum(scheduler.get_num_tokens_in_queue()
+                                    for scheduler in self.scheduler)
         request_with_evicted_tokens_requests: List[bool] = []
         total_evicted_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
@@ -1662,19 +1663,6 @@ class LLMEngine:
         max_lora_stat = "0"
         if self.lora_config:
             max_lora_stat = str(self.lora_config.max_loras)
-
-        # Calculate total tokens in queue
-        total_tokens_in_queue = 0
-        for scheduler in self.scheduler:
-            waiting_queue = scheduler.waiting
-            for waiting_seq_group in waiting_queue:
-                # Add prompt tokens
-                prompt_length = len(waiting_seq_group.prompt_token_ids)
-                total_tokens_in_queue += prompt_length
-                # Add expected generation tokens
-                if waiting_seq_group.sampling_params:
-                    total_tokens_in_queue += (
-                        waiting_seq_group.sampling_params.max_tokens)
 
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
