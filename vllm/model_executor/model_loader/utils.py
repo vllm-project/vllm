@@ -11,6 +11,7 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from vllm.config import ModelConfig, ModelImpl
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.bitsandbytes import (
@@ -156,31 +157,48 @@ class ParamMapping:
 
 def configure_quant_config(quant_config: QuantizationConfig,
                            model_class: Type[nn.Module]):
-    """
-    Pass packed_modules_mapping by reference to quant_config so that
-    quant_config can properly match fused modules
 
-    Note that model attributes are passed by reference to quant_config,
-    enabling them to be updated by model_class.__new__ (ex. chatglm, qwen)
-    """
-    packed_mapping = getattr(model_class, "packed_modules_mapping", None)
-    if packed_mapping is not None:
-        # pass packed_modules_mapping by reference to quant_config
-        quant_config.packed_modules_mapping = packed_mapping
-    else:
-        logger.warning(
-            "The model class %s has not defined `packed_modules_mapping`, "
-            "this may lead to incorrect mapping of quantized or ignored "
-            "modules", model_class.__name__)
-    if getattr(model_class, "hf_to_vllm_mapper", None) is None:
-        return
-    hf_to_vllm_mapper: WeightsMapper = model_class.hf_to_vllm_mapper
-    if isinstance(quant_config,
-                  BitsAndBytesConfig) and (llm_int8_skip_modules :=
-                                           quant_config.llm_int8_skip_modules):
-        new_modules_lst = []
-        for skip_module in llm_int8_skip_modules:
-            module_name = hf_to_vllm_mapper._map_name(skip_module)
-            new_modules_lst.append(module_name)
-        quant_config.llm_int8_skip_modules = new_modules_lst
-        pass
+    def configure_packed_modules_mapping():
+        """
+        Pass packed_modules_mapping by reference to quant_config so that
+        quant_config can properly match fused modules
+
+        Note that model attributes are passed by reference to quant_config,
+        enabling them to be updated by model_class.__new__ (ex. chatglm, qwen)
+        """
+        packed_mapping = getattr(model_class, "packed_modules_mapping", None)
+        if packed_mapping is not None:
+            # pass packed_modules_mapping by reference to quant_config
+            quant_config.packed_modules_mapping = packed_mapping
+        else:
+            logger.warning(
+                "The model class %s has not defined `packed_modules_mapping`, "
+                "this may lead to incorrect mapping of quantized or ignored "
+                "modules", model_class.__name__)
+
+    def configure_quant_skip_modules():
+
+        if getattr(model_class, "hf_to_vllm_mapper", None) is None:
+            return
+        hf_to_vllm_mapper: WeightsMapper = model_class.hf_to_vllm_mapper
+        # AWQ
+        if isinstance(quant_config,
+                      AWQConfig) and (modules_to_not_convert :=
+                                      quant_config.modules_to_not_convert):
+            new_modules_lst = []
+            for skip_module in modules_to_not_convert:
+                module_name = hf_to_vllm_mapper._map_name(skip_module)
+                new_modules_lst.append(module_name)
+            quant_config.modules_to_not_convert = new_modules_lst
+
+        # BitsAndBytes
+        elif isinstance(quant_config, BitsAndBytesConfig) and (
+                llm_int8_skip_modules := quant_config.llm_int8_skip_modules):
+            new_modules_lst = []
+            for skip_module in llm_int8_skip_modules:
+                module_name = hf_to_vllm_mapper._map_name(skip_module)
+                new_modules_lst.append(module_name)
+            quant_config.llm_int8_skip_modules = new_modules_lst
+
+    configure_packed_modules_mapping()
+    configure_quant_skip_modules()
