@@ -140,18 +140,6 @@ async def build_async_engine_client(
             engine_args, args.disable_frontend_multiprocessing) as engine:
         yield engine
 
-<<<<<<< HEAD
-    # If manually triggered or embedding model, use AsyncLLMEngine in process.
-    # TODO: support embedding model via RPC.
-    if (model_is_embedding(args.model, args.trust_remote_code,
-                           args.quantization)
-            or args.disable_frontend_multiprocessing):
-        async_engine_client = AsyncLLMEngine.from_engine_args(
-            engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
-        yield async_engine_client
-        return
-=======
->>>>>>> main
 
 @asynccontextmanager
 async def build_async_engine_client_from_engine_args(
