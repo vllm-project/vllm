@@ -119,7 +119,8 @@ class LLMEngine:
         return self.has_unfinished_requests_dp(has_unfinished)
 
     def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
-        aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(self.dp_group, has_unfinished)
+        aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(
+            self.dp_group, has_unfinished)
         if not has_unfinished and aggregated_has_unfinished:
             self.should_execute_dummy_batch = True
         return aggregated_has_unfinished
