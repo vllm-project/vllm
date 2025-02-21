@@ -49,6 +49,7 @@ from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceStatus)
+from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -57,8 +58,8 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import (MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3, Counter, Device,
-                        deprecate_kwargs, resolve_obj_by_qualname, weak_bind)
+from vllm.utils import (Counter, Device, deprecate_kwargs,
+                        resolve_obj_by_qualname, weak_bind)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
