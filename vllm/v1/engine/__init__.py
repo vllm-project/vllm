@@ -91,9 +91,8 @@ class EngineCoreOutput(
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
-    is_dummy_batch: bool = False
-    request_id: str = ""
-    new_token_ids: List[int] = msgspec.field(default_factory=list)
+    request_id: str
+    new_token_ids: List[int]
 
     new_logprobs: Optional[LogprobsLists] = None
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None

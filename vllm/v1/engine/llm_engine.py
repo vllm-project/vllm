@@ -160,6 +160,7 @@ class LLMEngine:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
+            self.engine_core.execute_dummy_batch()
             return []
 
         # 1) Get EngineCoreOutput from the EngineCore.
