@@ -170,10 +170,10 @@ class LLMEngine:
         self.engine_core.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
-        self.engine_core.sleep(level)
+        self.engine_core.sleep(level)  # type: ignore
 
     def wake_up(self):
-        self.engine_core.wake_up()
+        self.engine_core.wake_up()  # type: ignore
 
     def get_tokenizer_group(
         self,

@@ -148,7 +148,7 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def step(self) -> Optional[EngineCoreOutputs]:
+    def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
         has_unfinished = self.scheduler.has_unfinished_requests()

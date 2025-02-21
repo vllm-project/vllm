@@ -1315,7 +1315,6 @@ class ExecuteModelRequest(
     last_sampled_token_ids: Optional[torch.Tensor] = None
     # Async callback
     async_callback: Optional[Callable] = None
-    is_dummy_batch: bool = False
 
     @property
     def is_first_multi_step(self) -> bool:

@@ -319,10 +319,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         broadcast_data = broadcast_tensor_dict(src=0)
         if not broadcast_data:
             return None
-        if "is_dummy_batch" in broadcast_data and broadcast_data[
-                "is_dummy_batch"]:
-            self.model_runner._dummy_run(1)
-            return None
 
         worker_input = WorkerInput.from_broadcasted_tensor_dict(broadcast_data)
         model_input = (
@@ -379,11 +375,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     # driver broadcasts an empty input. Send an empty input to
                     # notify all other workers to stop their execution loop.
                     broadcast_tensor_dict({}, src=0)
-                return None
-            elif execute_model_req.is_dummy_batch:
-                if self.do_metadata_broadcast:
-                    broadcast_tensor_dict({"is_dummy_batch": True}, src=0)
-                self.model_runner._dummy_run(1)
                 return None
             return self._get_driver_input_and_broadcast(execute_model_req)
         else:
@@ -579,7 +570,7 @@ class WorkerWrapperBase:
     def init_device(self):
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during device initialization
-            self.worker.init_device()
+            self.worker.init_device()  # type: ignore
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
