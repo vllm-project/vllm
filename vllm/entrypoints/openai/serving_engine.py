@@ -31,7 +31,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ErrorResponse, RerankRequest,
                                               ScoreRequest,
                                               TokenizeChatRequest,
-                                              TokenizeCompletionRequest)
+                                              TokenizeCompletionRequest,
+                                              TranscriptionRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
@@ -51,13 +52,14 @@ from vllm.utils import is_list_of, make_async, random_uuid
 logger = init_logger(__name__)
 
 CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
-                              EmbeddingCompletionRequest, ScoreRequest,
-                              TokenizeCompletionRequest]
+                              EmbeddingCompletionRequest, RerankRequest,
+                              ScoreRequest, TokenizeCompletionRequest]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 
-AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest]
+AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest,
+                   TranscriptionRequest]
 
 
 class TextTokensPrompt(TypedDict):
@@ -449,6 +451,8 @@ class OpenAIServing:
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
         return conversation, [request_prompt], [engine_prompt]
 

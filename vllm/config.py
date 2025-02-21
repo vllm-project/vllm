@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import CpuArchEnum
+from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -50,21 +51,25 @@ else:
 
 logger = init_logger(__name__)
 
+# This value is chosen to have a balance between ITL and TTFT. Note it is
+# not optimized for throughput.
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
-                     "score", "reward"]
+                     "score", "reward", "transcription"]
 
 _ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
-                        "draft"]
+                        "draft", "transcription"]
 
-RunnerType = Literal["generate", "pooling", "draft"]
+RunnerType = Literal["generate", "pooling", "draft", "transcription"]
 
 _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
     "generate": ["generate"],
     "pooling": ["embed", "classify", "score", "reward"],
     "draft": ["draft"],
+    "transcription": ["transcription"],
 }
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
@@ -408,7 +413,8 @@ class ModelConfig:
         if is_s3(model) or is_s3(tokenizer):
             if is_s3(model):
                 s3_model = S3Model()
-                s3_model.pull_files(model, allow_pattern=["*config.json"])
+                s3_model.pull_files(
+                    model, allow_pattern=["*.model", "*.py", "*.json"])
                 self.model_weights = self.model
                 self.model = s3_model.dir
 
@@ -484,6 +490,8 @@ class ModelConfig:
             return "embed"
         if ModelRegistry.is_cross_encoder_model(architectures):
             return "score"
+        if ModelRegistry.is_transcription_model(architectures):
+            return "transcription"
 
         suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
@@ -516,6 +524,8 @@ class ModelConfig:
         runner_support: Dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
+            "transcription":
+            ModelRegistry.is_transcription_model(architectures),
             "generate": ModelRegistry.is_text_generation_model(architectures),
             "pooling": ModelRegistry.is_pooling_model(architectures),
         }
@@ -757,7 +767,7 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return (hasattr(self.hf_text_config, "model_type")) \
                 and (self.hf_text_config.model_type in \
-                    ('deepseek_v2', 'deepseek_v3'))\
+                    ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'))\
                 and (self.hf_text_config.kv_lora_rank is not None)
 
     def get_head_size(self) -> int:
@@ -850,8 +860,12 @@ class ModelConfig:
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
-        total_num_hidden_layers = getattr(self.hf_text_config,
-                                          "num_hidden_layers", 0)
+        if self.hf_text_config.model_type == "deepseek_mtp":
+            total_num_hidden_layers = getattr(self.hf_text_config,
+                                              "num_nextn_predict_layers", 0)
+        else:
+            total_num_hidden_layers = getattr(self.hf_text_config,
+                                              "num_hidden_layers", 0)
         pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
@@ -986,37 +1000,7 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
-        if not self.is_deepseek_mla or envs.VLLM_MLA_DISABLE:
-            return False
-
-        if self.quantization is not None and self.quantization not in [\
-            "fp8", "compressed-tensors"]:
-            logger.warning(
-                "MLA is not supported with %s quantization. "
-                "Disabling MLA.", self.quantization)
-            return False
-
-        # If using a "compressed-tensors" checkpoint, check that all groups
-        # have fp8 for both weights and activations.
-        if self.quantization == "compressed-tensors":
-            quant_config = self._parse_quant_hf_config()
-            for group_name, cfg in quant_config.get("config_groups", {
-                    "": {}
-            }).items():
-                act_cfg = cfg.get("input_activations", {})
-                act_type = None if act_cfg is None else act_cfg.get("type", "")
-                w_cfg = cfg.get("weights", {})
-                w_type = None if w_cfg is None else w_cfg.get("type", "")
-                if act_type != "fp8" or w_type != "fp8":
-                    logger.warning(
-                        "compressed-tensors MLA support requires fp8 "
-                        "activations and weights in group '%s', but got "
-                        "activations type '%s' and weights type '%s'.\n "
-                        "Full config: %s", group_name, act_type, w_type,
-                        quant_config)
-                    return False
-
-        return True
+        return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:
@@ -1455,6 +1439,17 @@ class SchedulerConfig:
     # Maximum length of a sequence (including prompt and generated text).
     max_model_len: int = 8192
 
+    # Maximum number of sequences that can be partially prefilled concurrently
+    max_num_partial_prefills: int = 1
+
+    # Maximum number of "very long prompt" sequences that can be prefilled
+    # concurrently (long is defined by long_prefill_threshold)
+    max_long_partial_prefills: int = 1
+
+    # calculate context length that determines which sequences are
+    # considered "long"
+    long_prefill_token_threshold: int = 0
+
     # The number of slots to allocate per sequence per
     # step, beyond the known token ids. This is used in speculative
     # decoding to store KV activations of tokens which may or may not be
@@ -1504,6 +1499,10 @@ class SchedulerConfig:
 
     chunked_prefill_enabled: bool = field(init=False)
 
+    # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
+    # or "mod.custom_class".
+    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -1530,15 +1529,17 @@ class SchedulerConfig:
                     # for now. Have max_num_batched_tokens set to max_model_len
                     # so we don't reject sequences on account of a short
                     # max_num_batched_tokens.
-                    self.max_num_batched_tokens = max(self.max_model_len, 2048)
+                    self.max_num_batched_tokens = max(
+                        self.max_model_len, _DEFAULT_MAX_NUM_BATCHED_TOKENS)
                 else:
-                    # This value is chosen to have a balance between ITL
-                    # and TTFT. Note it is not optimized for throughput.
-                    self.max_num_batched_tokens = 2048
+                    self.max_num_batched_tokens = (
+                        _DEFAULT_MAX_NUM_BATCHED_TOKENS)
             else:
-                # If max_model_len is too short, use 2048 as the default value
+                # If max_model_len is too short, use
+                # _DEFAULT_MAX_NUM_BATCHED_TOKENS as the default value
                 # for higher throughput.
-                self.max_num_batched_tokens = max(self.max_model_len, 2048)
+                self.max_num_batched_tokens = max(
+                    self.max_model_len, _DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.runner_type == "pooling":
                 # Choose specific value for higher throughput
@@ -1562,6 +1563,18 @@ class SchedulerConfig:
                 self.max_num_batched_tokens)
 
         self.chunked_prefill_enabled = self.enable_chunked_prefill
+        if self.max_num_partial_prefills > 1:
+            if self.long_prefill_token_threshold == 0:
+                self.long_prefill_token_threshold = int(self.max_model_len *
+                                                        0.04)
+
+            logger.info(
+                "Concurrent partial prefills enabled with "
+                "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
+                "long_prefill_token_threshold=%d",
+                self.max_num_partial_prefills, self.max_long_partial_prefills,
+                self.long_prefill_token_threshold)
+
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1592,6 +1605,29 @@ class SchedulerConfig:
                 "num_scheduler_steps "
                 f"({self.num_scheduler_steps}) must be greater than or "
                 "equal to 1.")
+
+        if self.max_num_partial_prefills < 1:
+            raise ValueError(
+                f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
+                "must be greater than or equal to 1.")
+        elif self.max_num_partial_prefills > 1:
+            if not self.chunked_prefill_enabled:
+                raise ValueError("Chunked prefill must be enabled to set "
+                                 "max_num_partial_prefills > 1.")
+
+            if self.long_prefill_token_threshold > self.max_model_len:
+                raise ValueError(
+                    "long_prefill_token_threshold "
+                    f"({self.long_prefill_token_threshold}) cannot be greater "
+                    f"than the max_model_len ({self.max_model_len}).")
+
+        if (self.max_long_partial_prefills
+                < 1) or (self.max_long_partial_prefills
+                         > self.max_num_partial_prefills):
+            raise ValueError(
+                f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
+                "must be greater than or equal to 1 and less than or equal to "
+                f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
 
     @property
     def is_multi_step(self) -> bool:
@@ -1666,6 +1702,18 @@ class SpeculativeConfig:
         factors: List[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
+
+    @staticmethod
+    def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+        if hf_config.model_type == "deepseek_v3":
+            hf_config.model_type = "deepseek_mtp"
+        if hf_config.model_type == "deepseek_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["DeepSeekMTPModel"]
+            })
+        return hf_config
 
     @staticmethod
     def maybe_create_spec_config(
@@ -1749,12 +1797,18 @@ class SpeculativeConfig:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
         """
-
         if speculative_model is None:
             if num_speculative_tokens is not None:
-                raise ValueError("num_speculative_tokens was provided without "
-                                 "speculative_model.")
-            return None
+                if target_model_config.hf_text_config.model_type \
+                        == "deepseek_v3":
+                    # use the draft model from the same model:
+                    speculative_model = target_model_config.model
+                else:
+                    raise ValueError(
+                        "num_speculative_tokens was provided without "
+                        "speculative_model.")
+            else:
+                return None
 
         if (speculative_disable_by_batch_size is not None
                 and speculative_disable_by_batch_size < 2):
@@ -1808,14 +1862,23 @@ class SpeculativeConfig:
                 max_seq_len_to_capture=target_model_config.
                 max_seq_len_to_capture,
                 max_logprobs=target_model_config.max_logprobs,
+                hf_overrides=SpeculativeConfig.hf_config_override,
             )
 
             draft_hf_config = draft_model_config.hf_config
 
+            # Detect EAGLE prefix to replace hf_config for EAGLE draft_model
+            if "eagle-" in draft_model_config.model.lower():
+                from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                if isinstance(draft_model_config.hf_config, EAGLEConfig):
+                    pass
+                else:
+                    eagle_config = EAGLEConfig(draft_model_config.hf_config)
+                    draft_model_config.hf_config = eagle_config
+
             if (num_speculative_tokens is not None
                     and hasattr(draft_hf_config, "num_lookahead_tokens")):
                 draft_hf_config.num_lookahead_tokens = num_speculative_tokens
-
             n_predict = getattr(draft_hf_config, "n_predict", None)
             if n_predict is not None:
                 if num_speculative_tokens is None:
@@ -1929,8 +1992,9 @@ class SpeculativeConfig:
                 speculative_draft_tensor_parallel_size = 1
                 if target_parallel_config.tensor_parallel_size > 1:
                     logger.warning(
-                        "MLPSpeculator cannot currently be run with tp>1; "
-                        "setting speculative_draft_tensor_parallel_size=1")
+                        "%s cannot currently be run with tp>1; "
+                        "setting speculative_draft_tensor_parallel_size=1",
+                        draft_hf_config.model_type)
             else:
                 speculative_draft_tensor_parallel_size = \
                     target_parallel_config.tensor_parallel_size
@@ -2573,7 +2637,9 @@ class DecodingConfig:
 
     def __post_init__(self):
         valid_guided_backends = ['outlines', 'lm-format-enforcer', 'xgrammar']
-        backend = self.guided_decoding_backend
+
+        backend = GuidedDecodingParams(
+            backend=self.guided_decoding_backend).backend_name
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
                              f"must be one of {valid_guided_backends}")
@@ -3272,6 +3338,9 @@ class VllmConfig:
                         "caching to be disabled.")
             self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.max_num_batched_tokens = max(
+                self.scheduler_config.max_model_len,
+                _DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False

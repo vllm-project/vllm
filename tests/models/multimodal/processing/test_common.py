@@ -10,7 +10,7 @@ from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import ProcessingCache
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import HF_EXAMPLE_MODELS
@@ -42,10 +42,7 @@ def _test_processing_correctness(
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
     ctx = InputProcessingContext(
         model_config,
-        tokenizer=cached_get_tokenizer(
-            model_config.tokenizer,
-            trust_remote_code=model_info.trust_remote_code,
-        ),
+        tokenizer=cached_tokenizer_from_config(model_config),
     )
     # Ensure that it can fit all of the data
     cache = ProcessingCache(capacity=1 << 30)
@@ -85,6 +82,14 @@ def _test_processing_correctness(
         partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
     }
 
+    tokenizer_encode_kwargs = {}
+    if model_config.hf_config.model_type == "mllama":
+        # For Mllama, tokenizer will always add bos_token at the beginning of
+        # prompt by default, causing hf_processor outputs incorrect token ids.
+        # So we need use `add_special_tokens=False` here to leave bos_token
+        # to be added by the processor.
+        tokenizer_encode_kwargs = {"add_special_tokens": False}
+
     for batch_idx in range(num_batches):
         mm_data = {
             k:
@@ -122,7 +127,7 @@ def _test_processing_correctness(
             f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
         baseline_tokenized_result = baseline_processor.apply(
-            tokenizer.encode(prompt),
+            tokenizer.encode(prompt, **tokenizer_encode_kwargs),
             mm_data=mm_data,
             hf_processor_mm_kwargs={},
         )
@@ -131,7 +136,7 @@ def _test_processing_correctness(
             f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
         cached_tokenized_result = cached_processor.apply(
-            tokenizer.encode(prompt),
+            tokenizer.encode(prompt, **tokenizer_encode_kwargs),
             mm_data=mm_data,
             hf_processor_mm_kwargs={},
         )
@@ -155,10 +160,13 @@ def _test_processing_correctness(
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+    "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
     "mistral-community/pixtral-12b",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
+    "allenai/Molmo-7B-D-0924",
+    "allenai/Molmo-7B-O-0924",
     "nvidia/NVLM-D-72B",
     "Qwen/Qwen-VL-Chat",
     "Qwen/Qwen2-VL-2B-Instruct",

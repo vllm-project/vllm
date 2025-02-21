@@ -58,14 +58,17 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig, MultiModalKwargs,
                                     VideoItem)
-from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
-                                   MultiModalDataItems, MultiModalDataParser)
+from vllm.multimodal.parse import (DictEmbeddingItems, ImageSize,
+                                   ModalityDataItems, MultiModalDataItems,
+                                   MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
+from vllm.transformers_utils.processor import (
+    cached_image_processor_from_config)
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper,
@@ -226,11 +229,15 @@ def apply_rotary_emb_torch(x: torch.Tensor,
 
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
-                                freqs: torch.Tensor) -> torch.Tensor:
+                                freqs: torch.Tensor,
+                                use_flash_attn=False) -> torch.Tensor:
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
-    output = apply_rotary_emb_torch(t_, cos, sin).type_as(t)
+    apply_rotary_emb = apply_rotary_emb_torch
+    if use_flash_attn:
+        from flash_attn.layers.rotary import apply_rotary_emb
+    output = apply_rotary_emb(t_, cos, sin).type_as(t)
     return output
 
 
@@ -336,20 +343,23 @@ class Qwen2VisionAttention(nn.Module):
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
         elif self.attn_backend == _Backend.TORCH_SDPA:
-            seq_length = q.size(1)
-            q, k, v = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-            attention_mask = torch.zeros([1, seq_length, seq_length],
-                                         device=q.device,
-                                         dtype=torch.bool)
+            # Execute attention entry by entry for speed & less VRAM.
+            outputs = []
             for i in range(1, len(cu_seqlens)):
-                attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
-                               cu_seqlens[i - 1]:cu_seqlens[i]] = True
-            output = F.scaled_dot_product_attention(q,
-                                                    k,
-                                                    v,
-                                                    attention_mask,
-                                                    dropout_p=0.0)
-            context_layer = rearrange(output, "b h s d -> b s h d ")
+                start_idx = cu_seqlens[i - 1]
+                end_idx = cu_seqlens[i]
+                q_i = q[:, start_idx:end_idx]
+                k_i = k[:, start_idx:end_idx]
+                v_i = v[:, start_idx:end_idx]
+                q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+                                 for x in [q_i, k_i, v_i])
+                output_i = F.scaled_dot_product_attention(q_i,
+                                                          k_i,
+                                                          v_i,
+                                                          dropout_p=0.0)
+                output_i = rearrange(output_i, "b h s d -> b s h d ")
+                outputs.append(output_i)
+            context_layer = torch.cat(outputs, dim=1)
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
@@ -650,49 +660,25 @@ class Qwen2VisionTransformer(nn.Module):
         return loaded_params
 
 
-class Qwen2VLEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
-                                              dict[str, torch.Tensor]]):
+def _qwen2vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+    image_grid_sizes = image_grid_thw.prod(-1)
 
-    def __init__(self, data: dict, modality: str) -> None:
-        super().__init__(data, modality)
+    video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
+    video_grid_sizes = video_grid_thw.prod(-1)
 
-        grid_thw = data[f"{modality}_grid_thw"]
-        slice_idxs = [0] + grid_thw.prod(-1).cumsum_(0).tolist()
-        self._slices = [
-            slice(slice_idxs[i], slice_idxs[i + 1])
-            for i in range(len(grid_thw))
-        ]
-
-    def get_count(self) -> int:
-        return len(self.data[f"{self.modality}_grid_thw"])
-
-    def get(self, index: int) -> dict[str, torch.Tensor]:
-        out = {}
-        for k, v in self.data.items():
-            if v != f"{self.modality}_grid_thw":
-                v = v[self._slices[index]]
-
-            out[k] = v
-
-        return out
-
-    def get_processor_data(self) -> Mapping[str, object]:
-        return {}
-
-    def get_passthrough_data(self) -> Mapping[str, object]:
-        return self.data
-
-
-class Qwen2VLImageEmbeddingItems(Qwen2VLEmbeddingItems):
-
-    def __init__(self, data: dict) -> None:
-        super().__init__(data, "image")
-
-
-class Qwen2VLVideoEmbeddingItems(Qwen2VLEmbeddingItems):
-
-    def __init__(self, data: dict) -> None:
-        super().__init__(data, "video")
+    return dict(
+        pixel_values=MultiModalFieldConfig.flat_from_sizes(
+            "image", image_grid_sizes),
+        image_embeds=MultiModalFieldConfig.flat_from_sizes(
+            "image", image_grid_sizes),
+        image_grid_thw=MultiModalFieldConfig.batched("image"),
+        pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
+            "video", video_grid_sizes),
+        video_embeds=MultiModalFieldConfig.flat_from_sizes(
+            "video", video_grid_sizes),
+        video_grid_thw=MultiModalFieldConfig.batched("video"),
+    )
 
 
 class Qwen2VLMultiModalDataParser(MultiModalDataParser):
@@ -702,7 +688,12 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2VLEmbeddingItems(data, modality="image")
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields={"image_embeds", "image_grid_thw"},
+                fields_factory=_qwen2vl_field_config,
+            )
 
         return super()._parse_image_data(data)
 
@@ -711,7 +702,12 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2VLEmbeddingItems(data, modality="video")
+            return DictEmbeddingItems(
+                data,
+                modality="video",
+                required_fields={"video_embeds", "video_grid_thw"},
+                fields_factory=_qwen2vl_field_config,
+            )
 
         return super()._parse_video_data(data)
 
@@ -726,34 +722,64 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
+        size: Optional[dict[str, int]] = None,
+        **kwargs: object,
     ) -> Qwen2VLProcessor:
-        hf_processor = self.ctx.get_hf_processor(Qwen2VLProcessor)
-        image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2VLImageProcessor)
+        return self.ctx.get_hf_processor(
+            Qwen2VLProcessor,
+            image_processor=self.get_image_processor(min_pixels=min_pixels,
+                                                     max_pixels=max_pixels,
+                                                     size=size),
+            **kwargs,
+        )
 
-        if min_pixels:
-            image_processor.min_pixels = min_pixels
-        if max_pixels:
-            image_processor.max_pixels = max_pixels
-        if max_pixels or min_pixels:
-            image_processor.size = {
-                "min_pixels": image_processor.min_pixels,
-                "max_pixels": image_processor.max_pixels,
-            }
+    def _get_image_processor_kwargs(
+        self,
+        *,
+        min_pixels: Optional[int] = None,
+        max_pixels: Optional[int] = None,
+        size: Optional[dict[str, int]] = None,
+        **kwargs: object,
+    ):
+        if self.ctx.model_config.mm_processor_kwargs:
+            kwargs.update(self.ctx.model_config.mm_processor_kwargs)
 
-        return hf_processor
+        if min_pixels is not None:
+            kwargs["min_pixels"] = min_pixels
+
+            if size is None:
+                size = {"shortest_edge": min_pixels}
+            else:
+                size["shortest_edge"] = min_pixels
+
+        if max_pixels is not None:
+            kwargs["max_pixels"] = max_pixels
+
+            if size is None:
+                size = {"longest_edge": max_pixels}
+            else:
+                size["longest_edge"] = max_pixels
+
+        if size is not None:
+            kwargs["size"] = size
+
+        return kwargs
 
     def get_image_processor(
         self,
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
+        size: Optional[dict[str, int]] = None,
+        **kwargs: object,
     ):
-        hf_processor = self.get_hf_processor(min_pixels=min_pixels,
-                                             max_pixels=max_pixels)
-        image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2VLImageProcessor)
-        return image_processor
+        return cached_image_processor_from_config(
+            self.ctx.model_config,
+            **self._get_image_processor_kwargs(min_pixels=min_pixels,
+                                               max_pixels=max_pixels,
+                                               size=size,
+                                               **kwargs),
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
@@ -950,6 +976,18 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2VLMultiModalDataParser()
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(text=prompt, **mm_data),
+            self.info._get_image_processor_kwargs(**mm_kwargs),
+        )
+
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
@@ -962,8 +1000,6 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
-        # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
-        # image_token and video_token registered
         placeholder = {
             "image": vocab[hf_processor.image_token],
             "video": vocab[hf_processor.video_token],
@@ -992,24 +1028,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
-        image_grid_sizes = image_grid_thw.prod(-1)
-
-        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        video_grid_sizes = video_grid_thw.prod(-1)
-
-        return dict(
-            pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_grid_sizes),
-            image_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_grid_sizes),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
-            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes),
-            video_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
-        )
+        return _qwen2vl_field_config(hf_inputs)
 
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
