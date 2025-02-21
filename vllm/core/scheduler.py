@@ -1375,7 +1375,6 @@ class Scheduler:
             [s.seq_group for s in swapped_in.prefill_seq_groups])
         self.running.extend(
             [s.seq_group for s in running_scheduled.decode_seq_groups])
-
         # Because multiple prefills may be running concurrently, we need to
         # make sure that prefills which are scheduled to finish are listed
         # before those that won't. This is so that on the next scheduling
