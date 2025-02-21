@@ -166,8 +166,9 @@ class SamplingParams(
         allowed_token_ids: If provided, the engine will construct a logits
             processor which only retains scores for the given token ids.
             Defaults to None.
-        extra_args: Arbitrary additional args, that can be used by custom sampling
-            implementations. Not used by any in-tree sampling implementations.
+        extra_args: Arbitrary additional args, that can be used by custom
+            sampling implementations. Not used by any in-tree sampling
+            implementations.
     """
 
     n: int = 1
