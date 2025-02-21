@@ -928,6 +928,10 @@ def ggml_moe_a8(
                                     quant_type, row, top_k, tokens)
 
 
+def ggml_moe_get_block_size(quant_type: int) -> torch.Tensor:
+    return torch.ops._C.ggml_moe_get_block_size(quant_type)
+
+
 # mamba
 def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       bias_: Optional[torch.Tensor],
