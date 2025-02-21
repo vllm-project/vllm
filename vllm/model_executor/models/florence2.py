@@ -37,8 +37,7 @@ from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 class Florence2ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: """
-    """(batch_size, num_channel, height, width)"""
+    """Shape: (batch_size, num_channel, height, width)"""
 
 
 # ViT implementation are all copied from
