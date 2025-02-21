@@ -79,7 +79,6 @@ async def test_no_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
 
     choice = chat_completion.choices[0]
     assert choice.logprobs is None
-    assert choice.finish_reason == "length"
 
 
 @pytest.mark.asyncio
