@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
-from torch.distributed import dist
+import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
