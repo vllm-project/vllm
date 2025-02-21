@@ -926,8 +926,7 @@ class LLMEngine:
         if not self.need_to_sync_across_dp:
             return has_unfinished
         aggregated_has_unfinished = ParallelConfig.\
-            sync_has_unfinished_across_dp(
-            self.dp_group, has_unfinished)
+            sync_has_unfinished_across_dp(self.dp_group, has_unfinished)
         if not has_unfinished and aggregated_has_unfinished:
             # current rank has no unfinished seqs, but other ranks do,
             # so we should execute a dummy batch to sync across ranks
