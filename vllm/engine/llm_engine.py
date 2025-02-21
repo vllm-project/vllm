@@ -1339,6 +1339,7 @@ class LLMEngine:
             outputs = self.model_executor.execute_model(
                 execute_model_req=ExecuteModelRequest(
                     seq_group_metadata_list=[], is_dummy_batch=True))
+            return []
 
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
