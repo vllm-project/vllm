@@ -259,7 +259,7 @@ class EngineArgs:
         parser.add_argument(
             "--hf-config-path",
             type=nullable_str,
-            default=None,
+            default=EngineArgs.hf_config_path,
             help='Name or path of the huggingface config to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
@@ -276,7 +276,7 @@ class EngineArgs:
         parser.add_argument(
             '--code-revision',
             type=nullable_str,
-            default=EngineArgs.hf_config_path,
+            default=None,
             help='The specific revision to use for the model code on '
             'Hugging Face Hub. It can be a branch name, a tag name, or a '
             'commit id. If unspecified, will use the default version.')
