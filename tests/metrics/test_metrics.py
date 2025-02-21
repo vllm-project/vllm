@@ -146,7 +146,7 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
         metrics_tag_content = stat_logger.labels["model_name"]
 
     if served_model_name is None or served_model_name == []:
-        actual_model_name = f"{MODEL_WEIGHTS_S3_BUCKET}/{model.split('/')[-1]}"
+        actual_model_name = f"{MODEL_WEIGHTS_S3_BUCKET}/{model}"
         assert metrics_tag_content == actual_model_name, (
             f"Metrics tag model_name is wrong! expect: {actual_model_name!r}\n"
             f"actual: {metrics_tag_content!r}")
