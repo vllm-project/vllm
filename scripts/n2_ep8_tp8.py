@@ -237,16 +237,29 @@ if __name__ == "__main__":
         )
     else:
         quantization = "inc_q" if args.mode == "q" else "inc_p"
-        llm = LLM(
-            model=model, 
-            tokenizer=args.tokenizer,
-            tensor_parallel_size=args.tp_size,
-            distributed_executor_backend='mp',
-            trust_remote_code=True,
-            quantization=quantization,
-            max_model_len=16384,
-            dtype="bfloat16",
-        )
+        if quantization == "inc_q":
+            llm = LLM(
+                model=model, 
+                tokenizer=args.tokenizer,
+                tensor_parallel_size=args.tp_size,
+                distributed_executor_backend='mp',
+                trust_remote_code=True,
+                quantization=quantization,
+                weights_load_device="cpu",
+                max_model_len=16384,
+                dtype="bfloat16",
+            )
+        else:
+            llm = LLM(
+                model=model, 
+                tokenizer=args.tokenizer,
+                tensor_parallel_size=args.tp_size,
+                distributed_executor_backend='mp',
+                trust_remote_code=True,
+                quantization=quantization,
+                max_model_len=16384,
+                dtype="bfloat16",
+            )
 
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
