@@ -758,7 +758,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         base_arange[:, data[0] - mrope_min: data[1] - mrope_min]
 
     def _calc_spec_decode_metadata(
-
         self,
         scheduler_output: "SchedulerOutput",
         cu_num_tokens: np.ndarray,
