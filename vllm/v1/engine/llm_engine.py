@@ -49,9 +49,9 @@ class LLMEngine:
 
         # important: init dp group before init the engine_core
         self.parallel_config = vllm_config.parallel_config
-        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
+        self.dp_enabled = self.parallel_config.data_parallel_size > 1  # noqa
         self.should_execute_dummy_batch = False
-        if self.need_to_sync_across_dp:
+        if self.dp_enabled:
             self.dp_group = self.parallel_config.stateless_init_dp_group()
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -114,7 +114,7 @@ class LLMEngine:
 
     def has_unfinished_requests(self) -> bool:
         has_unfinished = self.output_processor.has_unfinished_requests()
-        if not self.need_to_sync_across_dp:
+        if not self.dp_enabled:
             return has_unfinished
         aggregated_has_unfinished = ParallelConfig.\
         sync_has_unfinished_across_dp(self.dp_group, has_unfinished)
