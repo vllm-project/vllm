@@ -711,6 +711,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size()
         self.num_heads = divide(self.total_num_heads, tp_size)
+        print("NUMHEADS", self.total_num_heads, self.num_heads)
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
             self.num_kv_head_replicas = divide(tp_size,
@@ -773,6 +774,7 @@ class QKVParallelLinear(ColumnParallelLinear):
              (self.total_num_heads + self.total_num_kv_heads) * self.head_size,
              self.total_num_kv_heads * self.head_size),
         ]
+        print("OFFSET1")
 
         for shard_id, shard_offset, shard_size in shard_offsets:
             # Special case for Quantization.
@@ -805,6 +807,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             return
 
         assert loaded_shard_id in ["q", "k", "v"]
+
+        print("OFFSET2")
 
         shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
         shard_size = self._get_shard_size_mapping(loaded_shard_id)
@@ -863,6 +867,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
 
         if loaded_shard_id is None:
+            print("OFFSET3")
             # Loaded weight is already fused on disk (qkv).
             # (e.g., Phi-3's qkv_proj).
             if output_dim is None:
@@ -924,6 +929,7 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         # If output dim is defined, use the default loading process.
         if output_dim is not None:
+            # print("OFFSET4")
             if loaded_shard_id == "q":
                 shard_offset = 0
                 shard_size = self.num_heads * self.head_size
@@ -977,9 +983,12 @@ class QKVParallelLinear(ColumnParallelLinear):
             start_idx = shard_id * shard_size
 
             if not is_sharded_weight:
+                print(f"GPU {tp_rank}: expecting slice from {start_idx} to {start_idx + shard_size} "
+      f"out of total {loaded_weight.size(output_dim)}", end="\t")
+
                 if start_idx + shard_size > loaded_weight.size(output_dim):
-                    # print("LOADERSIZE", start_idx, shard_size, loaded_weight.size())
-                    # print("DUMMYHEAD", get_tensor_model_parallel_rank())
+                    # print("DUMMYLOADERSIZE", start_idx, shard_size, loaded_weight.size())
+                    print("DUMMYHEAD", get_tensor_model_parallel_rank(), end=", ")
                     # Create a tensor of zeros with the same size as the shard
                     weight_shape = list(loaded_weight.shape)
                     weight_shape[output_dim] = shard_size
@@ -989,7 +998,11 @@ class QKVParallelLinear(ColumnParallelLinear):
                     dtype=loaded_weight.dtype,
                     device=loaded_weight.device
                     )
+                    loaded_weight = loaded_weight.narrow(output_dim, 0, shard_size)
                 else:
+                    pass
+                    # print("REALLOADERSIZE", start_idx, shard_size, loaded_weight.size())
+                    print("REALHEAD", get_tensor_model_parallel_rank(), end=", ")
                     loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
                 # loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                 #                                      shard_size)
@@ -1125,10 +1138,9 @@ class RowParallelLinear(LinearBase):
                     dtype=loaded_weight.dtype,
                     device=loaded_weight.device
                 )
+                loaded_weight = loaded_weight.narrow(input_dim, 0, shard_size)
             else:
                 loaded_weight = loaded_weight.narrow(input_dim, start_idx, shard_size)
-            # loaded_weight = loaded_weight.narrow(input_dim, start_idx,
-            #                                      shard_size)
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
