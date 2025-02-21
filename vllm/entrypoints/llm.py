@@ -7,7 +7,6 @@ from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
                     Tuple, Type, Union, cast, overload)
 
 import cloudpickle
-import torch
 import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
@@ -25,6 +24,8 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
+from vllm.entrypoints.score_utils import (_cosine_similarity,
+                                          _validate_score_input_lens)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -1010,40 +1011,25 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> List[ScoringRequestOutput]:
 
-        encoded_output = self.encode(
+        encoded_output: List[PoolingRequestOutput] = self.encode(
             text_1 + text_2,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request)
-        encoded_output_1 = encoded_output[0:len(text_1)]
-        encoded_output_2 = encoded_output[len(text_1):]
+
+        encoded_output_1: List[PoolingRequestOutput] = encoded_output[
+            0:len(text_1)]
+        encoded_output_2: List[PoolingRequestOutput] = encoded_output[
+            len(text_1):]
 
         if len(encoded_output_1) == 1:
             encoded_output_1 = encoded_output_1 * len(encoded_output_2)
 
-        output_pairs = [(t1, t2)
-                        for t1, t2 in zip(encoded_output_1, encoded_output_2)]
+        scores: List[PoolingRequestOutput] = []
 
-        scores = []
-        scorer = torch.nn.CosineSimilarity(0)
-
-        for embed_1, embed_2 in output_pairs:
-            pair_score = scorer(embed_1.outputs.data, embed_2.outputs.data)
-
-            if (pad_token_id := getattr(tokenizer, "pad_token_id",
-                                        None)) is not None:
-                tokens = embed_1.prompt_token_ids + [
-                    pad_token_id
-                ] + embed_2.prompt_token_ids
-            else:
-                tokens = embed_1.prompt_token_ids + embed_2.prompt_token_ids
-
-            scores.append(
-                PoolingRequestOutput(
-                    request_id=f"{embed_1.request_id}_{embed_2.request_id}",
-                    outputs=pair_score,
-                    prompt_token_ids=tokens,
-                    finished=True))
+        scores = _cosine_similarity(tokenizer=tokenizer,
+                                    embed_1=encoded_output_1,
+                                    embed_2=encoded_output_2)
 
         items = self.engine_class.validate_outputs(scores,
                                                    PoolingRequestOutput)
@@ -1183,12 +1169,7 @@ class LLM:
             text_2 = [text_2]
         input_text_2: List[str] = [ensure_str(t) for t in text_2]
 
-        if len(input_text_1) > 1 and len(input_text_1) != len(input_text_2):
-            raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
-        if len(input_text_1) == 0:
-            raise ValueError("At least one text element must be given")
-        if len(input_text_2) == 0:
-            raise ValueError("At least one text_pair element must be given")
+        _validate_score_input_lens(input_text_1, input_text_2)
 
         if self.llm_engine.model_config.is_cross_encoder:
             return self._cross_encoding_score(tokenizer, input_text_1,
@@ -1197,7 +1178,6 @@ class LLM:
                                               lora_request,
                                               prompt_adapter_request)
         else:
-
             return self._embedding_score(
                 tokenizer,
                 input_text_1,  # type: ignore[arg-type]
