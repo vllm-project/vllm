@@ -23,7 +23,8 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, StoreBoolean
+from vllm.utils import (MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3,
+                        FlexibleArgumentParser, StoreBoolean)
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -1124,6 +1125,10 @@ class EngineArgs:
             f", but got {self.cpu_offload_gb}")
 
         device_config = DeviceConfig(device=self.device)
+        if envs.VLLM_CI_USE_S3 and self.model in MODELS_ON_S3:
+            self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
+            self.load_format = LoadFormat.RUNAI_STREAMER
+
         model_config = self.create_model_config()
 
         if (model_config.is_multimodal_model and not envs.VLLM_USE_V1
