@@ -267,31 +267,41 @@ torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
                          tokens, stream);
 
   switch (type) {
-    // case 2:
-    //   ggml_mul_mat_q4_0_q8_1_cuda(
-    //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-    //       (half*)Y.data_ptr(), col, row, tokens, padded, row, stream);
-    //   break;
-    // case 3:
-    //   ggml_mul_mat_q4_1_q8_1_cuda(
-    //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-    //       (half*)Y.data_ptr(), col, row, tokens, padded, row, stream);
-    //   break;
-    // case 6:
-    //   ggml_mul_mat_q5_0_q8_1_cuda(
-    //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-    //       (half*)Y.data_ptr(), col, row, tokens, padded, row, stream);
-    //   break;
-    // case 7:
-    //   ggml_mul_mat_q5_1_q8_1_cuda(
-    //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-    //       (half*)Y.data_ptr(), col, row, tokens, padded, row, stream);
-    //   break;
-    // case 8:
-    //   ggml_mul_mat_q8_0_q8_1_cuda(
-    //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-    //       (half*)Y.data_ptr(), col, row, tokens, padded, row, stream);
-    //   break;
+    case 2:
+      ggml_moe_q4_0_q8_1_cuda(
+          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
+          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+          W.stride(0), col, row, tokens, padded, row, top_k,
+          sorted_token_ids.sizes()[0], stream);
+      break;
+    case 3:
+      ggml_moe_q4_1_q8_1_cuda(
+          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
+          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+          W.stride(0), col, row, tokens, padded, row, top_k,
+          sorted_token_ids.sizes()[0], stream);
+      break;
+    case 6:
+      ggml_moe_q5_0_q8_1_cuda(
+          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
+          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+          W.stride(0), col, row, tokens, padded, row, top_k,
+          sorted_token_ids.sizes()[0], stream);
+      break;
+    case 7:
+      ggml_moe_q5_1_q8_1_cuda(
+          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
+          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+          W.stride(0), col, row, tokens, padded, row, top_k,
+          sorted_token_ids.sizes()[0], stream);
+      break;
+    case 8:
+      ggml_moe_q8_0_q8_1_cuda(
+          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
+          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+          W.stride(0), col, row, tokens, padded, row, top_k,
+          sorted_token_ids.sizes()[0], stream);
+      break;
     case 10:
       ggml_moe_q2_K_q8_1_cuda(
           (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
@@ -306,21 +316,27 @@ torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
           W.stride(0), col, row, tokens, padded, row, top_k,
           sorted_token_ids.sizes()[0], stream);
       break;
-      // case 12:
-      //   ggml_mul_mat_q4_K_q8_1_cuda(
-      //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-      //       (half*)Y.data_ptr(), col, row, tokens, padded, row, stream);
-      //   break;
-      // case 13:
-      //   ggml_mul_mat_q5_K_q8_1_cuda(
-      //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-      //       (half*)Y.data_ptr(), col, row, tokens, padded, row, stream);
-      //   break;
-      // case 14:
-      //   ggml_mul_mat_q6_K_q8_1_cuda(
-      //       (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
-      //       (half*)Y.data_ptr(), col, row, tokens, padded, row, stream);
-      //   break;
+    case 12:
+      ggml_moe_q4_K_q8_1_cuda(
+          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
+          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+          W.stride(0), col, row, tokens, padded, row, top_k,
+          sorted_token_ids.sizes()[0], stream);
+      break;
+    case 13:
+      ggml_moe_q5_K_q8_1_cuda(
+          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
+          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+          W.stride(0), col, row, tokens, padded, row, top_k,
+          sorted_token_ids.sizes()[0], stream);
+      break;
+    case 14:
+      ggml_moe_q6_K_q8_1_cuda(
+          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
+          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+          W.stride(0), col, row, tokens, padded, row, top_k,
+          sorted_token_ids.sizes()[0], stream);
+      break;
   }
   return Y;
 }
