@@ -831,7 +831,7 @@ def test_prefix_caching_with_concurrent_partial_prefills():
     assert out.num_batched_tokens == 44
 
 
-@pytest.mark.parametrize("model", ["facebook/opt-125m"])
+@pytest.mark.parametrize("model", ["hlarcher/opt-125m"])
 @pytest.mark.parametrize("max_num_partial_prefills", [2, 4, 8])
 def test_chunked_prefill_with_actual_engine(model: str,
                                             max_num_partial_prefills: int):

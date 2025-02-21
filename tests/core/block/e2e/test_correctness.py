@@ -13,7 +13,7 @@ from .conftest import get_token_ids_from_llm_generator
     "common_llm_kwargs",
     [{
         # Use a small model for a fast test.
-        "model": "facebook/opt-125m",
+        "model": "hlarcher/opt-125m",
 
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
@@ -89,7 +89,7 @@ def test_block_manager_with_preemption(baseline_llm_generator,
     "common_llm_kwargs",
     [{
         # Use a small model for a fast test.
-        "model": "facebook/opt-125m",
+        "model": "hlarcher/opt-125m",
 
         # Our prompts will generate 128 tokens; since the prompts themselves are
         # small, we don't need much KV space beyond 128.
@@ -186,7 +186,7 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
     [
         {
             # Use a small model for a fast test.
-            "model": "facebook/opt-125m",
+            "model": "hlarcher/opt-125m",
 
             # skip cuda graph creation for fast test.
             "enforce_eager": True,
@@ -263,7 +263,7 @@ def test_chunked_prefill_block_manager(baseline_llm_generator,
     "common_llm_kwargs",
     [{
         # Use a small model for a fast test.
-        "model": "facebook/opt-125m",
+        "model": "hlarcher/opt-125m",
 
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
@@ -344,7 +344,7 @@ def test_block_manager_prefix_caching_enabled_with_preemption(
     "common_llm_kwargs",
     [{
         # Use a small model for a fast test.
-        "model": "facebook/opt-125m",
+        "model": "hlarcher/opt-125m",
 
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
@@ -418,7 +418,7 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
     "common_llm_kwargs",
     [{
         # Use a small model for a fast test.
-        "model": "facebook/opt-125m",
+        "model": "hlarcher/opt-125m",
 
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
