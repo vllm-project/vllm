@@ -1304,7 +1304,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if get_pp_group().is_last_rank:
                 hidden_states = hidden_states[logit_indices]
                 logits = self.model.compute_logits(hidden_states, None)
-                penalties = torch.full((num_reqs, ), 0.0, device=self.device)
+                penalties = lambda: torch.full(
+                    (num_reqs, ), 0.0, device=self.device)
                 dummy_metadata = SamplingMetadata(
                     temperature=torch.full((num_reqs, ),
                                            0.5,
@@ -1321,9 +1322,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     max_num_logprobs=None,
                     no_penalties=True,
                     prompt_token_ids=None,
-                    frequency_penalties=penalties,
-                    presence_penalties=penalties,
-                    repetition_penalties=penalties,
+                    frequency_penalties=penalties(),
+                    presence_penalties=penalties(),
+                    repetition_penalties=penalties(),
                     output_token_ids=[[] for _ in range(num_reqs)],
                     min_tokens={},
                     logit_bias=[None for _ in range(num_reqs)])
