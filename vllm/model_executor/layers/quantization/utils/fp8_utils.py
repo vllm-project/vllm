@@ -162,6 +162,9 @@ def _per_token_group_quant_fp8(
     y_q_ptr,
     y_s_ptr,
     group_size,
+    # Num columns of y
+    y_num_columns,
+    y_row_stride,
     # Avoid to divide zero
     eps,
     # Information for float8
@@ -174,9 +177,14 @@ def _per_token_group_quant_fp8(
     quantization on a tensor.
     This function converts the tensor values into float8 values.
     """
+    groups_per_row = y_num_columns // group_size
+
     # Map the program id to the row of X and Y it should compute.
     g_id = tl.program_id(0)
-    y_ptr += g_id * group_size
+    row = g_id // groups_per_row
+    row_g_id = g_id % groups_per_row
+
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
     y_s_ptr += g_id
 
@@ -202,6 +210,7 @@ def _per_token_group_quant_fp8_colmajor(
     group_size,
     # Num columns of y
     y_num_columns,
+    y_row_stride,
     # Stride from one column to the next of y_s
     y_s_col_stride,
     # Avoid to divide zero
@@ -216,9 +225,14 @@ def _per_token_group_quant_fp8_colmajor(
     quantization on a tensor.
     This function converts the tensor values into float8 values.
     """
+    groups_per_row = y_num_columns // group_size
+
     # Map the program id to the row of X and Y it should compute.
     g_id = tl.program_id(0)
-    y_ptr += g_id * group_size
+    row = g_id // groups_per_row
+    row_g_id = g_id % groups_per_row
+
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
 
     # Convert g_id the flattened block coordinate to 2D so we can index
@@ -267,7 +281,7 @@ def per_token_group_quant_fp8(
     assert (x.shape[-1] % group_size == 0), (
         f"the last dimension of `x` {x.shape[-1]} must be divisible "
         f"by `group_size` {group_size}")
-    assert x.is_contiguous(), "`x` must be contiguous"
+    assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
     finfo = torch.finfo(dtype)
     fp8_min = finfo.min
@@ -295,6 +309,7 @@ def per_token_group_quant_fp8(
             x_s,
             group_size,
             x.shape[1],
+            x.stride(0),
             x_s.stride(1),
             eps,
             fp8_min=fp8_min,
@@ -309,6 +324,8 @@ def per_token_group_quant_fp8(
             x_q,
             x_s,
             group_size,
+            x.shape[1],
+            x.stride(0),
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,

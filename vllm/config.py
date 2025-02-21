@@ -3332,19 +3332,6 @@ class VllmConfig:
 
         current_platform.check_and_update_config(self)
 
-        # If MLA is enabled, force disable chunked prefill and prefix caching
-        if self.model_config and self.model_config.use_mla:
-            logger.info("MLA is enabled; forcing chunked prefill and prefix "
-                        "caching to be disabled.")
-            self.scheduler_config.enable_chunked_prefill = False
-            self.scheduler_config.chunked_prefill_enabled = False
-            self.scheduler_config.max_num_batched_tokens = max(
-                self.scheduler_config.max_model_len,
-                _DEFAULT_MAX_NUM_BATCHED_TOKENS)
-
-            if self.cache_config is not None:
-                self.cache_config.enable_prefix_caching = False
-
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
