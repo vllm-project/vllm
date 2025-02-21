@@ -456,18 +456,21 @@ class TPUModelRunner():
 
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config): 
-            selected_token_ids = self.model(
+            hidden_states = self.model(
                 token_ids=self.input_ids,
                 position_ids=self.position_ids,
                 kv_caches=self.kv_caches,
                 attn_metadata=attn_metadata,
-                logits_indices=logits_indices,
-                total_num_scheduled_tokens=total_num_scheduled_tokens,
             )
             # print(f'xw32 TPUModelRunner.execute_model line470 {selected_token_ids.shape=}')
+        hidden_states = hidden_states[:total_num_scheduled_tokens]
+        num_reqs = self.input_batch.num_reqs
+        logits_indices = logits_indices[:num_reqs]
+        hidden_states = hidden_states[logits_indices]
+        logits = self.model.compute_logits(hidden_states, None)
+        selected_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
 
         # Then, let's update the cache state.
-        num_reqs = self.input_batch.num_reqs
         request_seq_lens: List[Tuple[int, CachedRequestState, int]] = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
@@ -607,7 +610,7 @@ class TPUModelRunner():
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
             #logger.info(f"xw32 TPUModelRunner.dummy_run. before calling self.model, {input_ids.shape=}, {position_ids.shape=}")
-            self.model(input_ids, position_ids, attn_metadata, kv_caches, None, total_num_scheduled_tokens=num_tokens)
+            self.model(input_ids, position_ids, attn_metadata, kv_caches)
             #logger.info(f"xw32 TPUModelRunner.dummy_run. after calling self.model")
 
     def capture_model(self) -> None:
@@ -698,8 +701,6 @@ class ModelWrapperV1(nn.Module):
         position_ids: torch.Tensor,
         attn_metadata: AttentionMetadata,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        logits_indices: torch.Tensor,
-        total_num_scheduled_tokens: int,
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -747,24 +748,16 @@ class ModelWrapperV1(nn.Module):
             kv_caches,
             attn_metadata,
         )
-        # TODO(xw32): should unconditionally run hidden_states = hidden_states[:attn_metadata.total_num_scheduled_tokens]. Same for logits_indices
-        if attn_metadata is not None:
-            #print(f'xw32 ModelWrapperV1.forward line724 {attn_metadata.total_num_scheduled_tokens=}, {hidden_states.shape=}')
-            hidden_states = hidden_states[:total_num_scheduled_tokens]
-        if logits_indices is not None:
-            logits_indices = logits_indices[:attn_metadata.num_seqs]
-            hidden_states = hidden_states[logits_indices]
-            #print(f'xw32 ModelWrapperV1.forward line728 {logits_indices=}, {hidden_states.shape=}')
+        
+        return hidden_states
 
-        # hidden_states = hidden_states.flatten(0, 1) is not needed because previously hidden_states has shape [bs, T, C] and we need to combine the first 2 dimensions.
-        # hidden_states = hidden_states.flatten(0, 1)
-        logits = self.model.compute_logits(hidden_states, None)
-
-        # Greedy sampling.
-        argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-        #print(f'xw32 line728 {argmax_token_ids.shape=}')
-        # argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
-        return argmax_token_ids
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        return logits
 
 
 def _get_padded_prefill_len(x: int) -> int:
