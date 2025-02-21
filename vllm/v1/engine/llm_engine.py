@@ -47,6 +47,13 @@ class LLMEngine:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
+        # important: init dp group before init the engine_core
+        self.parallel_config = vllm_config.parallel_config
+        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
+        self.should_execute_dummy_batch = False
+        if self.need_to_sync_across_dp:
+            self.dp_group = self.parallel_config.stateless_init_dp_group()
+
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
@@ -75,12 +82,6 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=False,  # FIXME: implement
         )
-
-        self.parallel_config = vllm_config.parallel_config
-        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
-        self.should_execute_dummy_batch = False
-        if self.need_to_sync_across_dp:
-            self.dp_group = self.parallel_config.stateless_init_dp_group()
 
     @classmethod
     def from_engine_args(
