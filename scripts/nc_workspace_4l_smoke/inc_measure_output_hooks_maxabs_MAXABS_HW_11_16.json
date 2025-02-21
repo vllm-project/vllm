@@ -1,0 +1,974 @@
+{
+    "GlobalRank": null,
+    "LocalRank": 11,
+    "Mode": "Scale",
+    "Nodes": {
+        "model.layers.0.self_attn.q_a_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.0.self_attn.q_b_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.0.self_attn.kv_a_proj_with_mqa": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {
+                "weight": 0.0625
+            }
+        },
+        "model.layers.0.self_attn.kv_b_proj": {
+            "inputs": [
+                0.0625
+            ],
+            "outputs": [
+                0.000244140625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.0.self_attn.o_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.0.self_attn.attn.impl.matmul_qk": {
+            "inputs": [
+                0.0625,
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {}
+        },
+        "model.layers.0.self_attn.attn.impl.matmul_av": {
+            "inputs": [
+                0.0625,
+                0.00390625
+            ],
+            "outputs": [
+                0.000244140625
+            ],
+            "params": {}
+        },
+        "model.layers.0.self_attn.attn.impl.batch2block_matmul": {
+            "inputs": [
+                0.0625,
+                16.0
+            ],
+            "outputs": [
+                1.0
+            ],
+            "params": {}
+        },
+        "model.layers.0.self_attn.attn.impl.block2batch_matmul": {
+            "inputs": [
+                0.0625,
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {}
+        },
+        "model.layers.0.self_attn.attn.impl.fused_scaled_dot_product_attention": {
+            "inputs": [
+                1.0,
+                1.0,
+                0.00390625,
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.0.mlp.gate_up_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.0.mlp.down_proj": {
+            "inputs": [
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.0625
+            }
+        },
+        "model.layers.1.self_attn.q_a_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.1.self_attn.q_b_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.1.self_attn.kv_a_proj_with_mqa": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {
+                "weight": 0.0625
+            }
+        },
+        "model.layers.1.self_attn.kv_b_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.1.self_attn.o_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.1.self_attn.attn.impl.matmul_qk": {
+            "inputs": [
+                0.0625,
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {}
+        },
+        "model.layers.1.self_attn.attn.impl.matmul_av": {
+            "inputs": [
+                0.0625,
+                0.00390625
+            ],
+            "outputs": [
+                0.000244140625
+            ],
+            "params": {}
+        },
+        "model.layers.1.self_attn.attn.impl.batch2block_matmul": {
+            "inputs": [
+                0.0625,
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {}
+        },
+        "model.layers.1.self_attn.attn.impl.block2batch_matmul": {
+            "inputs": [
+                0.0625,
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {}
+        },
+        "model.layers.1.self_attn.attn.impl.fused_scaled_dot_product_attention": {
+            "inputs": [
+                1.0,
+                1.0,
+                0.00390625,
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.1.mlp.gate_up_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.1.mlp.down_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                0.000244140625
+            ],
+            "params": {
+                "weight": 0.0625
+            }
+        },
+        "model.layers.2.self_attn.q_a_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.2.self_attn.q_b_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.2.self_attn.kv_a_proj_with_mqa": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.2.self_attn.kv_b_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.2.self_attn.o_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.2.self_attn.attn.impl.matmul_qk": {
+            "inputs": [
+                0.0625,
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {}
+        },
+        "model.layers.2.self_attn.attn.impl.matmul_av": {
+            "inputs": [
+                0.0625,
+                0.00390625
+            ],
+            "outputs": [
+                0.000244140625
+            ],
+            "params": {}
+        },
+        "model.layers.2.self_attn.attn.impl.batch2block_matmul": {
+            "inputs": [
+                0.0625,
+                16.0
+            ],
+            "outputs": [
+                1.0
+            ],
+            "params": {}
+        },
+        "model.layers.2.self_attn.attn.impl.block2batch_matmul": {
+            "inputs": [
+                0.0625,
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {}
+        },
+        "model.layers.2.self_attn.attn.impl.fused_scaled_dot_product_attention": {
+            "inputs": [
+                1.0,
+                1.0,
+                0.00390625,
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.2.mlp.gate_up_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.2.mlp.down_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.self_attn.q_a_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.self_attn.q_b_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.self_attn.kv_a_proj_with_mqa": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {
+                "weight": 0.0625
+            }
+        },
+        "model.layers.3.self_attn.kv_b_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.self_attn.o_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.self_attn.attn.impl.matmul_qk": {
+            "inputs": [
+                1.0,
+                1.0
+            ],
+            "outputs": [
+                1.0
+            ],
+            "params": {}
+        },
+        "model.layers.3.self_attn.attn.impl.matmul_av": {
+            "inputs": [
+                0.0625,
+                0.00390625
+            ],
+            "outputs": [
+                0.000244140625
+            ],
+            "params": {}
+        },
+        "model.layers.3.self_attn.attn.impl.batch2block_matmul": {
+            "inputs": [
+                0.0625,
+                16.0
+            ],
+            "outputs": [
+                1.0
+            ],
+            "params": {}
+        },
+        "model.layers.3.self_attn.attn.impl.block2batch_matmul": {
+            "inputs": [
+                0.0625,
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {}
+        },
+        "model.layers.3.self_attn.attn.impl.fused_scaled_dot_product_attention": {
+            "inputs": [
+                1.0,
+                1.0,
+                0.00390625,
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.3.mlp.gate": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp": {
+            "inputs": [
+                1.0,
+                0.00390625,
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w13_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w13_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w2_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp.w2_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp": {
+            "inputs": [
+                1.0,
+                0.0625,
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w13_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w13_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w2_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_1.MoeOp.w2_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp": {
+            "inputs": [
+                1.0,
+                0.00390625,
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w13_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w13_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w2_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_2.MoeOp.w2_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp": {
+            "inputs": [
+                1.0,
+                0.00390625,
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w13_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w13_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w2_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_3.MoeOp.w2_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp": {
+            "inputs": [
+                1.0,
+                0.0625,
+                0.00390625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w13_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w13_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w2_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_4.MoeOp.w2_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp": {
+            "inputs": [
+                1.0,
+                0.0625,
+                0.00390625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w13_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w13_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w2_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_5.MoeOp.w2_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp": {
+            "inputs": [
+                1.0,
+                0.00390625,
+                0.0625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w13_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w13_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w2_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_6.MoeOp.w2_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp": {
+            "inputs": [
+                1.0,
+                0.00390625,
+                0.00390625
+            ],
+            "outputs": [
+                0.00390625
+            ],
+            "params": {}
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w13_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w13_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w2_list.0": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.experts._temp_expert_group_7.MoeOp.w2_list.1": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        },
+        "model.layers.3.mlp.shared_experts.gate_up_proj": {
+            "inputs": [
+                1.0
+            ],
+            "outputs": [
+                0.0625
+            ],
+            "params": {
+                "weight": 0.0625
+            }
+        },
+        "model.layers.3.mlp.shared_experts.down_proj": {
+            "inputs": [
+                0.00390625
+            ],
+            "outputs": [
+                1.52587890625e-05
+            ],
+            "params": {
+                "weight": 0.00390625
+            }
+        }
+    }
+}
