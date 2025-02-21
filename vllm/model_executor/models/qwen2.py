@@ -258,8 +258,6 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-# TODO(xw32): revert the change before merging the code.
-# xw32 turns off dynamo
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,

@@ -95,7 +95,6 @@ class TPUModelRunner():
         self.model: Optional[nn.Module] = None
 
         # Persistent batch.
-        # self.max_model_len=512, self.max_num_tokens=8192
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -114,9 +113,9 @@ class TPUModelRunner():
         # KV caches for forward pass
         self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
-        # xw32: do the swap thing later. Use the synchronous way now as baseline.
         # Cached torch/numpy tensor
-        # The pytorch tensor and numpy array share the same buffer. Sometimes the numpy op is faster.
+        # The pytorch tensor and numpy array share the same buffer.
+        # Sometimes the numpy op is faster so we create both.
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device="cpu")
@@ -127,13 +126,13 @@ class TPUModelRunner():
                                          device="cpu")
         self.positions_np = self.positions_cpu.numpy()
 
-        # xw32: slot_mapping maps a token to its position in the kvcache (=block_numbers * self.block_size+block_offset)
         self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
                                             dtype=torch.int64,
                                             device="cpu")
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
-        # self.input_batch.block_table has shape of [max_num_reqs, max_num_blocks_per_req].
-        # Because I want the block_table.shape[0] to be num_token, so I did this way.
+
+        # self.input_batch.block_table has a shape of [max_num_reqs, max_num_blocks_per_req].
+        # Because we want the block_table.shape[0] to be num_tokens nad block_table[1] to be multiple of NUM_KV_PAGES_PER_BLOCK, so we create a separate one.
         padded_max_num_blocks_per_req = _get_padded_number(self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
         self.block_table_cpu = torch.zeros((self.max_num_tokens, padded_max_num_blocks_per_req),
                                            dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
@@ -144,6 +143,7 @@ class TPUModelRunner():
                                                device="cpu",
                                                pin_memory=self.pin_memory)
         self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+
         self.seq_lens_cpu = torch.zeros(self.max_num_tokens,
                                         dtype=torch.int32,
                                         device="cpu",
@@ -314,17 +314,10 @@ class TPUModelRunner():
         return kv_cache_spec
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
-        # print(f'xw32 _prepare_inputs begins. {scheduler_output=}')
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
-        # OPTIMIZATION: Start copying the block table first.
-        # This way, we can overlap the copy with the following CPU operations.
-        # xw32q: Do we need this?
-        # TODO(xw32): check if TPU support async copy. Similar to the pined_memory
-        # self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
@@ -332,7 +325,6 @@ class TPUModelRunner():
         for req_id in self.input_batch.req_ids[:num_reqs]:
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            # xw32 TPUModelRunner.prepare_input line148. req_id='0', num_tokens=5
             num_scheduled_tokens_per_req.append(num_tokens)
             max_num_scheduled_tokens_all_reqs = max(max_num_scheduled_tokens_all_reqs,
                                            num_tokens)
@@ -352,14 +344,10 @@ class TPUModelRunner():
             [self.arange_np[:n] for n in num_scheduled_tokens_per_req])
         
         # Get positions.
-        # TODO(xw32): add an example of the output positions_np.
-        # self.positions_np.shape=(8192,) self.positions_np=array([281337856,         0,     32768, ...,         0, 281734336, 0], dtype=int32), the value in self.positions_np because it's initialize as torch.empty.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
-        # xw32 TPUModelRunner.prepare_input. total_num_scheduled_tokens=5, self.input_batch.num_computed_tokens_cpu=array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=int32), self.input_batch.num_reqs=1, self.model_config.uses_mrope=False
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
-        # xw32 TPUModelRunner.prepare_input. line355 self.input_batch.num_computed_tokens_cpu[req_indices]=array([0, 0, 0, 0, 0], dtype=int32), arange=array([0, 1, 2, 3, 4], dtype=int32), positions_np=array([0, 1, 2, 3, 4], dtype=int32)
         
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -367,12 +355,10 @@ class TPUModelRunner():
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-        # xw32 TPUModelRunner.prepare_input line148. positions_np=array([0, 1, 2, 3, 4]), req_indices=array([0, 0, 0, 0, 0], dtype=int32), self.input_batch.token_ids_cpu.shape=(16, 512), [0 1 2 3 4]
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        # xw32 note, self.input_batch.token_ids_cpu_tensor is a 2d tensor
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
@@ -384,6 +370,7 @@ class TPUModelRunner():
         # where K is the max_num_blocks_per_req and the block size is 2.
         # NOTE(woosuk): We can't simply use `token_indices // block_size` here
         # because M (max_model_len) is not necessarily divisible by block_size.
+        # req_indices: # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
         # NOTE(woosuk): We use torch.index_select instead of np.take here
@@ -395,7 +382,6 @@ class TPUModelRunner():
         np.add(block_numbers * self.block_size,
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
-        # xw32 TPUModelRunner.prepare_input line401 . self.slot_mapping_cpu.shape=torch.Size([8192]), self.slot_mapping_cpu=tensor([0, 1, 2,  ..., 0, 0, 0])
         
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -406,7 +392,7 @@ class TPUModelRunner():
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens_per_req)
 
-        # Copy the tensors to the TPU.
+        # Do the padding and copy the tensors to the TPU.
         padded_total_num_scheduled_tokens = _get_padded_number(total_num_scheduled_tokens, NUM_QUERIES_PER_BLOCK)
         self.input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens].to(self.device)
         self.position_ids = self.positions_cpu[:padded_total_num_scheduled_tokens].to(self.device)
@@ -418,9 +404,6 @@ class TPUModelRunner():
         query_start_loc = self.query_start_loc_cpu[:padded_total_num_scheduled_tokens+1].to(self.device)
         seq_lens = self.seq_lens_cpu[:padded_total_num_scheduled_tokens].to(self.device)
 
-        # print(f'xw32 TPUModelRunner.prepare_input line421 . {self.input_batch.block_table.get_device_tensor().shape=}') # self.input_batch.block_table.get_device_tensor().shape=torch.Size([16, 32]=(max_num_reqs, max_num_blocks_per_req)
-        # block_table.get_device_tensor()=tensor([[0, 0, 0, 0, 0...], [0]])
-        # slot_mapping=tensor([         0,          1,          2,          3,          4, 1000000000, ...])
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=padded_block_table,
@@ -442,17 +425,12 @@ class TPUModelRunner():
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        # logger.info(f"xw32 TPUModelRunner.execute_model. {scheduler_output=}")
-
         # Update cached state
         self._update_states(scheduler_output)
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-
-        input_ids = self.input_ids
-        # print(f'xw32 TPUModelRunner.execute_model line459 {input_ids.shape=}, {num_scheduled_tokens=}')
 
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config): 
@@ -462,7 +440,6 @@ class TPUModelRunner():
                 kv_caches=self.kv_caches,
                 attn_metadata=attn_metadata,
             )
-            # print(f'xw32 TPUModelRunner.execute_model line470 {selected_token_ids.shape=}')
         hidden_states = hidden_states[:total_num_scheduled_tokens]
         num_reqs = self.input_batch.num_reqs
         logits_indices = logits_indices[:num_reqs]
@@ -497,7 +474,6 @@ class TPUModelRunner():
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
-        # print(f'xw32 TPUModelRunner.execute_model line496 {selected_token_ids.shape=}')
         max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
             valid_sampled_token_ids = selected_token_ids.tolist()
@@ -507,7 +483,6 @@ class TPUModelRunner():
                 req_state.output_token_ids.append(token_id)
                 self.input_batch.num_tokens[i] += 1
         else:
-            # print('xw32 TPUModelRunner.execute_model line505 max_gen_len>1 is triggered')
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
             valid_sampled_token_ids = [
@@ -521,18 +496,17 @@ class TPUModelRunner():
                     i, target_slice] = valid_sampled_token_ids[i]
                 req_state.output_token_ids.extend(valid_sampled_token_ids[i])
 
-        # print(f'xw32 TPUModelRunner.execute_model line518 execute_model, {len(req_ids)=}, {len(self.input_batch.req_id_to_index)=}, {selected_token_ids.shape=}, {selected_token_ids=} {num_reqs=}')
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
 
     def load_model(self) -> None:
-        #logger.info("xw32 TPUModelRunner.load_model begins.")
         self.device = self.device_config.device
 
         # NOTE(woosuk): While the executor assigns the TP ranks to the worker
@@ -554,14 +528,10 @@ class TPUModelRunner():
         xm.mark_step()
         xm.wait_device_ops()
         model = ModelWrapperV1(model)
-        # TODO(xw32): turn on dynamo.
-        # xw32 turns off dynamo
-        # self.model = model
         self.model = torch.compile(model,
                                    backend="openxla",
                                    fullgraph=True,
                                    dynamic=False)
-        # logger.info("xw32 TPUModelRunner.load_model ends.")
 
     # @torch.inference_mode() fails so I disabled it.
     # It's also not in the original v1 tpu_model_runner.py
@@ -589,14 +559,12 @@ class TPUModelRunner():
         context_lens = torch.ones((num_tokens, ),
                                   dtype=torch.int32,
                                   device=self.device)
-        # TODO(xw32): how do I set torch._dynamo.mark_dynamic?
-        # The attn_metadata is used in torch._dynamo.mark_dynamic.
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=context_lens,
             query_start_loc=query_start_loc,
-            num_seqs=num_tokens,  # xw32: is it correct?
+            num_seqs=num_tokens,
         )
 
         torch._dynamo.mark_dynamic(input_ids, 0)
@@ -606,20 +574,15 @@ class TPUModelRunner():
         torch._dynamo.mark_dynamic(query_start_loc, 0)
         torch._dynamo.mark_dynamic(context_lens, 0)
 
-        # TODO(xw32): work with Alex to fix the issue later.
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
-            #logger.info(f"xw32 TPUModelRunner.dummy_run. before calling self.model, {input_ids.shape=}, {position_ids.shape=}")
             self.model(input_ids, position_ids, attn_metadata, kv_caches)
-            #logger.info(f"xw32 TPUModelRunner.dummy_run. after calling self.model")
 
     def capture_model(self) -> None:
         """Compile the model."""
 
-        #logger.info("xw32 TPUModelRunner.capture_model.")
         logger.info("Compiling the model with different input shapes.")
 
-        # xw32: may need to compile for num_seqs.
         start = time.perf_counter()
         num_tokens = 16
         # The num_tokens_list below is how GPU precompiles.
@@ -628,7 +591,6 @@ class TPUModelRunner():
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()
-            # print(f'xw32 capture_model line 620 {self.scheduler_config.max_num_batched_tokens=}')
             if num_tokens >= self.scheduler_config.max_num_batched_tokens:
                 break
             num_tokens *= 2
@@ -716,9 +678,6 @@ class ModelWrapperV1(nn.Module):
                 memory profiling at initialization.
         """
         # Skip this in memory profiling at initialization.
-        #logger.info("xw32 ModelWrapperV1.forward.")
-        # token_ids=tensor([9707,   11,  847,  829,  374, 0...0]
-        # position_ids=tensor([0, 1, 2, 3, 4, 0, ..., 0]
         if attn_metadata is not None and kv_caches[0][0].numel() > 0:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
@@ -726,7 +685,6 @@ class ModelWrapperV1(nn.Module):
             # work, we need to flatten the first three dimensions and modify
             # the slot_mapping accordingly.
             # kv_caches: List[Tuple[torch.Tensor, torch.Tensor]]
-            # print(f'xw32 line705 {kv_caches[0][0].shape=}')
             num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
             slot_mapping = attn_metadata.slot_mapping
             slot_mapping = slot_mapping.flatten()

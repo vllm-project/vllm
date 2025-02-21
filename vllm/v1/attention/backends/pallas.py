@@ -51,20 +51,6 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> None:
         raise RuntimeError("swap_blocks is not used for the TPU backend.")
 
-    @torch.compile(backend="openxla")
-    @staticmethod
-    def copy_blocks(
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        src_to_dists: Tuple[torch.Tensor, torch.Tensor],
-    ) -> None:
-        assert False, "I assume this PallasAttentionBackend.copy_blocks function should not be used. But I could be wrong."  # TODO(xw32): If it turns out all tests passed, remove this method.
-        src_indices, dst_indices = src_to_dists
-        for k_cache, v_cache in kv_caches:
-            torch.ops.xla.dynamo_set_buffer_donor_(k_cache, True)
-            k_cache[:, dst_indices] = k_cache[:, src_indices]
-            torch.ops.xla.dynamo_set_buffer_donor_(v_cache, True)
-            v_cache[:, dst_indices] = v_cache[:, src_indices]
-
 
 @dataclass
 class PallasMetadata():
@@ -151,9 +137,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        # xw32: kv_cache[0].shape=torch.Size([2, 57599, 16, 128])
-        # print(f'xw32 PallasAttentionBackendImpl.forward  begins {query.shape=}, {key.shape=}, {len(kv_cache)=}, {kv_cache[0].shape=}')
-
         if attn_metadata is None:
             if output is None:
                 output = torch.ones_like(query)

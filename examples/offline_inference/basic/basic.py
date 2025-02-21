@@ -2,7 +2,6 @@
 
 from vllm import LLM, SamplingParams
 
-# TODO(xw32): should remove the change in this file before merging the PR.
 # Sample prompts.
 prompts = [
     "Hello, my name is",
