@@ -4,7 +4,7 @@ from typing import Dict, List, Mapping, Optional, Type, Union
 
 from typing_extensions import TypeVar
 
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
@@ -76,6 +76,12 @@ class LLMEngine:
             log_stats=False,  # FIXME: implement
         )
 
+        self.parallel_config = vllm_config.parallel_config
+        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
+        self.should_execute_dummy_batch = False
+        if self.need_to_sync_across_dp:
+            self.dp_group = self.parallel_config.stateless_init_dp_group()
+
     @classmethod
     def from_engine_args(
         cls,
@@ -106,7 +112,14 @@ class LLMEngine:
         return self.output_processor.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        return self.output_processor.has_unfinished_requests()
+        has_unfinished = self.output_processor.has_unfinished_requests()
+        if not self.need_to_sync_across_dp:
+            return has_unfinished
+        aggregated_has_unfinished = ParallelConfig.\
+        sync_has_unfinished_across_dp(self.dp_group, has_unfinished)
+        if not has_unfinished and aggregated_has_unfinished:
+            self.should_execute_dummy_batch = True
+        return aggregated_has_unfinished
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
@@ -144,6 +157,11 @@ class LLMEngine:
         self.engine_core.add_request(request)
 
     def step(self) -> List[RequestOutput]:
+
+        if self.should_execute_dummy_batch:
+            self.should_execute_dummy_batch = False
+            self.engine_core.execute_dummy_batch()
+            return []
 
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()
