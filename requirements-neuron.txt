@@ -3,4 +3,5 @@
 
 # Dependencies for Neuron devices
 torch-neuronx >= 2.5.0
-neuronx-cc
+neuronx-cc==2.*
+torchvision # Required for Llama3.2 multimodal image preprocessing
