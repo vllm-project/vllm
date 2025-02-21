@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # usage: python examples/offline_inference/data_parallel.py
-# we need to have a launcher like torchrun to create multiple data parallel
+# we need to have a launcher to create multiple data parallel
 # ranks. And each rank will create a vLLM instance to process its own prompts.
 import os
 
