@@ -36,6 +36,7 @@ class TPUWorker:
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        self.is_driver_worker = is_driver_worker
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -151,7 +152,7 @@ class TPUWorker:
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
-        return output if self.rank == 0 else None
+        return output if self.is_driver_worker else None
 
     def load_model(self) -> None:
         self.model_runner.load_model()
