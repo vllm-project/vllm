@@ -52,8 +52,8 @@ class InfEncoder(json.JSONEncoder):
             return "inf"
         return o
 
-    def encode(self, o: Any, *args, **kwargs) -> Any:
-        return super().encode(self.clear_inf(o), *args, **kwargs)
+    def iterencode(self, o: Any, *args, **kwargs) -> Any:
+        return super().iterencode(self.clear_inf(o), *args, **kwargs)
 
 
 def write_to_json(filename: str, records: List) -> None:
