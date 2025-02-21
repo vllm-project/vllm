@@ -191,11 +191,13 @@ def bind_kv_cache(
 
 
 def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
-               length: int) -> None:
+               length: int) -> torch.Tensor:
     """
     Copy the first length elements of a tensor into another tensor in a
     non-blocking manner.
 
     Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
+
+    Returns the sliced target tensor.
     """
-    to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
+    return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
