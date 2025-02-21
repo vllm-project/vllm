@@ -43,7 +43,7 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
                                      max_tokens=16 * (dp_rank + 1))
 
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m", tensor_parallel_size=2)
+    llm = LLM(model="facebook/opt-125m", tensor_parallel_size=2, enforce_eager=True)
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
     for output in outputs:
