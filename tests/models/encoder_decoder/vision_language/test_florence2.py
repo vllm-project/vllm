@@ -127,6 +127,7 @@ def test_models(hf_runner: Type[HfRunner], vllm_runner: Type[VllmRunner],
             decoder_prompt=None,
         ) for factor in size_factors
     ] for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+
     run_test(
         hf_runner,
         vllm_runner,
