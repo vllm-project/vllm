@@ -1336,7 +1336,8 @@ class LLMEngine:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
-            # TODO: execute a dummy batch to sync across ranks
+            outputs = self.model_executor.execute_model(
+                execute_model_req=ExecuteModelRequest(is_dummy_batch=True))
 
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
