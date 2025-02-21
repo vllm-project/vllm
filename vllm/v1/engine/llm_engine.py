@@ -116,6 +116,9 @@ class LLMEngine:
         has_unfinished = self.output_processor.has_unfinished_requests()
         if not self.dp_enabled:
             return has_unfinished
+        return self.has_unfinished_requests_dp(has_unfinished)
+
+    def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
         aggregated_has_unfinished = ParallelConfig.\
         sync_has_unfinished_across_dp(self.dp_group, has_unfinished)
         if not has_unfinished and aggregated_has_unfinished:
