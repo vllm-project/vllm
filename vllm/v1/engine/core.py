@@ -182,10 +182,10 @@ class EngineCore:
         Note that if nothing to output in this step, None is returned.
 
         The execution flow is as follows:
-        1. Try to schedule a new batch if there are unscheduled requests
-        and the job queue is not full. If a new batch is scheduled, directly
-        return an empty engine core output. In other words, we won't check
-        and return model outputs before the batch queue is full.
+        1. Try to schedule a new batch if the batch queue is not full.
+        If a new batch is scheduled, directly return an empty engine core
+        output. In other words, fulfilling the batch queue has a higher priority
+        then getting model outputs.
         2. If there is no new scheduled batch, meaning that the batch queue
         is full or no other requests can be scheduled, we block until the first
         batch in the job queue is finished.
