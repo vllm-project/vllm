@@ -96,6 +96,7 @@ def run_test(
         )
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize(
     "size_factors",
