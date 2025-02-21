@@ -575,6 +575,10 @@ class WorkerWrapperBase:
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
             assert self.worker is not None
+
+    def init_device(self):
+        with set_current_vllm_config(self.vllm_config):
+            # To make vLLM config available during device initialization
             self.worker.init_device()
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
