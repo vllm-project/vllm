@@ -237,6 +237,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
         tensor_shape = (num_experts, 2 * intermediate_size_per_partition,
                         hidden_size)
+        print(hidden_size, intermediate_size_per_partition)
         #gate up proj
         w13_qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
@@ -312,40 +313,10 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-        final_hidden_states = torch.empty_like(x)
-        final_hidden_states_kern = _fused_moe_gguf(
-            x, layer.w13_qweight, layer.w2_qweight, topk_weights, topk_ids,
-            layer.w13_qweight_type.weight_type,
-            layer.w2_qweight_type.weight_type, self.act)
-        for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
-            inp = x[tok].reshape((1, ) + x.shape[1:])
-            current_hidden_state = None
-            for ww, ii in zip(w, idx):
-                expert_up = layer.w13_qweight[ii]
-
-                out = _fuse_mul_mat(inp, expert_up,
-                                    layer.w13_qweight_type.weight_type)
-                out = self.act(out)
-
-                expert_down = layer.w2_qweight[ii]
-                current_state = _fuse_mul_mat(
-                    out, expert_down,
-                    layer.w2_qweight_type.weight_type).mul_(ww)
-                if current_hidden_state is None:
-                    current_hidden_state = current_state
-                else:
-                    current_hidden_state.add_(current_state)
-            final_hidden_states[tok] = current_hidden_state
-        print(
-            "running with weight type", layer.w13_qweight_type.weight_type,
-            layer.w2_qweight_type.weight_type, "all close: ",
-            torch.allclose(final_hidden_states,
-                           final_hidden_states_kern,
-                           atol=1e-2), "mean abs diff: ",
-            torch.abs(final_hidden_states - final_hidden_states_kern).mean(),
-            "max abs diff: ",
-            torch.abs(final_hidden_states - final_hidden_states_kern).max())
-        return final_hidden_states
+        return _fused_moe_gguf(x, layer.w13_qweight, layer.w2_qweight,
+                               topk_weights, topk_ids,
+                               layer.w13_qweight_type.weight_type,
+                               layer.w2_qweight_type.weight_type, self.act)
 
 
 class GGUFEmbeddingMethod(GGUFLinearMethod):
