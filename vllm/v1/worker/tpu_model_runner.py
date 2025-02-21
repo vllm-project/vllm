@@ -760,23 +760,5 @@ class ModelWrapperV1(nn.Module):
         return logits
 
 
-def _get_padded_prefill_len(x: int) -> int:
-    # NOTE(woosuk): The pallas FlashAttention kernel requires the sequence
-    # length to be a multiple of 16. We pad the prompt length to the nearest
-    # multiple of 16. This is also good for performance.
-    if x <= 16:
-        return 16
-    return 1 << (x - 1).bit_length()
-
-
-def _get_padded_batch_size(batch_size: int) -> int:
-    # The GMM Pallas kernel requires num_tokens * topk to be a multiple of 16.
-    # To meet this requirement in the simplest way, we set the minimal batch
-    # size to 8.
-    if batch_size <= 8:
-        return 8
-    else:
-        return ((batch_size + 15) // 16) * 16
-
 def _get_padded_number(n: int, multiple: int) -> int:
     return ((n + multiple - 1) // multiple) * multiple

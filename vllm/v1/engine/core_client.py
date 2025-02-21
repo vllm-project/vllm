@@ -2,10 +2,14 @@
 
 import asyncio
 import os
+import queue
 import signal
+import uuid
 import weakref
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional, Type
+from concurrent.futures import Future
+from threading import Thread
+from typing import Any, Dict, List, Optional, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -16,13 +20,15 @@ from vllm.lora.request import LoRARequest
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType)
+                            EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
+
+AnyFuture = Union[asyncio.Future[Any], Future[Any]]
 
 
 class EngineCoreClient(ABC):
@@ -75,6 +81,12 @@ class EngineCoreClient(ABC):
     def reset_prefix_cache(self) -> None:
         raise NotImplementedError
 
+    def sleep(self, level: int = 1) -> None:
+        raise NotImplementedError
+
+    def wake_up(self) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
@@ -91,6 +103,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def reset_prefix_cache_async(self) -> None:
+        raise NotImplementedError
+
+    async def sleep_async(self, level: int = 1) -> None:
+        raise NotImplementedError
+
+    async def wake_up_async(self) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -131,6 +149,12 @@ class InprocClient(EngineCoreClient):
 
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
+
+    def sleep(self, level: int = 1) -> None:
+        self.engine_core.sleep(level)
+
+    def wake_up(self) -> None:
+        self.engine_core.wake_up()
 
     def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine_core.add_lora(lora_request)
@@ -204,12 +228,24 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
+        self.utility_results: Dict[int, AnyFuture] = {}
+
     def shutdown(self):
         """Clean up background resources."""
         if hasattr(self, "proc_handle"):
             self.proc_handle.shutdown()
 
         self._finalizer()
+
+
+def _process_utility_output(output: UtilityOutput,
+                            utility_results: Dict[int, AnyFuture]):
+    """Set the result from a utility method in the waiting future"""
+    future = utility_results.pop(output.call_id)
+    if output.failure_message is not None:
+        future.set_exception(Exception(output.failure_message))
+    else:
+        future.set_result(output.result)
 
 
 class SyncMPClient(MPClient):
@@ -224,10 +260,34 @@ class SyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-    def get_output(self) -> EngineCoreOutputs:
+        self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
 
-        (frame, ) = self.output_socket.recv_multipart(copy=False)
-        return self.decoder.decode(frame.buffer)
+        # Ensure that the outputs socket processing thread does not have
+        # a ref to the client which prevents gc.
+        output_socket = self.output_socket
+        decoder = self.decoder
+        utility_results = self.utility_results
+        outputs_queue = self.outputs_queue
+
+        def process_outputs_socket():
+            try:
+                while True:
+                    (frame, ) = output_socket.recv_multipart(copy=False)
+                    outputs = decoder.decode(frame.buffer)
+                    if outputs.utility_output:
+                        _process_utility_output(outputs.utility_output,
+                                                utility_results)
+                    else:
+                        outputs_queue.put_nowait(outputs)
+            except zmq.error.ContextTerminated:
+                # Expected when the class is GC'd / during process termination.
+                pass
+
+        # Process outputs from engine in separate thread.
+        Thread(target=process_outputs_socket, daemon=True).start()
+
+    def get_output(self) -> EngineCoreOutputs:
+        return self.outputs_queue.get()
 
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: Any) -> None:
@@ -235,6 +295,16 @@ class SyncMPClient(MPClient):
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
         self.input_socket.send_multipart(msg, copy=False)
+
+    def _call_utility(self, method: str, *args) -> Any:
+        call_id = uuid.uuid1().int >> 64
+        future: Future[Any] = Future()
+        self.utility_results[call_id] = future
+
+        self._send_input(EngineCoreRequestType.UTILITY,
+                         (call_id, method, args))
+
+        return future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
@@ -247,13 +317,19 @@ class SyncMPClient(MPClient):
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     def profile(self, is_start: bool = True) -> None:
-        self._send_input(EngineCoreRequestType.PROFILE, is_start)
+        self._call_utility("profile", is_start)
 
     def reset_prefix_cache(self) -> None:
-        self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
+        self._call_utility("reset_prefix_cache")
 
     def add_lora(self, lora_request: LoRARequest) -> None:
-        self._send_input(EngineCoreRequestType.ADD_LORA, lora_request)
+        self._call_utility("add_lora", lora_request)
+
+    def sleep(self, level: int = 1) -> None:
+        self._call_utility("sleep", level)
+
+    def wake_up(self) -> None:
+        self._call_utility("wake_up")
 
 
 class AsyncMPClient(MPClient):
@@ -268,30 +344,53 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        self.outputs_queue: Optional[asyncio.Queue[bytes]] = None
+        self.outputs_queue: Optional[asyncio.Queue[EngineCoreOutputs]] = None
         self.queue_task: Optional[asyncio.Task] = None
+
+    async def _start_output_queue_task(self):
+        # Perform IO in separate task to parallelize as much as possible.
+        # Avoid task having direct reference back to the client.
+        self.outputs_queue = asyncio.Queue()
+        output_socket = self.output_socket
+        decoder = self.decoder
+        utility_results = self.utility_results
+        outputs_queue = self.outputs_queue
+
+        async def process_outputs_socket():
+            while True:
+                (frame, ) = await output_socket.recv_multipart(copy=False)
+                outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
+                if outputs.utility_output:
+                    _process_utility_output(outputs.utility_output,
+                                            utility_results)
+                else:
+                    outputs_queue.put_nowait(outputs)
+
+        self.queue_task = asyncio.create_task(process_outputs_socket())
 
     async def get_output_async(self) -> EngineCoreOutputs:
         if self.outputs_queue is None:
-            # Perform IO in separate task to parallelize as much as possible
-            self.outputs_queue = asyncio.Queue()
-
-            async def process_outputs_socket():
-                assert self.outputs_queue is not None
-                while True:
-                    (frame, ) = await self.output_socket.recv_multipart(
-                        copy=False)
-                    self.outputs_queue.put_nowait(frame.buffer)
-
-            self.queue_task = asyncio.create_task(process_outputs_socket())
-
-        return self.decoder.decode(await self.outputs_queue.get())
+            await self._start_output_queue_task()
+            assert self.outputs_queue is not None
+        return await self.outputs_queue.get()
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
 
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
+
+        if self.outputs_queue is None:
+            await self._start_output_queue_task()
+
+    async def _call_utility_async(self, method: str, *args) -> Any:
+        call_id = uuid.uuid1().int >> 64
+        future = asyncio.get_running_loop().create_future()
+        self.utility_results[call_id] = future
+        await self._send_input(EngineCoreRequestType.UTILITY,
+                               (call_id, method, args))
+
+        return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
@@ -304,10 +403,16 @@ class AsyncMPClient(MPClient):
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     async def profile_async(self, is_start: bool = True) -> None:
-        await self._send_input(EngineCoreRequestType.PROFILE, is_start)
+        await self._call_utility_async("profile", is_start)
 
     async def reset_prefix_cache_async(self) -> None:
-        await self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
+        await self._call_utility_async("reset_prefix_cache")
+
+    async def sleep_async(self, level: int = 1) -> None:
+        await self._call_utility_async("sleep", level)
+
+    async def wake_up_async(self) -> None:
+        await self._call_utility_async("wake_up")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> None:
-        await self._send_input(EngineCoreRequestType.ADD_LORA, lora_request)
+        await self._call_utility_async("add_lora", lora_request)
