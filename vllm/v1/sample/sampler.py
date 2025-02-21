@@ -58,8 +58,8 @@ class Sampler(nn.Module):
 
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
-        logprobs_tensors = (None if num_logprobs is None else \
-            self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled))
+        logprobs_tensors = None if num_logprobs is None else \
+            self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -183,7 +183,6 @@ class Sampler(nn.Module):
             apply_min_token_penalties(logits,
                                       sampling_metadata.output_token_ids,
                                       sampling_metadata.min_tokens)
-
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
             logits = apply_all_penalties(
