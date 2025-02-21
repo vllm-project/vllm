@@ -9,34 +9,30 @@ encoder/decoder models, specifically Florence-2
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 
-dtype = "float"
-
 # Create a Florence-2 encoder/decoder model instance
 llm = LLM(
-    model="microsoft/Florence-2-base",
-    tokenizer="facebook/bart-base",
+    model="microsoft/Florence-2-large",
+    tokenizer="facebook/bart-large",
     max_num_seqs=8,
-    dtype=dtype,
     trust_remote_code=True,
 )
 
-cur_image = ImageAsset("cherry_blossom").pil_image
 prompts = [
-    {
+    {   # implicit prompt with task token
+        "prompt": "<DETAILED_CAPTION>",
+        "multi_modal_data": {
+            "image": ImageAsset("stop_sign").pil_image
+        },
+    },
+    {   # explicit encoder/decoder prompt
         "encoder_prompt": {
-            "prompt": "<DETAILED_CAPTION>",
+            "prompt": "Describe in detail what is shown in the image.",
             "multi_modal_data": {
-                "image": cur_image,
+                "image": ImageAsset("cherry_blossom").pil_image
             },
         },
         "decoder_prompt": "",
     },
-    {
-        "prompt": "<DETAILED_CAPTION>",
-        "multi_modal_data": {
-            "image": cur_image
-        },
-    }
 ]
 # Create a sampling params object.
 sampling_params = SamplingParams(
