@@ -1307,9 +1307,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dummy_tensors = lambda v: torch.full(
                     (num_reqs, ), v, device=self.device)
                 dummy_metadata = SamplingMetadata(
-                    temperature=torch.full((num_reqs, ),
-                                           0.5,
-                                           device=self.device),
+                    temperature=dummy_tensors(0.5),
                     all_greedy=False,
                     all_random=False,
                     spec_token_ids=None,
