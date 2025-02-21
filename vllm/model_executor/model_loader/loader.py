@@ -407,12 +407,8 @@ class DefaultModelLoader(BaseModelLoader):
                 model = _initialize_model(vllm_config=vllm_config)
 
             weights_to_load = {name for name, _ in model.named_parameters()}
-            time_before_load = time.perf_counter()
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))
-            time_after_load = time.perf_counter()
-            logger.info("Loading model weights took %.6f seconds",
-                    time_after_load - time_before_load)
             # We only enable strict check for non-quantized models
             # that have loaded weights tracking currently.
             if model_config.quantization is None and loaded_weights is not None:
