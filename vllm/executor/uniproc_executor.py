@@ -120,6 +120,16 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
+    def determine_available_memory(self) -> int:  # in bytes
+        # same as determine_num_available_blocks below,
+        # we need to get the min across all ranks.
+        memory = super().determine_available_memory()
+        from vllm.distributed.parallel_state import get_world_group
+        cpu_group = get_world_group().cpu_group
+        memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
+        dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
+        return memory_tensor.item()
+
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """
         Determine the number of available KV blocks.
