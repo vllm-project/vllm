@@ -224,7 +224,7 @@ class Worker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
-        return output if self.rank == 0 else None
+        return output if self.is_driver_worker else None
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
