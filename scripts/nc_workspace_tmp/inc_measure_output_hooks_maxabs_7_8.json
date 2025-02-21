@@ -64,18 +64,6 @@
             ]
         },
         "model.layers.0.self_attn.attn.impl.fused_scaled_dot_product_attention": {
-            "outputs": [
-                [
-                    [
-                        0.04443359375
-                    ]
-                ],
-                [
-                    [
-                        1.0
-                    ]
-                ]
-            ],
             "inputs": [
                 [
                     [
@@ -90,6 +78,18 @@
                 [
                     [
                         0.099609375
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.04443359375
+                    ]
+                ],
+                [
+                    [
+                        1.0
                     ]
                 ]
             ]
@@ -263,18 +263,6 @@
             ]
         },
         "model.layers.1.self_attn.attn.impl.fused_scaled_dot_product_attention": {
-            "outputs": [
-                [
-                    [
-                        0.020263671875
-                    ]
-                ],
-                [
-                    [
-                        1.0
-                    ]
-                ]
-            ],
             "inputs": [
                 [
                     [
@@ -289,6 +277,18 @@
                 [
                     [
                         0.0291748046875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.020263671875
+                    ]
+                ],
+                [
+                    [
+                        1.0
                     ]
                 ]
             ]
@@ -462,18 +462,6 @@
             ]
         },
         "model.layers.2.self_attn.attn.impl.fused_scaled_dot_product_attention": {
-            "outputs": [
-                [
-                    [
-                        0.037841796875
-                    ]
-                ],
-                [
-                    [
-                        1.0
-                    ]
-                ]
-            ],
             "inputs": [
                 [
                     [
@@ -488,6 +476,18 @@
                 [
                     [
                         0.038818359375
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.037841796875
+                    ]
+                ],
+                [
+                    [
+                        1.0
                     ]
                 ]
             ]
@@ -1989,18 +1989,6 @@
             ]
         },
         "model.layers.3.self_attn.attn.impl.fused_scaled_dot_product_attention": {
-            "outputs": [
-                [
-                    [
-                        0.0252685546875
-                    ]
-                ],
-                [
-                    [
-                        1.0
-                    ]
-                ]
-            ],
             "inputs": [
                 [
                     [
@@ -2015,6 +2003,18 @@
                 [
                     [
                         0.040283203125
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.0252685546875
+                    ]
+                ],
+                [
+                    [
+                        1.0
                     ]
                 ]
             ]
