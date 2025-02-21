@@ -16,6 +16,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
+from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -1344,6 +1345,34 @@ class ParallelConfig:
         answer = self.data_parallel_master_port
         self.data_parallel_master_port += 1
         return answer
+
+    def stateless_init_dp_group(self) -> "ProcessGroup":
+        from vllm.distributed.utils import (
+            stateless_init_torch_distributed_process_group)
+
+        # use gloo since the engine process might not have cuda device
+        dp_group = stateless_init_torch_distributed_process_group(
+            self.data_parallel_master_ip,
+            self.get_next_dp_init_port(),
+            self.data_parallel_rank,
+            self.data_parallel_size,
+            backend="gloo")
+
+        return dp_group
+
+    @staticmethod
+    def sync_has_unfinished_across_dp(dp_group: "ProcessGroup",
+                                      has_unfinished: bool) -> bool:
+        tensor = torch.tensor([has_unfinished],
+                              dtype=torch.int32,
+                              device="cpu")
+        # dp rank 0: has_unfinished_seqs=True
+        # dp rank 1: has_unfinished_seqs=False
+        # aggregated: has_unfinished_seqs=True
+        # so this is an OR operation, i.e. MAX in integers
+        torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
+        aggregated_has_unfinished = bool(tensor.item())
+        return aggregated_has_unfinished
 
     def compute_hash(self):
         """
