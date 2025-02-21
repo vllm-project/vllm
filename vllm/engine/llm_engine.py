@@ -243,7 +243,7 @@ class LLMEngine:
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
-        if envs.VLLM_CI_USE_S3 and self.model_config.model in MODELS_ON_S3:
+        if envs.VLLM_CI_USE_S3 and self.model_config.model in MODELS_ON_S3 and self.load_config.load_format == LoadFormat.AUTO:  # noqa: E501
             self.model_config.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model_config.model}"  # noqa: E501
             self.load_config.load_format = LoadFormat.RUNAI_STREAMER
 

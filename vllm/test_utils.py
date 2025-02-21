@@ -20,6 +20,8 @@ MODELS_ON_S3 = [
     "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
     "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue",
     "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symFalse",
+    "microsoft/Phi-3.5-vision-instruct",
+    "microsoft/Phi-3-vision-128k-instruct",
     "AMead10/Llama-3.2-1B-Instruct-AWQ",
     "shuyuej/Llama-3.2-1B-Instruct-GPTQ",
     "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head",

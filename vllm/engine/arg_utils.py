@@ -1125,7 +1125,7 @@ class EngineArgs:
             f", but got {self.cpu_offload_gb}")
 
         device_config = DeviceConfig(device=self.device)
-        if envs.VLLM_CI_USE_S3 and self.model in MODELS_ON_S3:
+        if envs.VLLM_CI_USE_S3 and self.model in MODELS_ON_S3 and self.load_format == LoadFormat.AUTO:  # noqa: E501
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
             self.load_format = LoadFormat.RUNAI_STREAMER
 

@@ -8,18 +8,16 @@ import ray
 from prometheus_client import REGISTRY
 
 from vllm import EngineArgs, LLMEngine
-from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
+from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET
 
 MODELS = [
     "distilbert/distilgpt2",
 ]
-
-RUNAI_STREAMER_LOAD_FORMAT = LoadFormat.RUNAI_STREAMER
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -145,7 +143,7 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
 
     if served_model_name is None or served_model_name == []:
         actual_model_name = model
-        assert metrics_tag_content == actual_model_name, (
+        assert metrics_tag_content == f"{MODEL_WEIGHTS_S3_BUCKET}/{actual_model_name}", (  # noqa: E501
             f"Metrics tag model_name is wrong! expect: {actual_model_name!r}\n"
             f"actual: {metrics_tag_content!r}")
     else:
@@ -172,10 +170,11 @@ async def test_async_engine_log_metrics_regression(
     when disable_log_stats=False
     (see: https://github.com/vllm-project/vllm/pull/4150#pullrequestreview-2008176678)
     """
-    engine_args = AsyncEngineArgs(model=model,
-                                  dtype=dtype,
-                                  disable_log_stats=disable_log_stats,
-                                  load_format=RUNAI_STREAMER_LOAD_FORMAT)
+    engine_args = AsyncEngineArgs(
+        model=model,
+        dtype=dtype,
+        disable_log_stats=disable_log_stats,
+    )
     async_engine = AsyncLLMEngine.from_engine_args(engine_args)
     for i, prompt in enumerate(example_prompts):
         results = async_engine.generate(
@@ -202,10 +201,11 @@ def test_engine_log_metrics_regression(
     max_tokens: int,
     disable_log_stats: bool,
 ) -> None:
-    engine_args = EngineArgs(model=model,
-                             dtype=dtype,
-                             disable_log_stats=disable_log_stats,
-                             load_format=RUNAI_STREAMER_LOAD_FORMAT)
+    engine_args = EngineArgs(
+        model=model,
+        dtype=dtype,
+        disable_log_stats=disable_log_stats,
+    )
     engine = LLMEngine.from_engine_args(engine_args)
     for i, prompt in enumerate(example_prompts):
         engine.add_request(
@@ -283,14 +283,15 @@ def test_metric_spec_decode_interval(
 ) -> None:
     k = 5
 
-    engine_args = EngineArgs(model=model,
-                             dtype=dtype,
-                             disable_log_stats=False,
-                             gpu_memory_utilization=0.4,
-                             speculative_model=model,
-                             num_speculative_tokens=k,
-                             enforce_eager=True,
-                             load_format=RUNAI_STREAMER_LOAD_FORMAT)
+    engine_args = EngineArgs(
+        model=model,
+        dtype=dtype,
+        disable_log_stats=False,
+        gpu_memory_utilization=0.4,
+        speculative_model=model,
+        num_speculative_tokens=k,
+        enforce_eager=True,
+    )
 
     engine = LLMEngine.from_engine_args(engine_args)
 
