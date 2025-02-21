@@ -206,7 +206,7 @@ if __name__ == "__main__":
         ]
 
         smoke_prompts = smoke_prompts + prompts[-smoke_num_samples:]
-
+        smoke_prompts = get_prompts()
         prompt_token_ids = get_prompt_token_ids(
             args.model, smoke_prompts, least_tokens
         )
