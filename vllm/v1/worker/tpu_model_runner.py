@@ -427,7 +427,6 @@ class TPUModelRunner():
             context_lens=seq_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_reqs,
-            total_num_scheduled_tokens=total_num_scheduled_tokens,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -450,7 +449,7 @@ class TPUModelRunner():
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         input_ids = self.input_ids
         # print(f'xw32 TPUModelRunner.execute_model line459 {input_ids.shape=}, {num_scheduled_tokens=}')
@@ -463,6 +462,7 @@ class TPUModelRunner():
                 kv_caches=self.kv_caches,
                 attn_metadata=attn_metadata,
                 logits_indices=logits_indices,
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
             )
             # print(f'xw32 TPUModelRunner.execute_model line470 {selected_token_ids.shape=}')
 
@@ -594,13 +594,20 @@ class TPUModelRunner():
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_tokens,  # xw32: is it correct?
-            total_num_scheduled_tokens=num_tokens,
         )
+
+        torch._dynamo.mark_dynamic(input_ids, 0)
+        torch._dynamo.mark_dynamic(position_ids, 0)
+        torch._dynamo.mark_dynamic(slot_mapping, 0)
+        torch._dynamo.mark_dynamic(block_tables, 0)
+        torch._dynamo.mark_dynamic(query_start_loc, 0)
+        torch._dynamo.mark_dynamic(context_lens, 0)
+
         # TODO(xw32): work with Alex to fix the issue later.
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
             #logger.info(f"xw32 TPUModelRunner.dummy_run. before calling self.model, {input_ids.shape=}, {position_ids.shape=}")
-            self.model(input_ids, position_ids, attn_metadata, kv_caches, None)
+            self.model(input_ids, position_ids, attn_metadata, kv_caches, None, total_num_scheduled_tokens=num_tokens)
             #logger.info(f"xw32 TPUModelRunner.dummy_run. after calling self.model")
 
     def capture_model(self) -> None:
@@ -613,7 +620,6 @@ class TPUModelRunner():
         start = time.perf_counter()
         num_tokens = 16
         # The num_tokens_list below is how GPU precompiles.
-        # num_tokens_list = [512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1]
         while True:
             self.dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
@@ -626,6 +632,20 @@ class TPUModelRunner():
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].",
                     end - start)
+
+        # GPU way of warming up.
+        # start = time.perf_counter()
+        # num_tokens_list = [512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1]
+        # # The num_tokens_list below is how GPU precompiles.
+        # for num_tokens in num_tokens_list:
+        #     self.dummy_run(self.kv_caches, num_tokens)
+        #     logger.info("  -- num_tokens: %d", num_tokens)
+        #     xm.mark_step()
+        #     xm.wait_device_ops()
+        #     if num_tokens >= self.scheduler_config.max_num_batched_tokens:
+        #         break
+        # end = time.perf_counter()
+        # logger.info("Compilation finished in in %.2f [secs].", end - start)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -679,6 +699,7 @@ class ModelWrapperV1(nn.Module):
         attn_metadata: AttentionMetadata,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
         logits_indices: torch.Tensor,
+        total_num_scheduled_tokens: int,
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -729,7 +750,7 @@ class ModelWrapperV1(nn.Module):
         # TODO(xw32): should unconditionally run hidden_states = hidden_states[:attn_metadata.total_num_scheduled_tokens]. Same for logits_indices
         if attn_metadata is not None:
             #print(f'xw32 ModelWrapperV1.forward line724 {attn_metadata.total_num_scheduled_tokens=}, {hidden_states.shape=}')
-            hidden_states = hidden_states[:attn_metadata.total_num_scheduled_tokens]
+            hidden_states = hidden_states[:total_num_scheduled_tokens]
         if logits_indices is not None:
             logits_indices = logits_indices[:attn_metadata.num_seqs]
             hidden_states = hidden_states[logits_indices]

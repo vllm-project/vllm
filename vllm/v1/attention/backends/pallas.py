@@ -83,7 +83,6 @@ class PallasMetadata():
     query_start_loc: torch.Tensor
     num_seqs: int
 
-    total_num_scheduled_tokens: int  # TODO(xw32): remove it before merging the PR.
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
@@ -170,7 +169,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # print('xw32 write to kv cache')
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
-            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping, attn_metadata.total_num_scheduled_tokens)
+            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
         query = query * self.scale
         # print(f'xw32 xw32 PallasAttentionBackendImpl.forward: {query.shape=}, {key_cache.shape=}, {value_cache.shape=}, {attn_metadata.context_lens.shape=}, {attn_metadata.block_tables.shape=}, {attn_metadata.query_start_loc.shape=}, {attn_metadata.num_seqs=}', flush=True)
@@ -197,7 +196,6 @@ def write_to_kv_cache(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
-    total_num_scheduled_tokens: int,
 ) -> None:
     """ Write the key and values to the KV cache.
 
