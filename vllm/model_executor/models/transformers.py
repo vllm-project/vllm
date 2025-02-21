@@ -19,7 +19,7 @@ from typing import Iterable, Literal, Optional, Union
 
 import torch
 from torch import nn
-from transformers import AutoModel, PreTrainedModel
+from transformers import AutoModel, PreTrainedModel, LlavaConfig
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.attention import Attention, AttentionMetadata
@@ -37,10 +37,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import cached_get_processor
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry, MultiModalKwargs
+from vllm.multimodal.processing import BaseMultiModalProcessor, BaseProcessingInfo
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalInputs, PlaceholderRange
 
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.inputs import InputRegistry, INPUT_REGISTRY, DummyData
-from vll.Sequence import SequenceData
 from .interfaces import SupportsQuant, SupportsMultiModal
 from .utils import maybe_prefix
 
@@ -122,23 +124,181 @@ def replace_linear_class(
     )
 
 
-def map_auto_class(config):
-    AutoModel
+class MultiModalProcessingInfo(BaseProcessingInfo):
+    def get_hf_config(self):
+        # NOTE: this means we don't check if return config type is same as requested
+        # VLLM on contrary always checks. In whcih cases we can have different config types tho?
+        return self.ctx.model_config.hf_config
+
+    def get_supported_mm_limits(self):
+        return {"image": None, "video": None}
+
+    def get_mm_max_tokens_per_item(self, seq_len, mm_counts):
+        return {"image": self.get_max_image_tokens(), "video": 100}
+
+    def get_max_image_tokens(self) -> int:
+        # Is already an attribute in some VLMs and now reason to make it a required attribute
+        # TODO: @raushan add it for all VLM configs
+        return self.get_hf_config().image_seq_length
+
+    def get_hf_processor(self):
+        processor = cached_get_processor(self.ctx.model_config.model)
+        return processor
 
 
-def dummy_encoder_data_for_whisper(ctx, seq_len: int, mm_counts):
-    assert mm_counts["image"] == 1
-    return DummyData(
-        SequenceData.from_prompt_token_counts((0, 596)),
-        {"image": np.zeros((3, 336, 336))},
-    )
+class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
+    def get_dummy_processor_inputs(
+        self,
+        seq_len,
+        mm_counts,
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        num_frames = 8
 
-@INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_whisper)
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens("image", 576)
+        processor = self.info.get_hf_processor()
+        image_token = getattr(processor, "image_token", None)
+        video_token = getattr(processor, "video_token", None)
+
+        # TODO: raushan, we can have processor attr for `processor.max_output_size` which will infer
+        # max features for model in HF side. IMO should be all done on processor side, not on model config
+        vision_config = self.info.get_hf_config().vision_config
+        target_width = target_height = vision_config.image_size
+
+        # NOTE: we can pass videos/images/audio to any processor With the new API used in MLLMs,
+        # HF processor will take the modality needed for model and ignore all others
+        mm_data = {
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images
+            ),
+            "video": self._get_dummy_videos(
+                width=target_width,
+                height=target_height,
+                num_frames=num_frames,
+                num_videos=num_videos,
+            )
+        }
+
+        prompt_text = video_token*num_videos if video_token is not None else image_token*num_images    
+        return ProcessorInputs(
+            prompt_text=prompt_text,
+            mm_data=mm_data,
+        )
+
+
+class MultiModalProcessor(BaseMultiModalProcessor):
+    def _get_prompt_replacements(
+        self,
+        mm_items,
+        hf_processor_mm_kwargs,
+        out_mm_kwargs: MultiModalKwargs,
+    ):
+        return
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs,
+        hf_processor_mm_kwargs,
+    ):
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            mm_token_type_ids=MultiModalFieldConfig.batched("image"),
+            pixel_values_videos=MultiModalFieldConfig.batched("video"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+            video_embeds=MultiModalFieldConfig.batched("video"),
+        )
+    
+    def _apply_hf_processor_text_mm(
+        self,
+        prompt_text,
+        mm_items,
+        hf_processor_mm_kwargs,
+    ):
+        """
+        Apply the HF processor on the prompt text and multi-modal data
+        together.
+
+        In addition, return whether prompt replacements have been applied.
+        """
+        processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
+        processor_data["return_mm_token_type_ids"] = True
+
+        processed_data = self._call_hf_processor(
+            prompt=prompt_text,
+            mm_data=processor_data,
+            mm_kwargs=hf_processor_mm_kwargs,
+        )
+        print("prompt_text", prompt_text, processed_data["pixel_values"][0].shape)
+        processed_data.update(passthrough_data)
+
+        prompt_ids, = processed_data.pop("input_ids").tolist()
+        mm_token_type_ids = processed_data.pop("mm_token_type_ids")
+
+        mm_kwargs = MultiModalKwargs.from_hf_inputs(
+            processed_data,
+            self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
+        )
+
+        return prompt_ids, mm_kwargs, mm_token_type_ids
+
+    def apply(
+        self,
+        prompt,
+        mm_data,
+        hf_processor_mm_kwargs,
+    ) -> MultiModalInputs:
+        """
+        Process multi-modal inputs to be used in vLLM.
+
+        Apply HF Processor on prompt text and multi-modal data together,
+        outputting token IDs and processed tensors.
+        """
+        mm_items = self._to_mm_items(mm_data)
+        prompt_ids, mm_kwargs, mm_token_type_ids = self._apply_hf_processor_text_mm(
+            prompt_text=prompt,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        # HF processor will return `mm_token_type_ids` from which
+        # we can infer mm_placeholders. Until then hardcode to make code run
+        # Below tested on Llava. Prompts and `mm_token_type_ids` are always bs=1
+        mm_positions = torch.where(mm_token_type_ids == 1)[1]
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        mm_tokens_per_modality = hf_processor._get_num_mm_tokens(
+            image_inputs=mm_kwargs.get_hf_inputs("image"),
+            video_inputs=mm_kwargs.get_hf_inputs("video"),
+        )
+
+        mm_placeholders = {}
+        for modality in mm_tokens_per_modality:
+            split_sizes = mm_tokens_per_modality[modality]
+            if split_sizes != 0:
+                chunked_mm_positions = torch.split(mm_positions, split_sizes)
+                ranges = [
+                    PlaceholderRange(offset=positions[0].item(), length=positions.shape[0]) 
+                    for positions in chunked_mm_positions
+                ]
+                mm_placeholders = {modality: ranges}
+
+        return MultiModalInputs(
+            type="multimodal",
+            prompt=prompt,
+            prompt_token_ids=prompt_ids,
+            mm_kwargs=mm_kwargs,
+            mm_hashes=None,
+            mm_placeholders=mm_placeholders,
+        )
+
+
+@MULTIMODAL_REGISTRY.register_processor(MultiModalProcessor,
+                                        info=MultiModalProcessingInfo,
+                                        dummy_inputs=MultiModalDummyInputsBuilder)
 class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
     embedding_padding_modules = ["lm_head"]
-    embedding_modules = ["embed_tokens"
-                         ]  # TODO transformers will have a util to get it
+    embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -148,8 +308,9 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
         cache_config = vllm_config.cache_config
 
         self.config = config
-        self.vocab_size = config.get_text_config().vocab_size
-        self.unpadded_vocab_size = config.get_text_config().vocab_size
+        self.text_config = config.get_text_config()
+        self.vocab_size = self.text_config.vocab_size
+        self.unpadded_vocab_size = self.text_config.vocab_size
 
         self.model: PreTrainedModel = AutoModel.from_config(
             self.config,
@@ -166,31 +327,31 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
         tp_size = get_tensor_model_parallel_world_size()
         self.attention_instances = [
             Attention(
-                num_heads=divide(config.get_text_config().num_attention_heads, tp_size),
-                head_size=config.get_text_config().head_dim,
+                num_heads=divide(self.text_config.num_attention_heads, tp_size),
+                head_size=self.text_config.head_dim,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_flash_attention_forward
-                scale=config.get_text_config().head_dim**-0.5,
-                num_kv_heads=divide(config.get_text_config().num_key_value_heads, tp_size),
+                scale=self.text_config.head_dim**-0.5,
+                num_kv_heads=divide(self.text_config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
                 quant_config=self.quant_config,
-                prefix=f"{i}.attn") for i in range(config.get_text_config().num_hidden_layers)
+                prefix=f"{i}.attn") for i in range(self.text_config.num_hidden_layers)
         ]
 
         # Model modifications
         self.replace_vocab_embed_class(self.model)
 
         # ForCausalLM modifications
-        self.lm_head = ParallelLMHead(config.get_text_config().vocab_size,
-                                      config.get_text_config().hidden_size,
+        self.lm_head = ParallelLMHead(self.text_config.vocab_size,
+                                      self.text_config.hidden_size,
                                       quant_config=self.quant_config,
                                       prefix=maybe_prefix(prefix, "lm_head"))
-        if config.get_text_config().tie_word_embeddings:
+        if self.text_config.tie_word_embeddings:
             self.lm_head.weight = self.model.get_input_embeddings().weight
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.get_text_config().vocab_size, logit_scale)
+                                                self.vocab_size, logit_scale)
         self.sampler = get_sampler()
 
         MultiModalRegistry()._get_plugin("image").register_max_multimodal_tokens(576)
@@ -201,7 +362,7 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
         Apply the base model tensor parallelization plan to a module.
         Currently only supports linear layers.
         """
-        if (self.config.get_text_config().base_model_tp_plan is None
+        if (self.text_config.base_model_tp_plan is None
                 and get_tensor_model_parallel_world_size() > 1):
             raise ValueError(
                 "Trying to run tensor parallelization but the model does not "
@@ -209,7 +370,7 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
 
         for child_name, child_module in module.named_children():
             qual_name = maybe_prefix(prefix, child_name)
-            for pattern, style in self.config.get_text_config().base_model_tp_plan.items():
+            for pattern, style in self.text_config.base_model_tp_plan.items():
                 if re.match(pattern, qual_name) and isinstance(
                         child_module, nn.Linear):
                     new_module = replace_linear_class(child_module, style,
@@ -223,7 +384,7 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
         # Use native set input embeddings
         new_module = VocabParallelEmbedding(
             self.vocab_size,
-            self.config.get_text_config().hidden_size,
+            self.text_config.hidden_size,
             org_num_embeddings=self.vocab_size,
             quant_config=None,
         )
@@ -241,7 +402,8 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(
-            input_ids[None, ...],
+            input_ids[None, ...] if input_ids is not None else None,
+            inputs_embeds=inputs_embeds[None, ...] if inputs_embeds is not None else None,
             use_cache=False,
             position_ids=positions[None, ...],
             attn_metadata=attn_metadata,
@@ -271,6 +433,8 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
         loaded_params = set[str]()
         for name, loaded_weight in weights:
             if name not in params_dict:
+                # In MLLM the head is usually part of the LM so we might want to strip it
+                # Very bad workaround, needs smth better
                 if "lm_head" in name:
                     name = name.replace("language_model.", "")
                 else:
@@ -282,3 +446,43 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
         return loaded_params
+
+    def get_multimodal_embeddings(self, **kwargs):
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        if pixel_values is not None:
+            vision_embeddings = self.model.get_image_features(
+                # Thing about pixels being batched again, adding extra dim
+                # TODO: find out do we really need that extra dim
+                pixel_values.flatten(0, 1), 
+                vision_feature_layer=self.config.vision_feature_layer,
+                vision_feature_select_strategy=self.config.vision_feature_select_strategy,
+            )
+            return vision_embeddings
+
+        if image_embeds is not None:
+            return image_embeds
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.get_input_embeddings()(input_ids)
+        if multimodal_embeddings is not None:
+            # most supported VLMs merge like this, otherwise we can add a special
+            # `merge_multimodal_embeddings` method on HF side
+            mask = (input_ids == self.config.image_token_index)
+            mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
+            multimodal_embeddings = torch.cat(multimodal_embeddings)
+
+            # FIXME: The returned multimodal_embeddings must be either a 3D torch.Tensor of shape
+            # (num_items, feature_size, hidden_size), or a list / tuple of 2D torch.Tensor’s of shape
+            # (feature_size, hidden_size), so that multimodal_embeddings[i] retrieves the embeddings generated
+            # from the i-th multimodal data item (e.g, image) of the request.
+            inputs_embeds = inputs_embeds.masked_scatter(mask, multimodal_embeddings)
+        return inputs_embeds

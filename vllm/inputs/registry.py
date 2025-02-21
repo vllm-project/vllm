@@ -388,6 +388,7 @@ class InputRegistry:
                     f"Expected at least {num_expected} dummy '{k}' instances "
                     f"for profiling, but found {num_items} instances instead.")
 
+        print(dummy_data.multi_modal_data["pixel_values"].shape)
         return dummy_data
 
     def _default_input_processor(

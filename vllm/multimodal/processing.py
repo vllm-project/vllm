@@ -867,7 +867,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_data=processor_data,
             mm_kwargs=hf_processor_mm_kwargs,
         )
-        print("prompt_text", prompt_text, processed_data.keys())
         processed_data.update(passthrough_data)
 
         prompt_ids, = processed_data.pop("input_ids").tolist()
@@ -1284,7 +1283,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        print("DONE HERE?")
+        print("DONE HERE?", mm_placeholder_ranges)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,

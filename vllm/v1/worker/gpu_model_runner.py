@@ -813,7 +813,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # depending on the input multimodal items.
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
-            print("curr_group_outputs", curr_group_outputs.shape)
+            print("curr_group_outputs", curr_group_outputs[0].shape)
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
