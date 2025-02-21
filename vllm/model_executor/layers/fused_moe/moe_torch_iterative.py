@@ -10,6 +10,7 @@ def fused_moe(
     w2: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
+    global_num_experts: int,
     expert_map: torch.Tensor = None,
     renormalize: bool = False,
 ) -> torch.Tensor:
@@ -29,7 +30,7 @@ def fused_moe(
     dtype = hidden_states.dtype
 
     hidden_states = hidden_states.view(num_tokens, hidden_size)
-    gating_output = gating_output.view(num_tokens, num_experts)
+    gating_output = gating_output.view(num_tokens, global_num_experts)
     topk_weights = gating_output.softmax(dim=-1, dtype=torch.float)
     topk_weights, selected_experts = topk_weights.topk(topk, dim=-1)
     if renormalize:

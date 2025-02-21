@@ -230,6 +230,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                 w2=layer.w2_weight,
                                 topk=top_k,
                                 gating_output=router_logits,
+                                global_num_experts=global_num_experts,
                                 expert_map=expert_map,
                                 renormalize=renormalize)
 

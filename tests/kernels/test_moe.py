@@ -60,8 +60,8 @@ def test_fused_moe(
                               dtype=torch.int32)
         e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
         e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
-        w1 = w1[e_map]
-        w2 = w2[e_map]
+        w1 = w1[e_ids]
+        w2 = w2[e_ids]
     else:
         e_map = None
 
@@ -80,7 +80,8 @@ def test_fused_moe(
                                      w2,
                                      score,
                                      topk,
-                                     e_map,
+                                     global_num_experts=e,
+                                     expert_map=e_map,
                                      renormalize=False)
     torch.testing.assert_close(iterative_output,
                                torch_output,
@@ -169,14 +170,14 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
                               dtype=torch.int32)
         e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
         e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
-        w1_ref = w1_ref[e_map]
-        w2_ref = w2_ref[e_map]
-        w1_qweight = w1_qweight[e_map]
-        w2_qweight = w2_qweight[e_map]
-        w1_scales = w1_scales[e_map]
-        w2_scales = w2_scales[e_map]
-        w1_qzeros = w1_qzeros[e_map]
-        w2_qzeros = w2_qzeros[e_map]
+        w1_ref = w1_ref[e_ids]
+        w2_ref = w2_ref[e_ids]
+        w1_qweight = w1_qweight[e_ids]
+        w2_qweight = w2_qweight[e_ids]
+        w1_scales = w1_scales[e_ids]
+        w2_scales = w2_scales[e_ids]
+        w1_qzeros = w1_qzeros[e_ids]
+        w2_qzeros = w2_qzeros[e_ids]
     else:
         e_map = None
 
@@ -188,6 +189,7 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
                               renormalize=False,
                               use_int4_w4a16=weight_bits == 4,
                               use_int8_w8a16=weight_bits == 8,
+                              global_num_experts=e,
                               expert_map=e_map,
                               w1_scale=w1_scales,
                               w2_scale=w2_scales,
