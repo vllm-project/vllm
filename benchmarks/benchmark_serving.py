@@ -1325,5 +1325,12 @@ if __name__ == "__main__":
                         "launching the server. For each request, the "
                         "script chooses a LoRA module at random.")
 
+    parser.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=0,
+        help=
+        "The tensor parallel used by the server to display on the dashboard")
+
     args = parser.parse_args()
     main(args)
