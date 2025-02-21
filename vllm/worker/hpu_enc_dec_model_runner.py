@@ -446,18 +446,24 @@ class HPUEncoderDecoderModelRunner(
         sampling_params = SamplingParams(temperature=temperature)
         num_blocks = math.ceil(seq_len / self.block_size)
         cross_block_table: Optional[List[int]] = None
-        encoder_dummy_data \
-            = self.input_registry.dummy_data_for_profiling(
-                self.model_config,
-                                        seq_len,
-                                        self.mm_registry,
-                                        is_encoder_data=True)
+        seq_len = max(seq_len, 1)
         mm_counts = self.mm_registry.get_mm_limits_per_prompt(
             self.model_config)
         num_images = mm_counts["image"]
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
             self.model_config) * num_images
-        seq_len = max(seq_len, 1)
+        decoder_dummy_data \
+            = self.input_registry.dummy_data_for_profiling(
+                self.model_config,
+                seq_len,
+                self.mm_registry,
+                is_encoder_data=False)
+        encoder_dummy_data \
+            = self.input_registry.dummy_data_for_profiling(
+                self.model_config,
+                max_mm_tokens,
+                self.mm_registry,
+                is_encoder_data=True)
         if is_prompt:
             input_len = seq_len
             output_len = 0
@@ -478,12 +484,14 @@ class HPUEncoderDecoderModelRunner(
         seq_data.output_token_ids = output_token_ids
         return SequenceGroupMetadata(
             request_id=str(group_id),
-            is_prompt=(output_len == 0),
+            is_prompt=is_prompt,
             seq_data={group_id: seq_data},
             sampling_params=sampling_params,
             block_tables=block_tables,
             encoder_seq_data=encoder_dummy_data.seq_data,
-            multi_modal_data=encoder_dummy_data.multi_modal_data,
+            multi_modal_data=decoder_dummy_data.multi_modal_data,
+            multi_modal_placeholders=decoder_dummy_data.
+            multi_modal_placeholders,
             cross_block_table=cross_block_table)
 
     def trim_attn_metadata(self, metadata: AttentionMetadata) -> object:

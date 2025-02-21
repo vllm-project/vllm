@@ -330,13 +330,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if attn_metadata.is_prompt:
             batch_size = attn_metadata.num_prefills
             batched_tokens, _ = query.shape
-            if key is not None:
-                batched_kv_tokens, _, _ = key.shape
+            batched_kv_tokens, _, _ = key.shape
             assert batch_size > 0, (
                 "In prefill stage the num_prefills should be > 0")
             assert batched_tokens % batch_size == 0
-            if key is not None:
-                assert batched_kv_tokens % batch_size == 0
+            assert batched_kv_tokens % batch_size == 0
             seq_len = batched_tokens // batch_size
 
         query = query.view(-1, self.num_heads, self.head_size)
@@ -378,12 +376,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                     device=query.device,
                                     dtype=torch.bool)
 
-            # NOTE(kzawora): mllama prefill fwd pass doesn't pass keys and
-            # values in profile_run. No idea why. This is a dirty workaround.
-            if key is None:
-                key = query
-            if value is None:
-                value = query
             out = ops.prompt_attention(
                 query.view(query_shape),
                 key.view(kv_shape),
