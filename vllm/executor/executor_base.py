@@ -282,7 +282,6 @@ class DistributedExecutorBase(ExecutorBase):
 
         # Only the driver worker returns the sampling results.
         driver_outputs = self._driver_execute_model(execute_model_req)
-        assert driver_outputs is not None
         return driver_outputs
 
     def stop_remote_worker_execution_loop(self) -> None:
