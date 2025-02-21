@@ -372,14 +372,17 @@ class EngineArgs:
             '--guided-decoding-backend',
             type=str,
             default='xgrammar',
-            choices=['outlines', 'lm-format-enforcer', 'xgrammar'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
             'https://github.com/outlines-dev/outlines, '
             'https://github.com/mlc-ai/xgrammar, and '
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
-            ' parameter.')
+            ' parameter.\n'
+            'Backend-sepcific options can be supplied in a comma-separated '
+            'list following a colon after the backend name. Valid backends and '
+            'all available options are: [xgrammar:no-fallback, '
+            'outlines:no-fallback, lm-format-enforcer:no-fallback]')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
