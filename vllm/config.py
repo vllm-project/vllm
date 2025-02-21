@@ -1365,7 +1365,7 @@ class ParallelConfig:
         return dp_group
 
     @staticmethod
-    def sync_has_unfinished_across_dp(dp_group: "ProcessGroup",
+    def has_unfinished_dp(dp_group: "ProcessGroup",
                                       has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished],
                               dtype=torch.int32,
