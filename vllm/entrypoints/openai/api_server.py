@@ -73,8 +73,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
-from vllm.entrypoints.openai.serving_rerank import JinaAIServingRerank
-from vllm.entrypoints.openai.serving_score import OpenAIServingScores
+from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.serving_transcription import (
@@ -320,12 +319,12 @@ def embedding(request: Request) -> Optional[OpenAIServingEmbedding]:
     return request.app.state.openai_serving_embedding
 
 
-def score(request: Request) -> Optional[OpenAIServingScores]:
+def score(request: Request) -> Optional[ServingScores]:
     return request.app.state.openai_serving_scores
 
 
-def rerank(request: Request) -> Optional[JinaAIServingRerank]:
-    return request.app.state.jinaai_serving_reranking
+def rerank(request: Request) -> Optional[ServingScores]:
+    return request.app.state.openai_serving_scores
 
 
 def tokenization(request: Request) -> OpenAIServingTokenization:
@@ -866,13 +865,13 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embed" else None
-    state.openai_serving_scores = OpenAIServingScores(
+    state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger
-    ) if model_config.task == "score" else None
-    state.jinaai_serving_reranking = JinaAIServingRerank(
+        request_logger=request_logger) if model_config.task in (
+            "score", "embed", "pooling") else None
+    state.jinaai_serving_reranking = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
