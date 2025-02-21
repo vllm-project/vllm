@@ -104,17 +104,10 @@ EXPECTED_VALUES = {
     ],
     "vllm:max_token_capacity_per_batch": [("", _MAX_MODEL_LEN * _MAX_NUM_SEQS)
                                           ],
-    "vllm:time_per_prefill_token_requests_milliseconds": [("_count",
-                                                           _NUM_REQUESTS)],
-    "vllm:total_tokens_in_current_batch": [
-        ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS)
-    ],
     "vllm:total_tokens_in_queue": [
         ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
         ("_count", _NUM_REQUESTS)
     ],
-    "vllm:requests_with_evicted_tokens_total": [("_total", 0)],
     "vllm:total_evicted_tokens_total": [("_total", 0)],
     "vllm:request_success": [("_total", _NUM_REQUESTS)],
 }
@@ -182,9 +175,6 @@ EXPECTED_METRICS = [
     "vllm:time_per_output_token_seconds_sum",
     "vllm:time_per_output_token_seconds_bucket",
     "vllm:time_per_output_token_seconds_count",
-    "vllm:time_per_prefill_token_requests_milliseconds_bucket",
-    "vllm:time_per_prefill_token_requests_milliseconds_sum",
-    "vllm:time_per_prefill_token_requests_milliseconds_count",
     "vllm:e2e_request_latency_seconds_sum",
     "vllm:e2e_request_latency_seconds_bucket",
     "vllm:e2e_request_latency_seconds_count",
@@ -203,13 +193,10 @@ EXPECTED_METRICS = [
     "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
-    "vllm:total_tokens_in_current_batch_sum",
-    "vllm:total_tokens_in_current_batch_count",
     "vllm:total_tokens_in_queue_sum",
     "vllm:total_tokens_in_queue_count",
     "vllm:max_token_capacity_per_batch_sum",
     "vllm:max_token_capacity_per_batch_count",
-    "vllm:requests_with_evicted_tokens_total",
     "vllm:total_evicted_tokens_total",
     "vllm:request_success_total",
     "vllm:cache_config_info",

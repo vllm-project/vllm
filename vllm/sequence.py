@@ -111,7 +111,6 @@ class RequestMetrics:
         model_execute_time: The time spent in the model execute function. This
                            will include model forward, block/sync across
                            workers, cpu-gpu sync time and sampling time.
-        time_per_prefill_token: The time spent in the prefill stage.
         num_evicted_tokens: The number of tokens that were evicted 
                            from KV cache.
     """
@@ -124,7 +123,6 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
-    time_per_prefill_token: Optional[float] = None
     num_evicted_tokens: int = 0
 
 
@@ -438,6 +436,11 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+        self.metrics = RequestMetrics(arrival_time=0.0,
+                                      last_token_time=0.0,
+                                      first_scheduled_time=None,
+                                      first_token_time=None,
+                                      time_in_queue=None)
 
     @property
     def n_blocks(self) -> int:
@@ -607,6 +610,17 @@ class Sequence:
 
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
+
+    def get_num_evicted_tokens(self) -> int:
+        """Returns the number of tokens that were evicted from KV cache."""
+        return self.metrics.num_evicted_tokens
+
+    def increment_evicted_tokens(self, num_tokens: int = 1) -> None:
+        """Increments the count of evicted tokens.
+        Args:
+            num_tokens: Number of tokens that were evicted from KV cache.
+        """
+        self.metrics.num_evicted_tokens += num_tokens
 
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "

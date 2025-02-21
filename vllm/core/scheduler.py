@@ -1611,6 +1611,10 @@ class Scheduler:
         seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         assert len(seqs) == 1
         for seq in seqs:
+            # Track token evictions before freeing
+            num_tokens = seq.get_num_computed_tokens()
+            if num_tokens > 0:
+                seq.increment_evicted_tokens(num_tokens)
             seq.status = SequenceStatus.WAITING
             self.free_seq(seq)
             seq.reset_state_for_recompute()
@@ -1623,6 +1627,11 @@ class Scheduler:
         seq_group: SequenceGroup,
         blocks_to_swap_out: List[Tuple[int, int]],
     ) -> None:
+        # Track token evictions before swapping out
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            num_tokens = seq.get_num_computed_tokens()
+            if num_tokens > 0:
+                seq.increment_evicted_tokens(num_tokens)
         self._swap_out(seq_group, blocks_to_swap_out)
 
     def _swap_in(
