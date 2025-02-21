@@ -364,3 +364,4 @@ int64_t ggml_moe_get_block_size(int64_t type) {
     case 14:
       return MMQ_X_Q6_K;
   }
+}
