@@ -974,6 +974,10 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         description=("Additional kwargs to pass to the template renderer. "
                      "Will be accessible by the chat template."),
     )
+    mm_processor_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
     priority: int = Field(
         default=0,
         description=(
@@ -1393,6 +1397,10 @@ class TokenizeChatRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the template renderer. "
                      "Will be accessible by the chat template."),
+    )
+    mm_processor_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
     )
 
     @model_validator(mode="before")
