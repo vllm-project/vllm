@@ -77,6 +77,10 @@ class LLMEngine:
             log_stats=False,  # FIXME: implement
         )
 
+        if not multiprocess_mode:
+            # for v0 compatibility
+            self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+
     @classmethod
     def from_engine_args(
         cls,

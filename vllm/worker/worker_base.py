@@ -569,7 +569,7 @@ class WorkerWrapperBase:
 
     def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.rpc_rank]
-        self.worker.initialize_from_config(kv_cache_config)
+        self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
