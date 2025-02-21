@@ -4,36 +4,36 @@
     "Mode": "DynamicRange",
     "Nodes": {
         "model.layers.0.mlp.down_proj": {
-            "inputs": [
-                [
-                    [
-                        0.9765625
-                    ]
-                ]
-            ],
             "params": {
                 "weight": [
                     [
                         0.546875
                     ]
                 ]
-            }
-        },
-        "model.layers.0.mlp.gate_up_proj": {
+            },
             "inputs": [
                 [
                     [
-                        30.25
+                        0.9765625
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.0.mlp.gate_up_proj": {
             "params": {
                 "weight": [
                     [
                         0.337890625
                     ]
                 ]
-            }
+            },
+            "inputs": [
+                [
+                    [
+                        30.25
+                    ]
+                ]
+            ]
         },
         "model.layers.0.self_attn.attn.impl.batch2block_matmul": {
             "inputs": [
@@ -64,18 +64,6 @@
             ]
         },
         "model.layers.0.self_attn.attn.impl.fused_scaled_dot_product_attention": {
-            "outputs": [
-                [
-                    [
-                        0.023193359375
-                    ]
-                ],
-                [
-                    [
-                        1.0
-                    ]
-                ]
-            ],
             "inputs": [
                 [
                     [
@@ -90,6 +78,18 @@
                 [
                     [
                         0.059814453125
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.023193359375
+                    ]
+                ],
+                [
+                    [
+                        1.0
                     ]
                 ]
             ]
@@ -123,116 +123,116 @@
             ]
         },
         "model.layers.0.self_attn.kv_a_proj_with_mqa": {
-            "inputs": [
-                [
-                    [
-                        6.34375
-                    ]
-                ]
-            ],
             "params": {
                 "weight": [
                     [
                         0.84765625
                     ]
                 ]
-            }
-        },
-        "model.layers.0.self_attn.kv_b_proj": {
-            "inputs": [
-                [
-                    [
-                        0.4296875
-                    ]
-                ]
-            ],
-            "params": {
-                "weight": [
-                    [
-                        0.12451171875
-                    ]
-                ]
-            }
-        },
-        "model.layers.0.self_attn.o_proj": {
-            "inputs": [
-                [
-                    [
-                        0.023193359375
-                    ]
-                ]
-            ],
-            "params": {
-                "weight": [
-                    [
-                        0.4375
-                    ]
-                ]
-            }
-        },
-        "model.layers.0.self_attn.q_a_proj": {
+            },
             "inputs": [
                 [
                     [
                         6.34375
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.0.self_attn.kv_b_proj": {
+            "params": {
+                "weight": [
+                    [
+                        0.12451171875
+                    ]
+                ]
+            },
+            "inputs": [
+                [
+                    [
+                        0.4296875
+                    ]
+                ]
+            ]
+        },
+        "model.layers.0.self_attn.o_proj": {
+            "params": {
+                "weight": [
+                    [
+                        0.4375
+                    ]
+                ]
+            },
+            "inputs": [
+                [
+                    [
+                        0.023193359375
+                    ]
+                ]
+            ]
+        },
+        "model.layers.0.self_attn.q_a_proj": {
             "params": {
                 "weight": [
                     [
                         0.23828125
                     ]
                 ]
-            }
-        },
-        "model.layers.0.self_attn.q_b_proj": {
+            },
             "inputs": [
                 [
                     [
-                        16.875
+                        6.34375
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.0.self_attn.q_b_proj": {
             "params": {
                 "weight": [
                     [
                         0.22265625
                     ]
                 ]
-            }
-        },
-        "model.layers.1.mlp.down_proj": {
+            },
             "inputs": [
                 [
                     [
-                        0.765625
+                        16.875
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.1.mlp.down_proj": {
             "params": {
                 "weight": [
                     [
                         0.38671875
                     ]
                 ]
-            }
-        },
-        "model.layers.1.mlp.gate_up_proj": {
+            },
             "inputs": [
                 [
                     [
-                        28.125
+                        0.765625
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.1.mlp.gate_up_proj": {
             "params": {
                 "weight": [
                     [
                         0.263671875
                     ]
                 ]
-            }
+            },
+            "inputs": [
+                [
+                    [
+                        28.125
+                    ]
+                ]
+            ]
         },
         "model.layers.1.self_attn.attn.impl.batch2block_matmul": {
             "inputs": [
@@ -263,18 +263,6 @@
             ]
         },
         "model.layers.1.self_attn.attn.impl.fused_scaled_dot_product_attention": {
-            "outputs": [
-                [
-                    [
-                        0.032958984375
-                    ]
-                ],
-                [
-                    [
-                        1.0
-                    ]
-                ]
-            ],
             "inputs": [
                 [
                     [
@@ -289,6 +277,18 @@
                 [
                     [
                         0.032958984375
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.032958984375
+                    ]
+                ],
+                [
+                    [
+                        1.0
                     ]
                 ]
             ]
@@ -322,116 +322,116 @@
             ]
         },
         "model.layers.1.self_attn.kv_a_proj_with_mqa": {
-            "inputs": [
-                [
-                    [
-                        5.8125
-                    ]
-                ]
-            ],
             "params": {
                 "weight": [
                     [
                         0.50390625
                     ]
                 ]
-            }
-        },
-        "model.layers.1.self_attn.kv_b_proj": {
-            "inputs": [
-                [
-                    [
-                        0.1044921875
-                    ]
-                ]
-            ],
-            "params": {
-                "weight": [
-                    [
-                        0.1572265625
-                    ]
-                ]
-            }
-        },
-        "model.layers.1.self_attn.o_proj": {
-            "inputs": [
-                [
-                    [
-                        0.032958984375
-                    ]
-                ]
-            ],
-            "params": {
-                "weight": [
-                    [
-                        0.291015625
-                    ]
-                ]
-            }
-        },
-        "model.layers.1.self_attn.q_a_proj": {
+            },
             "inputs": [
                 [
                     [
                         5.8125
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.1.self_attn.kv_b_proj": {
+            "params": {
+                "weight": [
+                    [
+                        0.1572265625
+                    ]
+                ]
+            },
+            "inputs": [
+                [
+                    [
+                        0.1044921875
+                    ]
+                ]
+            ]
+        },
+        "model.layers.1.self_attn.o_proj": {
+            "params": {
+                "weight": [
+                    [
+                        0.291015625
+                    ]
+                ]
+            },
+            "inputs": [
+                [
+                    [
+                        0.032958984375
+                    ]
+                ]
+            ]
+        },
+        "model.layers.1.self_attn.q_a_proj": {
             "params": {
                 "weight": [
                     [
                         0.1328125
                     ]
                 ]
-            }
-        },
-        "model.layers.1.self_attn.q_b_proj": {
+            },
             "inputs": [
                 [
                     [
-                        7.0625
+                        5.8125
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.1.self_attn.q_b_proj": {
             "params": {
                 "weight": [
                     [
                         0.19140625
                     ]
                 ]
-            }
-        },
-        "model.layers.2.mlp.down_proj": {
+            },
             "inputs": [
                 [
                     [
-                        0.5078125
+                        7.0625
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.2.mlp.down_proj": {
             "params": {
                 "weight": [
                     [
                         0.470703125
                     ]
                 ]
-            }
-        },
-        "model.layers.2.mlp.gate_up_proj": {
+            },
             "inputs": [
                 [
                     [
-                        39.5
+                        0.5078125
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.2.mlp.gate_up_proj": {
             "params": {
                 "weight": [
                     [
                         0.259765625
                     ]
                 ]
-            }
+            },
+            "inputs": [
+                [
+                    [
+                        39.5
+                    ]
+                ]
+            ]
         },
         "model.layers.2.self_attn.attn.impl.batch2block_matmul": {
             "inputs": [
@@ -462,18 +462,6 @@
             ]
         },
         "model.layers.2.self_attn.attn.impl.fused_scaled_dot_product_attention": {
-            "outputs": [
-                [
-                    [
-                        0.033935546875
-                    ]
-                ],
-                [
-                    [
-                        1.0
-                    ]
-                ]
-            ],
             "inputs": [
                 [
                     [
@@ -488,6 +476,18 @@
                 [
                     [
                         0.037841796875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.033935546875
+                    ]
+                ],
+                [
+                    [
+                        1.0
                     ]
                 ]
             ]
@@ -521,84 +521,84 @@
             ]
         },
         "model.layers.2.self_attn.kv_a_proj_with_mqa": {
-            "inputs": [
-                [
-                    [
-                        5.90625
-                    ]
-                ]
-            ],
             "params": {
                 "weight": [
                     [
                         0.439453125
                     ]
                 ]
-            }
-        },
-        "model.layers.2.self_attn.kv_b_proj": {
-            "inputs": [
-                [
-                    [
-                        0.080078125
-                    ]
-                ]
-            ],
-            "params": {
-                "weight": [
-                    [
-                        0.12890625
-                    ]
-                ]
-            }
-        },
-        "model.layers.2.self_attn.o_proj": {
-            "inputs": [
-                [
-                    [
-                        0.033935546875
-                    ]
-                ]
-            ],
-            "params": {
-                "weight": [
-                    [
-                        0.4453125
-                    ]
-                ]
-            }
-        },
-        "model.layers.2.self_attn.q_a_proj": {
+            },
             "inputs": [
                 [
                     [
                         5.90625
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.2.self_attn.kv_b_proj": {
+            "params": {
+                "weight": [
+                    [
+                        0.12890625
+                    ]
+                ]
+            },
+            "inputs": [
+                [
+                    [
+                        0.080078125
+                    ]
+                ]
+            ]
+        },
+        "model.layers.2.self_attn.o_proj": {
+            "params": {
+                "weight": [
+                    [
+                        0.4453125
+                    ]
+                ]
+            },
+            "inputs": [
+                [
+                    [
+                        0.033935546875
+                    ]
+                ]
+            ]
+        },
+        "model.layers.2.self_attn.q_a_proj": {
             "params": {
                 "weight": [
                     [
                         0.208984375
                     ]
                 ]
-            }
-        },
-        "model.layers.2.self_attn.q_b_proj": {
+            },
             "inputs": [
                 [
                     [
-                        6.75
+                        5.90625
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.2.self_attn.q_b_proj": {
             "params": {
                 "weight": [
                     [
                         0.205078125
                     ]
                 ]
-            }
+            },
+            "inputs": [
+                [
+                    [
+                        6.75
+                    ]
+                ]
+            ]
         },
         "model.layers.3.mlp.experts._temp_expert_group_0.MoeOp": {
             "inputs": [
@@ -1401,52 +1401,52 @@
             }
         },
         "model.layers.3.mlp.gate": {
-            "inputs": [
-                [
-                    [
-                        9.875
-                    ]
-                ]
-            ],
             "params": {
                 "weight": [
                     [
                         0.248046875
                     ]
                 ]
-            }
-        },
-        "model.layers.3.mlp.shared_experts.down_proj": {
-            "inputs": [
-                [
-                    [
-                        0.2578125
-                    ]
-                ]
-            ],
-            "params": {
-                "weight": [
-                    [
-                        0.2890625
-                    ]
-                ]
-            }
-        },
-        "model.layers.3.mlp.shared_experts.gate_up_proj": {
+            },
             "inputs": [
                 [
                     [
                         9.875
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.3.mlp.shared_experts.down_proj": {
+            "params": {
+                "weight": [
+                    [
+                        0.2890625
+                    ]
+                ]
+            },
+            "inputs": [
+                [
+                    [
+                        0.2578125
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.mlp.shared_experts.gate_up_proj": {
             "params": {
                 "weight": [
                     [
                         0.546875
                     ]
                 ]
-            }
+            },
+            "inputs": [
+                [
+                    [
+                        9.875
+                    ]
+                ]
+            ]
         },
         "model.layers.3.self_attn.attn.impl.batch2block_matmul": {
             "inputs": [
@@ -1477,18 +1477,6 @@
             ]
         },
         "model.layers.3.self_attn.attn.impl.fused_scaled_dot_product_attention": {
-            "outputs": [
-                [
-                    [
-                        0.042724609375
-                    ]
-                ],
-                [
-                    [
-                        1.0
-                    ]
-                ]
-            ],
             "inputs": [
                 [
                     [
@@ -1503,6 +1491,18 @@
                 [
                     [
                         0.0498046875
+                    ]
+                ]
+            ],
+            "outputs": [
+                [
+                    [
+                        0.042724609375
+                    ]
+                ],
+                [
+                    [
+                        1.0
                     ]
                 ]
             ]
@@ -1536,84 +1536,84 @@
             ]
         },
         "model.layers.3.self_attn.kv_a_proj_with_mqa": {
-            "inputs": [
-                [
-                    [
-                        7.96875
-                    ]
-                ]
-            ],
             "params": {
                 "weight": [
                     [
                         0.640625
                     ]
                 ]
-            }
-        },
-        "model.layers.3.self_attn.kv_b_proj": {
-            "inputs": [
-                [
-                    [
-                        0.126953125
-                    ]
-                ]
-            ],
-            "params": {
-                "weight": [
-                    [
-                        0.2158203125
-                    ]
-                ]
-            }
-        },
-        "model.layers.3.self_attn.o_proj": {
-            "inputs": [
-                [
-                    [
-                        0.042724609375
-                    ]
-                ]
-            ],
-            "params": {
-                "weight": [
-                    [
-                        0.265625
-                    ]
-                ]
-            }
-        },
-        "model.layers.3.self_attn.q_a_proj": {
+            },
             "inputs": [
                 [
                     [
                         7.96875
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.3.self_attn.kv_b_proj": {
+            "params": {
+                "weight": [
+                    [
+                        0.2158203125
+                    ]
+                ]
+            },
+            "inputs": [
+                [
+                    [
+                        0.126953125
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.self_attn.o_proj": {
+            "params": {
+                "weight": [
+                    [
+                        0.265625
+                    ]
+                ]
+            },
+            "inputs": [
+                [
+                    [
+                        0.042724609375
+                    ]
+                ]
+            ]
+        },
+        "model.layers.3.self_attn.q_a_proj": {
             "params": {
                 "weight": [
                     [
                         0.21484375
                     ]
                 ]
-            }
-        },
-        "model.layers.3.self_attn.q_b_proj": {
+            },
             "inputs": [
                 [
                     [
-                        5.84375
+                        7.96875
                     ]
                 ]
-            ],
+            ]
+        },
+        "model.layers.3.self_attn.q_b_proj": {
             "params": {
                 "weight": [
                     [
                         0.1982421875
                     ]
                 ]
-            }
+            },
+            "inputs": [
+                [
+                    [
+                        5.84375
+                    ]
+                ]
+            ]
         }
     }
 }
