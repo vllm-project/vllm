@@ -194,6 +194,7 @@ steps:
     - tests/v1
   commands:
     # split the test to avoid interference
+    - VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_USE_V1=1 torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
     - VLLM_USE_V1=1 pytest -v -s v1/core
     - VLLM_USE_V1=1 pytest -v -s v1/engine
     - VLLM_USE_V1=1 pytest -v -s v1/sample
