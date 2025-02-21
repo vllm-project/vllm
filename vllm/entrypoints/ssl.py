@@ -26,8 +26,6 @@ class SSLCertRefresher:
         self.cert_path = cert_path
         self.ca_path = ca_path
 
-        loop = asyncio.get_running_loop()
-
         # Setup certification chain watcher
         def update_ssl_cert_chain(change: Change, file_path: str) -> None:
             logger.info("Reloading SSL certificate chain")
@@ -36,7 +34,7 @@ class SSLCertRefresher:
 
         self.watch_ssl_cert_task = None
         if self.key_path and self.cert_path:
-            self.watch_ssl_cert_task = loop.create_task(
+            self.watch_ssl_cert_task = asyncio.create_task(
                 self._watch_files([self.key_path, self.cert_path],
                                   update_ssl_cert_chain))
 
@@ -48,7 +46,7 @@ class SSLCertRefresher:
 
         self.watch_ssl_ca_task = None
         if self.ca_path:
-            self.watch_ssl_ca_task = loop.create_task(
+            self.watch_ssl_ca_task = asyncio.create_task(
                 self._watch_files([self.ca_path], update_ssl_ca))
 
     async def _watch_files(self, paths, fun: Callable[[Change, str],
