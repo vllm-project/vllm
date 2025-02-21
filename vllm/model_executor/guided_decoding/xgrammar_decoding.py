@@ -20,6 +20,7 @@ except ImportError:
     xgr_installed = False
     pass
 
+from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
                                                        grammar_is_likely_lark)
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
 
     from vllm.config import ModelConfig
     from vllm.sampling_params import GuidedDecodingParams
+
+logger = init_logger(__name__)
 
 
 # TODO: passing batch size to max threads here
@@ -184,11 +187,29 @@ class GrammarConfig:
 
             any_whitespace = 'disable-any-whitespace' not in \
                     guided_params.backend_options()
+
+            # Check and log if model with xgrammar and whitespace have history
+            # of runaway generation of whitespaces.
+            # References:
+            # https://github.com/vllm-project/vllm/pull/12744
+            # https://github.com/mlc-ai/xgrammar/issues/212
+            model_with_warn = None
+
+            if 'Mistral' in model_config.model:
+                model_with_warn = 'Mistral'
+            elif 'Qwen' in model_config.model:
+                model_with_warn = 'Qwen'
+
+            if model_with_warn is not None and any_whitespace:
+                msg = (f"{model_with_warn} "
+                       f"model detected, consider set "
+                       f"`guided_backend=xgrammar:disable-any-whitespace` "
+                       f"to prevent runaway generation of whitespaces.")
+                logger.info_once(msg)
             # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
             try:
-
                 xgr.Grammar.from_json_schema(json_str,
                                              any_whitespace=any_whitespace)
             except RuntimeError as err:
