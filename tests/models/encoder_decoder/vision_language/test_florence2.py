@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import itertools
 from typing import Optional, Type
 
 import pytest
@@ -10,16 +9,19 @@ from vllm.inputs.data import ExplicitEncoderDecoderPrompt, TextPrompt
 from vllm.multimodal.image import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import HfRunner, VllmRunner, _ImageAssets
+from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
 
 MODELS = ["microsoft/Florence-2-base"]
 # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
 # Therefore, we borrow the BartTokenizer from the original Bart model
 TOKENIZER = "facebook/bart-base"
-PROMPTS = [
-    "<CAPTION>",
-]
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    "stop_sign":
+    "<CAPTION>",  # special task token
+    "cherry_blossom":
+    "Describe in detail what is shown in the image.",
+})
 
 
 def get_hf_images_prompts(
@@ -105,7 +107,7 @@ def run_test(
         # Single-scale, batched
         [1.0, 1.0, 1.0],
         # Multi-scale
-        [0.05, 0.75, 1.0],
+        [0.25, 0.5, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", ["float"])
@@ -122,9 +124,9 @@ def test_models(hf_runner: Type[HfRunner], vllm_runner: Type[VllmRunner],
             encoder_prompt=TextPrompt(
                 prompt=prompt,
                 multi_modal_data={"image": rescale_image_size(image, factor)}),
-            decoder_prompt="",
+            decoder_prompt=None,
         ) for factor in size_factors
-    ] for image, prompt in itertools.product(images, PROMPTS)]
+    ] for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
     run_test(
         hf_runner,
         vllm_runner,
