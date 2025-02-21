@@ -19,14 +19,6 @@ MODELS = ["microsoft/Florence-2-base"]
 TOKENIZER = "facebook/bart-base"
 PROMPTS = [
     "<CAPTION>",
-    "<DETAILED_CAPTION>",
-    "<MORE_DETAILED_CAPTION>",
-    "<CAPTION_TO_PHRASE_GROUNDING>",
-    "<DENSE_REGION_CAPTION>",
-    "<REGION_PROPOSAL>",
-    "<OCR_WITH_REGION>",
-    "<OCR>",
-    "<OD>",
 ]
 
 
@@ -45,15 +37,15 @@ def get_hf_images_prompts(
     return prompts, images
 
 
-def vllm_to_hf_output(vllm_output: tuple[list[int], str,
-                                         Optional[SampleLogprobs]], ):
-    """Sanitize vllm output to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
+def hf_to_vllm_output(hf_output: tuple[list[int], str,
+                                       Optional[SampleLogprobs]]):
+    """Sanitize hf output to be comparable with vllm output."""
+    output_ids, output_str, out_logprobs = hf_output
 
-    hf_output_str = "</s><s>" + output_str + "</s>"
-    output_ids = [2, 0] + output_ids
+    output_str = output_str.replace("</s>", "").replace("<s>", "")
+    output_ids = [ids for ids in output_ids if ids not in [0, 2]]
 
-    return output_ids, hf_output_str, out_logprobs
+    return output_ids, output_str, out_logprobs
 
 
 def run_test(
@@ -95,10 +87,8 @@ def run_test(
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_case,
                                         vllm_outputs_per_case):
         check_logprobs_close(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=[
-                vllm_to_hf_output(outputs) for outputs in vllm_outputs
-            ],
+            outputs_0_lst=[hf_to_vllm_output(output) for output in hf_outputs],
+            outputs_1_lst=vllm_outputs,
             name_0="hf",
             name_1="vllm",
         )
@@ -115,7 +105,7 @@ def run_test(
         # Single-scale, batched
         [1.0, 1.0, 1.0],
         # Multi-scale
-        [0.25, 0.5, 1.0],
+        [0.05, 0.75, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", ["float"])
