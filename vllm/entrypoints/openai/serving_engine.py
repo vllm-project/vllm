@@ -52,8 +52,8 @@ from vllm.utils import is_list_of, make_async, random_uuid
 logger = init_logger(__name__)
 
 CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
-                              EmbeddingCompletionRequest, ScoreRequest,
-                              TokenizeCompletionRequest]
+                              EmbeddingCompletionRequest, RerankRequest,
+                              ScoreRequest, TokenizeCompletionRequest]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
@@ -451,6 +451,8 @@ class OpenAIServing:
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
         return conversation, [request_prompt], [engine_prompt]
 

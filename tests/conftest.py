@@ -57,7 +57,6 @@ MODELS_ON_S3 = [
     "ArthurZ/Ilama-3.2-1B",
     "llava-hf/llava-1.5-7b-hf",
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    "JackFram/llama-160m",
     "ai21labs/Jamba-tiny-random",
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
     "nm-testing/Phi-3-mini-128k-instruct-FP8",
@@ -747,8 +746,7 @@ class VllmRunner:
         **kwargs,
     ) -> None:
         if model_name in MODELS_ON_S3 and not load_format:
-            model_name = (f"s3://vllm-ci-model-weights/"
-                          f"{model_name.split('/')[-1]}")
+            model_name = (f"{MODEL_WEIGHTS_S3_BUCKET}/{model_name}")
             load_format = LoadFormat.RUNAI_STREAMER
         if not load_format:
             load_format = LoadFormat.AUTO
