@@ -89,7 +89,7 @@ class EngineCoreClient(ABC):
 
     def execute_dummy_batch(self) -> None:
         raise NotImplementedError
-    
+
     async def execute_dummy_batch_async(self) -> None:
         raise NotImplementedError
 
@@ -342,6 +342,7 @@ class SyncMPClient(MPClient):
 
     def execute_dummy_batch(self) -> None:
         self._call_utility("execute_dummy_batch")
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""

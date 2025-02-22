@@ -1372,7 +1372,7 @@ class ParallelConfig:
 
     @staticmethod
     def has_unfinished_dp(dp_group: "ProcessGroup",
-                                      has_unfinished: bool) -> bool:
+                          has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished],
                               dtype=torch.int32,
                               device="cpu")

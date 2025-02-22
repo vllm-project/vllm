@@ -1167,7 +1167,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
-        with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
+        with set_forward_context(None, self.vllm_config,
+                                 num_tokens=num_tokens):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
