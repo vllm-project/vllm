@@ -53,6 +53,7 @@ if __name__ == "__main__":
             tokenizer=args.tokenizer,
             tensor_parallel_size=args.tp_size,
             distributed_executor_backend='ray',
+            quantization="inc_q",
             trust_remote_code=True,
             max_model_len=4096,
             dtype="bfloat16",
