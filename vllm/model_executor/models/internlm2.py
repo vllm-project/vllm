@@ -329,16 +329,6 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         "gate_up_proj": ["w1", "w3"],
     }
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "wqkv",
-        "wo",
-        "gate_up_proj",
-        "w2",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
-
     def __init__(self,
                  *,
                  vllm_config: VllmConfig,

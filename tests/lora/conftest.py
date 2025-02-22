@@ -23,6 +23,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
 
 
@@ -98,9 +99,13 @@ def dist_init_torch_only():
                                          backend=backend)
 
 
+class DummyLoRAModel(nn.Sequential, SupportsLoRA):
+    pass
+
+
 @pytest.fixture
 def dummy_model() -> nn.Module:
-    model = nn.Sequential(
+    model = DummyLoRAModel(
         OrderedDict([
             ("dense1", ColumnParallelLinear(764, 100)),
             ("dense2", RowParallelLinear(100, 50)),
@@ -121,12 +126,13 @@ def dummy_model() -> nn.Module:
             ("sampler", Sampler())
         ]))
     model.config = MagicMock()
+    model.embedding_modules = {"lm_head": "lm_head"}
     return model
 
 
 @pytest.fixture
 def dummy_model_gate_up() -> nn.Module:
-    model = nn.Sequential(
+    model = DummyLoRAModel(
         OrderedDict([
             ("dense1", ColumnParallelLinear(764, 100)),
             ("dense2", RowParallelLinear(100, 50)),
@@ -147,6 +153,13 @@ def dummy_model_gate_up() -> nn.Module:
             ("sampler", Sampler())
         ]))
     model.config = MagicMock()
+    model.packed_modules_mapping = {
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+    model.embedding_modules = {"lm_head": "lm_head"}
     return model
 
 

@@ -380,10 +380,6 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj", "o_proj", "embed_tokens", "lm_head", "up_proj",
-        "down_proj", "gate_proj", "out_proj", "in_proj", "x_proj"
-    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
