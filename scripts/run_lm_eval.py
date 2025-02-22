@@ -61,7 +61,8 @@ if __name__ == "__main__":
     
     # Run the evaluation; you can adjust num_fewshot and batch_size as needed.
     if args.task == "gsm8k":
-        results = simple_evaluate(model=llm, tasks=["gsm8k"], num_fewshot=5, batch_size=8, limit=args.limit)
+        print("============ Start Evaluation ============")
+        results = simple_evaluate(model=llm, tasks=["gsm8k"], num_fewshot=5, batch_size=1, limit=args.limit)
         # save as json
         with open(f"gsm8k_ep{args.ep_size}_result_samples.jsonl", "w") as f:
             json.dump(results['results'], f)
