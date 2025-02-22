@@ -27,6 +27,36 @@ container to access the host's shared memory. vLLM uses PyTorch, which uses shar
 memory to share data between processes under the hood, particularly for tensor parallel inference.
 :::
 
+:::{note}
+Optional dependencies are not included in order to avoid licensing issues (e.g. <gh-issue:8030>).
+
+If you need those dependencies, create a custom Dockerfile on top of the base image
+with an extra layer that installs them.
+
+For example, to include the `audio` and `video` optional dependencies:
+
+```Dockerfile
+FROM vllm/vllm-openai:latest
+
+RUN uv pip install --system vllm[audio,video]
+```
+
+:::
+
+:::{tip}
+Some new models may not have been released on [HF Transformers](https://github.com/huggingface/transformers) yet.
+
+To use the development version of `transformers`, create a custom Dockerfile on top of the base image
+with an extra layer that installs their code from source:
+
+```Dockerfile
+FROM vllm/vllm-openai:latest
+
+RUN uv pip install --system git+https://github.com/huggingface/transformers.git
+```
+
+:::
+
 (deployment-docker-build-image-from-source)=
 
 ## Building vLLM's Docker Image from Source
