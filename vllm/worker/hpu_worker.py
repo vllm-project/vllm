@@ -306,12 +306,13 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             num_fake_hpu_blocks = fake_hpu_cache_alloc // cache_block_size
             self.model_runner.bucketing_ctx.num_hpu_blocks = num_fake_hpu_blocks
             return num_fake_hpu_blocks, 0
-        with HabanaMemoryProfiler() as m:
-            self.model_runner.profile_run()
-            torch.hpu.synchronize()
-        msg = ("Model profiling run "
-               f"took {m.get_summary_string()}")
-        logger.info(msg)
+        # FIXME: (Yi) WA for run lm-eval, add back
+        # with HabanaMemoryProfiler() as m:
+        #     self.model_runner.profile_run()
+        #     torch.hpu.synchronize()
+        # msg = ("Model profiling run "
+        #        f"took {m.get_summary_string()}")
+        # logger.info(msg)
         # At this point we should've allocated the maximum workspace for all
         # recipes we will use the extra memory for graphs/blocks
         free_hpu_memory = torch.hpu.mem_get_info()[0]
