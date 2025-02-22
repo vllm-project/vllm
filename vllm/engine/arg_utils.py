@@ -10,6 +10,7 @@ from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
 import torch
 
 import vllm.envs as envs
+from vllm import version
 from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          DecodingConfig, DeviceConfig, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
@@ -188,6 +189,7 @@ class EngineArgs:
     qlora_adapter_name_or_path: Optional[str] = None
     disable_logprobs_during_spec_decoding: Optional[bool] = None
 
+    show_hidden_metrics_for_version: Optional[str] = None
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
@@ -372,14 +374,17 @@ class EngineArgs:
             '--guided-decoding-backend',
             type=str,
             default='xgrammar',
-            choices=['outlines', 'lm-format-enforcer', 'xgrammar'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
             'https://github.com/outlines-dev/outlines, '
             'https://github.com/mlc-ai/xgrammar, and '
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
-            ' parameter.')
+            ' parameter.\n'
+            'Backend-sepcific options can be supplied in a comma-separated '
+            'list following a colon after the backend name. Valid backends and '
+            'all available options are: [xgrammar:no-fallback, '
+            'outlines:no-fallback, lm-format-enforcer:no-fallback]')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
@@ -906,6 +911,18 @@ class EngineArgs:
                             default=None,
                             help='Name or path of the QLoRA adapter.')
 
+        parser.add_argument('--show-hidden-metrics-for-version',
+                            type=str,
+                            default=None,
+                            help='Enable deprecated Prometheus metrics that '
+                            'have been hidden since the specified version. '
+                            'For example, if a previously deprecated metric '
+                            'has been hidden since the v0.7.0 release, you '
+                            'use --show-hidden-metrics-for-version=0.7 as a '
+                            'temporary escape hatch while you migrate to new '
+                            'metrics. The metric is likely to be removed '
+                            'completely in an upcoming release.')
+
         parser.add_argument(
             '--otlp-traces-endpoint',
             type=str,
@@ -1167,9 +1184,9 @@ class EngineArgs:
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
 
-            # For multimodal models, chunked prefill is disabled by default in
-            # V0, but enabled by design in V1
-            if model_config.is_multimodal_model:
+            # For multimodal models and models with MLA, chunked prefill is
+            # disabled by default in V0, but enabled by design in V1
+            if model_config.is_multimodal_model or model_config.use_mla:
                 self.enable_chunked_prefill = bool(envs.VLLM_USE_V1)
 
             elif use_long_context:
@@ -1203,7 +1220,6 @@ class EngineArgs:
               and model_config.runner_type == "pooling"):
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
-
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
@@ -1315,6 +1331,11 @@ class EngineArgs:
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
 
+        show_hidden_metrics = False
+        if self.show_hidden_metrics_for_version is not None:
+            show_hidden_metrics = version._prev_minor_version_was(
+                self.show_hidden_metrics_for_version)
+
         detailed_trace_modules = []
         if self.collect_detailed_traces is not None:
             detailed_trace_modules = self.collect_detailed_traces.split(",")
@@ -1324,6 +1345,7 @@ class EngineArgs:
                     f"Invalid module {m} in collect_detailed_traces. "
                     f"Valid modules are {ALLOWED_DETAILED_TRACE_MODULES}")
         observability_config = ObservabilityConfig(
+            show_hidden_metrics=show_hidden_metrics,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_model_forward_time="model" in detailed_trace_modules
             or "all" in detailed_trace_modules,

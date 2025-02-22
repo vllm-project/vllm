@@ -235,6 +235,9 @@ class Worker(WorkerBase):
         else:
             self.profiler.stop()
 
+    def execute_dummy_batch(self) -> None:
+        self.model_runner._dummy_run(1)
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
