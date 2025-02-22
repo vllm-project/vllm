@@ -16,7 +16,6 @@ NUM_REQUESTS = 10000
 
 # Scenarios to test for num generated token.
 ENGINE_ARGS = AsyncEngineArgs(model=MODEL,
-                              load_format="runai_streamer",
                               disable_log_requests=True)
 
 

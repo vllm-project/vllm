@@ -25,7 +25,6 @@ def test_computed_prefix_blocks(model: str, block_size: int):
         "decoration.")
 
     engine_args = EngineArgs(model=model,
-                             load_format=LoadFormat.RUNAI_STREAMER,
                              block_size=block_size,
                              enable_prefix_caching=True)
 

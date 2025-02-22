@@ -28,7 +28,6 @@ def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
-              load_format=LoadFormat.RUNAI_STREAMER,
               tensor_parallel_size=1,
               max_model_len=8192,
               enable_lora=True,

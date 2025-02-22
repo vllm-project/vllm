@@ -23,7 +23,6 @@ from vllm.utils import FlexibleArgumentParser
 
 MODEL = "google/gemma-1.1-2b-it"
 ENGINE_ARGS = AsyncEngineArgs(model=MODEL,
-                              load_format="runai_streamer",
                               enforce_eager=True)
 RAISED_ERROR = KeyError
 RAISED_VALUE = "foo"

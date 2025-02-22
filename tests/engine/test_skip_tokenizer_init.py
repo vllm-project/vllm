@@ -13,8 +13,7 @@ def test_skip_tokenizer_initialization(model: str):
     # of tokenizer and detokenizer. The generated output is expected to contain
     # token ids.
     llm = LLM(model=model,
-              skip_tokenizer_init=True,
-              load_format=LoadFormat.RUNAI_STREAMER)
+              skip_tokenizer_init=True,)
     sampling_params = SamplingParams(prompt_logprobs=True, detokenize=True)
 
     with pytest.raises(ValueError, match="cannot pass text prompts when"):

@@ -99,7 +99,6 @@ MODELS_ON_S3 = [
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
     "OpenGVLab/InternVL2-1B",
-    "OrionStarAI/Orion-14B-Chat",
     "parasail-ai/GritLM-7B-vllm",
     "Qwen/Qwen1.5-MoE-A2.7B-Chat",
     "Qwen/Qwen2-7B-Instruct",

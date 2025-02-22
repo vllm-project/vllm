@@ -34,7 +34,7 @@ def v1(run_with_both_engines):
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("distilbert/distilgpt2", load_format=LoadFormat.RUNAI_STREAMER)
+    llm = LLM("distilbert/distilgpt2")
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails

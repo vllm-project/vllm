@@ -129,10 +129,7 @@ def test_end_to_end(model: str, use_v1: bool):
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
-    load_format = LoadFormat.AUTO
-    if "Llama" in model:
-        load_format = LoadFormat.RUNAI_STREAMER
-    llm = LLM(model, load_format=load_format, enable_sleep_mode=True)
+    llm = LLM(model, enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)

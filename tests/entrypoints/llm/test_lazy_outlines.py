@@ -45,7 +45,6 @@ def run_normal():
 
     # Create an LLM without guided decoding as a baseline.
     llm = LLM(model="distilbert/distilgpt2",
-              load_format=LoadFormat.RUNAI_STREAMER,
               enforce_eager=True,
               gpu_memory_utilization=0.3)
     outputs = llm.generate(prompts, sampling_params)
@@ -62,7 +61,6 @@ def run_normal():
 def run_lmfe(sample_regex):
     # Create an LLM with guided decoding enabled.
     llm = LLM(model="distilbert/distilgpt2",
-              load_format=LoadFormat.RUNAI_STREAMER,
               enforce_eager=True,
               guided_decoding_backend="lm-format-enforcer",
               gpu_memory_utilization=0.3)

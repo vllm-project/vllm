@@ -13,8 +13,6 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.sampling_params import SamplingParams
 
-RUNAI_STREAMER_LOAD_FORMAT = LoadFormat.RUNAI_STREAMER
-
 
 class Mock:
     ...
@@ -39,8 +37,7 @@ CustomUniExecutorAsync = CustomUniExecutor
 @pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_custom_executor_type_checking(model):
     with pytest.raises(ValueError):
-        engine_args = EngineArgs(model=model,
-                                 load_format=RUNAI_STREAMER_LOAD_FORMAT,
+        engine_args = EngineArgs(model=model,,
                                  distributed_executor_backend=Mock)
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
@@ -57,8 +54,7 @@ def test_custom_executor(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = EngineArgs(
-            model=model,
-            load_format=RUNAI_STREAMER_LOAD_FORMAT,
+            model=model,,
             distributed_executor_backend=CustomUniExecutor,
             enforce_eager=True,  # reduce test time
         )
@@ -81,8 +77,7 @@ def test_custom_executor_async(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = AsyncEngineArgs(
-            model=model,
-            load_format=RUNAI_STREAMER_LOAD_FORMAT,
+            model=model,,
             distributed_executor_backend=CustomUniExecutorAsync,
             enforce_eager=True,  # reduce test time
         )
@@ -109,8 +104,7 @@ def test_respect_ray(model):
     # resources using ray.
     engine_args = EngineArgs(
         model=model,
-        distributed_executor_backend="ray",
-        load_format=RUNAI_STREAMER_LOAD_FORMAT,
+        distributed_executor_backend="ray",,
         enforce_eager=True,  # reduce test time
     )
     engine = LLMEngine.from_engine_args(engine_args)
