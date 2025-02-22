@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention on rocm"""
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 
@@ -10,6 +10,7 @@ from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.fake import FakeAttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -103,7 +104,7 @@ class ROCmAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: Union[FlashAttentionMetadata, FakeAttentionMetadata],
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
@@ -119,7 +120,7 @@ class ROCmAttentionImpl(AttentionImpl):
         """
         assert output is not None, "Output tensor must be provided."
 
-        if attn_metadata is None:
+        if isinstance(attn_metadata, FakeAttentionMetadata):
             # Profiling run.
             return output
 

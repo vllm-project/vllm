@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
@@ -10,6 +10,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.v1.attention.backends.fake import FakeAttentionMetadata
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -158,7 +159,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor, torch.Tensor],
-        attn_metadata: PallasMetadata,
+        attn_metadata: Union[PallasMetadata, FakeAttentionMetadata],
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
@@ -176,7 +177,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             shape = [batch_size, seq_len, num_heads * head_size]
         """
 
-        if attn_metadata is None:
+        if isinstance(attn_metadata, FakeAttentionMetadata):
+            # Profiling run.
             if output is None:
                 output = torch.ones_like(query)
             return output
