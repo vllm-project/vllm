@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
+    VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -90,6 +91,10 @@ if TYPE_CHECKING:
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
+    VLLM_DP_RANK: int = 0
+    VLLM_DP_SIZE: int = 1
+    VLLM_DP_MASTER_IP: str = ""
+    VLLM_DP_MASTER_PORT: int = 0
 
 
 def get_default_cache_root():
@@ -355,8 +360,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Enables weights compression during model export via HF Optimum
     # default is False
     "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
-    lambda: bool(os.getenv("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", False)),
-
+    lambda:
+    (os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", "0").lower() in
+     ("on", "true", "1")),
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
@@ -503,6 +509,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 
+    # Pad the fp8 weights to 256 bytes for ROCm
+    "VLLM_ROCM_FP8_PADDING":
+    lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Divisor for dynamic key scale factor calculation for FP8 KV Cache
     "K_SCALE_CONSTANT":
     lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
@@ -593,6 +602,22 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
     lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
     ("1", "true"),
+
+    # Rank of the process in the data parallel setting
+    "VLLM_DP_RANK":
+    lambda: int(os.getenv("VLLM_DP_RANK", "0")),
+
+    # World size of the data parallel setting
+    "VLLM_DP_SIZE":
+    lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
+
+    # IP address of the master node in the data parallel setting
+    "VLLM_DP_MASTER_IP":
+    lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
+
+    # Port of the master node in the data parallel setting
+    "VLLM_DP_MASTER_PORT":
+    lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
 }
 
 # end-env-vars-definition
