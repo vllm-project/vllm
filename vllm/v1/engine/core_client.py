@@ -87,6 +87,12 @@ class EngineCoreClient(ABC):
     def wake_up(self) -> None:
         raise NotImplementedError
 
+    def execute_dummy_batch(self) -> None:
+        raise NotImplementedError
+    
+    async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
@@ -155,6 +161,9 @@ class InprocClient(EngineCoreClient):
 
     def wake_up(self) -> None:
         self.engine_core.wake_up()
+
+    def execute_dummy_batch(self) -> None:
+        self.engine_core.execute_dummy_batch()
 
     def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine_core.add_lora(lora_request)
@@ -331,6 +340,8 @@ class SyncMPClient(MPClient):
     def wake_up(self) -> None:
         self._call_utility("wake_up")
 
+    def execute_dummy_batch(self) -> None:
+        self._call_utility("execute_dummy_batch")
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -413,6 +424,9 @@ class AsyncMPClient(MPClient):
 
     async def wake_up_async(self) -> None:
         await self._call_utility_async("wake_up")
+
+    async def execute_dummy_batch_async(self) -> None:
+        await self._call_utility_async("execute_dummy_batch")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> None:
         await self._call_utility_async("add_lora", lora_request)
