@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Sequence
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
@@ -17,8 +18,15 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        BaseProcessingInfo,
+                                        BoundPromptReplacement,
+                                        PlaceholderFeaturesInfo,
+                                        PromptReplacement,
+                                        PromptReplacementDetails,
+                                        decode_tokens, encode_tokens,
+                                        find_text_matches, find_token_matches,
+                                        replace_text_matches,
+                                        replace_token_matches)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -163,6 +171,82 @@ class PaliGemmaMultiModalProcessor(
                 ),
             )
         ]
+
+    def _apply_prompt_replacements(
+        self,
+        token_ids: list[int],
+        mm_prompt_repls: Mapping[str, Sequence[BoundPromptReplacement]],
+        mm_item_counts: Mapping[str, int],
+    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        tokenizer = self.info.get_tokenizer()
+
+        mm_token_matches = {
+            modality: find_token_matches(token_ids, prompt_repls)
+            for modality, prompt_repls in mm_prompt_repls.items()
+        }
+        mm_match_counts = {
+            modality: len(matches)
+            for modality, matches in mm_token_matches.items()
+        }
+
+        # If the search text does not represent a special token,
+        # it may have different token IDs in the prompt, because
+        # the tokens may go across the boundaries of the search text.
+        # ----
+        # e.g. when searching for "foo" in "food", if "food" itself makes
+        # up a token, then the token ID of "foo" will not appear at all
+        # ----
+        # Since it is inefficient to search for all possible tokenizations
+        # of the search text in the prompt, we instead perform string
+        # replacement on the decoded token IDs, then encode them back.
+        if all(
+            mm_match_counts.get(modality, 0) >= item_count
+            for modality, item_count in mm_item_counts.items()
+        ):  # yapf: disable
+            token_ids = replace_token_matches(
+                token_ids,
+                mm_token_matches,
+                mm_item_counts,
+            )
+
+            text = decode_tokens(tokenizer, token_ids)
+            matched_repls = {
+                modality: [match.prompt_repl for match in token_matches]
+                for modality, token_matches in mm_token_matches.items()
+            }
+        else:
+            text = decode_tokens(tokenizer, token_ids)
+
+            mm_text_matches = {
+                modality: find_text_matches(text, prompt_repls)
+                for modality, prompt_repls in mm_prompt_repls.items()
+            }
+            text = replace_text_matches(
+                text,
+                mm_text_matches,
+                mm_item_counts,
+            )
+
+            token_ids = encode_tokens(tokenizer,
+                                      text,
+                                      add_special_tokens=False)
+            matched_repls = {
+                modality: [match.prompt_repl for match in token_matches]
+                for modality, token_matches in mm_text_matches.items()
+            }
+
+        placeholders = self._find_mm_placeholders(
+            matched_repls,
+            token_ids,
+            mm_item_counts,
+        )
+
+        # Force to add newline at the end of prompt due to paligemma's format
+        if len(token_ids) and token_ids[-1] != 109:
+            token_ids.append(109)
+            text += "\n"
+
+        return token_ids, text, placeholders
 
 
 @MULTIMODAL_REGISTRY.register_processor(
