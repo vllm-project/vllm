@@ -137,7 +137,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if attn_metadata is None:
+        # For determine_available_memory case.
+        if kv_cache[0].numel() == 0:
             if output is None:
                 output = torch.ones_like(query)
             return output
@@ -148,14 +149,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
         key = key.view(num_tokens, self.num_kv_heads, self.head_size)
         value = value.view(num_tokens, self.num_kv_heads, self.head_size)
 
+        key_cache, value_cache = kv_cache
         if kv_cache[0].numel() > 0:
-            # print('xw32 write to kv cache')
             slot_mapping = attn_metadata.slot_mapping
-            key_cache, value_cache = kv_cache
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
         query = query * self.scale
-        # print(f'xw32 xw32 PallasAttentionBackendImpl.forward: {query.shape=}, {key_cache.shape=}, {value_cache.shape=}, {attn_metadata.context_lens.shape=}, {attn_metadata.block_tables.shape=}, {attn_metadata.query_start_loc.shape=}, {attn_metadata.num_seqs=}', flush=True)
         output = torch.ops.xla.ragged_paged_attention(
             query,
             key_cache,
@@ -168,7 +167,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             num_queries_per_block=NUM_QUERIES_PER_BLOCK,
             use_kernel=True,
         )
-        # print(f'xw32 PallasAttentionBackendImpl.forward finished', flush=True)
 
         return output.reshape(num_tokens, hidden_size)
 
@@ -189,16 +187,12 @@ def write_to_kv_cache(
         v_cache = [num_kv_heads, num_blocks, block_size, head_size]
 
     """
-    # print(f'xw32 write_to_kv_cache {key.shape=}, {key_cache.shape=}, {slot_mapping.shape=}', flush=True)
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
 
-    # xw32: key = key.flatten(0, 1) or key = key.flatten(0, 2)?
-    # key = key.flatten(0, 1) because the key.shape has changed from [bs, seq_len, num_kv_heads, head_size] to [num_tokens, num_kv_heads, head_size]
     key = key.flatten(0, 1)
     value = value.flatten(0, 1)
     key_cache = key_cache.flatten(0, 2)
     value_cache = value_cache.flatten(0, 2)
     key_cache.index_copy_(0, slot_mapping, key)
     value_cache.index_copy_(0, slot_mapping, value)
-    # print(f'xw32 write_to_kv_cache finished', flush=True)

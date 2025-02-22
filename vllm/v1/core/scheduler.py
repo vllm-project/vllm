@@ -497,7 +497,6 @@ class Scheduler:
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-            # print(f'xw32 update_from_output {req_index=}, {len(generated_token_ids)=}')
             if req_id not in scheduler_output.scheduled_spec_decode_tokens:
                 # When the request's num_computed_tokens catches up
                 # its num_tokens, the request generates output tokens.

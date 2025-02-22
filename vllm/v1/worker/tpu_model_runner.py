@@ -92,8 +92,6 @@ class TPUModelRunner():
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
 
-        self.model: Optional[nn.Module] = None
-
         # Persistent batch.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
@@ -470,7 +468,7 @@ class TPUModelRunner():
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
 
-        prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]] = {}
+        prompt_logprobs_dict: Dict[str, LogprobsTensors] = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
@@ -533,8 +531,6 @@ class TPUModelRunner():
                                    fullgraph=True,
                                    dynamic=False)
 
-    # @torch.inference_mode() fails so I disabled it.
-    # It's also not in the original v1 tpu_model_runner.py
     # @torch.inference_mode()
     def dummy_run(
         self,
@@ -569,12 +565,12 @@ class TPUModelRunner():
 
         torch._dynamo.mark_dynamic(input_ids, 0)
         torch._dynamo.mark_dynamic(position_ids, 0)
-        torch._dynamo.mark_dynamic(slot_mapping, 0)
-        torch._dynamo.mark_dynamic(block_tables, 0)
-        torch._dynamo.mark_dynamic(query_start_loc, 0)
-        torch._dynamo.mark_dynamic(context_lens, 0)
+        torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+        torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
+        torch._dynamo.mark_dynamic(attn_metadata.query_start_loc, 0)
+        torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
 
-        with set_forward_context(None, self.vllm_config):
+        with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
             self.model(input_ids, position_ids, attn_metadata, kv_caches)
 
