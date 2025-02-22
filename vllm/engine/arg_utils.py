@@ -120,6 +120,9 @@ class EngineArgs:
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
+    max_num_partial_prefills: Optional[int] = 1
+    max_long_partial_prefills: Optional[int] = 1
+    long_prefill_token_threshold: Optional[int] = 0
     max_num_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
@@ -189,6 +192,7 @@ class EngineArgs:
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
 
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
@@ -368,14 +372,17 @@ class EngineArgs:
             '--guided-decoding-backend',
             type=str,
             default='xgrammar',
-            choices=['outlines', 'lm-format-enforcer', 'xgrammar'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
             'https://github.com/outlines-dev/outlines, '
             'https://github.com/mlc-ai/xgrammar, and '
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
-            ' parameter.')
+            ' parameter.\n'
+            'Backend-sepcific options can be supplied in a comma-separated '
+            'list following a colon after the backend name. Valid backends and '
+            'all available options are: [xgrammar:no-fallback, '
+            'outlines:no-fallback, lm-format-enforcer:no-fallback]')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
@@ -515,6 +522,31 @@ class EngineArgs:
                             default=EngineArgs.max_num_batched_tokens,
                             help='Maximum number of batched tokens per '
                             'iteration.')
+        parser.add_argument(
+            "--max-num-partial-prefills",
+            type=int,
+            default=EngineArgs.max_num_partial_prefills,
+            help="For chunked prefill, the max number of concurrent \
+            partial prefills."
+            "Defaults to 1",
+        )
+        parser.add_argument(
+            "--max-long-partial-prefills",
+            type=int,
+            default=EngineArgs.max_long_partial_prefills,
+            help="For chunked prefill, the maximum number of prompts longer "
+            "than --long-prefill-token-threshold that will be prefilled "
+            "concurrently. Setting this less than --max-num-partial-prefills "
+            "will allow shorter prompts to jump the queue in front of longer "
+            "prompts in some cases, improving latency. Defaults to 1.")
+        parser.add_argument(
+            "--long-prefill-token-threshold",
+            type=float,
+            default=EngineArgs.long_prefill_token_threshold,
+            help="For chunked prefill, a request is considered long if the "
+            "prompt is longer than this number of tokens. Defaults to 4%% of "
+            "the model's context length.",
+        )
         parser.add_argument('--max-num-seqs',
                             type=int,
                             default=EngineArgs.max_num_seqs,
@@ -911,6 +943,13 @@ class EngineArgs:
             'arrival deciding any ties).')
 
         parser.add_argument(
+            '--scheduler-cls',
+            default=EngineArgs.scheduler_cls,
+            help='The scheduler class to use. "vllm.core.scheduler.Scheduler" '
+            'is the default scheduler. Can be a class directly or the path to '
+            'a class of form "mod.custom_class".')
+
+        parser.add_argument(
             '--override-neuron-config',
             type=json.loads,
             default=None,
@@ -1244,7 +1283,13 @@ class EngineArgs:
             multi_step_stream_outputs=self.multi_step_stream_outputs,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
-            policy=self.scheduling_policy)
+            policy=self.scheduling_policy,
+            scheduler_cls=self.scheduler_cls,
+            max_num_partial_prefills=self.max_num_partial_prefills,
+            max_long_partial_prefills=self.max_long_partial_prefills,
+            long_prefill_token_threshold=self.long_prefill_token_threshold,
+        )
+
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,

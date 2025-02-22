@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MM_INPUT_CACHE_SIZE: int = 256
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
+    VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
 
 
 def get_default_cache_root():
@@ -401,14 +403,20 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
 
     # Timeout for fetching videos when serving multimodal models
-    # Default is 15 seconds
+    # Default is 30 seconds
     "VLLM_VIDEO_FETCH_TIMEOUT":
-    lambda: int(os.getenv("VLLM_VIDEO_FETCH_TIMEOUT", "15")),
+    lambda: int(os.getenv("VLLM_VIDEO_FETCH_TIMEOUT", "30")),
 
     # Timeout for fetching audio when serving multimodal models
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Cache size for multimodal feature/input cache for multimodal models
+    # in unit of number of multimodal data items (e.g. image, video, audio).
+    # Default is 256 multimodal data items.
+    "VLLM_MM_INPUT_CACHE_SIZE":
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_SIZE", "256")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -578,6 +586,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
+
+    # Contiguous cache fetching to avoid using costly gather operation on
+    # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
+    # contiguous cache fetch will be used.
+    "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
+    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
+    ("1", "true"),
 }
 
 # end-env-vars-definition

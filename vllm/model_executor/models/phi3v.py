@@ -50,7 +50,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsQuant
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -313,11 +313,12 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         self,
         *,
         num_crops: Optional[int] = None,
+        **kwargs: object,
     ) -> ProcessorMixin:
         if num_crops is not None:
-            return self.ctx.get_hf_processor(num_crops=num_crops)
+            kwargs["num_crops"] = num_crops
 
-        return self.ctx.get_hf_processor()
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -498,7 +499,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor,
                                         info=Phi3VProcessingInfo,
                                         dummy_inputs=Phi3VDummyInputsBuilder)
-class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
+                       SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_embed_tokens.wte": "embed_tokens",
@@ -510,7 +512,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
@@ -520,14 +521,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             config.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "model.embed_tokens"),
         )
 
         # TODO: Optionally initializes this for supporting input embeddings.
         self.vision_embed_tokens = Phi3HDImageEmbedding(
             config,
-            quant_config,
+            self.quant_config,
             prefix=maybe_prefix(prefix, "model.vision_embed_tokens"))
 
         self.language_model = init_vllm_registered_model(

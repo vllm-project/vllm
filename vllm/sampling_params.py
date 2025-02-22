@@ -64,6 +64,25 @@ class GuidedDecodingParams:
             whitespace_pattern=whitespace_pattern,
         )
 
+    @property
+    def backend_name(self) -> str:
+        """Return the backend name without any options.
+        
+        For example if the backend is "xgrammar:no-fallback", returns "xgrammar"
+        """
+        return (self.backend or "").split(":")[0]
+
+    def backend_options(self) -> List[str]:
+        """Return the backend options as a list of strings."""
+        if not self.backend or ":" not in self.backend:
+            return []
+        return self.backend.split(":")[1].split(",")
+
+    def no_fallback(self) -> bool:
+        """Returns True if the "no-fallback" option is supplied for the guided
+        decoding backend"""
+        return "no-fallback" in self.backend_options()
+
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
         guide_count = sum([
@@ -243,8 +262,10 @@ class SamplingParams(
         allowed_token_ids: Optional[List[int]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
+            # Convert token_id to integer
+            # Clamp the bias between -100 and 100 per OpenAI API spec
             logit_bias = {
-                int(token): bias
+                int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
 

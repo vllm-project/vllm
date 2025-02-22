@@ -488,7 +488,8 @@ def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
 
 def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
                                       kv_cache_spec: KVCacheSpec,
-                                      available_memory: int) -> KVCacheConfig:
+                                      available_memory: int,
+                                      num_layers: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model with one type of KV cache.
     Divide the available memory equally among all layers.
@@ -497,6 +498,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         vllm_config: The global VllmConfig
         kv_cache_spec: The kv cache spec of the model
         available_memory: Memory available for KV cache in bytes.
+        num_layers: The number of layers in the model.
 
     Returns:
         The generated KVCacheConfig
@@ -506,7 +508,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     assert len(page_sizes) == 1
     page_size = page_sizes.pop()
 
-    num_blocks = int(available_memory // page_size // len(kv_cache_spec))
+    num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
 
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
@@ -517,11 +519,13 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
             "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
         num_blocks = num_gpu_blocks_override
 
-    logger.info("# GPU blocks: %d", num_blocks)
-    max_concurrency = (num_blocks * vllm_config.cache_config.block_size /
-                       vllm_config.model_config.max_model_len)
+    num_tokens = num_blocks * vllm_config.cache_config.block_size
+    num_tokens_str = f"{num_tokens:,}"
+    logger.info("GPU KV cache size: %s tokens", num_tokens_str)
+    max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
+    max_concurrency = num_tokens / vllm_config.model_config.max_model_len
     logger.info("Maximum concurrency for %s tokens per request: %.2fx",
-                vllm_config.model_config.max_model_len, max_concurrency)
+                max_model_len_str, max_concurrency)
 
     per_layer_size = page_size * num_blocks
 
@@ -536,25 +540,36 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     return kv_cache_config
 
 
-def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
-                        available_memory: int) -> KVCacheConfig:
+def get_kv_cache_configs(vllm_config: VllmConfig,
+                         kv_cache_specs: List[KVCacheSpec],
+                         available_memory: int) -> List[KVCacheConfig]:
     """
     Generates the KV cache configuration for a model
     TODO: support hybrid models with more than one type of KV cache.
 
     Args:
         vllm_config: The global VllmConfig
-        kv_cache_spec: The kv cache spec of the model
+        kv_cache_specs: The kv cache specs of the model
         available_memory: Memory available for KV cache in bytes.
 
     Returns:
-        The generated KVCacheConfig
+        The generated KVCacheConfigs
     """
-    check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
-    if is_kv_cache_type_uniform(kv_cache_spec):
-        # KV cache of all layers are the same, which is true for most models.
-        # Allocate the same amount of memory for each layer.
-        return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
-                                                 available_memory)
-    else:
-        raise NotImplementedError
+    # Use the max number of layers to conservatively determine
+    # the number of blocks.
+    num_layers = max(len(kv_cache_spec) for kv_cache_spec in kv_cache_specs)
+    kv_cache_configs = []
+    for kv_cache_spec in kv_cache_specs:
+        check_enough_kv_cache_memory(vllm_config, kv_cache_spec,
+                                     available_memory)
+        if is_kv_cache_type_uniform(kv_cache_spec):
+            # KV cache of all layers are the same, which is true for
+            # most models. Allocate the same amount of memory for
+            # each layer.
+            kv_cache_configs.append(
+                _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
+                                                  available_memory,
+                                                  num_layers))
+        else:
+            raise NotImplementedError
+    return kv_cache_configs
