@@ -87,6 +87,7 @@ class CustomAllreduce:
             return
 
         rank = dist.get_rank(group=self.group)
+        self.rank = rank
         world_size = dist.get_world_size(group=self.group)
         if world_size == 1:
             # No need to initialize custom allreduce for single GPU case.
@@ -201,8 +202,10 @@ class CustomAllreduce:
 
     @staticmethod
     def free_shared_buffer(pointers: List[int],
-                           group: Optional[ProcessGroup] = None) -> None:
-        rank = dist.get_rank(group=group)
+                           group: Optional[ProcessGroup] = None,
+                           rank: Optional[int] = None) -> None:
+        if rank is None:
+            rank = dist.get_rank(group=group)
         lib = CudaRTLibrary()
         lib.cudaFree(ctypes.c_void_p(pointers[rank]))
 
@@ -298,8 +301,8 @@ class CustomAllreduce:
         if not self.disabled and self._ptr:
             ops.dispose(self._ptr)
             self._ptr = 0
-            self.free_shared_buffer(self.meta_ptrs)
-            self.free_shared_buffer(self.buffer_ptrs)
+            self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
+            self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
 
     def __del__(self):
         self.close()

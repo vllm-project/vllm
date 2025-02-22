@@ -219,6 +219,9 @@ class EngineCore:
     def wake_up(self):
         self.model_executor.wake_up()
 
+    def execute_dummy_batch(self):
+        self.model_executor.collective_rpc("execute_dummy_batch")
+
     def add_lora(self, lora_request: LoRARequest) -> None:
         self.model_executor.add_lora(lora_request)
 
