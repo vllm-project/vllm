@@ -11,4 +11,4 @@ void paged_attention(torch::Tensor& out, torch::Tensor& exp_sums,
                      int64_t max_context_len,
                      const std::optional<torch::Tensor>& alibi_slopes,
                      const std::string& kv_cache_dtype, torch::Tensor& k_scale,
-                     torch::Tensor& v_scale);
+                     torch::Tensor& v_scale, bool is_navi);
