@@ -88,3 +88,7 @@ if __name__ == "__main__":
     print("Evaluation Results:")
     for task, metrics in results['results'].items():
         print(f"{task}: {metrics}")
+
+    print("Evaluation Results Table: ")
+    from lm_eval.utils import make_table
+    print(make_table(results))
