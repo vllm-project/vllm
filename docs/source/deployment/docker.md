@@ -34,7 +34,6 @@ If you need to use those dependencies (having accepted the license terms),
 create a custom Dockerfile on top of the base image with an extra layer that installs them:
 
 ```Dockerfile
-# You can choose other base images depending on your use case
 FROM vllm/vllm-openai:v0.7.3
 
 # e.g. install the `audio` and `video` optional dependencies
