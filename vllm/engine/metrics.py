@@ -516,6 +516,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
                                          vllm_config=vllm_config)
 
+        # Use this flag to hide metrics that were deprecated in
+        # a previous release and which will be removed future
+        self.show_hidden_metrics = \
+            vllm_config.observability_config.show_hidden_metrics
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
