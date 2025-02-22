@@ -580,7 +580,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     prefill_meta.block_tables,
                     prefill_meta.query_start_loc,
                     prefill_meta.seq_lens_tensor,
-                    prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window,
