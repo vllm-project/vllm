@@ -95,6 +95,11 @@ class PrometheusStatLogger(StatLoggerBase):
     def __init__(self, vllm_config: VllmConfig):
         self._unregister_vllm_metrics()
 
+        # Use this flag to hide metrics that were deprecated in
+        # a previous release and which will be removed future
+        self.show_hidden_metrics = \
+            vllm_config.observability_config.show_hidden_metrics
+
         labelnames = ["model_name"]
         labelvalues = [vllm_config.model_config.served_model_name]
 
