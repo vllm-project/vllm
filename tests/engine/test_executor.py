@@ -54,7 +54,7 @@ def test_custom_executor(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = EngineArgs(
-            model=model,,
+            model=model,
             distributed_executor_backend=CustomUniExecutor,
             enforce_eager=True,  # reduce test time
         )
@@ -77,7 +77,7 @@ def test_custom_executor_async(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = AsyncEngineArgs(
-            model=model,,
+            model=model,
             distributed_executor_backend=CustomUniExecutorAsync,
             enforce_eager=True,  # reduce test time
         )
@@ -104,7 +104,7 @@ def test_respect_ray(model):
     # resources using ray.
     engine_args = EngineArgs(
         model=model,
-        distributed_executor_backend="ray",,
+        distributed_executor_backend="ray",
         enforce_eager=True,  # reduce test time
     )
     engine = LLMEngine.from_engine_args(engine_args)
