@@ -1054,6 +1054,11 @@ def destroy_model_parallel():
         _PP.destroy()
     _PP = None
 
+    global _DP
+    if _DP:
+        _DP.destroy()
+    _DP = None
+
 
 def destroy_distributed_environment():
     global _WORLD
