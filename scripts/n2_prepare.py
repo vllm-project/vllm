@@ -216,7 +216,7 @@ if __name__ == "__main__":
         distributed_executor_backend='ray',
         trust_remote_code=True,
         quantization='inc_p',
-        max_model_len=16384,
+        max_model_len= 2048, #16384,
         dtype="bfloat16",
     )
 
