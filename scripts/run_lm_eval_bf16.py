@@ -54,7 +54,7 @@ if __name__ == "__main__":
             tensor_parallel_size=args.tp_size,
             distributed_executor_backend='ray',
             trust_remote_code=True,
-            max_model_len=4096,
+            max_model_len=2048, # 4096 was failed
             dtype="bfloat16",
             gpu_memory_utilization=0.8,
         )
