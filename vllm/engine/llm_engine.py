@@ -49,7 +49,6 @@ from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceStatus)
-from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -242,10 +241,6 @@ class LLMEngine:
 
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
-
-        if envs.VLLM_CI_USE_S3 and self.model_config.model in MODELS_ON_S3 and self.load_config.load_format == LoadFormat.AUTO:  # noqa: E501
-            self.model_config.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model_config.model}"  # noqa: E501
-            self.load_config.load_format = LoadFormat.RUNAI_STREAMER
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()

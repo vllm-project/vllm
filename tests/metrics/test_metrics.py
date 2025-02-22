@@ -13,6 +13,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
+from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET
 
 MODELS = [
     "distilbert/distilgpt2",
@@ -141,7 +142,7 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
         metrics_tag_content = stat_logger.labels["model_name"]
 
     if served_model_name is None or served_model_name == []:
-        assert metrics_tag_content == model, (
+        assert metrics_tag_content == f"{MODEL_WEIGHTS_S3_BUCKET}/{model}", (
             f"Metrics tag model_name is wrong! expect: {model!r}\n"
             f"actual: {metrics_tag_content!r}")
     else:
@@ -184,7 +185,7 @@ async def test_async_engine_log_metrics_regression(
         async for _ in results:
             pass
 
-    assert_metrics(async_engine.engine, disable_log_stats,
+    assert_metrics(model, async_engine.engine, disable_log_stats,
                    len(example_prompts))
 
 
@@ -214,8 +215,7 @@ def test_engine_log_metrics_regression(
     while engine.has_unfinished_requests():
         engine.step()
 
-    assert_metrics(engine, disable_log_stats, len(example_prompts))
-
+    assert_metrics(f"{MODEL_WEIGHTS_S3_BUCKET}/{model}", engine, disable_log_stats, len(example_prompts))
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
@@ -356,7 +356,7 @@ def test_metric_spec_decode_interval(
         cleanup_dist_env_and_memory()
 
 
-def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
+def assert_metrics(model: str, engine: LLMEngine, disable_log_stats: bool,
                    num_requests: int) -> None:
     if disable_log_stats:
         with pytest.raises(AttributeError):
@@ -367,7 +367,7 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
         # Ensure the count bucket of request-level histogram metrics matches
         # the number of requests as a simple sanity check to ensure metrics are
         # generated
-        labels = {'model_name': engine.model_config.model}
+        labels = {'model_name': model}
         request_histogram_metrics = [
             "vllm:e2e_request_latency_seconds",
             "vllm:request_prompt_tokens",
