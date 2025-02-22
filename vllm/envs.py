@@ -360,8 +360,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Enables weights compression during model export via HF Optimum
     # default is False
     "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
-    lambda: bool(os.getenv("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", False)),
-
+    lambda:
+    (os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", "0").lower() in
+     ("on", "true", "1")),
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
