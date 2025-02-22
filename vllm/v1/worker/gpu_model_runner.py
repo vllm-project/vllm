@@ -1319,13 +1319,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     generators={},
                     max_num_logprobs=None,
                     no_penalties=True,
-                    prompt_token_ids=torch.ones_like(logits, dtype=torch.int64),
+                    prompt_token_ids=torch.ones_like(logits,
+                                                     dtype=torch.int64),
                     frequency_penalties=dummy_tensors(0.1),
                     presence_penalties=dummy_tensors(0.1),
                     repetition_penalties=dummy_tensors(0.1),
                     output_token_ids=[[] for _ in range(num_reqs)],
                     min_tokens={},
-                    logit_bias=[None for _ in range(num_reqs)])
+                    logit_bias=[None for _ in range(num_reqs)],
+                    allowed_token_ids_mask=None,
+                )
                 sampler_output = self.model.sample(
                     logits=logits, sampling_metadata=dummy_metadata)
             else:
