@@ -571,6 +571,11 @@ class WorkerWrapperBase:
         kv_cache_config = kv_cache_configs[self.rpc_rank]
         self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
+    def init_device(self):
+        with set_current_vllm_config(self.vllm_config):
+            # To make vLLM config available during device initialization
+            self.worker.init_device()  # type: ignore
+
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
             target = self if self.worker is None else self.worker

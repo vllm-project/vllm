@@ -9,7 +9,7 @@ import torch
 @dataclass
 class SamplingMetadata:
 
-    temperature: torch.Tensor
+    temperature: Optional[torch.Tensor]
     all_greedy: bool
     all_random: bool
 
@@ -37,3 +37,7 @@ class SamplingMetadata:
     min_tokens: Dict[int, Tuple[int, Set[int]]]
 
     logit_bias: List[Optional[Dict[int, float]]]
+
+    # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,
+    # vocab size).
+    allowed_token_ids_mask: Optional[torch.Tensor]
