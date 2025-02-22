@@ -1194,6 +1194,17 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return super().parse_args(processed_args, namespace)
 
+    def check_port(self, value):
+        try:
+            value = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError("Port must be an integer")
+
+        if not (1024 <= value <= 65535):
+            raise argparse.ArgumentTypeError("Port must be between 1024 and 65535")
+
+        return value
+
     def _pull_args_from_config(self, args: List[str]) -> List[str]:
         """Method to pull arguments specified in the config file
         into the command-line args variable.
