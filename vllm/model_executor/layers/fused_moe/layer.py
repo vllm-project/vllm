@@ -318,12 +318,12 @@ class FusedMoE(torch.nn.Module):
                 # Each non-last rank gets local_num_experts experts.
                 self.expert_map[ep_rank * local_num_experts:
                                 (ep_rank + 1) * local_num_experts] = \
-                    torch.arange(0, local_num_experts,dtype=torch.int32)
+                    torch.arange(0, local_num_experts, dtype=torch.int32)
             else:
                 # All remaining experts are assigned to the last rank.
                 local_num_experts = num_experts - ep_rank * local_num_experts
                 self.expert_map[-local_num_experts:] = \
-                    torch.arange(0, local_num_experts,dtype=torch.int32)
+                    torch.arange(0, local_num_experts, dtype=torch.int32)
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "

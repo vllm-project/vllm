@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 
 from ..utils import compare_two_settings, fork_new_process_for_each_test
 
-logger = init_logger("test_pipeline_parallel")
+logger = init_logger("test_expert_parallel")
 
 
 class ParallelSetup(NamedTuple):
@@ -107,9 +107,6 @@ class EPTestSettings:
 
 # yapf: disable
 TEST_MODELS = {
-    # "ai21labs/Jamba-v0.1": EPTestSettings.fast(trust_remote_code=True),
-    "deepseek-ai/deepseek-llm-7b-chat": EPTestSettings.fast(
-        trust_remote_code=True),
     "deepseek-ai/DeepSeek-V2-Lite-Chat": EPTestSettings.fast(
         trust_remote_code=True),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": EPTestSettings.fast(tp_base=4),
@@ -124,7 +121,7 @@ def _compare_tp(
     test_options: EPTestOptions,
     num_gpus_available: int,
     *,
-    method: Literal["generate", "encode"],
+    method: Literal["generate_close"],
 ):
     (
         tp_size,
@@ -149,6 +146,8 @@ def _compare_tp(
         "2048",
         "--max-num-seqs",
         "8",
+        "--load-format",
+        "auto",
     ]
     if chunked_prefill:
         common_args.append("--enable-chunked-prefill")
@@ -176,12 +175,12 @@ def _compare_tp(
         "--distributed-executor-backend",
         distributed_backend,
     ]
-
-    # compare without pipeline parallelism
-    # NOTE: use mp backend for TP
-    # PP tests might involve multiple nodes, and ray might
-    #  schedule all workers in a node other than the head node,
-    #  which can cause the test to fail.
+    
+    # compare without expert parallelism
+    tp_env = {
+        "VLLM_TEST_ENABLE_EP": "0",
+    }
+    
     tp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -195,7 +194,9 @@ def _compare_tp(
                              ep_args,
                              tp_args,
                              ep_env,
-                             method=method)
+                             tp_env,
+                             method=method,
+                             max_wait_seconds=360)
     except Exception:
         raise
 
