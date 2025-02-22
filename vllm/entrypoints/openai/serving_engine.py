@@ -523,7 +523,7 @@ class OpenAIServing:
             return logprob.decoded_token
         return tokenizer.decode(token_id)
 
-    def _is_model_supported(self, model_name) -> bool:
+    def _is_model_supported(self, model_name: Optional[str]) -> bool:
         if not model_name:
             return True
         return self.models.is_base_model(model_name)
