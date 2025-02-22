@@ -166,10 +166,12 @@ class MultiModalProfiler(Generic[_I]):
                 f"({set(mm_max_tokens_per_item.keys())})")
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        placeholders_by_modality = mm_inputs["mm_placeholders"]
+        # For encoder-decoder models, use encoder prompt token ids instead of
+        # decoder prompt to construct dummy seq_data for encoder profiling.
         prompt_token_ids = (
             mm_inputs["prompt_token_ids"] if not is_encoder_data else
             mm_inputs["encoder_prompt_token_ids"])  # type: ignore
-        placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         total_placeholders_by_modality = {
             modality: sum(item["length"] for item in placeholders)
