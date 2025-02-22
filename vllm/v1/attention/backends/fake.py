@@ -5,5 +5,5 @@ from dataclasses import dataclass
 @dataclass
 class FakeAttentionMetadata:
 
-    # For logging.
+    # Used for DP.
     num_input_tokens: int  # Number of tokens including padding.
