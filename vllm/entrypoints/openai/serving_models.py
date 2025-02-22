@@ -95,7 +95,7 @@ class OpenAIServingModels:
             if isinstance(load_result, ErrorResponse):
                 raise ValueError(load_result.message)
 
-    def is_base_model(self, model_name):
+    def is_base_model(self, model_name) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
 
     def model_name(self, lora_request: Optional[LoRARequest] = None) -> str:
