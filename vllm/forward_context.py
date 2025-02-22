@@ -73,7 +73,7 @@ def set_forward_context(attn_metadata: Any,
                 batchsize = attn_metadata.num_input_tokens
         else:
             batchsize = num_tokens
-        num_tokens_across_dp = [0] * vllm_config.parallel_config.data_parallel_size
+        num_tokens_across_dp = [0] * vllm_config.parallel_config.data_parallel_size  # noqa
         num_tokens_across_dp[
             vllm_config.parallel_config.data_parallel_rank] = batchsize
         num_tokens_tensor = torch.tensor(num_tokens_across_dp,
