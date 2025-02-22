@@ -246,7 +246,7 @@ if __name__ == "__main__":
                 trust_remote_code=True,
                 quantization=quantization,
                 weights_load_device="cpu",
-                max_model_len=16384,
+                max_model_len=2048,
                 dtype="bfloat16",
             )
         else:
