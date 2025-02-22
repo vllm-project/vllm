@@ -56,7 +56,7 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
         generated_text = output.outputs[0].text
         print(
             f"DP rank {dp_rank}, Prompt: {prompt!r}, "
-            "Generated text: {generated_text!r}")
+            f"Generated text: {generated_text!r}")
 
 
 if __name__ == "__main__":
