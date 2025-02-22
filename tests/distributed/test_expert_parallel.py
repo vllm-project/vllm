@@ -166,7 +166,7 @@ def _compare_tp(
         common_args.extend(["--hf-overrides", hf_overrides])
 
     ep_env = {
-        "VLLM_TEST_EP_PARALLEL": "1",
+        "VLLM_TEST_ENABLE_EP": "1",
     }
 
     ep_args = [
