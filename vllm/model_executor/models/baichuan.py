@@ -342,15 +342,6 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "W_pack",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(
         self,

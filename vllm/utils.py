@@ -501,6 +501,25 @@ def get_open_zmq_ipc_path() -> str:
 
 
 def get_open_port() -> int:
+    """
+    Get an open port for the vLLM process to listen on.
+    An edge case to handle, is when we run data parallel,
+    we need to avoid ports that are potentially used by
+    the data parallel master process.
+    Right now we reserve 10 ports for the data parallel master
+    process. Currently it uses 2 ports.
+    """
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        dp_port = envs.VLLM_DP_MASTER_PORT
+        while True:
+            port = _get_open_port()
+            if port >= dp_port and port < dp_port + 10:
+                continue
+            return port
+    return _get_open_port()
+
+
+def _get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
         while True:
@@ -1197,8 +1216,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
     def check_port(self, value):
         try:
             value = int(value)
-        except ValueError as err:
-            raise argparse.ArgumentTypeError("Port must be an integer") from err
+        except ValueError:
+            msg = "Port must be an integer"
+            raise argparse.ArgumentTypeError(msg) from None
 
         if not (1024 <= value <= 65535):
             raise argparse.ArgumentTypeError(

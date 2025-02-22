@@ -1167,7 +1167,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
-        with set_forward_context(None, self.vllm_config):
+        with set_forward_context(None, self.vllm_config,
+                                 num_tokens=num_tokens):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1326,7 +1327,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     repetition_penalties=dummy_tensors(0.1),
                     output_token_ids=[[] for _ in range(num_reqs)],
                     min_tokens={},
-                    logit_bias=[None for _ in range(num_reqs)])
+                    logit_bias=[None for _ in range(num_reqs)],
+                    allowed_token_ids_mask=None,
+                )
                 sampler_output = self.model.sample(
                     logits=logits, sampling_metadata=dummy_metadata)
             else:

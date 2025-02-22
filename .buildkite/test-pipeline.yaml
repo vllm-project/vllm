@@ -134,7 +134,9 @@ steps:
   - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
+  - tests/examples/offline_inference/data_parallel.py
   commands:
+  - VLLM_USE_V1=1 python3 ../examples/offline_inference/data_parallel.py
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
