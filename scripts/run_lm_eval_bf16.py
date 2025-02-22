@@ -16,7 +16,7 @@ parser.add_argument("--task", type=str, default="gsm8k", help="The model path.")
 parser.add_argument("--tokenizer", type=str, default=model_path, help="The model path.")
 parser.add_argument("--tp_size", type=int, default=16, help="Tensor Parallelism size.")
 parser.add_argument("--ep_size", type=int, default=16, help="Expert Parallelism size.")
-parser.add_argument("-l", "--limit", type=int, default=128, help="test request counts.")
+parser.add_argument("-l", "--limit", type=int, default=16, help="test request counts.")
 args = parser.parse_args()
 
 # os.environ["VLLM_SKIP_WARMUP"] = "true"
@@ -53,9 +53,8 @@ if __name__ == "__main__":
             tokenizer=args.tokenizer,
             tensor_parallel_size=args.tp_size,
             distributed_executor_backend='ray',
-            quantization="inc_q",
             trust_remote_code=True,
-            max_model_len=4096,
+            max_model_len=2048, # 4096 was failed
             dtype="bfloat16",
             gpu_memory_utilization=0.8,
         )
@@ -64,13 +63,7 @@ if __name__ == "__main__":
     # Run the evaluation; you can adjust num_fewshot and batch_size as needed.
     if args.task == "gsm8k":
         print("============ Start Evaluation ============")
-        results = simple_evaluate(
-            model=llm,
-            tasks=["gsm8k"],
-            num_fewshot=5,
-            batch_size=1,
-            limit=args.limit,
-        )
+        results = simple_evaluate(model=llm, tasks=["gsm8k"], num_fewshot=5, batch_size=1, limit=args.limit)
         # save as json
         with open(f"gsm8k_ep{args.ep_size}_result_samples.jsonl", "w") as f:
             json.dump(results['results'], f)
@@ -94,7 +87,7 @@ if __name__ == "__main__":
     print("Evaluation Results:")
     for task, metrics in results['results'].items():
         print(f"{task}: {metrics}")
-
+    
     print("Evaluation Results Table: ")
     from lm_eval.utils import make_table
     print(make_table(results))
