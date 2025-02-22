@@ -20,7 +20,7 @@ prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer >= 0.10.9, < 0.11
 outlines == 0.1.11
-lark == 1.2.2 
+lark == 1.2.2
 xgrammar == 0.1.11; platform_machine == "x86_64"
 typing_extensions >= 4.10
 filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
@@ -37,3 +37,4 @@ einops # Required for Qwen2-VL.
 compressed-tensors == 0.9.2 # required for compressed-tensors
 depyf==0.18.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
+watchfiles # required for http server to monitor the updates of TLS files

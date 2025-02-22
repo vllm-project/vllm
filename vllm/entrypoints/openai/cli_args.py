@@ -165,6 +165,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         default=None,
                         help="The CA certificates file.")
     parser.add_argument(
+        "--enable-ssl-refresh",
+        action="store_true",
+        default=False,
+        help="Refresh SSL Context when SSL certificate files change")
+    parser.add_argument(
         "--ssl-cert-reqs",
         type=int,
         default=int(ssl.CERT_NONE),
