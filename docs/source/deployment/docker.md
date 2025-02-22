@@ -31,13 +31,13 @@ memory to share data between processes under the hood, particularly for tensor p
 Optional dependencies are not included in order to avoid licensing issues (e.g. <gh-issue:8030>).
 
 If you need to use those dependencies (having accepted the license terms),
-create a custom Dockerfile on top of the base image with an extra layer that installs them.
-
-For example, to include the `audio` and `video` optional dependencies:
+create a custom Dockerfile on top of the base image with an extra layer that installs them:
 
 ```Dockerfile
+# You can choose other base images depending on your use case
 FROM vllm/vllm-openai:latest
 
+# e.g. install the `audio` and `video` optional dependencies
 RUN uv pip install --system vllm[audio,video]
 ```
 
