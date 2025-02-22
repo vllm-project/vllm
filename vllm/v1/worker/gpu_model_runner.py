@@ -1048,6 +1048,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
+            time_before_load = time.perf_counter()
             self.model = get_model(vllm_config=self.vllm_config)
             if self.lora_config:
                 self.model = self.load_lora_model(self.model,
@@ -1055,10 +1056,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.scheduler_config,
                                                   self.lora_config,
                                                   self.device)
-
+            time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
+        logger.info("Loading model weights took %.4f GB and %.6f seconds",
+                    self.model_memory_usage / float(2**30),
+                    time_after_load - time_before_load)
 
     def _get_prompt_logprobs_dict(
         self,
