@@ -8,9 +8,8 @@ from typing import Dict, List, Optional, Type, Union, cast
 import numpy as np
 import prometheus_client
 
-from vllm.config import VllmConfig
-from vllm.engine.metrics_types import (StatLoggerBase, Stats,
-                                       SupportsMetricsInfo)
+from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
 
