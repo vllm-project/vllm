@@ -33,6 +33,11 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
     start = dp_rank * promts_per_rank
     end = start + promts_per_rank
     prompts = prompts[start:end]
+    if len(prompts) == 0:
+        # if any rank has no prompts to process,
+        # we need to set a placeholder prompt
+        prompts = ["Placeholder"]
+    print(f"DP rank {dp_rank} needs to process {len(prompts)} prompts")
 
     # Create a sampling params object.
     # since we are doing data parallel, every rank can have different
@@ -49,7 +54,8 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"DP rank {dp_rank}, Prompt: {prompt!r}, "
+        "Generated text: {generated_text!r}")
 
 
 if __name__ == "__main__":
