@@ -97,8 +97,8 @@ def test_models(
     "test_suite", [
         ("distilbert/distilgpt2", "ray", "", "L4"),
         ("distilbert/distilgpt2", "mp", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "ray", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
+        ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4"),
+        ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4"),
         ("distilbert/distilgpt2", "ray", "", "A100"),
         ("distilbert/distilgpt2", "mp", "", "A100"),
         ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100"),

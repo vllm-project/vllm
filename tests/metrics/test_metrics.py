@@ -13,7 +13,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
-from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET
 
 MODELS = [
     "distilbert/distilgpt2",
@@ -142,9 +141,8 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
         metrics_tag_content = stat_logger.labels["model_name"]
 
     if served_model_name is None or served_model_name == []:
-        actual_model_name = model
-        assert metrics_tag_content == f"{MODEL_WEIGHTS_S3_BUCKET}/{actual_model_name}", (  # noqa: E501
-            f"Metrics tag model_name is wrong! expect: {actual_model_name!r}\n"
+        assert metrics_tag_content == model, (
+            f"Metrics tag model_name is wrong! expect: {model!r}\n"
             f"actual: {metrics_tag_content!r}")
     else:
         assert metrics_tag_content == served_model_name[0], (
