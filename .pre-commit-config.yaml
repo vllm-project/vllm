@@ -44,7 +44,6 @@ repos:
   hooks:
   - id: actionlint
     exclude: 'vllm/third_party/.*'
-repos:
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.6.2
   hooks:
