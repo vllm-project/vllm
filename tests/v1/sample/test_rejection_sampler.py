@@ -43,6 +43,7 @@ def create_sampling_metadata(spec_tokens: List[List[int]]) -> SamplingMetadata:
         output_token_ids=[],
         min_tokens={},
         logit_bias=[None] * batch_size,
+        allowed_token_ids_mask=None,
     )
 
 
