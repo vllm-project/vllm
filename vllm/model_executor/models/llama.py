@@ -452,10 +452,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
-        "lm_head"
-    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings"

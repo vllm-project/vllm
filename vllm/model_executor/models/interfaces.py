@@ -118,11 +118,11 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-
-    packed_modules_mapping: ClassVar[Dict[str, List[str]]]
-    supported_lora_modules: ClassVar[List[str]]
-    embedding_modules: ClassVar[Dict[str, str]]
-    embedding_padding_modules: ClassVar[List[str]]
+    # The `embedding_module` and `embedding_padding_modules`
+    # are empty by default.
+    embedding_modules: ClassVar[Dict[str, str]] = {}
+    embedding_padding_modules: ClassVar[List[str]] = []
+    packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -132,7 +132,6 @@ class _SupportsLoRAType(Protocol):
     supports_lora: Literal[True]
 
     packed_modules_mapping: Dict[str, List[str]]
-    supported_lora_modules: List[str]
     embedding_modules: Dict[str, str]
     embedding_padding_modules: List[str]
 
@@ -155,7 +154,6 @@ def supports_lora(
     if not result:
         lora_attrs = (
             "packed_modules_mapping",
-            "supported_lora_modules",
             "embedding_modules",
             "embedding_padding_modules",
         )

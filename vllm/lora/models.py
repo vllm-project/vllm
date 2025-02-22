@@ -26,6 +26,7 @@ from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
+                             get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
@@ -332,15 +333,15 @@ class LoRAModelManager(AdapterModelManager):
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
         super().__init__(model)
-        if hasattr(self.model, "supported_lora_modules"):
-            self.supported_lora_modules = copy.deepcopy(
-                self.model.supported_lora_modules)
-            if lora_config.long_lora_scaling_factors:
-                # We need to replace rotary emb layer to do batch computation
-                # for long lora.
-                self.supported_lora_modules.append("rotary_emb")
-            self.packed_modules_mapping = copy.deepcopy(
-                self.model.packed_modules_mapping)
+        self.supported_lora_modules = get_supported_lora_modules(self.model)
+        assert self.supported_lora_modules, "No supported LoRA modules found in"
+        f"{self.model.__class__.__name__}."
+        if lora_config.long_lora_scaling_factors:
+            # We need to replace rotary emb layer to do batch computation
+            # for long lora.
+            self.supported_lora_modules.append("rotary_emb")
+        self.packed_modules_mapping = copy.deepcopy(
+            self.model.packed_modules_mapping)
         # Used to indicate whether the model is a multimodal model
         self.supports_mm: bool = (
             supports_multimodal(self.model)
@@ -756,7 +757,7 @@ def create_lora_manager(
         lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager,
         **kwargs) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
-    if not hasattr(model, "supported_lora_modules"):
+    if not hasattr(model, "packed_modules_mapping"):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
     lora_manager = lora_manager_cls(
         model=model,

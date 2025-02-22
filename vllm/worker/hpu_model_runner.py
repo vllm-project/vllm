@@ -650,9 +650,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             logger.info(msg)
 
             if self.lora_config:
-                assert hasattr(self.model, "supported_lora_modules"
-                               ) and self.model.supported_lora_modules, (
-                                   "Model does not support LoRA")
                 assert hasattr(self.model, "embedding_modules"
                                ), "Model does not have embedding_modules"
                 assert hasattr(

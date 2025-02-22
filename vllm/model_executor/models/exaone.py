@@ -415,14 +415,6 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "out_proj",
-        "gate_up_proj",
-        "c_proj",
-        "wte",
-        "lm_head",
-    ]
     embedding_modules = {
         "wte": "input_embeddings",
         "lm_head": "output_embeddings",
