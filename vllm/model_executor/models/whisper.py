@@ -640,6 +640,10 @@ class WhisperMultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
+        # Strictly speaking, whisper encoder only accept audio features.
+        # We create a dummy encoder prompt here which will be padded to
+        # num_audio_tokens. So that we can create dummy data from this
+        # for encoder profiling.
         return [0]
 
     def _call_hf_processor(
