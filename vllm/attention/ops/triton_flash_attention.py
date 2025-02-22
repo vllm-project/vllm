@@ -21,14 +21,13 @@ Currently only the forward kernel is supported, and contains these features:
 
 """
 
-import torch
 import triton
 import triton.language as tl
+from utils.benchmark_utils import get_available_models, get_model_configs
 
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
-
-class MetaData:
+class MetaData():
     cu_seqlens_q = None
     cu_seqlens_k = None
     max_seqlens_q = 0
@@ -76,8 +75,9 @@ class MetaData:
         self.p_descale = p_descale
         self.use_p_scale = (p_scale is not None) and (
             p_descale is not None) and (v_descale is not None)
-        self.int8_kv = ((q_descale is None) and (k_descale is not None)
-                        and (v_descale is not None))
+        self.int8_kv = (q_descale is None) and (k_descale
+                                                is not None) and (v_descale
+                                                                  is not None)
 
     def need_bias(self, bias, batch, nheads, seqlen_q, seqlen_k):
         assert bias.is_cuda
@@ -244,8 +244,8 @@ def compute_alibi_block(alibi_slope,
     # [[3], - [[0, 1, 2, 3, 4]] =  [[ 3, 2, 1, 0,-1], [4], [ 4, 3, 2, 1, 0]]
     # 5. -1 * alibi_slope * tl.abs(relative_pos_block) = [[ -3, -2, -1, 0,-1],
     #                                                    [ -4, -3, -2, -1, 0]],
-    relative_pos_block = (offs_m[:, None] + seqlen_k - seqlen_q -
-                          offs_n[None, :])
+    relative_pos_block = offs_m[:,
+                                None] + seqlen_k - seqlen_q - offs_n[None, :]
     alibi_block = -1 * alibi_slope * tl.abs(relative_pos_block)
     if transpose:
         return alibi_block.T
@@ -282,7 +282,10 @@ def _attn_fwd_inner(
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
-        k_offs_n = start_n + tl.arange(0, BLOCK_N) if MASK_STEPS else None
+        if MASK_STEPS:
+            k_offs_n = start_n + tl.arange(0, BLOCK_N)
+        else:
+            k_offs_n = None
         k_offs_k = None if not PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
         k = load_fn(k_ptrs, k_offs_k, k_offs_n, ACTUAL_BLOCK_DMODEL,
                     actual_seqlen_k)
@@ -294,7 +297,7 @@ def _attn_fwd_inner(
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
-        if MASK_STEPS:  # noqa: SIM102
+        if MASK_STEPS:
             # If this is the last block / iteration, we want to
             # mask if the sequence length is not a multiple of block size
             # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if not
@@ -392,6 +395,26 @@ def _attn_fwd_inner(
         if RETURN_ENCODED_SOFTMAX:
             encoded_sm_ptrs += BLOCK_N
     return acc, l_i, m_i
+
+
+def get_gfx_version():
+    try:
+        # Run the rocminfo command
+        result = subprocess.run(['rocminfo'],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                text=True)
+        output = result.stdout
+
+        # Parse the output to find the gfx version
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("Name: gfx"):
+                gfx_version = line.split("Name:")[1].strip()
+                return gfx_version
+    except Exception as e:
+        print(f"Error: {e}")
+    return None
 
 
 def is_hip():
@@ -583,6 +606,27 @@ def attn_fwd(
         USE_ALIBI: tl.constexpr, INT8: tl.constexpr, USE_P_SCALE: tl.constexpr,
         INT8_KV: tl.constexpr):
 
+    tl.assume(stride_qz >= 0)
+    tl.assume(stride_qh >= 0)
+    tl.assume(stride_qm >= 0)
+    tl.assume(stride_qk >= 0)
+    tl.assume(stride_kz >= 0)
+    tl.assume(stride_kh >= 0)
+    tl.assume(stride_kn >= 0)
+    tl.assume(stride_kk >= 0)
+    tl.assume(stride_bz >= 0)
+    tl.assume(stride_bh >= 0)
+    tl.assume(stride_bm >= 0)
+    tl.assume(stride_bn >= 0)
+    tl.assume(stride_vz >= 0)
+    tl.assume(stride_vh >= 0)
+    tl.assume(stride_vk >= 0)
+    tl.assume(stride_vn >= 0)
+    tl.assume(stride_oz >= 0)
+    tl.assume(stride_oh >= 0)
+    tl.assume(stride_om >= 0)
+    tl.assume(stride_on >= 0)
+
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
         NUM_WG = NUM_CU * GRID_CU_MULTIP  # number of workgroups launched
         num_tiles_per_head = tl.cdiv(
@@ -592,7 +636,7 @@ def attn_fwd(
         num_tiles_total = num_tiles_per_sample * B  # times number of samples
         if PERSISTENT_DYNAMIC:
             tile_id = atomic_counter.atomic_add(
-                1)  # returns the value BEFORE the atomic operation
+                1)  # retuns the value BEFORE the atomic operation
         else:
             tile_id = tl.program_id(0)
     else:  # standard, kernel processes only one tile
@@ -672,18 +716,18 @@ def attn_fwd(
                         [BLOCK_M, BLOCK_DMODEL])
                     # We still need to write 0s to the result
                     tl.store(o_ptrs, acc, mask=o_ptrs_mask)
-                    # The tensor allocated for L is based on MAX_SEQLENS_Q as
-                    # that is statically known.
+                    # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
+                    # statically known.
                     l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q +
                               off_h_q * MAX_SEQLENS_Q + offs_m)
                     # We store inf to LSE, not -inf because in the bwd pass,
                     # we subtract this from qk which makes it -inf, such that
                     # exp(qk - inf) = 0 for these masked blocks.
-                    l_value = tl.full([BLOCK_M],
-                                      value=float("inf"),
-                                      dtype=tl.float32)
+                    l = tl.full([BLOCK_M],
+                                value=float("inf"),
+                                dtype=tl.float32)
                     l_ptrs_mask = offs_m < MAX_SEQLENS_Q
-                    tl.store(l_ptrs, l_value, mask=l_ptrs_mask)
+                    tl.store(l_ptrs, l, mask=l_ptrs_mask)
                     # TODO: Should dropout and return encoded softmax be
                     # handled here too?
                     continue_condition = False
@@ -692,7 +736,11 @@ def attn_fwd(
             if continue_condition:
                 # If MQA / GQA, set the K and V head offsets appropriately.
                 GROUP_SIZE: tl.constexpr = HQ // HK
-                off_h_k = off_h_q // GROUP_SIZE if GROUP_SIZE != 1 else off_h_q
+                if GROUP_SIZE != 1:
+                    off_h_k = off_h_q // GROUP_SIZE
+                else:
+                    off_h_k = off_h_q
+
                 n_extra_tokens = 0
                 if seqlen_k < BLOCK_N:
                     n_extra_tokens = BLOCK_N - seqlen_k
@@ -727,7 +775,7 @@ def attn_fwd(
                         p_descale_ptrs = P_descale + off_h_q
 
                 if USE_BIAS:
-                    # Note: might get large enough to overflow on some configs
+                    # Note: this might get large enough to overflow on some configs
                     bias_offset = off_h_q * stride_bh
                     bias_ptrs = (bias + bias_offset +
                                  offs_m[:, None] * stride_bm +
@@ -762,8 +810,8 @@ def attn_fwd(
                 m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
                 l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
                 acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
-                # scale sm_scale by log_2(e) and use 2^x in the loop as we do
-                # not have native e^x support in HW.
+                # scale sm_scale by log_2(e) and use 2^x in the loop as we do not
+                # have native e^x support in HW.
                 QK_SCALE: tl.constexpr = SM_SCALE * 1.44269504089
                 # Q is loaded once at the beginning and shared by all N blocks.
                 q_ptrs_mask = offs_m[:, None] < seqlen_q
@@ -775,7 +823,10 @@ def attn_fwd(
                 if INT8:
                     k_descale = tl.load(k_descale_ptrs)
                     v_descale = tl.load(v_descale_ptrs)
-                    q_descale = None if INT8_KV else tl.load(q_descale_ptrs)
+                    if not INT8_KV:
+                        q_descale = tl.load(q_descale_ptrs)
+                    else:
+                        q_descale = None
                     if USE_P_SCALE:
                         p_scale = tl.load(p_scale_ptrs)
                         p_descale = tl.load(p_descale_ptrs)
@@ -926,8 +977,7 @@ def attn_fwd(
                     acc *= v_descale
 
                 # epilogue
-                # This helps the compiler do Newton Raphson on l_i vs on acc
-                # which is much larger.
+                # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
                 l_recip = 1 / l_i[:, None]
                 acc = acc * l_recip
 
@@ -942,7 +992,7 @@ def attn_fwd(
                 start_m_idx = start_m * BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k
                 acc = acc.to(Out.type.element_ty)
-                if IS_CAUSAL:  # noqa: SIM102
+                if IS_CAUSAL:
                     if (causal_start_idx > start_m_idx
                             and causal_start_idx < end_m_idx):
                         out_mask_boundary = tl.full((BLOCK_DMODEL, ),
@@ -997,8 +1047,6 @@ def attn_fwd(
 
 
 def get_shape_from_layout(q, k, metadata):
-    assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
-
     if metadata.layout == 'thd':
         nheads_q, nheads_k = q.shape[1], k.shape[1]
         head_size = q.shape[-1]
@@ -1009,12 +1057,13 @@ def get_shape_from_layout(q, k, metadata):
     elif metadata.layout == 'bshd':
         batch, _, nheads_q, head_size = q.shape
         nheads_k = k.shape[2]
+    else:
+        assert False, "Got unsupported layout."
     return batch, nheads_q, nheads_k, head_size
 
 
 # TODO: This can probably optimized to have fewer lines of code.
 def get_strides_from_layout(q, k, v, o, metadata):
-    assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
     if metadata.layout == 'thd':
         q_strides = (0, q.stride(1), q.stride(0), q.stride(2))
         k_strides = (0, k.stride(1), k.stride(0), k.stride(2))
@@ -1030,6 +1079,8 @@ def get_strides_from_layout(q, k, v, o, metadata):
         k_strides = (k.stride(0), k.stride(2), k.stride(1), k.stride(3))
         v_strides = (v.stride(0), v.stride(2), v.stride(1), v.stride(3))
         o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
+    else:
+        assert False, 'Got unsupported layout.'
     return q_strides, k_strides, v_strides, o_strides
 
 
@@ -1116,51 +1167,52 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
-        attn_fwd[grid](q,
-                       k,
-                       v,
-                       metadata.bias,
-                       metadata.sm_scale,
-                       M,
-                       o,
-                       *q_strides,
-                       *k_strides,
-                       *v_strides,
-                       *o_strides,
-                       *bias_strides,
-                       *alibi_strides,
-                       q_descale,
-                       k_descale,
-                       p_scale,
-                       p_descale,
-                       v_descale,
-                       metadata.cu_seqlens_q,
-                       metadata.cu_seqlens_k,
-                       dropout_p=metadata.dropout_p,
-                       philox_seed=philox_seed,
-                       philox_offset_base=philox_offset,
-                       encoded_softmax=encoded_softmax,
-                       alibi_slopes=metadata.alibi_slopes,
-                       HQ=nheads_q,
-                       HK=nheads_k,
-                       ACTUAL_BLOCK_DMODEL=head_size,
-                       MAX_SEQLENS_Q=metadata.max_seqlens_q,
-                       MAX_SEQLENS_K=metadata.max_seqlens_k,
-                       IS_CAUSAL=metadata.causal,
-                       VARLEN=metadata.varlen,
-                       BLOCK_DMODEL=padded_d_model,
-                       USE_BIAS=metadata.bias is not None,
-                       USE_ALIBI=metadata.alibi_slopes is not None,
-                       ENABLE_DROPOUT=metadata.dropout_p > 0.0,
-                       RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
-                       INT8=metadata.int8,
-                       USE_P_SCALE=metadata.int8 and metadata.use_p_scale,
-                       INT8_KV=metadata.int8 and metadata.int8_kv,
-                       PERSISTENT=metadata.persistent is not None,
-                       PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
-                       NUM_CU=NUM_CU,
-                       atomic_counter=atomic_counter,
-                       B=batch)
+        attn_fwd[grid](
+            q,
+            k,
+            v,
+            metadata.bias,
+            metadata.sm_scale,
+            M,
+            o,
+            *q_strides,
+            *k_strides,
+            *v_strides,
+            *o_strides,
+            *bias_strides,
+            *alibi_strides,
+            q_descale,
+            k_descale,
+            p_scale,
+            p_descale,
+            v_descale,
+            metadata.cu_seqlens_q,
+            metadata.cu_seqlens_k,
+            dropout_p=metadata.dropout_p,
+            philox_seed=philox_seed,
+            philox_offset_base=philox_offset,
+            encoded_softmax=encoded_softmax,
+            alibi_slopes=metadata.alibi_slopes,
+            HQ=nheads_q,
+            HK=nheads_k,
+            ACTUAL_BLOCK_DMODEL=head_size,
+            MAX_SEQLENS_Q=metadata.max_seqlens_q,
+            MAX_SEQLENS_K=metadata.max_seqlens_k,
+            IS_CAUSAL=metadata.causal,
+            VARLEN=metadata.varlen,
+            BLOCK_DMODEL=padded_d_model,
+            USE_BIAS=False if metadata.bias is None else True,
+            USE_ALIBI=False if metadata.alibi_slopes is None else True,
+            ENABLE_DROPOUT=metadata.dropout_p > 0.0,
+            RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
+            INT8=metadata.int8,
+            USE_P_SCALE=metadata.int8 and metadata.use_p_scale,
+            INT8_KV=metadata.int8 and metadata.int8_kv,
+            PERSISTENT=metadata.persistent is not None,
+            PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
+            NUM_CU=NUM_CU,
+            atomic_counter=atomic_counter,
+            B=batch)
 
         ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
@@ -1173,11 +1225,10 @@ class _attention(torch.autograd.Function):
         ctx.philox_offset = philox_offset
         ctx.encoded_softmax = encoded_softmax
         ctx.return_encoded_softmax = metadata.return_encoded_softmax
-        return o, encoded_softmax
+        return o, encoded_softmax, attn_fwd.best_config
 
 
 triton_attention_rocm = _attention.apply
-
 
 def triton_attention(
     q,
@@ -1200,3 +1251,4 @@ def triton_attention(
     attn_metadata.bias = bias
     attn_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
     return triton_attention_rocm(q, k, v, o, attn_metadata)
+
