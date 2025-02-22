@@ -518,6 +518,7 @@ def get_open_port() -> int:
             return port
     return _get_open_port()
 
+
 def _get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
