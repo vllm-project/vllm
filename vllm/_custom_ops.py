@@ -433,6 +433,18 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
 
 
 # cutlass
+def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
+                          block_scale_a: torch.Tensor,
+                          block_scale_b: torch.Tensor, alpha: torch.Tensor,
+                          out_dtype: torch.dtype) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2
+    m, n = a.shape[0], b.shape[0]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+    torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b,
+                                       alpha)
+    return out
+
+
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
 
