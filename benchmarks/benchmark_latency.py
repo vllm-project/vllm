@@ -42,6 +42,10 @@ def main(args: argparse.Namespace):
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(**dataclasses.asdict(engine_args))
+    assert llm.llm_engine.model_config.max_model_len >= (
+        args.input_len + args.output_len), (
+            "Please ensure that max_model_len is greater than"
+            " the sum of input_len and output_len.")
 
     sampling_params = SamplingParams(
         n=args.n,
