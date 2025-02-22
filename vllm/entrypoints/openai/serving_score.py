@@ -358,7 +358,12 @@ class ServingScores(OpenAIServing):
                 request.truncate_prompt_tokens,
             )
             return self.request_output_to_rerank_response(
-                final_res_batch, request_id, self._get_model_name(request.model), documents, top_n)
+                final_res_batch,
+                request_id,
+                self._get_model_name(request.model),
+                documents,
+                top_n,
+            )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
