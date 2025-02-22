@@ -45,7 +45,7 @@ MODELS_ON_S3 = [
     "microsoft/Phi-3-vision-128k-instruct",
     "microsoft/Phi-3.5-MoE-instruct",
     "microsoft/Phi-3.5-vision-instruct",
-    "mistralai/Mistral-7B-Instruct-v0.1",
+    # "mistralai/Mistral-7B-Instruct-v0.1",
     "mistralai/Mixtral-8x7B-Instruct-v0.1",
     "mistralai/Pixtral-12B-2409",
     "mistral-community/Mixtral-8x22B-v0.1-AWQ",
