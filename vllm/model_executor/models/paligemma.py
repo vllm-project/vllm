@@ -29,6 +29,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         replace_token_matches)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel, get_max_siglip_image_tokens
