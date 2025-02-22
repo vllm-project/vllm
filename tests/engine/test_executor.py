@@ -37,7 +37,7 @@ CustomUniExecutorAsync = CustomUniExecutor
 @pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_custom_executor_type_checking(model):
     with pytest.raises(ValueError):
-        engine_args = EngineArgs(model=model,,
+        engine_args = EngineArgs(model=model,
                                  distributed_executor_backend=Mock)
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
