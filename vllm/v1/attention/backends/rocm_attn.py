@@ -121,7 +121,7 @@ class ROCmAttentionImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
 
         if isinstance(attn_metadata, FakeAttentionMetadata):
-            # Profiling run.
+            # Dummy run.
             return output
 
         assert attn_metadata.use_cascade is False
