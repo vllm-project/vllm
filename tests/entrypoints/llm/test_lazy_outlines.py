@@ -6,7 +6,6 @@ from contextlib import nullcontext
 from vllm_test_utils import BlameResult, blame
 
 from vllm import LLM, SamplingParams
-from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 
 

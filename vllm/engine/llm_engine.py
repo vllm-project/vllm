@@ -16,7 +16,7 @@ import torch
 from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoadFormat, LoRAConfig, ModelConfig,
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
                          VllmConfig)
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs

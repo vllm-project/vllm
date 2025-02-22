@@ -7,7 +7,6 @@ import pytest
 from huggingface_hub import snapshot_download
 
 from vllm import LLM
-from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 

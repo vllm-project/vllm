@@ -2,7 +2,6 @@
 
 import pytest
 
-from vllm.config import LoadFormat
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 
@@ -12,8 +11,10 @@ def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
     # of tokenizer and detokenizer. The generated output is expected to contain
     # token ids.
-    llm = LLM(model=model,
-              skip_tokenizer_init=True,)
+    llm = LLM(
+        model=model,
+        skip_tokenizer_init=True,
+    )
     sampling_params = SamplingParams(prompt_logprobs=True, detokenize=True)
 
     with pytest.raises(ValueError, match="cannot pass text prompts when"):

@@ -2,7 +2,6 @@
 
 import pytest
 
-from vllm.config import LoadFormat
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 

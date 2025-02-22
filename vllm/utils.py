@@ -1197,11 +1197,12 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
     def check_port(self, value):
         try:
             value = int(value)
-        except ValueError:
-            raise argparse.ArgumentTypeError("Port must be an integer")
+        except ValueError as err:
+            raise argparse.ArgumentTypeError("Port must be an integer") from err
 
         if not (1024 <= value <= 65535):
-            raise argparse.ArgumentTypeError("Port must be between 1024 and 65535")
+            raise argparse.ArgumentTypeError(
+                "Port must be between 1024 and 65535")
 
         return value
 

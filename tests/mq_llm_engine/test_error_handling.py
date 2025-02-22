@@ -22,8 +22,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser
 
 MODEL = "google/gemma-1.1-2b-it"
-ENGINE_ARGS = AsyncEngineArgs(model=MODEL,
-                              enforce_eager=True)
+ENGINE_ARGS = AsyncEngineArgs(model=MODEL, enforce_eager=True)
 RAISED_ERROR = KeyError
 RAISED_VALUE = "foo"
 

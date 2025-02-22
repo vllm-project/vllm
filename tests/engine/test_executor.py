@@ -6,7 +6,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import pytest
 
-from vllm.config import LoadFormat
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine

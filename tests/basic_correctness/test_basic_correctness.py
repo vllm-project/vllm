@@ -9,7 +9,6 @@ import weakref
 import pytest
 
 from vllm import LLM
-from vllm.config import LoadFormat
 from vllm.platforms import current_platform
 
 from ..conftest import VllmRunner

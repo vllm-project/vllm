@@ -215,7 +215,9 @@ def test_engine_log_metrics_regression(
     while engine.has_unfinished_requests():
         engine.step()
 
-    assert_metrics(f"{MODEL_WEIGHTS_S3_BUCKET}/{model}", engine, disable_log_stats, len(example_prompts))
+    assert_metrics(f"{MODEL_WEIGHTS_S3_BUCKET}/{model}", engine,
+                   disable_log_stats, len(example_prompts))
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])

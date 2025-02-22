@@ -6,7 +6,6 @@ from typing import List
 import pytest
 
 from vllm import LLM, PoolingParams, PoolingRequestOutput
-from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
