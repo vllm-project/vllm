@@ -35,7 +35,7 @@ create a custom Dockerfile on top of the base image with an extra layer that ins
 
 ```Dockerfile
 # You can choose other base images depending on your use case
-FROM vllm/vllm-openai:0.7.3
+FROM vllm/vllm-openai:v0.7.3
 
 # e.g. install the `audio` and `video` optional dependencies
 # NOTE: Make sure the version of vLLM matches the base image!
