@@ -141,7 +141,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            model_name = self.models.model_name(lora_request)
+            model_name = self._get_model_name(request.model, lora_request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
