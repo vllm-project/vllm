@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import os
 import re
 import weakref
 
@@ -15,24 +14,6 @@ from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
-GUIDED_DECODING_BACKENDS_V1 = ["xgrammar"]
-
-
-@pytest.fixture(autouse=True)
-def v1(request, run_with_both_engines, monkeypatch):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    use_v1 = os.getenv('VLLM_USE_V1') == '1'
-    if use_v1 and 'guided_decoding_backend' in request.fixturenames:
-        guided_decoding_backend = request.getfixturevalue(
-            'guided_decoding_backend')
-        if guided_decoding_backend not in GUIDED_DECODING_BACKENDS_V1:
-            pytest.skip(f"Skipping test because {guided_decoding_backend} "
-                        "is not in GUIDED_DECODING_BACKENDS_V1")
-
-    if use_v1 and "regex" in request.node.name:
-        pytest.skip("Skipping test because V1 does not support regex")
 
 
 @pytest.fixture(scope="module")
