@@ -4,10 +4,10 @@ from typing import Dict, List, Mapping, Optional, Type, Union
 
 from typing_extensions import TypeVar
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -44,6 +44,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
@@ -83,6 +84,10 @@ class LLMEngine:
             log_stats=False,  # FIXME: implement
         )
 
+        if not multiprocess_mode:
+            # for v0 compatibility
+            self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+
     @classmethod
     def from_engine_args(
         cls,
@@ -97,7 +102,7 @@ class LLMEngine:
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
 
-        if VLLM_ENABLE_V1_MULTIPROCESSING:
+        if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.debug("Enabling multiprocessing for LLMEngine.")
             enable_multiprocessing = True
 

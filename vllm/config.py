@@ -1407,6 +1407,11 @@ class ParallelConfig:
         self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
         self.world_size_across_dp = self.world_size * self.data_parallel_size
 
+        if self.distributed_executor_backend == "external_launcher":
+            import os
+            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+            logger.info("Disabling V1 multiprocessing for external launcher.")
+
         ray_only_devices = ["tpu"]
         from vllm.platforms import current_platform
         if (current_platform.device_type in ray_only_devices
