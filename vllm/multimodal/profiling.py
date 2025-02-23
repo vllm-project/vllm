@@ -166,8 +166,12 @@ class MultiModalProfiler(Generic[_I]):
                 f"({set(mm_max_tokens_per_item.keys())})")
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
-        prompt_token_ids = mm_inputs["prompt_token_ids"]
         placeholders_by_modality = mm_inputs["mm_placeholders"]
+        # For encoder-decoder models, use encoder prompt token ids instead of
+        # decoder prompt to construct dummy seq_data for encoder profiling.
+        prompt_token_ids = (
+            mm_inputs["prompt_token_ids"] if not is_encoder_data else
+            mm_inputs["encoder_prompt_token_ids"])  # type: ignore
 
         total_placeholders_by_modality = {
             modality: sum(item["length"] for item in placeholders)
@@ -188,7 +192,7 @@ class MultiModalProfiler(Generic[_I]):
 
         # V0 does not support chunked prefill.
         if (total_len > seq_len and not envs.VLLM_USE_V1) or is_encoder_data:
-            if total_len > seq_len:
+            if total_len > seq_len and not is_encoder_data:
                 logger.warning(
                     "The context length (%d) of the model is too short "
                     "to hold the multi-modal embeddings in the worst case "
@@ -201,7 +205,8 @@ class MultiModalProfiler(Generic[_I]):
                     total_placeholders_by_modality)
 
             return DummyData(
-                seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),
+                seq_data=SequenceData.from_prompt_token_counts(
+                    (0, max(seq_len, total_len))),
                 multi_modal_data=None,
                 multi_modal_placeholders=None,
             )
