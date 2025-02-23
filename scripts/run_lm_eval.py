@@ -4,6 +4,8 @@ import argparse
 import os
 import json
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 model_path = "/data/models/DeepSeek-R1/"
 #model_path = "/mnt/workdisk/dohayon/Projects/R1/DeepSeek-R1-fp8/"
 # model_path = "deepseek-ai/DeepSeek-V2-Lite"
