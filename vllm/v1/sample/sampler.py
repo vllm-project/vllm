@@ -121,7 +121,7 @@ class Sampler(nn.Module):
     def compute_probs(self, 
                       logits: torch.Tensor,
                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        if sampling_metadata.all_random:
+        if sampling_metadata.all_greedy:
             return logits
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)

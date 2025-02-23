@@ -102,7 +102,7 @@ class RejectionSampler(nn.Module):
         target_probs = _create_greedy_token_probs(target_token_ids, vocab_size,
                                                   target_probs.device)
         uniform_samples = torch.zeros(draft_token_ids_tensor.size(0),
-                                      draft_token_ids_tensor.size(1),
+                                      draft_token_ids_tensor.size(1) + 1,
                                       device=target_probs.device)
 
         sampled_token_ids, _, _ = fs.chain_speculative_sampling(
@@ -129,6 +129,7 @@ class RejectionSampler(nn.Module):
         draft_token_ids_tensor = pad_sequence(draft_token_ids_tensor,
                                               batch_first=True,
                                               padding_value=INVALID_TOKEN_ID)
+        draft_token_ids_tensor = draft_token_ids_tensor.to(target_probs.device)
         # Add 1 to include the 'bonus' token.
         if sampling_metadata.all_greedy:
             output_token_ids = target_probs.argmax(dim=-1).view(-1)
