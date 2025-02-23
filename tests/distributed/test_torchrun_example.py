@@ -47,6 +47,9 @@ test_consistent_across_ranks(
     llm.llm_engine.vllm_config.cache_config.num_cpu_blocks)
 test_consistent_across_ranks(
     llm.llm_engine.vllm_config.cache_config.num_gpu_blocks)
+
+# make sure we can access the model parameters from the calling process
+# of the `LLM` instance.
 params = list(llm.llm_engine.model_executor.driver_worker.worker.model_runner.
               model.parameters())
 test_consistent_across_ranks(len(params))
