@@ -9,7 +9,7 @@ from vllm import SamplingParams
 
 from ..conftest import VllmRunner
 
-MODELS = ["facebook/opt-125m"]
+MODELS = ["distilbert/distilgpt2"]
 
 
 @pytest.mark.parametrize("model", MODELS)

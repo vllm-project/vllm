@@ -519,11 +519,13 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
 
         return _get_tokenizer_without_image_pad(tokenizer)
 
-    def get_hf_processor(self) -> QwenVLProcessor:
-        tokenizer = self.ctx.tokenizer
-        assert isinstance(tokenizer, PreTrainedTokenizer)
-
-        return QwenVLProcessor(self.get_hf_config(), tokenizer)
+    def get_hf_processor(self, **kwargs: object) -> QwenVLProcessor:
+        return self.ctx.init_processor(
+            QwenVLProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -605,6 +607,14 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             mm_kwargs=mm_kwargs,
         )
 
+    def _hf_processor_applies_repl(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -657,21 +667,6 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
             "w1",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "c_attn",
-        "gate_up_proj",
-        "c_proj",
-        # visual module
-        "out_proj",
-        "in_proj",
-        "c_fc",
-        # resampler
-        "kv_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """

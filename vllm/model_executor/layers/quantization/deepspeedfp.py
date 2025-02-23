@@ -25,6 +25,7 @@ class DeepSpeedFPConfig(QuantizationConfig):
         weight_bits: int = 8,
         group_size: int = 512,
     ) -> None:
+        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.valid_types = [torch.bfloat16, torch.float16]

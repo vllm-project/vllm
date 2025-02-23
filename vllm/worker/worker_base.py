@@ -397,6 +397,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
+        if (execute_model_req is not None and execute_model_req.spec_step_idx):
+            kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
 
@@ -564,6 +566,11 @@ class WorkerWrapperBase:
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
             assert self.worker is not None
+
+    def init_device(self):
+        with set_current_vllm_config(self.vllm_config):
+            # To make vLLM config available during device initialization
+            self.worker.init_device()  # type: ignore
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:

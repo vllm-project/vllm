@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MM_INPUT_CACHE_SIZE: int = 256
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
+    VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -88,6 +90,11 @@ if TYPE_CHECKING:
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
+    VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
+    VLLM_DP_RANK: int = 0
+    VLLM_DP_SIZE: int = 1
+    VLLM_DP_MASTER_IP: str = ""
+    VLLM_DP_MASTER_PORT: int = 0
 
 
 def get_default_cache_root():
@@ -353,8 +360,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Enables weights compression during model export via HF Optimum
     # default is False
     "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
-    lambda: bool(os.getenv("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", False)),
-
+    lambda:
+    (os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", "0").lower() in
+     ("on", "true", "1")),
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
@@ -401,14 +409,20 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
 
     # Timeout for fetching videos when serving multimodal models
-    # Default is 15 seconds
+    # Default is 30 seconds
     "VLLM_VIDEO_FETCH_TIMEOUT":
-    lambda: int(os.getenv("VLLM_VIDEO_FETCH_TIMEOUT", "15")),
+    lambda: int(os.getenv("VLLM_VIDEO_FETCH_TIMEOUT", "30")),
 
     # Timeout for fetching audio when serving multimodal models
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Cache size for multimodal feature/input cache for multimodal models
+    # in unit of number of multimodal data items (e.g. image, video, audio).
+    # Default is 256 multimodal data items.
+    "VLLM_MM_INPUT_CACHE_SIZE":
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_SIZE", "256")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -495,6 +509,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 
+    # Pad the fp8 weights to 256 bytes for ROCm
+    "VLLM_ROCM_FP8_PADDING":
+    lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Divisor for dynamic key scale factor calculation for FP8 KV Cache
     "K_SCALE_CONSTANT":
     lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
@@ -578,6 +595,29 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
+
+    # Contiguous cache fetching to avoid using costly gather operation on
+    # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
+    # contiguous cache fetch will be used.
+    "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
+    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
+    ("1", "true"),
+
+    # Rank of the process in the data parallel setting
+    "VLLM_DP_RANK":
+    lambda: int(os.getenv("VLLM_DP_RANK", "0")),
+
+    # World size of the data parallel setting
+    "VLLM_DP_SIZE":
+    lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
+
+    # IP address of the master node in the data parallel setting
+    "VLLM_DP_MASTER_IP":
+    lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
+
+    # Port of the master node in the data parallel setting
+    "VLLM_DP_MASTER_PORT":
+    lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
 }
 
 # end-env-vars-definition
