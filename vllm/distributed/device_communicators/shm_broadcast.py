@@ -18,6 +18,7 @@ import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
+from vllm.logger import rank_debug
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
@@ -412,6 +413,8 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
+                        rank_debug(f"No available block found in %s second. ",
+                                   VLLM_RINGBUFFER_WARNING_INTERVAL)
                         logger.debug("No available block found in %s second. ",
                                      VLLM_RINGBUFFER_WARNING_INTERVAL)
                         n_warning += 1
