@@ -217,6 +217,7 @@ if __name__ == "__main__":
         trust_remote_code=True,
         quantization='inc_p',
         max_model_len= 16384,
+        max_num_seqs=1,
         dtype="bfloat16",
     )
 

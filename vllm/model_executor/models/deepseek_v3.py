@@ -582,6 +582,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+        logger.info(f"hidden_states shape : {hidden_states.shape}")
         show_mem_info(logger, "DeepseekV3DecoderLayer: before self_attn")
         hidden_states = self.self_attn(
             positions=positions,
