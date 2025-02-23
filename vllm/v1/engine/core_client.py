@@ -171,7 +171,10 @@ class InprocClient(EngineCoreClient):
 
 
 @dataclass
-class ShutdownResources:
+class BackgroundResources:
+    """Used as a finalizer for clean shutdown, avoiding
+    circular reference back to the client object."""
+
     ctx: Union[zmq.Context, zmq.asyncio.Context] = None
     output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
     input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
@@ -182,6 +185,8 @@ class ShutdownResources:
 
         if self.proc_handle is not None:
             self.proc_handle.shutdown()
+        # ZMQ context termination can hang if the sockets
+        # aren't explicitly closed first.
         if self.output_socket is not None:
             self.output_socket.close(linger=0)
         if self.input_socket is not None:
@@ -233,10 +238,10 @@ class MPClient(EngineCoreClient):
             zmq.asyncio.Context()  # type: ignore[attr-defined]
             if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
 
-        # Set up finalizer, can't reference self.
-        # This will ensure resources created so far are closed,
-        # even if an exception is raised mid-construction.
-        resources = ShutdownResources(ctx=self.ctx)
+        # This will ensure resources created so far are closed
+        # when the client is garbage collected,  even if an
+        # exception is raised mid-construction.
+        resources = BackgroundResources(ctx=self.ctx)
         self._finalizer = weakref.finalize(self, resources)
 
         # Paths and sockets for IPC.
