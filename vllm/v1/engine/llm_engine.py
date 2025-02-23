@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Mapping, Optional, Type, Union, Set
+from typing import Dict, List, Mapping, Optional, Set, Type, Union
 
 from typing_extensions import TypeVar
 

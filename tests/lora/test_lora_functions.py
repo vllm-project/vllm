@@ -3,20 +3,19 @@
 Script to test add_lora, remove_lora, pin_lora, list_loras functions.
 """
 
-from pathlib import Path
-import pytest
-from typing import List
 import os
+from typing import List
+
+import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.llm import LLM
 from vllm.lora.request import LoRARequest
 
-from huggingface_hub import snapshot_download
-
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 LORA_MODULE_PATH = "yard1/llama-2-7b-sql-lora-test"
 LORA_RANK = 8
+
 
 @pytest.fixture(autouse=True)
 def v1(run_with_both_engines_lora):
@@ -24,6 +23,7 @@ def v1(run_with_both_engines_lora):
     # This can be promoted up to conftest.py to run for every
     # test in a package
     pass
+
 
 def make_lora_request(lora_id: int):
     return LoRARequest(lora_name=f"{lora_id}",
@@ -36,14 +36,13 @@ def test_lora_functions_sync():
     max_loras = 4
     # Create engine in eager-mode. Due to high max_loras, the CI can
     # OOM during cuda-graph capture.
-    engine_args = EngineArgs(
-        model=MODEL_PATH,
-        enable_lora=True,
-        max_loras=max_loras,
-        max_lora_rank=LORA_RANK,
-        max_model_len=128,
-        gpu_memory_utilization=0.8,  #avoid OOM
-        enforce_eager=True)
+    engine_args = EngineArgs(model=MODEL_PATH,
+                             enable_lora=True,
+                             max_loras=max_loras,
+                             max_lora_rank=LORA_RANK,
+                             max_model_len=128,
+                             gpu_memory_utilization=0.8,
+                             enforce_eager=True)
 
     llm = LLM.get_engine_class().from_engine_args(engine_args)
 
@@ -56,7 +55,7 @@ def test_lora_functions_sync():
 
     # Pin LoRA 1 and test that it is never removed on subsequent adds.
     run_check(llm.pin_lora, 1, [1, 2])
-    run_check(llm.add_lora, make_lora_request(3), [1, 2, 3]) 
+    run_check(llm.add_lora, make_lora_request(3), [1, 2, 3])
     run_check(llm.add_lora, make_lora_request(4), [1, 2, 3, 4])
     run_check(llm.add_lora, make_lora_request(5), [1, 5, 3, 4])
     run_check(llm.add_lora, make_lora_request(6), [1, 5, 6, 4])
@@ -83,7 +82,8 @@ async def test_lora_functions_async():
 
     if os.getenv("VLLM_USE_V1") == "0":
         pytest.skip(
-        reason=f"V0 AsyncLLMEngine does not expose remove/list/pin LoRA functions")
+            reason=
+            "V0 AsyncLLMEngine does not expose remove/list/pin LoRA functions")
 
     # The run_with_both_engines_lora fixture sets up the `VLLM_USE_V1`
     # environment variable. reload vllm.enging.async_llm_engine as
@@ -97,14 +97,13 @@ async def test_lora_functions_async():
         build_async_engine_client_from_engine_args)
 
     max_loras = 4
-    engine_args = AsyncEngineArgs(
-        model=MODEL_PATH,
-        enable_lora=True,
-        max_loras=max_loras,
-        max_lora_rank=LORA_RANK,
-        max_model_len=128,
-        gpu_memory_utilization=0.8, 
-        enforce_eager=True)
+    engine_args = AsyncEngineArgs(model=MODEL_PATH,
+                                  enable_lora=True,
+                                  max_loras=max_loras,
+                                  max_lora_rank=LORA_RANK,
+                                  max_model_len=128,
+                                  gpu_memory_utilization=0.8,
+                                  enforce_eager=True)
 
     async def run_check(fn, args, expected: List):
         await fn(args)
@@ -116,7 +115,7 @@ async def test_lora_functions_async():
 
         # Pin LoRA 1 and test that it is never removed on subsequent adds.
         await run_check(llm.pin_lora, 1, [1, 2])
-        await run_check(llm.add_lora, make_lora_request(3), [1, 2, 3]) 
+        await run_check(llm.add_lora, make_lora_request(3), [1, 2, 3])
         await run_check(llm.add_lora, make_lora_request(4), [1, 2, 3, 4])
         await run_check(llm.add_lora, make_lora_request(5), [1, 5, 3, 4])
         await run_check(llm.add_lora, make_lora_request(6), [1, 5, 6, 4])

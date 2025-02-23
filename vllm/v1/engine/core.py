@@ -7,7 +7,7 @@ import time
 from concurrent.futures import Future
 from inspect import isclass, signature
 from multiprocessing.connection import Connection
-from typing import Any, List, Optional, Tuple, Type, Set
+from typing import Any, List, Optional, Set, Tuple, Type
 
 import msgspec
 import psutil

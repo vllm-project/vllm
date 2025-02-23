@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from typing import AsyncGenerator, List, Mapping, Optional, Type, Union, Set
+from typing import AsyncGenerator, List, Mapping, Optional, Set, Type, Union
 
 import numpy as np
 
