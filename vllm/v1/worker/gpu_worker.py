@@ -212,6 +212,14 @@ class Worker(WorkerBase):
             self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
+
+        # Warm up sampler and preallocate memory buffer for logits and other
+        # sampling related tensors of max possible shape to avoid memory
+        # fragmentation issue.
+        self.model_runner._dummy_sampler_run(
+            hidden_states=self.model_runner._dummy_run(
+                num_tokens=self.scheduler_config.max_num_seqs))
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
