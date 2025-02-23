@@ -6,7 +6,6 @@ from contextlib import nullcontext
 from vllm_test_utils import BlameResult, blame
 
 from vllm import LLM, SamplingParams
-from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 
 
@@ -44,8 +43,7 @@ def run_normal():
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM without guided decoding as a baseline.
-    llm = LLM(model="s3://vllm-ci-model-weights/distilgpt2",
-              load_format=LoadFormat.RUNAI_STREAMER,
+    llm = LLM(model="distilbert/distilgpt2",
               enforce_eager=True,
               gpu_memory_utilization=0.3)
     outputs = llm.generate(prompts, sampling_params)
@@ -61,8 +59,7 @@ def run_normal():
 
 def run_lmfe(sample_regex):
     # Create an LLM with guided decoding enabled.
-    llm = LLM(model="s3://vllm-ci-model-weights/distilgpt2",
-              load_format=LoadFormat.RUNAI_STREAMER,
+    llm = LLM(model="distilbert/distilgpt2",
               enforce_eager=True,
               guided_decoding_backend="lm-format-enforcer",
               gpu_memory_utilization=0.3)

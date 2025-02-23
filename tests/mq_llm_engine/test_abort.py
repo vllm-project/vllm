@@ -10,8 +10,8 @@ import pytest
 from tests.mq_llm_engine.utils import RemoteMQLLMEngine, generate
 from vllm.engine.arg_utils import AsyncEngineArgs
 
-MODEL = "s3://vllm-ci-model-weights/gemma-1.1-2b-it"
-ENGINE_ARGS = AsyncEngineArgs(model=MODEL, load_format="runai_streamer")
+MODEL = "google/gemma-1.1-2b-it"
+ENGINE_ARGS = AsyncEngineArgs(model=MODEL)
 RAISED_ERROR = KeyError
 RAISED_VALUE = "foo"
 EXPECTED_TOKENS = 250

@@ -16,7 +16,7 @@ from vllm.engine.llm_engine import LLMEngine
 from ..models.utils import check_outputs_equal
 
 MODELS = [
-    "facebook/opt-125m",
+    "distilbert/distilgpt2",
 ]
 
 UNSTABLE_PROMPT_SEQUENCE = [

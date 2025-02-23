@@ -7,7 +7,6 @@ from transformers import PretrainedConfig
 
 from vllm import LLM
 
-from ..conftest import MODELS_ON_S3
 from .registry import HF_EXAMPLE_MODELS
 
 
@@ -43,11 +42,8 @@ def test_can_initialize(model_arch):
 
     with patch.object(LLM.get_engine_class(), "_initialize_kv_caches",
                       _initialize_kv_caches):
-        model_name = model_info.default
-        if model_name in MODELS_ON_S3:
-            model_name = f"s3://vllm-ci-model-weights/{model_name.split('/')[-1]}"
         LLM(
-            model_name,
+            model_info.default,
             tokenizer=model_info.tokenizer,
             tokenizer_mode=model_info.tokenizer_mode,
             speculative_model=model_info.speculative_model,

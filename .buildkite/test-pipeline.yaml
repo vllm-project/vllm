@@ -278,7 +278,7 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_minicpmv_tp.py
   parallelism: 4
 
-- label: "PyTorch Fullgraph Smoke Test" # 9min
+- label: PyTorch Fullgraph Smoke Test # 9min
   fast_check: true
   source_file_dependencies:
   - vllm/
@@ -289,7 +289,7 @@ steps:
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
 
-- label: "PyTorch Fullgraph Test" # 18min
+- label: PyTorch Fullgraph Test # 18min
   source_file_dependencies:
   - vllm/
   - tests/compile
