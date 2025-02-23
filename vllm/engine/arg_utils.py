@@ -224,7 +224,7 @@ class EngineArgs:
 
         # Override max_num_seqs if it's not set by user.
         if self.max_num_seqs is None:
-            self.max_num_seqs = 256
+            self.max_num_seqs = 256 if not envs.VLLM_USE_V1 else 1024
 
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
