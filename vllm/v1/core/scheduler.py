@@ -76,9 +76,6 @@ class Scheduler:
         # Request id -> CachedRequestData
         self._cached_reqs_data: Dict[str, CachedRequestData] = {}
 
-        # The list of guided decoding request left within the queue
-        self.guided_decoding_requests: List[Request] = []
-
         # Encoder-related.
         # Calculate encoder cache size if applicable
         # NOTE: For now we use the same budget for both compute and space.
