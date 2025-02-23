@@ -37,6 +37,7 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.logger import rank_debug
+from vllm.logger import show_mem_info
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -778,6 +779,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     elif config.quantize:
                         self.model = convert(self.model, config)
                     torch.distributed.barrier()
+                    show_mem_info(logger, msg="After INC")
                     htcore.hpu_initialize(self.model,
                                           mark_only_scales_as_const=True)
                 self.inc_initialized_successfully = True
