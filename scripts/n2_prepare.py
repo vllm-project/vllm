@@ -224,7 +224,7 @@ if __name__ == "__main__":
     # that contain the prompt, generated text, and other information.
     outputs = []
     for one_prompt_token in prompt_token_ids:
-        print("one_prompt_token: {one_prompt_token}")
+        print(f"one_prompt_token: {one_prompt_token}")
         output = llm.generate(
             prompts=None, sampling_params=sampling_params, prompt_token_ids=prompt_token_ids
         )
