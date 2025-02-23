@@ -157,7 +157,7 @@ async def build_async_engine_client_from_engine_args(
     engine_config = engine_args.create_engine_config(usage_context)
 
     # Attempt to use V1 Engine for certain EngineConfigs.
-    if engine_config.is_v1:
+    if engine_config.use_v1:
         if disable_frontend_multiprocessing:
             raise NotImplementedError
 
