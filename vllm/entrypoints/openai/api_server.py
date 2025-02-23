@@ -154,7 +154,8 @@ async def build_async_engine_client_from_engine_args(
     """
 
     usage_context = UsageContext.OPENAI_API_SERVER
-    engine_config = engine_args.create_engine_config(usage_context)
+    engine_config = engine_args.create_engine_config(
+        usage_context, disable_frontend_multiprocessing)
 
     # Attempt to use V1 Engine for certain EngineConfigs.
     if engine_config.use_v1:

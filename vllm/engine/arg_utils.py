@@ -1126,20 +1126,33 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def _is_v1_supported(self, model_config: ModelConfig):
+    def _is_v1_supported(
+        self,
+        model_config: ModelConfig,
+        disable_frontend_multiprocessing: bool,
+    ) -> bool:
         """Detect if the current configuration is supported in V1."""
 
-        # Only CUDA, ROCm, and TPU so far.
+        if disable_frontend_multiprocessing:
+            if envs.VLLM_USE_V1:
+                raise ValueError("VLLM_USE_V1=1 is not supported with "
+                                 "--disable-frontend-multiprocessing.")
+            logger.info("Detected --disable-frontend-multiprocessing. "
+                        "Falling back to VLLM_USE_V1=0.")
+            return False
+
+        # Only CUDA and TPU are enabled by default so far.
         from vllm.platforms import current_platform
-        if (not current_platform.is_cuda() and not current_platform.is_rocm()
-                and not current_platform.is_tpu()):
+        if (not current_platform.is_cuda() and not current_platform.is_tpu()):
             if envs.VLLM_USE_V1:
                 logger.warning(
                     "Detected VLLM_USE_V1=1 on unsupported platform. "
                     "Usage should be considered experimental and you may "
                     "encounter bugs. Please report any issues on Github.")
                 return True
-
+            logger.info(
+                "Platform %s not yet enabled by default for V1 Engine. "
+                "Falling back to V0 Engine.", current_platform.device_type)
             return False
 
         # No embedding / score models so far.
@@ -1149,6 +1162,9 @@ class EngineArgs:
                     "Detected VLLM_USE_V1=1 on unsupported task. "
                     "Usage should be considered experimental and you may "
                     "encounter bugs. Please report any issues on Github.")
+            logger.info(
+                "Task %s not yet supported by V1 Engine. "
+                "Falling back to V0 Engine.", model_config.task)
             return False
 
         # No Mamba, Encoder-Decoder, or MLA so far.
@@ -1161,7 +1177,12 @@ class EngineArgs:
                     "Usage should be considered experimental and you may "
                     "encounter bugs. Please report any issues on Github.")
                 return True
+            logger.info("Mamba-style, Encoder-Decoder, and MLA models are"
+                        "not yet supported by the V1 Engine. "
+                        "Falling back to V0.")
             return False
+
+        return True
 
     def _set_default_args(self, model_config: ModelConfig,
                           usage_context: UsageContext):
@@ -1216,9 +1237,11 @@ class EngineArgs:
             logger.info("Setting max_num_seqs to %d for %s usage context.",
                         self.max_num_seqs, usage_context.value)
 
-    def create_engine_config(self,
-                             usage_context: Optional[UsageContext] = None
-                             ) -> VllmConfig:
+    def create_engine_config(
+        self,
+        usage_context: Optional[UsageContext] = None,
+        disable_frontend_multiprocessing: bool = False,
+    ) -> VllmConfig:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
@@ -1226,7 +1249,8 @@ class EngineArgs:
         model_config = self.create_model_config()
 
         # Check if we can use the V1 Engine.
-        self.use_v1 = self._is_v1_supported(model_config)
+        self.use_v1 = self._is_v1_supported(model_config,
+                                            disable_frontend_multiprocessing)
 
         # Set default arguments for the scheduler.
         self._set_default_args(usage_context)
