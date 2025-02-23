@@ -26,15 +26,6 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        if sampling_metadata.spec_token_ids:
-            if sampling_metadata.max_num_logprobs:
-                raise NotImplementedError(
-                    "Rejection sampling does not support logprobs.")
-            return self.rejection_sampler(
-                logits,
-                sampling_metadata,
-            )
-
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
         # This is different from the V0 sampler, which uses the logits that
@@ -127,6 +118,15 @@ class Sampler(nn.Module):
         )
         return sampled
 
+    def compute_probs(self, 
+                      logits: torch.Tensor,
+                      sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        if sampling_metadata.all_random:
+            return logits
+        # Apply temperature.
+        logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        return logits.softmax(dim=-1, dtype=torch.float32)
+    
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
 

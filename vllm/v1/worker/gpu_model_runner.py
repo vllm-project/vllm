@@ -37,6 +37,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.sample.sampler import SamplerOutput
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
@@ -953,12 +954,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
-        sampling_metadata = self.input_batch.get_sampling_metadata(
-            scheduler_output.scheduled_spec_decode_tokens)
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+        sampling_metadata = self.input_batch.sampling_metadata
+        if not self.use_spec_decode:
+            sampler_output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+        else:
+            target_probs = self.model.sampler.compute_probs(logits)
+            scheduled_request_ids = num_scheduled_tokens.keys()
+            draft_token_ids = [scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+                for req_id in scheduled_request_ids]
+            sampled_token_ids = self.model.sampler.rejection_sampler(
+                draft_token_ids,    
+                target_probs,
+                sampling_metadata
+            )
+            sampler_output = SamplerOutput(
+                sampled_token_ids=sampled_token_ids,
+                logprobs_tensors=None,
+            )
+            
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
