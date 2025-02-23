@@ -1100,6 +1100,10 @@ class CacheConfig:
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
 
+        if self.cpu_offload_gb < 0:
+            raise ValueError("CPU offload space must be non-negative. Got"
+                             f"{self.cpu_offload_gb}.")
+
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass

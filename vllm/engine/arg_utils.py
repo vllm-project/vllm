@@ -217,15 +217,6 @@ class EngineArgs:
         if not self.tokenizer:
             self.tokenizer = self.model
 
-        # Override the default value of enable_prefix_caching if it's not set
-        # by user.
-        if self.enable_prefix_caching is None:
-            self.enable_prefix_caching = bool(envs.VLLM_USE_V1)
-
-        # Override max_num_seqs if it's not set by user.
-        if self.max_num_seqs is None:
-            self.max_num_seqs = 256 if not envs.VLLM_USE_V1 else 1024
-
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
@@ -1062,6 +1053,17 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
+        # NOTE: gguf file needs specific model loader and doesn't use hf_repo
+        if check_gguf_file(self.model):
+            self.quantization = self.load_format = "gguf"
+
+        # NOTE: This is to allow model loading from S3 in CI
+        if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
+                and self.model in MODELS_ON_S3
+                and self.load_format == LoadFormat.AUTO):  # noqa: E501
+            self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
+            self.load_format = LoadFormat.RUNAI_STREAMER
+
         return ModelConfig(
             model=self.model,
             task=self.task,
@@ -1101,26 +1103,6 @@ class EngineArgs:
         )
 
     def create_load_config(self) -> LoadConfig:
-        return LoadConfig(
-            load_format=self.load_format,
-            download_dir=self.download_dir,
-            model_loader_extra_config=self.model_loader_extra_config,
-            ignore_patterns=self.ignore_patterns,
-        )
-
-    def create_engine_config(self,
-                             usage_context: Optional[UsageContext] = None
-                             ) -> VllmConfig:
-        from vllm.platforms import current_platform
-        current_platform.pre_register_and_update()
-
-        if envs.VLLM_USE_V1:
-            self._override_v1_engine_args(usage_context)
-
-        # gguf file needs a specific model loader and doesn't use hf_repo
-        if check_gguf_file(self.model):
-            self.quantization = self.load_format = "gguf"
-
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
         if (self.quantization == "bitsandbytes" or
@@ -1137,27 +1119,117 @@ class EngineArgs:
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
 
-        assert self.cpu_offload_gb >= 0, (
-            "CPU offload space must be non-negative"
-            f", but got {self.cpu_offload_gb}")
+        return LoadConfig(
+            load_format=self.load_format,
+            download_dir=self.download_dir,
+            model_loader_extra_config=self.model_loader_extra_config,
+            ignore_patterns=self.ignore_patterns,
+        )
+
+    def _is_v1_supported(self, model_config: ModelConfig):
+        """Detect if the current configuration is supported in V1."""
+
+        # Only CUDA, ROCm, and TPU so far.
+        from vllm.platforms import current_platform
+        if (not current_platform.is_cuda() and not current_platform.is_rocm()
+                and not current_platform.is_tpu()):
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 on unsupported platform. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+
+            return False
+
+        # No embedding / score models so far.
+        if model_config.task not in ["generate"]:
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 on unsupported task. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+            return False
+
+        # No Mamba, Encoder-Decoder, or MLA so far.
+        if (model_config.is_encoder_decoder or model_config.is_hybrid
+                or model_config.is_attention_free
+                or model_config.has_inner_state or model_config.use_mla):
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 on unsupported model. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+            return False
+
+    def _set_default_args(self, model_config: ModelConfig,
+                          usage_context: UsageContext):
+        """Configure SchedulerArgs for V0 and V1."""
+
+        # Set Default Args for V0 Engine.
+        if not self.use_v1:
+            # Disable prefix caching for multimodal models for VLLM_V0.
+            if (model_config.is_multimodal_model
+                    and self.enable_prefix_caching):
+                logger.warning(
+                    "--enable-prefix-caching is not supported for multimodal "
+                    "models in V0 and has been disabled.")
+                self.enable_prefix_caching = False
+
+            # Set max_num_seqs to 256 for VLLM_V0.
+            if self.max_num_seqs is None:
+                self.max_num_seqs = 256
+
+            return
+
+        # VLLM_V1 only supports chunked prefill.
+        self.enable_chunked_prefill = True
+
+        # Set the default values based on the usage context.
+        # Use different default values for different hardware.
+        from vllm.platforms import current_platform
+        device_name = current_platform.get_device_name().lower()
+        if "h100" in device_name or "h200" in device_name:
+            # For H100 and H200, we use larger default values.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 8192,
+            }
+        else:
+            # TODO(woosuk): Tune the default values for other hardware.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 8192,
+                UsageContext.OPENAI_API_SERVER: 2048,
+            }
+        if (self.max_num_batched_tokens is None
+                and usage_context in default_max_num_batched_tokens):
+            self.max_num_batched_tokens = default_max_num_batched_tokens[
+                usage_context]
+            logger.info(
+                "Setting max_num_batched_tokens to %d for %s usage context.",
+                self.max_num_batched_tokens, usage_context.value)
+
+        default_max_num_seqs = 1024
+        if self.max_num_seqs is None:
+            self.max_num_seqs = default_max_num_seqs
+            logger.info("Setting max_num_seqs to %d for %s usage context.",
+                        self.max_num_seqs, usage_context.value)
+
+    def create_engine_config(self,
+                             usage_context: Optional[UsageContext] = None
+                             ) -> VllmConfig:
+        from vllm.platforms import current_platform
+        current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(device=self.device)
-
-        # NOTE: This is to allow model loading from S3 in CI
-        if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
-                and self.model in MODELS_ON_S3
-                and self.load_format == LoadFormat.AUTO):  # noqa: E501
-            self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
-            self.load_format = LoadFormat.RUNAI_STREAMER
-
         model_config = self.create_model_config()
 
-        if (model_config.is_multimodal_model and not envs.VLLM_USE_V1
-                and self.enable_prefix_caching):
-            logger.warning("--enable-prefix-caching is currently not "
-                           "supported for multimodal models in v0 and "
-                           "has been disabled.")
-            self.enable_prefix_caching = False
+        # Check if we can use the V1 Engine.
+        self.use_v1 = self._is_v1_supported(model_config)
+
+        # Set default arguments for the scheduler.
+        self._set_default_args(usage_context)
 
         cache_config = CacheConfig(
             block_size=self.block_size,
@@ -1380,40 +1452,6 @@ class EngineArgs:
         )
 
         return config
-
-    def _override_v1_engine_args(self, usage_context: UsageContext) -> None:
-        """
-        Override the EngineArgs's args based on the usage context for V1.
-        """
-        assert envs.VLLM_USE_V1, "V1 is not enabled"
-
-        # V1 always uses chunked prefills.
-        self.enable_chunked_prefill = True
-        # When no user override, set the default values based on the usage
-        # context.
-        # Use different default values for different hardware.
-        from vllm.platforms import current_platform
-        device_name = current_platform.get_device_name().lower()
-        if "h100" in device_name or "h200" in device_name:
-            # For H100 and H200, we use larger default values.
-            default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 16384,
-                UsageContext.OPENAI_API_SERVER: 8192,
-            }
-        else:
-            # TODO(woosuk): Tune the default values for other hardware.
-            default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 8192,
-                UsageContext.OPENAI_API_SERVER: 2048,
-            }
-
-        if (self.max_num_batched_tokens is None
-                and usage_context in default_max_num_batched_tokens):
-            self.max_num_batched_tokens = default_max_num_batched_tokens[
-                usage_context]
-            logger.warning(
-                "Setting max_num_batched_tokens to %d for %s usage context.",
-                self.max_num_batched_tokens, usage_context.value)
 
 
 @dataclass
