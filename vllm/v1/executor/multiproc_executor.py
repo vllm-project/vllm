@@ -216,6 +216,7 @@ class WorkerProc:
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
+            "is_driver_worker": rank == 0,
         }
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
