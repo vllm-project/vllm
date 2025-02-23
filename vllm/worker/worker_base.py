@@ -567,6 +567,10 @@ class WorkerWrapperBase:
             self.worker = worker_class(**kwargs)
             assert self.worker is not None
 
+    def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
+        kv_cache_config = kv_cache_configs[self.rpc_rank]
+        self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+
     def init_device(self):
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during device initialization
@@ -574,8 +578,11 @@ class WorkerWrapperBase:
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
-            target = self if self.worker is None else self.worker
-            return run_method(target, method, args, kwargs)
+            # method resolution order:
+            # if a method is defined in this class, it will be called directly.
+            # otherwise, since we define `__getattr__` and redirect attribute
+            # query to `self.worker`, the method will be called on the worker.
+            return run_method(self, method, args, kwargs)
         except Exception as e:
             # if the driver worker also execute methods,
             # exceptions in the rest worker may cause deadlock in rpc like ray

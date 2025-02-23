@@ -3,6 +3,9 @@
 from concurrent.futures import Future
 from typing import List, Type, Union
 
+import torch
+import torch.distributed as dist
+
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.uniproc_executor import (  # noqa
@@ -49,12 +52,14 @@ class Executor(ExecutorBase):
                              f"{distributed_executor_backend}")
         return executor_class
 
-    def initialize(self, kv_cache_configs: List[KVCacheConfig]) -> None:
+    def initialize_from_config(self,
+                               kv_cache_configs: List[KVCacheConfig]) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_cache", args=(kv_cache_configs, ))
+        self.collective_rpc("initialize_from_config",
+                            args=(kv_cache_configs, ))
         self.collective_rpc("compile_or_warm_up_model")
 
     def determine_available_memory(self) -> int:  # in bytes
@@ -89,4 +94,13 @@ class UniProcExecutor(UniProcExecutorV0, Executor):
 
 
 class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
-    pass
+
+    def determine_available_memory(self) -> int:  # in bytes
+        # same as determine_num_available_blocks in v0,
+        # we need to get the min across all ranks.
+        memory = super().determine_available_memory()
+        from vllm.distributed.parallel_state import get_world_group
+        cpu_group = get_world_group().cpu_group
+        memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
+        dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
+        return memory_tensor.item()

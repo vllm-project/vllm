@@ -503,6 +503,7 @@ steps:
   - entrypoints/llm/test_collective_rpc.py
   commands:
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - VLLM_USE_V1=1 torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
