@@ -582,21 +582,21 @@ class DeepseekV3DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        logger.info(f"hidden_states shape : {hidden_states.shape}")
-        show_mem_info(logger, "DeepseekV3DecoderLayer: before self_attn")
+        # logger.info(f"hidden_states shape : {hidden_states.shape}")
+        # show_mem_info(logger, "DeepseekV3DecoderLayer: before self_attn")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        show_mem_info(logger, "DeepseekV3DecoderLayer: after self_attn")
+        # show_mem_info(logger, "DeepseekV3DecoderLayer: after self_attn")
         htorch.core.mark_step()
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        show_mem_info(logger, "DeepseekV3DecoderLayer: after mlp")
+        # show_mem_info(logger, "DeepseekV3DecoderLayer: after mlp")
         return hidden_states, residual
 
 
@@ -656,6 +656,7 @@ class DeepseekV3Model(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        logger.info(f"input_ids shape : {input_ids.shape}")
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
