@@ -4,7 +4,7 @@ from typing import Dict, List, Mapping, Optional, Type, Union
 
 from typing_extensions import TypeVar
 
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
@@ -46,6 +46,13 @@ class LLMEngine:
     ) -> None:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
+
+        # important: init dp group before init the engine_core
+        self.parallel_config = vllm_config.parallel_config
+        self.dp_enabled = self.parallel_config.data_parallel_size > 1  # noqa
+        self.should_execute_dummy_batch = False
+        if self.dp_enabled:
+            self.dp_group = self.parallel_config.stateless_init_dp_group()
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -106,7 +113,17 @@ class LLMEngine:
         return self.output_processor.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        return self.output_processor.has_unfinished_requests()
+        has_unfinished = self.output_processor.has_unfinished_requests()
+        if not self.dp_enabled:
+            return has_unfinished
+        return self.has_unfinished_requests_dp(has_unfinished)
+
+    def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
+        aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(
+            self.dp_group, has_unfinished)
+        if not has_unfinished and aggregated_has_unfinished:
+            self.should_execute_dummy_batch = True
+        return aggregated_has_unfinished
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
@@ -144,6 +161,11 @@ class LLMEngine:
         self.engine_core.add_request(request)
 
     def step(self) -> List[RequestOutput]:
+
+        if self.should_execute_dummy_batch:
+            self.should_execute_dummy_batch = False
+            self.engine_core.execute_dummy_batch()
+            return []
 
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()
