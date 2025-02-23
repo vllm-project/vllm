@@ -316,7 +316,7 @@ run_serving_tests() {
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
         --request-rate $qps \
-        --tensor-parallel-size $tp \
+        --metadata "tensor_parallel_size=$tp" \
         $client_args"
 
       echo "Running test case $test_name with qps $qps"
