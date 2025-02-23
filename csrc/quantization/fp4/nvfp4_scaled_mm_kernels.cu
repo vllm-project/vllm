@@ -194,8 +194,9 @@ void runGemm(at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
              at::Tensor const& A_sf, at::Tensor const& B_sf,
              at::Tensor const& alpha, int64_t m, int64_t n, int64_t k,
              cudaStream_t stream) {
-  TORCH_CHECK(false, "Unsupported CUTLASS version. Set VLLM_CUTLASS_SRC_DIR to "
-                     "a CUTLASS 3.8 source directory to enable support.");
+  TORCH_CHECK(false,
+              "Unsupported CUTLASS version. Set VLLM_CUTLASS_SRC_DIR to "
+              "a CUTLASS 3.8 source directory to enable support.");
 }
 #endif  // defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
 
