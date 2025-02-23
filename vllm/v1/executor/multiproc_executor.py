@@ -216,9 +216,10 @@ class WorkerProc:
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
+            "is_driver_worker": rank == 0,
         }
         wrapper.init_worker(all_kwargs)
-        self.worker = wrapper.worker
+        self.worker = wrapper
 
         pid = os.getpid()
         _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
@@ -239,7 +240,7 @@ class WorkerProc:
             ready_socket.send_string(WorkerProc.READY_STR)
             ready_socket.send(payload)
 
-        wrapper.init_device()
+        self.worker.init_device()
         self.worker.load_model()
 
     @staticmethod
