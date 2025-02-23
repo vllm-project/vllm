@@ -1190,6 +1190,49 @@ class EngineArgs:
 
         # Set Default Args for V0 Engine.
         if not self.use_v1:
+            max_model_len = model_config.max_model_len
+            use_long_context = max_model_len > 32768
+            if self.enable_chunked_prefill is None:
+                # Chunked prefill not supported for Multimodal or MLA in V0.
+                if model_config.is_multimodal_model or model_config.use_mla:
+                    self.enable_chunked_prefill = False
+
+                # Enable chunked prefill by default for long context (> 32K)
+                # models to avoid OOM errors in initial memory profiling phase.
+                elif use_long_context:
+                    from vllm.platforms import current_platform
+                    is_gpu = current_platform.is_cuda()
+                    use_sliding_window = (model_config.get_sliding_window()
+                                          is not None)
+                    use_spec_decode = self.speculative_model is not None
+
+                    if (is_gpu and not use_sliding_window
+                            and not use_spec_decode and not self.enable_lora
+                            and not self.enable_prompt_adapter
+                            and model_config.runner_type != "pooling"):
+                        self.enable_chunked_prefill = True
+                        logger.warning(
+                            "Chunked prefill is enabled by default for models "
+                            "with max_model_len > 32K. Chunked prefill might "
+                            "not work with some features or models. If you "
+                            "encounter any issues, please disable by launching"
+                            "with --enable-chunked-prefill=False.")
+
+                if self.enable_chunked_prefill is None:
+                    self.enable_chunked_prefill = False
+
+            if not self.enable_chunked_prefill and use_long_context:
+                logger.warning(
+                    "The model has a long context length (%s). This may cause"
+                    "OOM during the initial memory profiling phase, or result "
+                    "in low performance due to small KV cache size. Consider "
+                    "setting --max-model-len to a smaller value.",
+                    max_model_len)
+            elif (self.enable_chunked_prefill
+                  and model_config.runner_type == "pooling"):
+                msg = "Chunked prefill is not supported for pooling models"
+                raise ValueError(msg)
+
             # Disable prefix caching for multimodal models for VLLM_V0.
             if (model_config.is_multimodal_model
                     and self.enable_prefix_caching):
@@ -1281,50 +1324,6 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
         )
-
-        max_model_len = model_config.max_model_len
-        use_long_context = max_model_len > 32768
-        if self.enable_chunked_prefill is None:
-            # If not explicitly set, enable chunked prefill by default for
-            # long context (> 32K) models. This is to avoid OOM errors in the
-            # initial memory profiling phase.
-
-            # For multimodal models and models with MLA, chunked prefill is
-            # disabled by default in V0, but enabled by design in V1
-            if model_config.is_multimodal_model or model_config.use_mla:
-                self.enable_chunked_prefill = bool(envs.VLLM_USE_V1)
-
-            elif use_long_context:
-                is_gpu = device_config.device_type == "cuda"
-                use_sliding_window = (model_config.get_sliding_window()
-                                      is not None)
-                use_spec_decode = self.speculative_model is not None
-                from vllm.platforms import current_platform
-                if (is_gpu and not use_sliding_window and not use_spec_decode
-                        and not self.enable_lora
-                        and not self.enable_prompt_adapter
-                        and model_config.runner_type != "pooling"
-                        and not current_platform.is_rocm()):
-                    self.enable_chunked_prefill = True
-                    logger.warning(
-                        "Chunked prefill is enabled by default for models with "
-                        "max_model_len > 32K. Currently, chunked prefill might "
-                        "not work with some features or models. If you "
-                        "encounter any issues, please disable chunked prefill "
-                        "by setting --enable-chunked-prefill=False.")
-            if self.enable_chunked_prefill is None:
-                self.enable_chunked_prefill = False
-
-        if not self.enable_chunked_prefill and use_long_context:
-            logger.warning(
-                "The model has a long context length (%s). This may cause OOM "
-                "errors during the initial memory profiling phase, or result "
-                "in low performance due to small KV cache space. Consider "
-                "setting --max-model-len to a smaller value.", max_model_len)
-        elif (self.enable_chunked_prefill
-              and model_config.runner_type == "pooling"):
-            msg = "Chunked prefill is not supported for pooling models"
-            raise ValueError(msg)
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
