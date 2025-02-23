@@ -42,6 +42,11 @@ class _Backend(enum.Enum):
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
 
+    @classmethod
+    def is_v1(cls) -> bool:
+        return (cls in (cls.FLASH_ATTN_VLLM_V1, cls.ROCM_FLASH,
+                        cls.PALLAS_VLLM_V1))
+
 
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
