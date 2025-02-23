@@ -218,6 +218,7 @@ if __name__ == "__main__":
         quantization='inc_q',
         weights_load_device="cpu",
         max_model_len=16384,
+        max_num_seqs=1,
         dtype="bfloat16",
     )
 

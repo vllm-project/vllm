@@ -57,6 +57,7 @@ if __name__ == "__main__":
             trust_remote_code=True,
             max_model_len=4096,
             dtype="bfloat16",
+            max_num_seqs=1,
             gpu_memory_utilization=0.8,
         )
 
