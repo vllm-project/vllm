@@ -2,16 +2,12 @@
 
 import pytest
 
-from vllm.config import LoadFormat
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.sampling_params import SamplingParams
 
-from ..conftest import MODEL_WEIGHTS_S3_BUCKET
 
-
-@pytest.mark.parametrize("model",
-                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
+@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 @pytest.mark.parametrize("block_size", [16])
 def test_computed_prefix_blocks(model: str, block_size: int):
     # This test checks if we are able to run the engine to completion
@@ -28,7 +24,6 @@ def test_computed_prefix_blocks(model: str, block_size: int):
         "decoration.")
 
     engine_args = EngineArgs(model=model,
-                             load_format=LoadFormat.RUNAI_STREAMER,
                              block_size=block_size,
                              enable_prefix_caching=True)
 
