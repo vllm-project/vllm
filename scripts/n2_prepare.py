@@ -223,13 +223,10 @@ if __name__ == "__main__":
 
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
-    outputs = []
-    for one_prompt_token in prompt_token_ids:
-        print(f"one_prompt_token: {one_prompt_token}")
-        output = llm.generate(
-            prompts=None, sampling_params=sampling_params, prompt_token_ids=prompt_token_ids
-        )
-        outputs.append(output)
+    outputs = llm.generate(
+        prompts=None, sampling_params=sampling_params, prompt_token_ids=prompt_token_ids
+    )
+    # outputs.append(output)
     # Print the outputs.
     for output_i in range(len(outputs)):
         output = outputs[output_i]
