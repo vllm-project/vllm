@@ -161,8 +161,10 @@ def rank_debug(msg, level="info", target_rank=None):
         fn(f"[Rank {rank}] {msg}")
 
 
-def show_mem_info(logger, msg="", loglevel="info"):
+def show_mem_info(logger=None, msg="", loglevel="info"):
     import torch
+    if logger is None:
+        logger = init_logger(__name__)
     hpu_mem_mb = get_used_hpu_mem_MB()
     show_fn = getattr(logger, loglevel)
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1

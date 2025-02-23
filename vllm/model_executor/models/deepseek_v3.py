@@ -58,6 +58,8 @@ import habana_frameworks.torch as htorch
 from vllm.platforms import current_platform
 is_hpu = current_platform.is_hpu()
 
+
+from vllm.logger import show_mem_info
 class DeepseekV3MLP(nn.Module):
 
     def __init__(
@@ -577,17 +579,20 @@ class DeepseekV3DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+        show_mem_info("DeepseekV3DecoderLayer: before self_attn")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
+        show_mem_info("DeepseekV3DecoderLayer: after self_attn")
         htorch.core.mark_step()
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+        show_mem_info("DeepseekV3DecoderLayer: after mlp")
         return hidden_states, residual
 
 
