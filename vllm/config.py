@@ -3203,6 +3203,7 @@ class VllmConfig:
     additional_config: SupportsHash = field(default=None,
                                             init=True)  # type: ignore
     instance_id: str = ""
+    use_v1: bool = False
 
     def compute_hash(self) -> str:
         """
