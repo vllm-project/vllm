@@ -245,7 +245,7 @@ except ImportError:
     from flash_attn import flash_attn_varlen_func
     is_vllm_fa = False
 
-from vllm.attention.ops.triton_flash_attention import (triton_attention)
+from vllm.attention.ops.triton_flash_attention import triton_attention
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -1330,9 +1330,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     prefill_metadata.context_chunk_cu_seq_lens[i],
                     prefill_metadata.max_query_len,
                     prefill_metadata.context_chunk_max_seq_lens[i],
-                    False,          # causal
+                    False,  # causal
                     self.scale,
-                    None,           # attn_mask is None unless applying ALiBi mask
+                    None,  # attn_mask is None unless applying ALiBi mask
                 )
             elif is_vllm_fa:
                 attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
@@ -1342,7 +1342,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     cu_seqlens_q=prefill_metadata.query_start_loc,
                     cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
                     max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
+                    max_seqlen_k=prefill_metadata.
+                    context_chunk_max_seq_lens[i],
                     softmax_scale=self.scale,
                     causal=False,  # Context is unmasked
                     return_softmax_lse=True,
@@ -1355,7 +1356,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     cu_seqlens_q=prefill_metadata.query_start_loc,
                     cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
                     max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
+                    max_seqlen_k=prefill_metadata.
+                    context_chunk_max_seq_lens[i],
                     softmax_scale=self.scale,
                     causal=False,  # Context is unmasked
                     return_attn_probs=True,
@@ -1417,9 +1419,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 prefill_metadata.query_start_loc,
                 prefill_metadata.max_prefill_seq_len,
                 prefill_metadata.max_prefill_seq_len,
-                True,       # causal
+                True,  # causal
                 self.scale,
-                None,       # attn_mask is None unless applying ALiBi mask
+                None,  # attn_mask is None unless applying ALiBi mask
             )
             ## triton flash attention always return 2 objects
             if not has_context:
