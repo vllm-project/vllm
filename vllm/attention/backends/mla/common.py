@@ -236,9 +236,13 @@ from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
+    is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
     from flash_attn import flash_attn_varlen_func
+    is_vllm_fa = False
+
+from vllm.attention.ops.triton_flash_attention import (triton_attention)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -1043,12 +1047,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.q_proj = q_proj
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
-        self.vllm_flash_attn_version = get_flash_attn_version()
+        self.triton_fa_func = triton_attention
 
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
         # latter has an additional parameter to control FA2 vs FA3
         self.flash_attn_varlen_func = flash_attn_varlen_func
+        self.vllm_flash_attn_version = get_flash_attn_version()
         if self.vllm_flash_attn_version is not None:
             self.flash_attn_varlen_func = \
                 functools.partial(flash_attn_varlen_func,
@@ -1312,18 +1317,46 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                                                [0, q.shape[-1] - v.shape[-1]],
                                                value=0)
 
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
-            )
+            if envs.VLLM_USE_TRITON_FLASH_ATTN:
+                attn_output, attn_softmax_lse = self.triton_fa_func(
+                    q,
+                    k,
+                    v_padded,
+                    None,
+                    prefill_metadata.query_start_loc,
+                    prefill_metadata.context_chunk_cu_seq_lens[i],
+                    prefill_metadata.max_query_len,
+                    prefill_metadata.context_chunk_max_seq_lens[i],
+                    False,          # causal
+                    self.scale,
+                    None,           # attn_mask is None unless applying ALiBi mask
+                )
+            elif is_vllm_fa:
+                attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
+                    q=q,
+                    k=k,
+                    v=v_padded,
+                    cu_seqlens_q=prefill_metadata.query_start_loc,
+                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
+                    max_seqlen_q=prefill_metadata.max_query_len,
+                    max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
+                    softmax_scale=self.scale,
+                    causal=False,  # Context is unmasked
+                    return_softmax_lse=True,
+                )
+            else:
+                attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
+                    q=q,
+                    k=k,
+                    v=v_padded,
+                    cu_seqlens_q=prefill_metadata.query_start_loc,
+                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
+                    max_seqlen_q=prefill_metadata.max_query_len,
+                    max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
+                    softmax_scale=self.scale,
+                    causal=False,  # Context is unmasked
+                    return_attn_probs=True,
+                )
 
             if output is None:
                 output = attn_output
@@ -1371,21 +1404,53 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
 
-        output = self.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v_padded,
-            cu_seqlens_q=prefill_metadata.query_start_loc,
-            cu_seqlens_k=prefill_metadata.query_start_loc,
-            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_softmax_lse=has_context,
-        )
+        if envs.VLLM_USE_TRITON_FLASH_ATTN:
+            output = self.triton_fa_func(
+                q,
+                k,
+                v_padded,
+                None,
+                prefill_metadata.query_start_loc,
+                prefill_metadata.query_start_loc,
+                prefill_metadata.max_prefill_seq_len,
+                prefill_metadata.max_prefill_seq_len,
+                True,       # causal
+                self.scale,
+                None,       # attn_mask is None unless applying ALiBi mask
+            )
+            ## triton flash attention always return 2 objects
+            if not has_context:
+                output = output[0]
+        elif is_vllm_fa:
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=has_context,
+            )
+        else:
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_attn_probs=has_context,
+            )
 
         if has_context:
-            suffix_output, suffix_lse = output
+            # ROCm flash_attn_varlen_func will return 3 objects instead of 2
+            suffix_output, suffix_lse, *rest = output
             context_output, context_lse = self._compute_prefill_context( \
                 q, kv_c_and_k_pe_cache, attn_metadata)
 
