@@ -79,9 +79,9 @@ if __name__ == "__main__":
             for sample in results['samples']['gsm8k']:
                 json.dump(sample, f)
                 f.write("\n")
-    elif args.task == "hallaswag":
+    elif args.task == "hellaswag":
         results = simple_evaluate(model=llm, tasks=["hellaswag"], num_fewshot=0, batch_size=8, limit=args.limit)
-        with open(f"hallaswag_ep{args.ep_size}_result_samples.jsonl", "w") as f:
+        with open(f"hellaswag_ep{args.ep_size}_result_samples.jsonl", "w") as f:
             json.dump(results['results'], f)
             f.write("\n")
             for sample in results['samples']['hellaswag']:
