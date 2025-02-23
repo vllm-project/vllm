@@ -149,8 +149,8 @@ def _cached_get_attn_backend(
                                  _Backend.XFORMERS)):
             raise ValueError(
                 f"{selected_backend.name} is not compatible with vLLM V1. "
-                "Please use FLASH_ATTN_VLLM_V1 instead or unset the "
-                "VLLM_ATTENTION_BACKEND env variable.")
+                f"Please use {_Backend.FLASH_ATTN_VLLM_V1.name} instead or "
+                "unset the VLLM_ATTENTION_BACKEND env variable.")
         elif selected_backend not in _Backend.get_v1_backends():
             raise ValueError(
                 f"Selected backend {selected_backend.name} is not compatible "
