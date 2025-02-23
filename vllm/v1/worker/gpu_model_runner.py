@@ -1345,10 +1345,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states = hidden_states[logit_indices]
                 sampler_output = self._dummy_sampler_run(hidden_states)
             else:
-                logits = None
                 sampler_output = None
             torch.cuda.synchronize()
-            del hidden_states, logits, sampler_output
+            del hidden_states, sampler_output
             self.encoder_cache.clear()
         gc.collect()
 
