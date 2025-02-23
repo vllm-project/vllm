@@ -224,7 +224,7 @@ class EngineArgs:
 
         # Override max_num_seqs if it's not set by user.
         if self.max_num_seqs is None:
-            self.max_num_seqs = 256 if not envs.VLLM_USE_V1 else 1024
+            self.max_num_seqs = 256
 
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -1379,8 +1379,6 @@ class EngineArgs:
             additional_config=self.additional_config,
         )
 
-        if envs.VLLM_USE_V1:
-            self._override_v1_engine_config(config)
         return config
 
     def _override_v1_engine_args(self, usage_context: UsageContext) -> None:
@@ -1416,12 +1414,6 @@ class EngineArgs:
             logger.warning(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, usage_context.value)
-
-    def _override_v1_engine_config(self, engine_config: VllmConfig) -> None:
-        """
-        Override the EngineConfig's configs based on the usage context for V1.
-        """
-        assert envs.VLLM_USE_V1, "V1 is not enabled"
 
 
 @dataclass
