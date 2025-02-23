@@ -80,7 +80,13 @@ if __name__ == "__main__":
                 json.dump(sample, f)
                 f.write("\n")
     elif args.task == "hellaswag":
-        results = simple_evaluate(model=llm, tasks=["hellaswag"], num_fewshot=0, batch_size=8, limit=args.limit)
+        results = simple_evaluate(
+            model=llm,
+            tasks=["hellaswag"],
+            num_fewshot=0,
+            batch_size=8,
+            limit=args.limit,
+        )
         with open(f"hellaswag_ep{args.ep_size}_result_samples.jsonl", "w") as f:
             json.dump(results['results'], f)
             f.write("\n")
