@@ -255,13 +255,16 @@ class MiniCPMVImageEmbeddingItems(DictEmbeddingItems):
     def __init__(
         self,
         data: Mapping[str, torch.Tensor],
-        fields_config: Mapping[str, MultiModalFieldConfig],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
     ) -> None:
         super().__init__(
             data,
             modality="image",
-            fields_config=fields_config,
             required_fields={"image_embeds", "image_sizes"},
+            fields_factory=fields_factory,
         )
 
     def get_image_size(self, index: int) -> ImageSize:
@@ -274,13 +277,16 @@ class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
     def __init__(
         self,
         data: Mapping[str, torch.Tensor],
-        fields_config: Mapping[str, MultiModalFieldConfig],
+        fields_factory: Callable[
+            [Mapping[str, torch.Tensor]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
     ) -> None:
         super().__init__(
             data,
             modality="video",
-            fields_config=fields_config,
             required_fields={"video_embeds", "video_image_sizes"},
+            fields_factory=fields_factory,
         )
 
     def get_frame_size(self, index: int) -> ImageSize:
@@ -300,7 +306,7 @@ class MiniCPMVMultiModalDataParser(MultiModalDataParser):
         if isinstance(data, dict):
             return MiniCPMVImageEmbeddingItems(
                 data,
-                fields_config=_minicpmv_field_config(data),
+                fields_factory=_minicpmv_field_config,
             )
 
         return super()._parse_image_data(data)
@@ -312,7 +318,7 @@ class MiniCPMVMultiModalDataParser(MultiModalDataParser):
         if isinstance(data, dict):
             return MiniCPMVVideoEmbeddingItems(
                 data,
-                fields_config=_minicpmv_field_config(data),
+                fields_factory=_minicpmv_field_config,
             )
 
         return super()._parse_video_data(data)
@@ -325,11 +331,8 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
-    def get_hf_processor(
-        self,
-        **kwargs: object,
-    ):
-        hf_processor = self.ctx.get_hf_processor()
+    def get_hf_processor(self, **kwargs: object):
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
 
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
@@ -1225,23 +1228,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        # resampler
-        "kv_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -1335,23 +1321,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        # resampler
-        "kv_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -1457,13 +1426,6 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
     which is not conducive to the current integration logic of LoRA and
     bitsandbytes in vLLM. Therefore, it is necessary to separate them.
     """
-    # Ensure that the LoRA support check passes when the class is not
-    # initialized, but set all these attributes to empty.
-    # These will be updated when an instance class is selected
-    packed_modules_mapping = {}
-    supported_lora_modules = []
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -1484,7 +1446,6 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
         # quant_config references base class members,
         # so update values before init is called
         cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
-        cls.supported_lora_modules += instance_cls.supported_lora_modules
         cls.embedding_modules.update(instance_cls.embedding_modules)
         cls.embedding_padding_modules += instance_cls.embedding_padding_modules
         return instance_cls(vllm_config=vllm_config, prefix=prefix)

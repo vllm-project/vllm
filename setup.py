@@ -13,7 +13,7 @@ from typing import Dict, List
 
 import torch
 from packaging.version import Version, parse
-from setuptools import Extension, find_packages, setup
+from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
@@ -499,9 +499,7 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    version = get_version(
-        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
-    )
+    version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
@@ -547,16 +545,6 @@ def get_vllm_version() -> str:
         raise RuntimeError("Unknown runtime environment")
 
     return version
-
-
-def read_readme() -> str:
-    """Read the README file if present."""
-    p = get_path("README.md")
-    if os.path.isfile(p):
-        with open(get_path("README.md"), encoding="utf-8") as f:
-            return f.read()
-    else:
-        return ""
 
 
 def get_requirements() -> List[str]:
@@ -649,36 +637,10 @@ else:
     }
 
 setup(
-    name="vllm",
+    # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
-    author="vLLM Team",
-    license="Apache 2.0",
-    description=("A high-throughput and memory-efficient inference and "
-                 "serving engine for LLMs"),
-    long_description=read_readme(),
-    long_description_content_type="text/markdown",
-    url="https://github.com/vllm-project/vllm",
-    project_urls={
-        "Homepage": "https://github.com/vllm-project/vllm",
-        "Documentation": "https://vllm.readthedocs.io/en/latest/",
-    },
-    classifiers=[
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "License :: OSI Approved :: Apache Software License",
-        "Intended Audience :: Developers",
-        "Intended Audience :: Information Technology",
-        "Intended Audience :: Science/Research",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-        "Topic :: Scientific/Engineering :: Information Analysis",
-    ],
-    packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
-                                    "tests*")),
-    python_requires=">=3.9",
-    install_requires=get_requirements(),
     ext_modules=ext_modules,
+    install_requires=get_requirements(),
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
@@ -687,9 +649,4 @@ setup(
     },
     cmdclass=cmdclass,
     package_data=package_data,
-    entry_points={
-        "console_scripts": [
-            "vllm=vllm.entrypoints.cli.main:main",
-        ],
-    },
 )

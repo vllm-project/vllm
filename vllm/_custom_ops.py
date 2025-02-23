@@ -433,6 +433,18 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
 
 
 # cutlass
+def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
+                          block_scale_a: torch.Tensor,
+                          block_scale_b: torch.Tensor, alpha: torch.Tensor,
+                          out_dtype: torch.dtype) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2
+    m, n = a.shape[0], b.shape[0]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+    torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b,
+                                       alpha)
+    return out
+
+
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
 
@@ -774,6 +786,7 @@ def scaled_fp4_quant(
             two values are packed into a uint8 and float8_e4m3 scaling factors
             in the sizzled layout.
     """
+    assert not current_platform.is_rocm()
     assert input.ndim >= 1, (
         f'input.ndim needs to be >= 1, but got {input.ndim}.')
     other_dims = 1 if input.ndim == 1 else -1
@@ -1096,6 +1109,16 @@ def convert_fp8(output: torch.Tensor,
                 scale: float = 1.0,
                 kv_dtype: str = "fp8") -> None:
     torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
+
+
+def gather_cache(src_cache: torch.Tensor,
+                 dst: torch.Tensor,
+                 block_table: torch.Tensor,
+                 cu_seq_lens: torch.Tensor,
+                 batch_size: int,
+                 seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
+                                        cu_seq_lens, batch_size, seq_starts)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:

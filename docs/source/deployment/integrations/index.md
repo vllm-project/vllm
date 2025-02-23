@@ -6,4 +6,5 @@
 kserve
 kubeai
 llamastack
+llmaz
 :::

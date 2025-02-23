@@ -36,3 +36,11 @@ The following metrics are exposed:
 :language: python
 :start-after: begin-metrics-definitions
 :::
+
+The following metrics are deprecated and due to be removed in a future version:
+
+- *(No metrics are currently deprecated)*
+
+Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`
+but can be re-enabled using the `--show-hidden-metrics-for-version=X.Y` escape hatch,
+and are then removed in version `X.Y+2`.

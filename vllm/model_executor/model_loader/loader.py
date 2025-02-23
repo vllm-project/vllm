@@ -1327,6 +1327,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
+
         is_s3_path = is_s3(model_name_or_path)
         is_local = os.path.isdir(model_name_or_path)
         safetensors_pattern = "*.safetensors"
@@ -1340,7 +1341,6 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                          revision,
                          ignore_patterns=self.load_config.ignore_patterns,
                      ))
-
         if is_s3_path:
             hf_weights_files = s3_glob(path=hf_folder,
                                        allow_pattern=[safetensors_pattern])
@@ -1394,7 +1394,6 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
-
     if isinstance(load_config.load_format, type):
         return load_config.load_format(load_config)
 
