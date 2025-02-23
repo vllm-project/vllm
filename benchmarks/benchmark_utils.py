@@ -37,10 +37,12 @@ def convert_to_pytorch_benchmark_format(args: argparse.Namespace,
             },
         }
 
-        tp = record["benchmark"]["extra_info"]["args"].get("tensor_parallel_size", 0)
+        tp = record["benchmark"]["extra_info"]["args"].get(
+            "tensor_parallel_size")
         # Save tensor_parallel_size parameter if it's part of the metadata
         if not tp and "tensor_parallel_size" in extra_info:
-            record["benchmark"]["extra_info"]["args"]["tensor_parallel_size"] = tp
+            record["benchmark"]["extra_info"]["args"][
+                "tensor_parallel_size"] = extra_info["tensor_parallel_size"]
 
         records.append(record)
 
