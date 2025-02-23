@@ -5,8 +5,10 @@ import os
 import queue
 import signal
 import uuid
+import weakref
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
+from dataclasses import dataclass
 from threading import Thread
 from typing import Any, Dict, List, Optional, Type, Union
 
@@ -168,6 +170,26 @@ class InprocClient(EngineCoreClient):
         self.engine_core.add_lora(lora_request)
 
 
+@dataclass
+class ShutdownResources:
+    ctx: Union[zmq.Context, zmq.asyncio.Context] = None
+    output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    proc_handle: Optional[BackgroundProcHandle] = None
+
+    def __call__(self):
+        """Clean up background resources."""
+
+        if self.proc_handle is not None:
+            self.proc_handle.shutdown()
+        if self.output_socket is not None:
+            self.output_socket.close(linger=0)
+        if self.input_socket is not None:
+            self.input_socket.close(linger=0)
+        if self.ctx is not None:
+            self.ctx.destroy(linger=0)
+
+
 class MPClient(EngineCoreClient):
     """
     MPClient: base client for multi-proc EngineCore.
@@ -211,16 +233,22 @@ class MPClient(EngineCoreClient):
             zmq.asyncio.Context()  # type: ignore[attr-defined]
             if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
 
+        # Set up finalizer, can't reference self.
+        # This will ensure resources created so far are closed,
+        # even if an exception is raised mid-construction.
+        resources = ShutdownResources(ctx=self.ctx)
+        self._finalizer = weakref.finalize(self, resources)
+
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
-        self.output_socket = make_zmq_socket(self.ctx, output_path,
-                                             zmq.constants.PULL)
-        self.input_socket = make_zmq_socket(self.ctx, input_path,
-                                            zmq.constants.PUSH)
+        resources.output_socket = make_zmq_socket(self.ctx, output_path,
+                                                  zmq.constants.PULL)
+        resources.input_socket = make_zmq_socket(self.ctx, input_path,
+                                                 zmq.constants.PUSH)
 
         # Start EngineCore in background process.
-        self.proc_handle = BackgroundProcHandle(
+        resources.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
             process_name="EngineCore",
@@ -231,19 +259,12 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
+        self.output_socket = resources.output_socket
+        self.input_socket = resources.input_socket
         self.utility_results: Dict[int, AnyFuture] = {}
 
-    def __del__(self):
-        self.shutdown()
-
     def shutdown(self):
-        """Clean up background resources."""
-
-        if ctx := getattr(self, "ctx", None):
-            ctx.destroy(linger=0)
-
-        if proc_handle := getattr(self, "proc_handle", None):
-            proc_handle.shutdown()
+        self._finalizer()
 
 
 def _process_utility_output(output: UtilityOutput,
