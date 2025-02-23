@@ -175,12 +175,12 @@ def _compare_tp(
         "--distributed-executor-backend",
         distributed_backend,
     ]
-    
+
     # compare without expert parallelism
     tp_env = {
         "VLLM_TEST_ENABLE_EP": "0",
     }
-    
+
     tp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -224,4 +224,4 @@ def test_ep(
                 task,
                 test_options,
                 num_gpus_available,
-                method="generate")
+                method="generate_close")
