@@ -609,9 +609,14 @@ class BartEncoder(nn.Module):
 
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         r"""
         Args:
             input_ids
@@ -628,7 +633,8 @@ class BartEncoder(nn.Module):
             Decoder output torch.Tensor
         """
         # retrieve input_ids and inputs_embeds
-        inputs_embeds = self.embed_tokens(input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
 
         embed_pos = self.embed_positions(positions)
         embed_pos = embed_pos.to(inputs_embeds.device)
@@ -691,11 +697,15 @@ class BartDecoder(nn.Module):
 
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
 
-    def forward(self, decoder_input_ids: torch.Tensor,
-                decoder_positions: torch.Tensor,
-                encoder_hidden_states: Optional[torch.Tensor],
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata) -> torch.Tensor:
+    def forward(
+        self,
+        decoder_input_ids: torch.Tensor,
+        decoder_positions: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor],
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        decoder_inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         r"""
         Args:
             decoder_input_ids
@@ -713,8 +723,10 @@ class BartDecoder(nn.Module):
         Returns:
             Decoder output torch.Tensor
         """
-
-        inputs_embeds = self.embed_tokens(decoder_input_ids)
+        if (inputs_embeds := decoder_inputs_embeds) is None:
+            inputs_embeds = self.embed_tokens(decoder_input_ids)
+        else:
+            decoder_positions = inputs_embeds[:, -1]
 
         # embed positions
         embed_pos = self.embed_positions(decoder_positions)
