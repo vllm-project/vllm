@@ -257,18 +257,24 @@ def get_config(
             if is_gguf or file_or_path_exists(
                     model, HF_CONFIG_NAME, revision=revision):
                 config_format = ConfigFormat.HF
-            elif file_or_path_exists(model, mistral,
+            elif file_or_path_exists(model,
+                                     MISTRAL_CONFIG_NAME,
                                      revision=revision):
                 config_format = ConfigFormat.MISTRAL
-        except:
-            raise ValueError(
-                f"Invalid repository ID or local directory specified: '{model}'.\n"
-                "Please verify the following requirements:\n"
+
+        except Exception as e:
+            error_message = (
+                "Invalid repository ID or local directory specified:"
+                " '{model}'.\nPlease verify the following requirements:\n"
                 "1. Provide a valid Hugging Face repository ID.\n"
-                "2. Specify a local directory that contains a recognized configuration file.\n"
-                "   - For Hugging Face models: ensure the presence of a 'config.json'.\n"
-                "   - For MISTRAL models: ensure the presence of a 'mistral_config.json'.\n"
-            )
+                "2. Specify a local directory that contains a recognized "
+                "configuration file.\n"
+                "   - For Hugging Face models: ensure the presence of a "
+                "'config.json'.\n"
+                "   - For MISTRAL models: ensure the presence of a "
+                "'mistral_config.json'.\n")
+
+            raise ValueError(error_message) from e
 
     if config_format == ConfigFormat.HF:
         config_dict, _ = PretrainedConfig.get_config_dict(
