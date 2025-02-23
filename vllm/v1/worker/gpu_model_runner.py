@@ -33,11 +33,11 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
+from vllm.v1.sample.sampler import SamplerOutput
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.sample.sampler import SamplerOutput
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
@@ -962,19 +962,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         else:
             target_probs = self.model.sampler.compute_probs(logits)
-            scheduled_request_ids = num_scheduled_tokens.keys()
-            draft_token_ids = [scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-                for req_id in scheduled_request_ids]
-            sampled_token_ids = self.model.sampler.rejection_sampler(
-                draft_token_ids,    
-                target_probs,
-                sampling_metadata
+            scheduled_request_ids = scheduler_output.num_scheduled_tokens.keys(
             )
+            draft_token_ids = [
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+                for req_id in scheduled_request_ids
+            ]
+            sampled_token_ids = self.model.sampler.rejection_sampler(
+                draft_token_ids, target_probs, sampling_metadata)
             sampler_output = SamplerOutput(
                 sampled_token_ids=sampled_token_ids,
                 logprobs_tensors=None,
             )
-            
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1329,7 +1328,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     temperature=dummy_tensors(0.5),
                     all_greedy=False,
                     all_random=False,
-                    spec_token_ids=None,
                     top_p=dummy_tensors(0.9),
                     top_k=dummy_tensors(logits.size(1) - 1),
                     min_p=None,

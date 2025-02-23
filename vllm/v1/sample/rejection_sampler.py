@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import List
+
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
@@ -8,7 +10,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from typing import List
 
 try:
     import flashinfer.sampling as fs
@@ -53,16 +54,14 @@ class RejectionSampler(nn.Module):
         else:
             self.forward_method = self.forward_native
 
-    def forward(self, 
-                draft_token_ids: List[List[int]],
+    def forward(self, draft_token_ids: List[List[int]],
                 target_probs: torch.Tensor,
                 sampling_metadata: SamplingMetadata) -> SamplerOutput:
         if not sampling_metadata.all_greedy:
             raise NotImplementedError(
                 "Currently, only greedy sampling is supported by "
                 "rejection sampler.")
-        return self.forward_method(draft_token_ids, 
-                                   target_probs,
+        return self.forward_method(draft_token_ids, target_probs,
                                    sampling_metadata)
 
     def flashinfer_sample(
@@ -77,15 +76,12 @@ class RejectionSampler(nn.Module):
         sample_lens = [len(x) + 1 for x in draft_token_ids]
         # Convert draft token IDs to a tensor, split by sample_lens, then pad.
         draft_token_ids = [
-            torch.tensor(x,
-                         dtype=int,
-                         device='cpu')
-            for x in draft_token_ids
+            torch.tensor(x, dtype=int, device='cpu') for x in draft_token_ids
         ]
-        draft_token_ids = pad_sequence(draft_token_ids,
-                                      batch_first=True,
-                                      padding_value=INVALID_TOKEN_ID)
-        
+        draft_token_ids_tensor = pad_sequence(draft_token_ids,
+                                              batch_first=True,
+                                              padding_value=INVALID_TOKEN_ID)
+
         if sampling_metadata.all_greedy:
             target_token_ids = target_probs.argmax(dim=-1).view(-1)
             target_token_ids = target_token_ids.split(sample_lens)
@@ -99,18 +95,19 @@ class RejectionSampler(nn.Module):
 
         vocab_size = target_probs.size(-1)
         # NOTE: CPU <-> GPU synchronization happens here.
-        draft_token_ids = draft_token_ids.to(target_probs.device)
-        draft_probs = _create_greedy_token_probs(draft_token_ids, vocab_size,
+        draft_token_ids_tensor = draft_token_ids_tensor.to(target_probs.device)
+        draft_probs = _create_greedy_token_probs(draft_token_ids_tensor,
+                                                 vocab_size,
                                                  target_probs.device)
         target_probs = _create_greedy_token_probs(target_token_ids, vocab_size,
                                                   target_probs.device)
-        uniform_samples = torch.zeros(draft_token_ids.size(0),
-                                      draft_token_ids.size(1),
+        uniform_samples = torch.zeros(draft_token_ids_tensor.size(0),
+                                      draft_token_ids_tensor.size(1),
                                       device=target_probs.device)
 
         sampled_token_ids, _, _ = fs.chain_speculative_sampling(
             draft_probs,
-            draft_token_ids,
+            draft_token_ids_tensor,
             uniform_samples,
             target_probs,
         )
@@ -126,15 +123,12 @@ class RejectionSampler(nn.Module):
     ) -> SamplerOutput:
         sample_lens = [len(x) + 1 for x in draft_token_ids]
         # Convert draft token IDs to a tensor, split by sample_lens, then pad.
-        draft_token_ids = [
-            torch.tensor(x,
-                         dtype=int,
-                         device='cpu')
-            for x in draft_token_ids
+        draft_token_ids_tensor = [
+            torch.tensor(x, dtype=int, device='cpu') for x in draft_token_ids
         ]
-        draft_token_ids = pad_sequence(draft_token_ids,
-                                      batch_first=True,
-                                      padding_value=INVALID_TOKEN_ID)
+        draft_token_ids_tensor = pad_sequence(draft_token_ids_tensor,
+                                              batch_first=True,
+                                              padding_value=INVALID_TOKEN_ID)
         # Add 1 to include the 'bonus' token.
         if sampling_metadata.all_greedy:
             output_token_ids = target_probs.argmax(dim=-1).view(-1)
@@ -144,8 +138,9 @@ class RejectionSampler(nn.Module):
                                             padding_value=INVALID_TOKEN_ID)
             # Produce a mask that remains 1 (True) until the first
             # mismatch (cumprod turns 0 after a mismatch).
-            accept_mask = (output_token_ids[:, :-1] == draft_token_ids).cumprod(
-                dim=1)
+            accept_mask = (
+                output_token_ids[:, :-1] == draft_token_ids_tensor).cumprod(
+                    dim=1)
         else:
             raise NotImplementedError(
                 "Currently, only greedy sampling is supported by "
