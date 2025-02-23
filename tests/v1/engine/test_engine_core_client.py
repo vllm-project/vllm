@@ -3,7 +3,6 @@
 import asyncio
 import time
 import uuid
-from contextlib import ExitStack
 from typing import Dict, List, Optional
 
 import pytest
@@ -178,7 +177,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_asyncio(monkeypatch):
 
-    with monkeypatch.context() as m, ExitStack() as after:
+    with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
         # Monkey-patch core engine utility function to test.
@@ -195,7 +194,6 @@ async def test_engine_core_client_asyncio(monkeypatch):
             executor_class=executor_class,
             log_stats=True,
         )
-        after.callback(client.shutdown)
 
         MAX_TOKENS = 20
         params = SamplingParams(max_tokens=MAX_TOKENS)
