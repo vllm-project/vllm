@@ -43,9 +43,8 @@ class _Backend(enum.Enum):
     NO_ATTENTION = enum.auto()
 
     @classmethod
-    def is_v1(cls) -> bool:
-        return (cls in (cls.FLASH_ATTN_VLLM_V1, cls.ROCM_FLASH,
-                        cls.PALLAS_VLLM_V1))
+    def get_v1_backends(cls) -> Tuple["_Backend", ...]:
+        return (cls.FLASH_ATTN_VLLM_V1, cls.ROCM_FLASH, cls.PALLAS_VLLM_V1)
 
 
 class PlatformEnum(enum.Enum):
