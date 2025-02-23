@@ -123,10 +123,10 @@ class RejectionSampler(nn.Module):
     ) -> SamplerOutput:
         sample_lens = [len(x) + 1 for x in draft_token_ids]
         # Convert draft token IDs to a tensor, split by sample_lens, then pad.
-        draft_token_ids_tensor = [
+        draft_token_ids = [
             torch.tensor(x, dtype=int, device='cpu') for x in draft_token_ids
         ]
-        draft_token_ids_tensor = pad_sequence(draft_token_ids_tensor,
+        draft_token_ids_tensor = pad_sequence(draft_token_ids,
                                               batch_first=True,
                                               padding_value=INVALID_TOKEN_ID)
         draft_token_ids_tensor = draft_token_ids_tensor.to(target_probs.device)

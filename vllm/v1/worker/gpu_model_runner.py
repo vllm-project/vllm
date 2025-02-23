@@ -33,7 +33,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
-from vllm.v1.sample.sampler import SamplerOutput
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -961,7 +960,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
         else:
-            target_probs = self.model.sampler.compute_probs(logits, sampling_metadata)
+            target_probs = self.model.sampler.compute_probs(
+                logits, sampling_metadata)
             scheduled_request_ids = scheduler_output.num_scheduled_tokens.keys(
             )
             draft_token_ids = [
