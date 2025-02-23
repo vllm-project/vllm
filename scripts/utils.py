@@ -59,6 +59,6 @@ def get_pile_prompts(model_name, num_samples=512):
             continue
         num_sample += 1
         samples_lst.append(prompt)
-        if num_sample > num_samples:
+        if num_sample >= num_samples:
             break
     return samples_lst
