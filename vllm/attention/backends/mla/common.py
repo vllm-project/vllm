@@ -1130,13 +1130,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 )
 
         def get_layer_weight(layer):
-            if hasattr(layer, "weight"):
-                return layer.weight
-            elif hasattr(layer, "qweight"):
-                return layer.qweight
-            else:
-                raise AttributeError(
-                    f"Layer '{layer}' has neither weight nor qweight")
+            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
+            for attr in WEIGHT_NAMES:
+                if hasattr(layer, attr):
+                    return getattr(layer, attr)
+            raise AttributeError(
+                f"Layer '{layer}' has no recognized weight attribute:"
+                f" {WEIGHT_NAMES}.")
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
@@ -1151,10 +1151,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 # standardize to (output, input)
                 return dequant_weights.T
             return layer.weight
-
-        weight_dtype = get_layer_weight(self.kv_b_proj).dtype
-        assert get_layer_weight(self.o_proj).dtype == weight_dtype
-        assert get_layer_weight(self.q_proj).dtype == weight_dtype
 
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
         assert kv_b_proj_weight.shape == (
@@ -1189,7 +1185,11 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.W_QR = self.W_QR.to(act_dtype)
 
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
+            weight_dtype = get_layer_weight(self.kv_b_proj).dtype
+            assert get_layer_weight(self.o_proj).dtype == weight_dtype
+            assert get_layer_weight(self.q_proj).dtype == weight_dtype
             requantization_enabled = not envs.VLLM_MLA_DISABLE_REQUANTIZATION
+
             if is_fp8(weight_dtype) and requantization_enabled:
                 # This assumes it wise to requantize using the same group shapes
                 # (i.e. strategy, per-tensor, per-channel, block etc.) that the
