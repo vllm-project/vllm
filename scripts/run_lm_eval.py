@@ -93,6 +93,20 @@ if __name__ == "__main__":
             for sample in results['samples']['hellaswag']:
                 json.dump(sample, f)
                 f.write("\n")
+    elif args.task == "drop":
+        results = simple_evaluate(
+            model=llm,
+            tasks=["drop"],
+            num_fewshot=3,
+            batch_size=1,
+            limit=args.limit,
+        )
+        with open(f"drop_ep{args.ep_size}_result_samples.jsonl", "w") as f:
+            json.dump(results['results'], f)
+            f.write("\n")
+            for sample in results['samples']['drop']:
+                json.dump(sample, f)
+                f.write("\n")
     else:
         tasks = args.task.split(",")
         assert isinstance(tasks, list), f"tasks must be a list of strings, got {type(tasks)}"
