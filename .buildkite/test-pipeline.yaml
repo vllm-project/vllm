@@ -134,7 +134,9 @@ steps:
   - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
+  - tests/examples/offline_inference/data_parallel.py
   commands:
+  - VLLM_USE_V1=1 python3 ../examples/offline_inference/data_parallel.py
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
@@ -276,7 +278,7 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_minicpmv_tp.py
   parallelism: 4
 
-- label: "PyTorch Fullgraph Smoke Test" # 9min
+- label: PyTorch Fullgraph Smoke Test # 9min
   fast_check: true
   source_file_dependencies:
   - vllm/
@@ -287,7 +289,7 @@ steps:
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
 
-- label: "PyTorch Fullgraph Test" # 18min
+- label: PyTorch Fullgraph Test # 18min
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -501,6 +503,7 @@ steps:
   - entrypoints/llm/test_collective_rpc.py
   commands:
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - VLLM_USE_V1=1 torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
