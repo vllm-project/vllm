@@ -51,30 +51,25 @@ def get_forward_context() -> ForwardContext:
 @contextmanager
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
-                        virtual_engine: int = 0,
-                        num_tokens: int = 0):
+                        virtual_engine: int = 0):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
     """
     global forward_start_time
-    need_to_track_batchsize = track_batchsize and attn_metadata is not None
-    if need_to_track_batchsize:
+    if track_batchsize:
         forward_start_time = time.perf_counter()
     num_tokens_across_dp = None
     if vllm_config.parallel_config.data_parallel_size > 1:
         dp_size = vllm_config.parallel_config.data_parallel_size
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        if attn_metadata is not None:
-            if hasattr(attn_metadata, "num_prefill_tokens"):
-                # for v0 attention backends
-                batchsize = attn_metadata.num_prefill_tokens + \
-                    attn_metadata.num_decode_tokens
-            else:
-                # for v1 attention backends
-                batchsize = attn_metadata.num_input_tokens
+        if hasattr(attn_metadata, "num_prefill_tokens"):
+            # for v0 attention backends
+            batchsize = attn_metadata.num_prefill_tokens + \
+                attn_metadata.num_decode_tokens
         else:
-            batchsize = num_tokens
+            # for v1 attention backends
+            batchsize = attn_metadata.num_input_tokens
         num_tokens_across_dp = [0] * dp_size
         num_tokens_across_dp[dp_rank] = batchsize
         num_tokens_tensor = torch.tensor(num_tokens_across_dp,
@@ -95,7 +90,7 @@ def set_forward_context(attn_metadata: Any,
         yield
     finally:
         global last_logging_time, batchsize_logging_interval
-        if need_to_track_batchsize:
+        if track_batchsize:
             if hasattr(attn_metadata, "num_prefill_tokens"):
                 # for v0 attention backends
                 batchsize = attn_metadata.num_prefill_tokens + \

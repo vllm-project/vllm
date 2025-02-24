@@ -24,6 +24,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
+from vllm.v1.attention.backends.fake import FakeAttentionMetadata
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
@@ -1167,8 +1168,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+        fake_metadata = FakeAttentionMetadata(num_input_tokens=num_tokens)
+        with set_forward_context(fake_metadata, self.vllm_config):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
