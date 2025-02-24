@@ -44,3 +44,10 @@ python n2_ep8_tp8.py --mode q
 > - The `QUANT_CONFIG` was hard-coded in [1](https://github.com/yiliu30/vllm-fork/blob/bc3a26c3d6143b6405ef9af7e06f6eddcbcbdad0/scripts/g4_multi_nodes_source.sh#L34C8-L34C20) and [2](https://github.com/yiliu30/vllm-fork/blob/bc3a26c3d6143b6405ef9af7e06f6eddcbcbdad0/scripts/g5_multi_nodes_source.sh#L38).
 > - `VLLMKVCache`, `KVCache` and `lm-head` were skipped to quantize, will add them back.
 > - ~~FAKE `EP` was hard-coded as 16. Please check `TEMP_EP` in vllm and `DEEPSEEK_EP` in INC.~~
+
+
+## Others
+- 1. Measured on 2x8G2 w/ 513 samples https://huggingface.co/Yi30/nc_workspace_tmp_pile_512_backup
+- 2. 4 layers smoke on 8G2 test https://huggingface.co/Yi30/nc_workspace_tmp_4l_ep8_tp8
+- 3. Merged result of 1) https://huggingface.co/Yi30/nc_workspace_tmp
+- 4. 4 layers on 2x8G2 https://huggingface.co/Yi30/nc_workspace_tmp_4l_smoke
