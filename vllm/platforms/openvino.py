@@ -67,6 +67,9 @@ class OpenVinoPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.utils import GiB_bytes
+        if vllm_config.use_v1:
+            raise NotImplementedError(
+                "V1 is not supported on OpenVino. Set VLLM_USE_V1=0")
 
         parallel_config = vllm_config.parallel_config
         assert (parallel_config.world_size == 1

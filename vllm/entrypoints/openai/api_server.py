@@ -153,9 +153,32 @@ async def build_async_engine_client_from_engine_args(
     Returns the Client or None if the creation failed.
     """
 
-    # AsyncLLMEngine.
-    if (MQLLMEngineClient.is_unsupported_config(engine_args)
-            or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
+    # Create the EngineConfig (determines if we can use V1).
+    usage_context = UsageContext.OPENAI_API_SERVER
+    engine_config = engine_args.create_engine_config(
+        usage_context, disable_frontend_multiprocessing)
+
+    # Try the V1 Engine.
+    if engine_config.use_v1:
+        if disable_frontend_multiprocessing:
+            logger.warning(
+                "V1 is enabled, but got --disable-frontend-multiprocessing. "
+                "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
+
+        from vllm.v1.engine.async_llm import AsyncLLM
+        async_llm: Optional[AsyncLLM] = None
+        try:
+            # NOTE: engine_args ignored when we pass engine_config
+            async_llm = AsyncLLM.from_engine_args(engine_args=engine_args,
+                                                  engine_config=engine_config,
+                                                  usage_context=usage_context)
+            yield async_llm
+        finally:
+            if async_llm:
+                async_llm.shutdown()
+
+    elif (MQLLMEngineClient.is_unsupported_config(engine_args)
+          or disable_frontend_multiprocessing):
 
         engine_client: Optional[EngineClient] = None
         try:
