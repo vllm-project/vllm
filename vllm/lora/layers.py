@@ -95,6 +95,12 @@ class BaseLayerWithLoRA(nn.Module):
         """Slice lora b if splitting with tensor parallelism."""
         ...
 
+    def slice_magnitude_param(
+        self, magnitude_param: Union[torch.Tensor, List[Union[torch.Tensor, None]]]
+    ) -> Union[torch.Tensor, List[Union[torch.Tensor, None]]]:
+        """Slice magnitude param if splitting with tensor parallelism."""
+        ...
+
     def create_lora_weights(
         self,
         max_loras: int,
@@ -135,36 +141,6 @@ class BaseLayerWithLoRA(nn.Module):
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         raise NotImplementedError
-
-
-class BaseLayerWithDoRA(BaseLayerWithLoRA):
-    def slice_magnitude_param(
-        self, magnitude_param: Union[torch.Tensor, List[Union[torch.Tensor, None]]]
-    ) -> Union[torch.Tensor, List[Union[torch.Tensor, None]]]:
-        """Slice magnitude param if splitting with tensor parallelism."""
-        ...
-
-    def create_dora_weights(
-        self,
-        max_loras: int,
-        lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
-    ) -> None: ...
-
-    def reset_dora(self, index: int):
-        """Resets the dora weights at index back to 0. dora weights = magnitude param + lora weights"""
-        ...
-
-    def set_dora(
-        self,
-        index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
-    ):
-        """Overwrites dora tensors at index. dora tensors = magnitude param + lora tensors"""
-        ...
 
 
 class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
@@ -233,11 +209,24 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.lora_a_stacked.shape[0] * self.lora_a_stacked.shape[1],
             self.lora_a_stacked.shape[2],
         )
+        if lora_config.dora_enabled:
+            self.dora_enabled = True
+            self.magnitude_stacked = torch.zeros(
+                (
+                    max_loras,
+                    1,
+                    lora_config.max_lora_rank,
+                ),
+                dtype=lora_config.lora_dtype,
+                device=self.base_layer.weight.device,
+            )
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
         self.embeddings_tensors[index] = 0
+        if self.dora_enabled:
+            self.magnitude_stacked[index] = 0
 
     def set_lora(
         self,
@@ -246,6 +235,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
+        magnitude_param: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
         self.lora_a_stacked[index, : lora_a.shape[0], : lora_a.shape[1]].copy_(
@@ -269,6 +259,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 )[self.embeddings_slice[0] : self.embeddings_slice[1]]
                 assert self.embeddings_weights is not None
                 self.embeddings_weights[: embeddings.shape[0]].copy_(embeddings)
+        if magnitude_param is not None:
+            self.magnitude_stacked[index, 0, : magnitude_param.shape[0]].copy_(
+                magnitude_param, non_blocking=True
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = x > self.base_layer.org_vocab_size - 1
