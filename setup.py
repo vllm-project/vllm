@@ -328,6 +328,7 @@ class repackage_wheel(build_ext):
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
+                "vllm/_flashmla_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/vllm_flash_attn/flash_attn_interface.py",
@@ -612,7 +613,10 @@ if _is_cuda():
         # FA3 requires CUDA 12.0 or later
         ext_modules.append(
             CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
-        ext_modules.append(CMakeExtension(name="vllm._C_flashmla"))
+        # Optional since this doesn't get built (produce an .so file) when
+        # not targeting a hopper system
+        ext_modules.append(
+            CMakeExtension(name="vllm._flashmla_C", optional=True))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
