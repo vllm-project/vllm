@@ -4,6 +4,7 @@ import gc
 import os
 from typing import TYPE_CHECKING, Optional
 
+import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -212,14 +213,18 @@ class Worker(WorkerBase):
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 
-        # Warm up sampler and preallocate memory buffer for logits and other
-        # sampling related tensors of max possible shape to avoid memory
-        # fragmentation issue.
-        # NOTE: This is called after `capture_model` on purpose to prevent
-        # memory buffers from being cleared by `torch.cuda.empty_cache`.
-        self.model_runner._dummy_sampler_run(
-            hidden_states=self.model_runner._dummy_run(
-                num_tokens=self.scheduler_config.max_num_seqs))
+        num_scheduled_tokens: np.ndarray = np.array(
+            [self.scheduler_config.max_num_seqs], dtype=np.int32)
+        with self.model_runner.maybe_profile_with_lora(self.lora_config,
+                                                       num_scheduled_tokens):
+            # Warm up sampler and preallocate memory buffer for logits and other
+            # sampling related tensors of max possible shape to avoid memory
+            # fragmentation issue.
+            # NOTE: This is called after `capture_model` on purpose to prevent
+            # memory buffers from being cleared by `torch.cuda.empty_cache`.
+            self.model_runner._dummy_sampler_run(
+                hidden_states=self.model_runner._dummy_run(
+                    num_tokens=self.scheduler_config.max_num_seqs))
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
