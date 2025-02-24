@@ -612,6 +612,7 @@ if _is_cuda():
         # FA3 requires CUDA 12.0 or later
         ext_modules.append(
             CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+        ext_modules.append(CMakeExtension(name="vllm._C_flashmla"))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():

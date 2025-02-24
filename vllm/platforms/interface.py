@@ -35,6 +35,7 @@ class _Backend(enum.Enum):
     OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()
+    FLASHMLA = enum.auto()
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
