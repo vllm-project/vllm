@@ -1053,7 +1053,6 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
-
         return ModelConfig(
             model=self.model,
             task=self.task,
@@ -1093,22 +1092,6 @@ class EngineArgs:
         )
 
     def create_load_config(self) -> LoadConfig:
-        # bitsandbytes quantization needs a specific model loader
-        # so we make sure the quant method and the load format are consistent
-        if (self.quantization == "bitsandbytes" or
-           self.qlora_adapter_name_or_path is not None) and \
-           self.load_format != "bitsandbytes":
-            raise ValueError(
-                "BitsAndBytes quantization and QLoRA adapter only support "
-                f"'bitsandbytes' load format, but got {self.load_format}")
-
-        if (self.load_format == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
-            self.quantization != "bitsandbytes":
-            raise ValueError(
-                "BitsAndBytes load format and QLoRA adapter only support "
-                f"'bitsandbytes' quantization, but got {self.quantization}")
-
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
@@ -1366,8 +1349,8 @@ class EngineArgs:
             return False
 
         # ngram is supported on V1, but off by default for now.
-        if SpeculativeConfig.is_speculation_enabled(
-                self.speculative_model, self.num_speculative_tokens):
+        if (self.speculative_model is None
+                and self.num_speculative_tokens is None):
             if envs.VLLM_USE_V1:
                 logger.warning(
                     "Detected VLLM_USE_V1=1 with speculative decoding. "
@@ -1497,11 +1480,33 @@ class EngineArgs:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
-        device_config = DeviceConfig(device=self.device)
-
         # TODO(rob): move this to create_model_config
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
+
+        # TODO(rob): move this to create_load_config
+        # bitsandbytes quantization needs a specific model loader
+        # so we make sure the quant method and the load format are consistent
+        if (self.quantization == "bitsandbytes" or
+           self.qlora_adapter_name_or_path is not None) and \
+           self.load_format != "bitsandbytes":
+            raise ValueError(
+                "BitsAndBytes quantization and QLoRA adapter only support "
+                f"'bitsandbytes' load format, but got {self.load_format}")
+
+        if (self.load_format == "bitsandbytes" or
+            self.qlora_adapter_name_or_path is not None) and \
+            self.quantization != "bitsandbytes":
+            raise ValueError(
+                "BitsAndBytes load format and QLoRA adapter only support "
+                f"'bitsandbytes' quantization, but got {self.quantization}")
+
+        # TODO(rob): move this to vllm/config.py:_verify_args
+        assert self.cpu_offload_gb >= 0, (
+            "CPU offload space must be non-negative"
+            f", but got {self.cpu_offload_gb}")
+
+        device_config = DeviceConfig(device=self.device)
 
         # NOTE: This is to allow model loading from S3 in CI
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
