@@ -17,12 +17,14 @@ TOP_KS = [2, 6]
 def run(a_q: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
         w2_q: torch.Tensor, w1_scale: torch.Tensor, w2_scale: torch.Tensor,
         topk_weights: torch.Tensor, topk_ids: torch.Tensor, m: int, n: int,
-        k: int, e: int):
+        k: int, e: int, ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
+        ab_strides2: torch.Tensor, c_strides2: torch.Tensor):
     with set_current_vllm_config(
             VllmConfig(parallel_config=ParallelConfig(
                 pipeline_parallel_size=1))):
         return cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
-                           topk_weights, topk_ids, m, n, k, e)
+                           topk_weights, topk_ids, m, n, k, e, ab_strides1,
+                           c_strides1, ab_strides2, c_strides2)
 
 
 @pytest.mark.parametrize("m", [2, 16, 32, 64, 224])
@@ -82,8 +84,11 @@ def test_cutlass_moe_no_graph(
         w1_q = w1_q.transpose(1, 2)
         w2_q = w2_q.transpose(1, 2)
         a_d = (a_q.float() * a_scale).half()
-        w1_d = (w1_q.transpose(1, 2).float() * w1_scale).half()
-        w2_d = (w2_q.transpose(1, 2).float() * w2_scale).half()
+
+        ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+        c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
+        ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
+        c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
 
         w1_d = torch.empty_like(w1)
         w2_d = torch.empty_like(w2)
@@ -162,8 +167,11 @@ def test_cutlass_moe_cuda_graph(
         w1_q = w1_q.transpose(1, 2)
         w2_q = w2_q.transpose(1, 2)
         a_d = (a_q.float() * a_scale).half()
-        w1_d = (w1_q.transpose(1, 2).float() * w1_scale).half()
-        w2_d = (w2_q.transpose(1, 2).float() * w2_scale).half()
+
+        ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+        c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
+        ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
+        c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
 
         w1_d = torch.empty_like(w1)
         w2_d = torch.empty_like(w2)
@@ -180,7 +188,9 @@ def test_cutlass_moe_cuda_graph(
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             cutlass_output = run(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
-                                 topk_weights, topk_ids, m, n, k, e)
+                                 topk_weights, topk_ids, m, n, k, e,
+                                 ab_strides1, c_strides1, ab_strides2,
+                                 c_strides2)
         torch.cuda.synchronize()
         graph.replay()
         torch.cuda.synchronize()
@@ -235,8 +245,11 @@ def test_cutlass_moe_profile(
         w2_q_notransp = w2_q.clone()
         w1_q = w1_q.transpose(1, 2)
         w2_q = w2_q.transpose(1, 2)
-        w1_d = (w1_q.transpose(1, 2).float() * w1_scale).half()
-        w2_d = (w2_q.transpose(1, 2).float() * w2_scale).half()
+
+        ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+        c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
+        ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
+        c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
 
         w1_d = torch.empty_like(w1)
         w2_d = torch.empty_like(w2)
@@ -254,7 +267,9 @@ def test_cutlass_moe_profile(
             with torch.profiler.record_function("cutlass_output"):
                 cutlass_output = cutlass_moe(a_q, a_scale, w1_q, w2_q,
                                              w1_scale, w2_scale, topk_weights,
-                                             topk_ids, m, n, k, e)
+                                             topk_ids, m, n, k, e, ab_strides1,
+                                             c_strides1, ab_strides2,
+                                             c_strides2)
         print("profile cutlass:")
         print(
             prof_cutlass.key_averages(group_by_input_shape=True).table(
