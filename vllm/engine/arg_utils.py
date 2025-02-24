@@ -1150,7 +1150,9 @@ class EngineArgs:
         # usually called from AsyncLLMEngine.from_engine_args.
         try_v1 = use_v1_if_supported or envs.VLLM_USE_V1
         use_v1 = try_v1 and self._use_v1_oracle(model_config)
-        if not envs.is_set("VLLM_USE_V1"):
+        if envs.is_set("VLLM_USE_V1"):
+            # If the user explicitly set VLLM_USE_V1, make
+            # sure that we have forced things properly.
             assert use_v1 == envs.VLLM_USE_V1
 
         # Set default arguments for V0 or V1 Engine.

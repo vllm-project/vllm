@@ -2936,6 +2936,7 @@ class CompilationConfig(BaseModel):
         sufficient for most cases. It might be beneficial to compile for
         certain small batchsizes, where inductor is good at optimizing.
     """ # noqa
+    use_v1: bool = False
     level: int = 0
     debug_dump_path: str = ""
     cache_dir: str = ""
@@ -3063,16 +3064,7 @@ class CompilationConfig(BaseModel):
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
 
         if self.splitting_ops is None:
-            if envs.VLLM_USE_V1:
-                # v1 must split the graph on attention ops
-                # for piecewise cudagraph
-                self.splitting_ops = [
-                    "vllm.unified_attention",
-                    "vllm.unified_attention_with_output",
-                ]
-            else:
-                # v0 uses full graph compilation
-                self.splitting_ops = []
+            self.splitting_ops = []
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
@@ -3166,6 +3158,12 @@ class CompilationConfig(BaseModel):
                     self.bs_to_padded_graph_size[bs] = end
         self.bs_to_padded_graph_size[
             self.max_capture_size] = self.max_capture_size
+
+    def set_splitting_ops_for_v1(self):
+        if len(self.splitting_ops) == 0:
+            # v1 must split the graph on attention ops
+            # for piecewise cudagraph
+            pass
 
 
 @dataclass
@@ -3371,7 +3369,7 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
-        if envs.VLLM_USE_V1 and self.model_config is not None and \
+        if self.use_v1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
             # NOTE(woosuk): Currently, we use inductor because the piecewise
             # CUDA graphs do not work properly with the custom CUDA kernels.
@@ -3385,7 +3383,7 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_reshape = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
 
-        self._set_cudagraph_sizes()
+        self._set_cudagraph_sizes(self.use_v1)
 
         if self.cache_config is not None and \
             self.cache_config.cpu_offload_gb > 0 and \
@@ -3406,7 +3404,7 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-    def _set_cudagraph_sizes(self):
+    def _set_cudagraph_sizes(self, use_v1: bool):
         """
         cudagraph batchsize padding logic:
 
@@ -3435,7 +3433,7 @@ class VllmConfig:
         """
 
         # calculate the default `batch_size_capture_list`
-        if not envs.VLLM_USE_V1:
+        if not use_v1:
             batch_size_capture_list = []
             max_batchsize_to_capture = 0
             if self.scheduler_config is not None and \
