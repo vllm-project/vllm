@@ -23,8 +23,6 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 
 WORKDIR /workspace
 
-ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
-ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,src=requirements-build.txt,target=requirements-build.txt \
     pip install --upgrade pip && \
@@ -37,6 +35,7 @@ WORKDIR /workspace/vllm
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,src=requirements-common.txt,target=requirements-common.txt \
     --mount=type=bind,src=requirements-cpu.txt,target=requirements-cpu.txt \
+    --mount=type=bind,src=requirements-torch-cpu.txt,target=requirements-torch-cpu.txt \
     pip install -v -r requirements-cpu.txt
 
 COPY . .
@@ -51,7 +50,8 @@ ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
+    pip install build && \
+    VLLM_TARGET_DEVICE=cpu python -m build --no-isolation --wheel && \
     pip install dist/*.whl && \
     rm -rf dist
 

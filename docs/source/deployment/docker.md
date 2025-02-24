@@ -90,7 +90,6 @@ Keep an eye on memory usage with parallel jobs as it can be substantial (see exa
 
 ```console
 # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
-$ python3 use_existing_torch.py
 $ DOCKER_BUILDKIT=1 docker build . \
   --target vllm-openai \
   --platform "linux/arm64" \

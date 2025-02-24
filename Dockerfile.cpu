@@ -22,12 +22,10 @@ ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/li
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
-RUN pip install intel_extension_for_pytorch==2.5.0
+RUN pip install intel_extension_for_pytorch==2.5.0 # FIXME: should this be a dependency in requirements-cpu.txt?
 
 WORKDIR /workspace
 
-ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
-ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,src=requirements-build.txt,target=requirements-build.txt \
     pip install --upgrade pip && \
@@ -40,6 +38,7 @@ WORKDIR /workspace/vllm
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,src=requirements-common.txt,target=requirements-common.txt \
     --mount=type=bind,src=requirements-cpu.txt,target=requirements-cpu.txt \
+    --mount=type=bind,src=requirements-torch-cpu.txt,target=requirements-torch-cpu.txt \
     pip install -v -r requirements-cpu.txt
 
 COPY . .
@@ -54,9 +53,7 @@ ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
-    pip install dist/*.whl && \
-    rm -rf dist
+    VLLM_TARGET_DEVICE=cpu pip install -v --no-build-isolation .
 
 WORKDIR /workspace/
 
