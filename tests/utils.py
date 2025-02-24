@@ -297,12 +297,12 @@ def _test_completion_close(
                                            logprobs=5,
                                            temperature=0.0)
 
-    logporbs = completion.choices[0].logprobs.top_logprobs[0]
-    logporbs = {k: round(v, 2) for k, v in logporbs.items()}
+    logprobs = completion.choices[0].logprobs.top_logprobs[0]
+    logprobs = {k: round(v, 2) for k, v in logprobs.items()}
 
     results.append({
         "test": "completion_close",
-        "logprobs": logporbs,
+        "logprobs": logprobs,
     })
 
     return results

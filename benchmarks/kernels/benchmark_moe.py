@@ -468,7 +468,8 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    elif config.architectures[0] == "DeepseekV3ForCausalLM":
+    elif (config.architectures[0] == "DeepseekV3ForCausalLM"
+          or config.architectures[0] == "DeepseekV2ForCausalLM"):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size

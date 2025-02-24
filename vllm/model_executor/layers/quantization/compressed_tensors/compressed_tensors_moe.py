@@ -214,6 +214,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
@@ -239,6 +241,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                              topk_ids=topk_ids,
                              inplace=True,
                              use_fp8_w8a8=True,
+                             global_num_experts=global_num_experts,
+                             expert_map=expert_map,
                              w1_scale=layer.w13_weight_scale,
                              w2_scale=layer.w2_weight_scale,
                              a1_scale=layer.w13_input_scale,
@@ -540,10 +544,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if expert_map is not None:
+            raise NotImplementedError(
+                "Expert Parallelism is not supported for "
+                "fused Marlin MoE method.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
