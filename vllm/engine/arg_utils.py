@@ -1412,6 +1412,17 @@ class EngineArgs:
                         "by the V1 Engine. Falling back to V0.")
             return False
 
+        # No OTLP observability so far.
+        if (self.otlp_traces_endpoint or self.collect_detailed_traces):
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 on unsupported otlp observability "
+                    "features. Usage should be considered experimental and you "
+                    "may encounter bugs. Please report any issues on Github.")
+            logger.info("OTLP observability is not yet supported by the "
+                        "V1 Engine. Falling back to V0.")
+            return False
+
         return True
 
     def _set_default_args_v0(
