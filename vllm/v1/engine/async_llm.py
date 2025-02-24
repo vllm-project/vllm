@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
+from typing import AsyncGenerator, List, Mapping, Optional, Set, Type, Union
 
 import numpy as np
 
@@ -392,9 +392,21 @@ class AsyncLLM(EngineClient):
     async def wake_up(self) -> None:
         await self.engine_core.wake_up_async()
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
-        await self.engine_core.add_lora_async(lora_request)
+        return await self.engine_core.add_lora_async(lora_request)
+
+    async def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter."""
+        return await self.engine_core.remove_lora_async(lora_id)
+
+    async def list_loras(self) -> Set[int]:
+        """List all registered adapters."""
+        return await self.engine_core.list_loras_async()
+
+    async def pin_lora(self, lora_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return await self.engine_core.pin_lora_async(lora_id)
 
     @property
     def is_running(self) -> bool:
