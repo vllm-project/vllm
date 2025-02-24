@@ -180,9 +180,6 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
 
-        if len(self.guided_decoding_manager.requests) > 0:
-            self.guided_decoding_manager.reset_bitmask()
-
         return engine_core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
