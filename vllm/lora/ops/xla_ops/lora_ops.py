@@ -10,8 +10,8 @@ def bgmv_expand(inputs: torch.Tensor,
                 add_inputs: bool = True):
     inputs = inputs.to(dtype=output_tensor.dtype)
 
-    batch_size = outputs.size(0)
     outputs = torch.ops.xla.bgmv(inputs, lora_b_weights, lora_indices_tensor)
+    batch_size = outputs.size(0)
 
     limit = output_tensor.shape[0]
     if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
@@ -49,8 +49,8 @@ def bgmv_expand_slice(inputs: torch.Tensor,
 
     inputs = inputs.to(dtype=output_tensor.dtype)
 
-    batch_size = outputs.size(0)
     outputs = torch.ops.xla.bgmv(inputs, lora_b_weights, lora_indices_tensor)
+    batch_size = outputs.size(0)
 
     outputs = torch.cat((
         torch.zeros((batch_size, slice_offset), device=outputs.device),
