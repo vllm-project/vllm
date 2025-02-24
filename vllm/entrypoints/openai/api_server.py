@@ -160,12 +160,15 @@ async def build_async_engine_client_from_engine_args(
     # Attempt to use V1 Engine for certain EngineConfigs.
     if engine_config.use_v1:
         if disable_frontend_multiprocessing:
-            raise NotImplementedError
+            logger.warning(
+                "V1 is enabled, but got --disable-frontend-multiprocessing. "
+                "To truly disable frontend multiprocessing, set VLLM_USE_V1=0."
+            )
 
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
         try:
-            # note: engine_args ignored when we pass engine_config
+            # NOTE: engine_args ignored when we pass engine_config
             async_llm = AsyncLLM.from_engine_args(engine_args=engine_args,
                                                   engine_config=engine_config,
                                                   usage_context=usage_context)
@@ -176,7 +179,7 @@ async def build_async_engine_client_from_engine_args(
 
     # AsyncLLMEngine.
     elif (MQLLMEngineClient.is_unsupported_config(engine_args)
-          or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
+          or disable_frontend_multiprocessing):
 
         engine_client: Optional[EngineClient] = None
         try:
