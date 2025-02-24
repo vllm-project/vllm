@@ -148,13 +148,6 @@ class EngineCore:
 
         if not self.scheduler.has_unfinished_requests():
             return EngineCoreOutputs(
-                request_ids=[],
-                new_token_id_offsets=None,
-                new_token_ids=[],
-                new_logprobs={},
-                new_prompt_logprobs_tensors={},
-                finish_reason={},
-                events=None,
                 scheduler_stats=self.scheduler.make_stats())
 
         scheduler_output = self.scheduler.schedule()
@@ -207,7 +200,7 @@ class EngineCore:
                 # If the queue is empty (timeout at .get), return
                 # an empty EngineCoreOutputs for logging.
                 engine_core_outputs = EngineCoreOutputs(
-                    outputs=[], scheduler_stats=self.scheduler.make_stats())
+                    scheduler_stats=self.scheduler.make_stats())
 
         return engine_core_outputs
 
@@ -294,7 +287,7 @@ class EngineCoreProc(EngineCore):
 
         finally:
             if engine_core is not None:
-                engine_core.scheduler.profiler.print_stats('cumulative')
+                engine_core.scheduler.print_stats()
                 engine_core.shutdown()
 
     def run_busy_loop(self):

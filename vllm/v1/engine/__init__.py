@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import msgspec
 import torch
+import numpy as np
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
@@ -126,21 +127,20 @@ class EngineCoreOutputs(
         gc=False):  # type: ignore[call-arg]
 
     # [num_reqs]
-    request_ids: List[str]
-    new_token_id_offsets: Optional[List[int]]
-    new_token_ids: List[int]
-    #new_token_id_offsets: List[int] #Optional[List[int]]
-    #new_token_ids: torch.Tensor #List[int]
+    request_ids: List[str] = []
+    req_id_to_index : Dict[str, int] = {}
+    new_token_id_counts: Optional[np.ndarray] = None
+    new_token_ids: np.ndarray = np.empty(0, dtype=int) # List[int]
 
     # req_id -> LogprobsLists
-    new_logprobs: Dict[str, LogprobsLists]
+    new_logprobs: Dict[str, LogprobsLists] = {}
 
     # req_id -> LogprobsTensors
-    new_prompt_logprobs_tensors: Dict[str, LogprobsTensors]
+    new_prompt_logprobs_tensors: Dict[str, LogprobsTensors] = {}
 
-    finish_reason: Dict[str, Tuple[FinishReason, Union[int, str, None]]]
-    events: Optional[List[Optional[List[EngineCoreEvent]]]]
-    scheduler_stats: Optional[SchedulerStats]
+    finish_reason: Dict[str, Tuple[FinishReason, Union[int, str, None]]] = {}
+    events: Optional[List[Optional[List[EngineCoreEvent]]]] = None
+    scheduler_stats: Optional[SchedulerStats] = None
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None

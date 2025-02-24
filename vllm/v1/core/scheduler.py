@@ -477,7 +477,7 @@ class Scheduler:
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
-    def update_from_output(
+    def _update_from_output(
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
@@ -487,7 +487,7 @@ class Scheduler:
         self.profiler.disable()
         return res
 
-    def _update_from_output(
+    def update_from_output(
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
@@ -499,21 +499,11 @@ class Scheduler:
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         new_running: List[Request] = []
-        output = EngineCoreOutputs(
-            request_ids=[],
-            new_token_id_offsets=None,
-            new_token_ids=[],
-            new_logprobs={},
-            new_prompt_logprobs_tensors={},
-            finish_reason={},
-            events=None,
-            scheduler_stats=SchedulerStats(),
-        )
+        output = EngineCoreOutputs()
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
-        offset = 0
         for i, request in enumerate(self.running):
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
@@ -521,6 +511,8 @@ class Scheduler:
                 # The request was not scheduled in this step.
                 new_running.append(request)
                 continue
+
+            #print(f"r2i = {model_runner_output.req_id_to_index}")
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
@@ -575,7 +567,7 @@ class Scheduler:
 
             stopped = False
             new_logprobs = None
-            new_token_ids: List[int] = []
+            new_token_ids = np.empty(0, dtype=int)
             num_new_tokens = 0
 
             if request.num_computed_tokens >= request.num_tokens:
@@ -585,7 +577,6 @@ class Scheduler:
                     output_token_id = int(output_token_id)
                     #print(f"{output_token_id}, {type(output_token_id)}")
                     request.append_output_token_ids(output_token_id)
-                    new_token_ids.append(output_token_id)
                     num_new_tokens = num_new_tokens + 1
 
                     # Check for stop and update request state.
@@ -608,12 +599,10 @@ class Scheduler:
                 output.request_ids.append(req_id)
 
                 if (num_new_tokens > 1 or
-                    output.new_token_id_offsets is not None):
-                    if output.new_token_id_offsets is None:
-                        output.new_token_id_offsets = [1] * i
-                    output.new_token_id_offsets.append(offset)
-
-                output.new_token_ids += new_token_ids
+                    output.new_token_id_counts is not None):
+                    if output.new_token_id_counts is None:
+                        output.new_token_id_counts = [1] * i
+                    output.new_token_id_counts.append(num_new_tokens)
 
                 if new_logprobs is not None:
                     output.new_logprobs[req_id] = new_logprobs
@@ -628,16 +617,14 @@ class Scheduler:
                         output.events = [None] * i
                     output.events.append(events)
 
-                offset = offset + num_new_tokens
-
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
                 new_running.append(request)
 
-        # Add sentinel to make output processing simpler.
-        total_new_tokens = len(output.new_token_ids)
-        if total_new_tokens > 0 and output.new_token_id_offsets is not None:
-            output.new_token_id_offsets.append(total_new_tokens)
+        output.req_id_to_index = model_runner_output.req_id_to_index
+        output.new_token_ids = sampled_token_ids
+
+        #print(f"NEW TOK IDS {output.new_token_ids}")
 
         self.running = new_running
         output.new_prompt_logprobs_tensors = prompt_logprobs_dict
@@ -698,7 +685,9 @@ class Scheduler:
             request.status = finished_status
             self._free_request(request)
 
+    def print_stats(self):
         #self.profiler.print_stats('cumulative')
+        pass
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()

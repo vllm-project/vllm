@@ -153,7 +153,8 @@ class OutputProcessor:
 
         request_outputs: List[RequestOutput] = []
         reqs_to_abort: List[str] = []
-        new_token_id_offsets = engine_core_outputs.new_token_id_offsets
+        req_id_to_index = engine_core_outputs.req_id_to_index
+        new_token_id_counts = engine_core_outputs.new_token_id_counts
 
         for i, req_id in enumerate(
                 engine_core_outputs.request_ids[first:last]):
@@ -163,12 +164,12 @@ class OutputProcessor:
                 # Ignore output for already-aborted request.
                 continue
 
-            if new_token_id_offsets is not None:
-                start = new_token_id_offsets[req_idx]
-                end = new_token_id_offsets[req_idx + 1]
+            start = req_id_to_index[req_id]
+
+            if new_token_id_counts is not None:
+                end = start + new_token_id_counts[req_idx]
             else:
-                start = req_idx
-                end = req_idx + 1
+                end = start + 1
 
             num_tokens = end - start
             events = engine_core_outputs.events[
