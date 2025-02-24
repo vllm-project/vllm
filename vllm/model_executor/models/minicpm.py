@@ -105,7 +105,7 @@ class MiniCPMMoE(nn.Module):
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
-                        device=current_platform.device,
+                        device=current_platform.device_type,
                         dtype=self.params_dtype))
 
         set_weight_attrs(self.ws, {
