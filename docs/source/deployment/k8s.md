@@ -2,7 +2,10 @@
 
 # Using Kubernetes
 
-Using Kubernetes to deploy vLLM is a scalable and efficient way to serve machine learning models. This guide will walk you through the process of deploying vLLM with Kubernetes, including the necessary prerequisites, steps for deployment, and testing.
+Using Kubernetes to deploy vLLM is a scalable and efficient way to serve machine learning models. 
+Though it is doable to deploy vLLM using native Kubernetes, [`vllm-project/production-stack`](https://github.com/vllm-project/production-stack) allows you to serve LLM models on multi-node Kubernetes cluster, while including a wide range of usability, observability and performance-related features.
+This guide will walk you through the process of deploying vLLM with Kubernetes, including the necessary prerequisites, steps for deployment, and testing.
+
 
 ## Prerequisites
 
@@ -17,7 +20,7 @@ If you just start using Kubernetes, don't worry: we provide step-by-step [guide]
 
 ## Deployment using helm chart
 
-Helm chart hides Kubernetes complications from you so that yoiu can focus on configurations that really matters for your vLLM cluster. This [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) helps you install helm chart.
+Helm chart hides Kubernetes complications from you so that yoiu can focus on configurations that really matters for your vLLM cluster. This [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) helps you install helm.
 
 Here is an minimal helm chart example:
 ```
