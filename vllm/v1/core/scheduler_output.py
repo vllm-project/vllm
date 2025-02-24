@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.base import PlaceholderRange
     from vllm.sampling_params import SamplingParams
-    from vllm.v1.guided_decoding import Grammar
     from vllm.v1.request import Request
 
 
@@ -27,7 +26,6 @@ class NewRequestData:
     block_ids: List[int]
     num_computed_tokens: int
     lora_request: Optional["LoRARequest"]
-    grammar: Optional["Grammar"]
 
     @classmethod
     def from_request(
@@ -46,7 +44,6 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
-            grammar=request.grammar,
         )
 
 
