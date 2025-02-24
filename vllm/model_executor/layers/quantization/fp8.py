@@ -415,6 +415,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
+        self.num_experts = num_experts
 
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -573,11 +574,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Re-initialize w13_scale because we directly quantize
             # merged w13 weights and generate a single scaling factor.
             layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
-                layer.num_experts,
+                self.num_experts,
                 dtype=torch.float32,
                 device=w13_weight.device),
                                                         requires_grad=False)
-            for expert in range(layer.num_experts):
+            for expert in range(self.num_experts):
                 w13_weight[expert, :, :], layer.w13_weight_scale[
                     expert] = ops.scaled_fp8_quant(
                         layer.w13_weight.data[expert, :, :])
@@ -644,7 +645,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.num_experts):
+            for expert_id in range(self.num_experts):
                 start = 0
                 for shard_id in range(2):
                     dq_weight = per_tensor_dequantize(
