@@ -533,7 +533,7 @@ class MLACommonMetadata(AttentionMetadata):
                 not in supported_head_sizes:
             raise ValueError(
                 f"Only {supported_head_sizes} are supported for head_dim,",
-                f"received {self.head_dim}.")
+                f" received {self.head_dim}.")
 
     @property
     def prefill_metadata(self) -> Optional["MLACommonMetadata"]:

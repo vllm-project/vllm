@@ -513,7 +513,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
             raise ValueError(
                 "cupy is not installed but required since "
-                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set."
+                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set. "
                 "Run `pip install ray[adag]` and check cupy installation.")
 
     def _compiled_ray_dag(self, enable_asyncio: bool):

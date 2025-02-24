@@ -16,7 +16,7 @@ try:
             ROCmFlashAttentionMetadata as FlashAttentionMetadata)
 except (ModuleNotFoundError, ImportError) as err:
     raise RuntimeError(
-        "Draft model speculative decoding currently only supports"
+        "Draft model speculative decoding currently only supports "
         "CUDA and ROCm flash attention backend.") from err
 
 from vllm.logger import init_logger
