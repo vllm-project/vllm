@@ -1610,6 +1610,16 @@ class EngineArgs:
             if speculative_config is None \
             else speculative_config.num_lookahead_slots
 
+        if not self.use_v2_block_manager:
+            logger.warning(
+                "[DEPRECATED] Block manager v1 has been removed, "
+                "and setting --use-v2-block-manager to True or False has "
+                "no effect on vLLM behavior. Please remove "
+                "--use-v2-block-manager in your engine argument. "
+                "If your use case is not supported by "
+                "SelfAttnBlockSpaceManager (i.e. block manager v2),"
+                " please file an issue with detailed information.")
+
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
