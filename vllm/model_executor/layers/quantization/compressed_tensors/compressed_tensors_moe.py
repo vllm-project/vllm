@@ -527,7 +527,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         replace_tensor("w13_weight_scale", marlin_w13_scales)
         marlin_w2_scales = marlin_moe_permute_scales(
             layer.w2_weight_scale,
-            layer.w2_weight_scale.shape[1] * self.packed_factor,
+            layer.w2_weight_scale.shape[1] *
+            (self.group_size if self.group_size != -1 else self.packed_factor),
             size_k2,
             self.group_size,
             self.num_bits,
