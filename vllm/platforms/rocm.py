@@ -119,7 +119,7 @@ class RocmPlatform(Platform):
             return "vllm.attention.backends.triton_mla.TritonMLABackend"
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
-        if envs.VLLM_USE_V1:
+        if use_v1:
             logger.info("Using ROCm Attention backend on V1 engine.")
             return "vllm.v1.attention.backends.rocm_attn.ROCmAttentionBackend"
         if selected_backend == _Backend.ROCM_FLASH:
@@ -170,7 +170,7 @@ class RocmPlatform(Platform):
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
+                if vllm_config.use_v1:
                     raise NotImplementedError(
                         "Multi-step scheduling is not supported (and not "
                         "needed) on VLLM V1. Please launch without "
@@ -179,7 +179,7 @@ class RocmPlatform(Platform):
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
-                if envs.VLLM_USE_V1:
+                if vllm_config.use_v1:
                     raise NotImplementedError(
                         "Speculative decoding is not yet supported on VLLM V1."
                     )
@@ -189,7 +189,7 @@ class RocmPlatform(Platform):
                     parallel_config.sd_worker_cls = \
                         "vllm.worker.worker.Worker"
             else:
-                if envs.VLLM_USE_V1:
+                if vllm_config.use_v1:
                     parallel_config.worker_cls = \
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:

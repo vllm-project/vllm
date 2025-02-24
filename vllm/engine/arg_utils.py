@@ -1173,6 +1173,7 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            use_v1=use_v1,
         )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
