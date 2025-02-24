@@ -57,7 +57,6 @@ class Gemma2MLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        hidden_act: str,
         hidden_activation: str,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
@@ -70,7 +69,7 @@ class Gemma2MLP(nn.Module):
                                            hidden_size,
                                            bias=False,
                                            quant_config=quant_config)
-        if not (hidden_act == hidden_activation == "gelu_pytorch_tanh"):
+        if not (hidden_activation == "gelu_pytorch_tanh"):
             raise ValueError(
                 "Gemma2 uses `gelu_pytorch_tanh` as the hidden activation "
                 "function. Please set `hidden_act` and `hidden_activation` to "
@@ -203,7 +202,6 @@ class Gemma2DecoderLayer(nn.Module):
         self.mlp = Gemma2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
             hidden_activation=config.hidden_activation,
             quant_config=quant_config,
         )
@@ -259,6 +257,7 @@ class Gemma2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -330,6 +329,11 @@ class Gemma2Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+            if self.quant_config and self.quant_config.get_name() == "gguf" \
+                and name.endswith("norm.weight"):
+                # Revert +1 during llama.cpp conversion
+                # see: https://github.com/ggerganov/llama.cpp/blob/2e2f8f093cd4fb6bbb87ba84f6b9684fa082f3fa/convert_hf_to_gguf.py#L3313-L3315
+                loaded_weight -= 1
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache scales for compressed-tensors quantization
