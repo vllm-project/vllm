@@ -1440,26 +1440,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         "merged_linear": ["gate_proj", "up_proj"]  # image_projector
     }
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # language model
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",  # same name with image_projector
-        # vision tower
-        "wq",
-        "wk",
-        "wv",
-        "wo",
-        "w1",
-        "w2",
-        # image_projector
-        "merged_linear",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
