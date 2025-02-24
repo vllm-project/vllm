@@ -40,6 +40,7 @@ def tpu_platform_plugin() -> Optional[str]:
         import libtpu  # noqa: F401
         is_tpu = True
     except Exception:
+        logger.debug("Failed to import libtpu. tpu platform is skipped.")
         pass
 
     return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None
@@ -65,6 +66,8 @@ def cuda_platform_plugin() -> Optional[str]:
     except Exception as e:
         if "nvml" not in e.__class__.__name__.lower():
             # If the error is not related to NVML, re-raise it.
+            logger.debug("Unexpected error when importing pynvml, "
+                         "gpu platform is skipped.")
             raise e
 
         # CUDA is supported on Jetson, but NVML may not be.
@@ -76,6 +79,8 @@ def cuda_platform_plugin() -> Optional[str]:
 
         if cuda_is_jetson():
             is_cuda = True
+        else:
+            logger.debug("Failed to import pynvml, cuda platform is skipped.")
 
     return "vllm.platforms.cuda.CudaPlatform" if is_cuda else None
 
@@ -92,7 +97,7 @@ def rocm_platform_plugin() -> Optional[str]:
         finally:
             amdsmi.amdsmi_shut_down()
     except Exception:
-        pass
+        logger.debug("Failed to import amdsmi. rocm platform is skipped.")
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
@@ -103,7 +108,8 @@ def hpu_platform_plugin() -> Optional[str]:
         from importlib import util
         is_hpu = util.find_spec('habana_frameworks') is not None
     except Exception:
-        pass
+        logger.debug(
+            "Failed to import habana_frameworks. hpu platform is skipped.")
 
     return "vllm.platforms.hpu.HpuPlatform" if is_hpu else None
 
@@ -119,7 +125,8 @@ def xpu_platform_plugin() -> Optional[str]:
         if hasattr(torch, 'xpu') and torch.xpu.is_available():
             is_xpu = True
     except Exception:
-        pass
+        logger.debug("Failed to import intel_extension_for_pytorch or "
+                     "oneccl_bindings_for_pytorch. xpu platform is skipped.")
 
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
@@ -144,7 +151,9 @@ def neuron_platform_plugin() -> Optional[str]:
         import transformers_neuronx  # noqa: F401
         is_neuron = True
     except ImportError:
-        pass
+        logger.debug(
+            "Failed to import transformers_neuronx. neuron platform is skipped."
+        )
 
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
@@ -182,7 +191,7 @@ def resolve_current_platform_cls_qualname() -> str:
             if platform_cls_qualname is not None:
                 activated_plugins.append(name)
         except Exception:
-            pass
+            logger.debug("Failed to resolve platform %s.", name, exc_info=True)
 
     activated_builtin_plugins = list(
         set(activated_plugins) & set(builtin_platform_plugins.keys()))
@@ -209,7 +218,8 @@ def resolve_current_platform_cls_qualname() -> str:
     else:
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
         logger.info(
-            "No platform detected, vLLM is running on UnspecifiedPlatform")
+            "No platform detected, vLLM is running on UnspecifiedPlatform. "
+            "Enable debug logging to get more details.")
     return platform_cls_qualname
 
 
