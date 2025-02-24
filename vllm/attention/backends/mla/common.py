@@ -1130,13 +1130,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 )
 
         def get_layer_weight(layer):
-            if hasattr(layer, "weight"):
-                return layer.weight
-            elif hasattr(layer, "qweight"):
-                return layer.qweight
-            else:
-                raise AttributeError(
-                    f"Layer '{layer}' has neither weight nor qweight")
+            weight_names = ("weight", "qweight", "weight_packed", "compressed")
+            for weight_name in weight_names:
+                if hasattr(layer, weight_name):
+                    return getattr(layer, weight_name)
+
+            raise AttributeError(
+                f"Layer '{layer}' is missing any of {weight_names} weight names"
+            )
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
