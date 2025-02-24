@@ -62,7 +62,6 @@ from vllm.utils import (Counter, Device, deprecate_kwargs,
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
-_LOCAL_LOGGING_INTERVAL_SEC = 5
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
@@ -374,12 +373,13 @@ class LLMEngine:
 
                 self.stat_loggers = {
                     "logging":
-                    LoggingStatLogger(
-                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                        vllm_config=vllm_config),
+                    LoggingStatLogger(local_interval=self.vllm_config.
+                                      observability_config.log_stats_interval,
+                                      vllm_config=vllm_config),
                     "prometheus":
                     PrometheusStatLogger(
-                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                        local_interval=self.vllm_config.observability_config.
+                        log_stats_interval,
                         labels=dict(
                             model_name=self.model_config.served_model_name),
                         vllm_config=vllm_config),
