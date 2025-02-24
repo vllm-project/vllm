@@ -303,18 +303,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             )
             outputs.append(output)
 
-            if self.return_hidden_states:
-                assert model_input.sampling_metadata is not None
-                indices = model_input.sampling_metadata.selected_token_indices
-                if model_input.is_prompt:
-                    save_hidden_states = hidden_states.index_select(0, indices)
-                    output.prefill_hidden_states = hidden_states
-                elif use_cuda_graph:
-                    save_hidden_states = hidden_states[:len(indices)]
-                else:
-                    save_hidden_states = hidden_states
-
-                output.hidden_states = save_hidden_states
+            if self.return_hidden_states and is_fallback:
+                output.hidden_states = hidden_states
 
             if model_input.attn_metadata.num_prefills == 0 \
                 and self.indices_of_seq_with_bonus_tokens is not None:
