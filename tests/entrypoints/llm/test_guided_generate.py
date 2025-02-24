@@ -345,8 +345,8 @@ def test_json_with_any_whitespace_disabled(llm):
         kitchen_ids: str
         holiday_ids: str
         
-    # Note: Without this setting the response will be full of `\n`
-    # for this model
+    # Note: Without this setting, the response is sometimes full of `\n`
+    # for some models. This option prevents that.
     guided_decoding_backend='xgrammar:disable-any-whitespace'
     
     schema = ResponseSchema.model_json_schema()
