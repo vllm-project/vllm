@@ -1197,7 +1197,7 @@ class AsyncLLMEngine(EngineClient):
         self.engine.add_lora(lora_request)
 
 
-# NOTE: we need this for users who use AsyncLLMEngine directly.
+# TODO(v1): Remove this class proxy when V1 goes default.
 if envs.VLLM_USE_V1:
     from vllm.v1.engine.async_llm import AsyncLLM
 
