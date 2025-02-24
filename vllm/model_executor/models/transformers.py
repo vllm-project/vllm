@@ -161,9 +161,9 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
         video_token = getattr(processor, "video_token", None)
 
         # TODO: raushan, we can have processor attr for `processor.max_output_size` which will infer
-        # max features for model in HF side. IMO should be all done on processor side, not on model config
-        vision_config = self.info.get_hf_config().vision_config
-        target_width = target_height = vision_config.image_size
+        # max features for model in HF side. But imo we can just set a veru high resolution
+        # and the processor will return us pixels with correct max shape. Resolution 3kx3k is high enough
+        target_width = target_height = 3000
 
         # NOTE: we can pass videos/images/audio to any processor With the new API used in MLLMs,
         # HF processor will take the modality needed for model and ignore all others
@@ -352,9 +352,6 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsMultiModal):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 self.vocab_size, logit_scale)
         self.sampler = get_sampler()
-
-        MultiModalRegistry()._get_plugin("image").register_max_multimodal_tokens(576)
-        InputRegistry()._dummy_factories_by_model_type[model_cls] = factory
 
     def apply_base_model_tp_plan(self, module: nn.Module, prefix: str = ""):
         """
