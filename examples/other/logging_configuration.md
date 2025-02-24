@@ -49,7 +49,7 @@ disabled, an error will occur while starting vLLM.
 ### Example 1: Customize vLLM root logger
 
 For this example, we will customize the vLLM root logger to use
-[`python-json-logger`](https://github.com/madzak/python-json-logger) to log to
+[`python-json-logger`](https://github.com/nhairs/python-json-logger) to log to
 STDOUT of the console in JSON format with a log level of `INFO`.
 
 To begin, first, create an appropriate JSON logging configuration file:
@@ -65,7 +65,7 @@ To begin, first, create an appropriate JSON logging configuration file:
   },
   "handlers": {
     "console": {
-      "class" : "logging.StreamHandler",
+      "class": "logging.StreamHandler",
       "formatter": "json",
       "level": "INFO",
       "stream": "ext://sys.stdout"
@@ -122,7 +122,7 @@ configuration for the root vLLM logger and for the logger you wish to silence:
   },
   "handlers": {
     "vllm": {
-      "class" : "logging.StreamHandler",
+      "class": "logging.StreamHandler",
       "formatter": "vllm",
       "level": "INFO",
       "stream": "ext://sys.stdout"
