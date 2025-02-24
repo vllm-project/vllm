@@ -4,14 +4,13 @@ import itertools
 import warnings
 from contextlib import contextmanager
 from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
-                    Tuple, Type, Union, cast, overload)
+                    Tuple, Union, cast, overload)
 
 import cloudpickle
 import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 
-from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.config import CompilationConfig
@@ -237,21 +236,23 @@ class LLM:
             compilation_config=compilation_config_instance,
             **kwargs,
         )
-        # Logic to switch between engines is done at runtime instead of import
-        # to avoid import order issues
-        self.engine_class = self.get_engine_class()
+
+        # Create the Engine
+        engine_config = engine_args.create_engine_config(
+            UsageContext.LLM_CLASS)
+        if engine_config.use_v1:
+            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+            self.engine_class = V1LLMEngine
+        else:
+            self.engine_class = LLMEngine
+
         self.llm_engine = self.engine_class.from_engine_args(
-            engine_args, usage_context=UsageContext.LLM_CLASS)
+            # NOTE: engine_args are ignored if we pass engine_config.
+            engine_args=engine_args,
+            engine_config=engine_config,
+            usage_context=UsageContext.LLM_CLASS)
 
         self.request_counter = Counter()
-
-    @staticmethod
-    def get_engine_class() -> Type[LLMEngine]:
-        if envs.VLLM_USE_V1:
-            # Lazy import: the v1 package isn't distributed
-            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-            return V1LLMEngine  # type: ignore
-        return LLMEngine
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
