@@ -7,6 +7,7 @@ import pytest
 import ray
 from prometheus_client import REGISTRY
 
+import vllm.envs as envs
 from vllm import EngineArgs, LLMEngine
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -141,8 +142,10 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
         stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metrics_tag_content = stat_logger.labels["model_name"]
 
+    if envs.VLLM_CI_USE_S3:
+        model = f"{MODEL_WEIGHTS_S3_BUCKET}/{model}"
     if served_model_name is None or served_model_name == []:
-        assert metrics_tag_content == f"{MODEL_WEIGHTS_S3_BUCKET}/{model}", (
+        assert metrics_tag_content == model, (
             f"Metrics tag model_name is wrong! expect: {model!r}\n"
             f"actual: {metrics_tag_content!r}")
     else:
@@ -215,8 +218,9 @@ def test_engine_log_metrics_regression(
     while engine.has_unfinished_requests():
         engine.step()
 
-    assert_metrics(f"{MODEL_WEIGHTS_S3_BUCKET}/{model}", engine,
-                   disable_log_stats, len(example_prompts))
+    if envs.VLLM_CI_USE_S3:
+        model = f"{MODEL_WEIGHTS_S3_BUCKET}/{model}"
+    assert_metrics(model, engine, disable_log_stats, len(example_prompts))
 
 
 @pytest.mark.parametrize("model", MODELS)
