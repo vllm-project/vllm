@@ -3385,7 +3385,7 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_reshape = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
 
-        self._set_cudagraph_sizes(self.use_v1)
+        self._set_cudagraph_sizes()
 
         if self.cache_config is not None and \
             self.cache_config.cpu_offload_gb > 0 and \
@@ -3406,7 +3406,7 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-    def _set_cudagraph_sizes(self, use_v1: bool):
+    def _set_cudagraph_sizes(self):
         """
         cudagraph batchsize padding logic:
 
@@ -3435,7 +3435,7 @@ class VllmConfig:
         """
 
         # calculate the default `batch_size_capture_list`
-        if not use_v1:
+        if not self.use_v1:
             batch_size_capture_list = []
             max_batchsize_to_capture = 0
             if self.scheduler_config is not None and \
