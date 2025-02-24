@@ -83,13 +83,15 @@ ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
 class Idefics3ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(
-            self,
-            *,
-            size: Optional[Dict[str, int]] = None) -> Idefics3Processor:
+        self,
+        *,
+        size: Optional[Dict[str, int]] = None,
+        **kwargs: object,
+    ) -> Idefics3Processor:
         if size is not None:
-            return self.ctx.get_hf_processor(Idefics3Processor, size=size)
+            kwargs["size"] = size
 
-        return self.ctx.get_hf_processor(Idefics3Processor)
+        return self.ctx.get_hf_processor(Idefics3Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -595,21 +597,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision_model
-        "fc1",
-        "fc2",
-        "out_proj",
-        # text_model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

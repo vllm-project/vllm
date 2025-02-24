@@ -10,7 +10,7 @@ from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import ProcessingCache
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import HF_EXAMPLE_MODELS
@@ -42,10 +42,7 @@ def _test_processing_correctness(
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
     ctx = InputProcessingContext(
         model_config,
-        tokenizer=cached_get_tokenizer(
-            model_config.tokenizer,
-            trust_remote_code=model_info.trust_remote_code,
-        ),
+        tokenizer=cached_tokenizer_from_config(model_config),
     )
     # Ensure that it can fit all of the data
     cache = ProcessingCache(capacity=1 << 30)
@@ -86,11 +83,11 @@ def _test_processing_correctness(
     }
 
     tokenizer_encode_kwargs = {}
-    if model_config.hf_config.model_type == "mllama":
-        # For Mllama, tokenizer will always add bos_token at the beginning of
-        # prompt by default, causing hf_processor outputs incorrect token ids.
-        # So we need use `add_special_tokens=False` here to leave bos_token
-        # to be added by the processor.
+    if model_config.hf_config.model_type in ("mllama", "whisper"):
+        # For some encoder-decoder models, tokenizer will always add bos_token
+        # at the beginning of prompt by default, causing hf_processor outputs
+        # incorrect token ids. So we need use `add_special_tokens=False` here
+        # to leave bos_token to be added by the processor.
         tokenizer_encode_kwargs = {"add_special_tokens": False}
 
     for batch_idx in range(num_batches):
@@ -176,6 +173,7 @@ def _test_processing_correctness(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
+    "openai/whisper-large-v3",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])

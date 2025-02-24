@@ -119,7 +119,7 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
         return get_vision_encoder_info(self.get_hf_config())
 
     @abstractmethod
-    def get_hf_processor(self) -> LlavaLikeProcessor:
+    def get_hf_processor(self, **kwargs: object) -> LlavaLikeProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -208,8 +208,8 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(LlavaProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
 
 
 class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
@@ -272,8 +272,8 @@ class LlavaMultiModalProcessor(
 
 class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(PixtralProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
 
 class PixtralHFMultiModalProcessor(
@@ -428,7 +428,7 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
 
 
 def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
-    """Given an signed vision feature layer, get the number of hidden layers
+    """Given a signed vision feature layer, get the number of hidden layers
     needed to leverage it.
 
     Args:
@@ -438,7 +438,7 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     """
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
-    return feature_layer_index + 1
+    return feature_layer_index
 
 
 def init_vision_tower_for_llava(
@@ -742,23 +742,24 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
 class MantisProcessingInfo(LlavaProcessingInfo):
 
-    def get_hf_processor(self):
+    def get_hf_processor(self, **kwargs: object):
         hf_config = self.get_hf_config()
         vision_info = self.get_vision_encoder_info()
+
+        kwargs.setdefault("patch_size", vision_info.get_patch_size())
 
         if Version(TRANSFORMERS_VERSION) < Version("4.48"):
             # BUG: num_additional_image_tokens = 0 but treated as 1,
             # so we set vision_feature_select_strategy to None to offset this
-            vision_feature_select_strategy = None
+            kwargs.setdefault("vision_feature_select_strategy", None)
         else:
             # FIXED: https://github.com/huggingface/transformers/pull/33424/files#diff-6a37acc21efcadaae622b079b2712a131131448ff64262bd219aa346aeec38faL150
-            vision_feature_select_strategy = hf_config.vision_feature_select_strategy  # noqa: E501
+            kwargs.setdefault(
+                "vision_feature_select_strategy",
+                hf_config.vision_feature_select_strategy,
+            )
 
-        return self.ctx.get_hf_processor(
-            LlavaProcessor,
-            patch_size=vision_info.get_patch_size(),
-            vision_feature_select_strategy=vision_feature_select_strategy,
-        )
+        return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
 
 
 class MantisMultiModalProcessor(LlavaMultiModalProcessor):
