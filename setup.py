@@ -95,7 +95,8 @@ def get_neuronxcc_version():
 
 
 neuron_ver = os.getenv("NEURON_VERSION", None)
-neuronxcc_version = get_neuronxcc_version() if neuron_ver is None else neuron_ver
+neuronxcc_version = get_neuronxcc_version() if neuron_ver is None \
+    else neuron_ver
 
 
 def get_path(*filepath) -> str:

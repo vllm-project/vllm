@@ -59,7 +59,8 @@ ignore = [
     "UP032",
     # Python 3.8 typing
     "UP006", "UP035",
-
+    # This doesn't get flagged in vllm-project/vllm
+    "E721"
 ]
 
 [tool.mypy]
