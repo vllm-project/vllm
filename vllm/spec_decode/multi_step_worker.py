@@ -96,9 +96,9 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             # TODO: Remove this branch once DraftModelRunner supports TP>1
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
+            if expanded_request.previous_hidden_states is not None:
+                self.worker.model_runner.return_hidden_states = True
             for _ in range(sample_len):
-                if expanded_request.previous_hidden_states is not None:
-                    self.worker.model_runner.return_hidden_states = True
                 model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
                 assert (len(model_output) == 1
