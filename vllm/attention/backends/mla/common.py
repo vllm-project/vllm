@@ -357,7 +357,7 @@ class MLACommonState(AttentionState):
             self, batch_size: int, is_encoder_decoder_model: bool = False):
         assert self._is_graph_capturing
 
-        attn_metadata = self.runner.attn_backend.make_metadata(
+        attn_metadata = MLACommonMetadata(
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
             use_cuda_graph=True,
