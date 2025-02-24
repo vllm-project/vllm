@@ -85,7 +85,6 @@ class DecodeData:
 #TODO(kzawora): remove this
 @dataclass
 class PrefillInputData:
-
     request_ids: List
     prompt_lens: List
     token_ids: List
@@ -101,7 +100,6 @@ class PrefillInputData:
 #TODO(kzawora): remove this
 @dataclass
 class DecodeInputData:
-
     num_decodes: int
     token_ids: Optional[torch.Tensor] = None
     position_ids: Optional[torch.Tensor] = None
@@ -1040,7 +1038,7 @@ class HPUModelRunner:
         prefill_attn_metadata = []
         prefill_logits_indices = []
         block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
-        use_prefix_caching = self.cache_config.enable_prefix_caching
+        enable_prefix_caching = self.cache_config.enable_prefix_caching
 
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
@@ -1087,17 +1085,14 @@ class HPUModelRunner:
                 # Else, we'll break on first batch size that fits token budget.
                 if not self.padding_aware_scheduling or can_schedule:
                     break
-            context_lens = torch.zeros(padded_batch_size,
-                                       dtype=torch.int32,
-                                       device='cpu')
-            if use_prefix_caching:
-                self.input_batch.num_computed_tokens_cpu[batch_idx:batch_idx +
-                                                         num_prefills]
-            # TODO(kzawora): this is an ugly hack for prefix caching, remove
-            # that once batch padding works properly (idk why it doesn't)
-            if use_prefix_caching:
-                padded_batch_size = num_prefills
 
+            context_lens = self.input_batch.num_computed_tokens_cpu[batch_idx:batch_idx + num_prefills]
+            use_prefix_caching = enable_prefix_caching and any(context_lens)
+            if use_prefix_caching:
+                # TODO(kzawora): this is an ugly hack for prefix caching, remove
+                # that once batch padding works properly (idk why it doesn't)
+                padded_batch_size = num_prefills
+    
             padded_prompt_lens = [
                 padded_prompt_len for _ in range(padded_batch_size)
             ]
