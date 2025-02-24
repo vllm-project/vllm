@@ -92,7 +92,7 @@ class LLMEngine:
     def from_engine_args(
         cls,
         engine_args: EngineArgs,
-        vllm_config: Optional[VllmConfig],
+        vllm_config: Optional[VllmConfig] = None,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         enable_multiprocessing: bool = False,
