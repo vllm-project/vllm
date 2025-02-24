@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -95,18 +96,61 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder):
 
 class FlashMLAState(MLACommonState):
 
+    @contextmanager
+    def graph_capture(self, max_batch_size: int):
+        # Run a dummy `get_mla_metadata` so we can get the right shapes
+        self._graph_decoder_tile_scheduler_metadata, \
+            self._graph_decode_num_splits = get_mla_metadata(
+            torch.ones(
+                max_batch_size, dtype=torch.int32, device=self.runner.device),
+            self.runner.model_config.get_num_attention_heads(
+                self.runner.parallel_config),
+            1,
+        )
+
+        with super().graph_capture(max_batch_size):
+            yield
+
+        del self._graph_decoder_tile_scheduler_metadata
+        del self._graph_decode_num_splits
+
+    def graph_capture_get_metadata_for_batch(
+            self, batch_size: int, is_encoder_decoder_model: bool = False):
+        common_metadata = super().graph_capture_get_metadata_for_batch(
+            batch_size, is_encoder_decoder_model)
+        assert common_metadata.num_decode_tokens > 0
+
+        return FlashMLAMetadata(
+            # TODO: not on hotpath but can this be faster?
+            **asdict(common_metadata),
+            decode_tile_scheduler_metadata=\
+                self._graph_decoder_tile_scheduler_metadata,
+            decode_num_splits=self._graph_decode_num_splits[:batch_size + 1],
+        )
+
     def get_graph_input_buffers(self,
                                 attn_metadata,
                                 is_encoder_decoder_model: bool = False):
         input_buffers = super().get_graph_input_buffers(
             attn_metadata, is_encoder_decoder_model)
-        if attn_metadata.tile_scheduler_metadata is not None:
-            tile_scheduler_metadata = attn_metadata.tile_scheduler_metadata
-            num_splits = attn_metadata.num_splits
-            input_buffers["tile_scheduler_metadata"] = tile_scheduler_metadata
-            input_buffers["num_splits"] = num_splits
+        input_buffers["decode_tile_scheduler_metadata"] = \
+                attn_metadata.decode_metadata.decode_tile_scheduler_metadata
+        input_buffers["decode_num_splits"] = \
+                attn_metadata.decode_metadata.decode_num_splits
 
         return input_buffers
+
+    def prepare_graph_input_buffers(self,
+                                    input_buffers,
+                                    attn_metadata,
+                                    is_encoder_decoder_model: bool = False):
+        super().prepare_graph_input_buffers(input_buffers, attn_metadata,
+                                            is_encoder_decoder_model)
+        input_buffers["decode_tile_scheduler_metadata"].copy_(
+            attn_metadata.decode_metadata.decode_tile_scheduler_metadata,
+            non_blocking=True)
+        input_buffers["decode_num_splits"].copy_(
+            attn_metadata.decode_metadata.decode_num_splits, non_blocking=True)
 
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
