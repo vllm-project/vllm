@@ -1521,6 +1521,7 @@ class EngineArgs:
         self,
         usage_context: Optional[UsageContext] = None,
         disable_frontend_multiprocessing: bool = False,
+        use_v1_if_supported: bool = False,
     ) -> VllmConfig:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
@@ -1528,9 +1529,15 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        # Enable the V1 Engine by default if supported.
-        use_v1 = self._is_v1_supported_oracle(
-            model_config, disable_frontend_multiprocessing)
+        # Attempt to use the V1 Engine if prompted.
+        # NOTE: we need to be careful to opt-in, since the
+        # user is in control of whether they use V0's
+        # AsyncLLMEngine or V1's AsyncLLM, which is imported
+        # separately from this method. In fact, this method is
+        # usually called from AsyncLLMEngine.from_engine_args.
+        try_v1 = use_v1_if_supported or envs.VLLM_USE_V1
+        use_v1 = (try_v1 and self._is_v1_supported_oracle(
+            model_config, disable_frontend_multiprocessing))
 
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
