@@ -181,7 +181,7 @@ class Request:
     def _check_grammar_completion(self) -> bool:
         if isinstance(self._grammar, Future):
             try:
-                self._grammar = self._grammar.result(timeout=0.05)
+                self._grammar = self._grammar.result(timeout=0.0001)
                 self.status = RequestStatus.WAITING
             except TimeoutError:
                 return False
@@ -189,10 +189,7 @@ class Request:
 
     @property
     def is_grammar_ready(self) -> bool:
-        if isinstance(self._grammar, Future):
-            return not self._grammar.running() and self._grammar.done()
-        return (self.status == RequestStatus.WAITING
-                and self._grammar is not None)
+        return self._check_grammar_completion()
 
     @property
     def grammar(self) -> Optional[Grammar]:
