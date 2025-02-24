@@ -33,7 +33,11 @@ def _bgmv_kernel(bT: int, bL: int, idx_ref, inp_ref, lora_ref, out_ref, acc_ref,
 
 
 @jax.jit
-def _bgmv(inputs: jax.Array, loras: jax.Array, idxs: jax.Array):
+def _bgmv(
+    idxs: jax.Array,   # (T, )        int32
+    inputs: jax.Array, # (T, D)       model dtype
+    loras: jax.Array   # (N, 1, L, D) model dtype
+) -> jax.Array:        # (T, L)       model dtype
     T, D = inputs.shape
     N, _, L, _ = loras.shape
     
@@ -72,7 +76,7 @@ def _bgmv(inputs: jax.Array, loras: jax.Array, idxs: jax.Array):
                               dimension_semantics=("parallel", "parallel",
                                                    "arbitrary")))(idxs, inputs, loras)[:, :L]
 
-def bgmv_shape_function(inputs, loras, idxs):
+def bgmv_shape_function(idxs, inputs, loras):
     T, _ = inputs.shape
     _, _, L, _ = loras.shape
     
@@ -81,4 +85,4 @@ def bgmv_shape_function(inputs, loras, idxs):
 def bgmv(inputs, loras, idxs):
     kernel = make_kernel_from_pallas(_bgmv, bgmv_shape_function)
     
-    return kernel(inputs, loras, idxs)
+    return kernel(idxs, inputs, loras)
