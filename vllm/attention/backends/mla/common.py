@@ -292,7 +292,10 @@ class MLACommonBackend(AttentionBackend):
         return [576]
 
 
-class MLACommonState(AttentionState):
+T = TypeVar("T", bound="MLACommonMetadata")
+
+
+class MLACommonState(AttentionState, Generic[T]):
 
     def __init__(self, runner):
         self.runner = runner
@@ -354,10 +357,12 @@ class MLACommonState(AttentionState):
         return self.__class__(self.runner)
 
     def graph_capture_get_metadata_for_batch(
-            self, batch_size: int, is_encoder_decoder_model: bool = False):
+            self,
+            batch_size: int,
+            is_encoder_decoder_model: bool = False) -> T:
         assert self._is_graph_capturing
 
-        attn_metadata = MLACommonMetadata(
+        attn_metadata = self.runner.attn_backend.make_metadata(
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
             use_cuda_graph=True,
@@ -720,9 +725,6 @@ class MLACommonMetadata(AttentionMetadata):
                                    seq_lens=self.seq_lens_tensor,
                                    slot_mapping=self.slot_mapping,
                                    block_tables=self.block_tables)
-
-
-T = TypeVar("T", bound=MLACommonMetadata)
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
