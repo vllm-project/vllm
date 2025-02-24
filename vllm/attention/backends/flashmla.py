@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -15,6 +15,9 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
+
+if TYPE_CHECKING:
+    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 
 class FlashMLABackend(MLACommonBackend):
@@ -65,11 +68,24 @@ class FlashMLAMetadata(MLACommonMetadata):
         )
         return self._cached_decode_metadata
 
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
+        raise NotImplementedError(
+            "advance_step is not implemented for FlashMLA")
+
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self.num_q_heads = self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
@@ -81,9 +97,8 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder):
             decode_tile_scheduler_metadata, decode_num_splits = \
                 get_mla_metadata(
                 common_metadata.seq_lens_tensor[common_metadata.num_prefills:],
-                self.runner.model_config.get_num_attention_heads(
-                    self.runner.parallel_config),
-                1,
+                self.num_q_heads,
+                1, # MQA for the decode path
             )
 
         return FlashMLAMetadata(
@@ -94,7 +109,13 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder):
         )
 
 
-class FlashMLAState(MLACommonState):
+class FlashMLAState(MLACommonState[FlashMLAMetadata]):
+
+    def __init__(self, *args, **kwds):
+        super().__init__(*args, **kwds)
+
+        self.num_q_heads = self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config)
 
     @contextmanager
     def graph_capture(self, max_batch_size: int):
@@ -103,9 +124,8 @@ class FlashMLAState(MLACommonState):
             self._graph_decode_num_splits = get_mla_metadata(
             torch.ones(
                 max_batch_size, dtype=torch.int32, device=self.runner.device),
-            self.runner.model_config.get_num_attention_heads(
-                self.runner.parallel_config),
-            1,
+            self.num_q_heads,
+            1, # MQA for the decode path
         )
 
         with super().graph_capture(max_batch_size):
@@ -116,17 +136,27 @@ class FlashMLAState(MLACommonState):
 
     def graph_capture_get_metadata_for_batch(
             self, batch_size: int, is_encoder_decoder_model: bool = False):
-        common_metadata = super().graph_capture_get_metadata_for_batch(
+        metadata = super().graph_capture_get_metadata_for_batch(
             batch_size, is_encoder_decoder_model)
-        assert common_metadata.num_decode_tokens > 0
+        assert metadata.num_decode_tokens > 0
 
-        return FlashMLAMetadata(
-            # TODO: not on hotpath but can this be faster?
-            **asdict(common_metadata),
-            decode_tile_scheduler_metadata=\
-                self._graph_decoder_tile_scheduler_metadata,
-            decode_num_splits=self._graph_decode_num_splits[:batch_size + 1],
+        decoder_tile_scheduler_metadata, decode_num_splits = get_mla_metadata(
+            metadata.seq_lens_tensor,
+            self.num_q_heads,
+            1,  # MQA for the decode path
         )
+
+        self._graph_decoder_tile_scheduler_metadata.copy_(
+            decoder_tile_scheduler_metadata, non_blocking=True)
+        self._graph_decode_num_splits[:batch_size + 1].copy_(decode_num_splits,
+                                                             non_blocking=True)
+
+        metadata.decode_tile_scheduler_metadata=\
+            self._graph_decoder_tile_scheduler_metadata
+        metadata.decode_num_splits=\
+            self._graph_decode_num_splits[:batch_size + 1]
+
+        return metadata
 
     def get_graph_input_buffers(self,
                                 attn_metadata,
@@ -146,11 +176,11 @@ class FlashMLAState(MLACommonState):
                                     is_encoder_decoder_model: bool = False):
         super().prepare_graph_input_buffers(input_buffers, attn_metadata,
                                             is_encoder_decoder_model)
+
         input_buffers["decode_tile_scheduler_metadata"].copy_(
-            attn_metadata.decode_metadata.decode_tile_scheduler_metadata,
-            non_blocking=True)
+            attn_metadata.decode_metadata.decode_tile_scheduler_metadata)
         input_buffers["decode_num_splits"].copy_(
-            attn_metadata.decode_metadata.decode_num_splits, non_blocking=True)
+            attn_metadata.decode_metadata.decode_num_splits)
 
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
@@ -201,7 +231,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Triton MLA not yet supported")
+            raise NotImplementedError("FP8 FlashMLA not yet supported")
 
         decode_meta = attn_metadata.decode_metadata
         assert decode_meta is not None
