@@ -27,11 +27,14 @@ def load_block_tables(block_tables_hbm, num_tiles, num_blocks_per_tile):
     B_P_SIZE = 128
 
     # reshape as `(num_tiles, num_blocks_per_tile)`
-    assert len(block_tables_hbm.shape) == 1
-    (num_total_blocks, ) = block_tables_hbm.shape
-    assert num_blocks_per_tile * num_tiles == num_total_blocks
-    block_tables_hbm = block_tables_hbm.reshape(
-        (num_tiles, num_blocks_per_tile))
+    if len(block_tables_hbm.shape) == 1:
+        (num_total_blocks, ) = block_tables_hbm.shape
+        assert num_blocks_per_tile * num_tiles == num_total_blocks
+        block_tables_hbm = block_tables_hbm.reshape(
+            (num_tiles, num_blocks_per_tile))
+    else:
+        assert tuple(block_tables_hbm.shape) == (num_tiles,
+                                                 num_blocks_per_tile)
 
     block_tables_sbuf = nl.zeros(
         (ceil_div(num_tiles,
@@ -401,11 +404,11 @@ def _flash_attention_core(
 
 
 @nki.jit
-def load_v_tile(v_hbm_tile, cur_v_tile, large_tile_idx, v_i, LARGE_TILE_SZ):
+def load_v_tile(v_hbm_tile, cur_v_tile, v_i):
     B_P_SIZE = 128
     B_D_SIZE = v_hbm_tile.shape[-1]
     loaded = nl.load(v_hbm_tile[
-        nl.ds(large_tile_idx * LARGE_TILE_SZ + B_P_SIZE * v_i, B_P_SIZE),
+        nl.ds(B_P_SIZE * v_i, B_P_SIZE),
         :,
     ])
     if cur_v_tile.dtype != loaded.dtype:
@@ -687,9 +690,7 @@ def flash_paged_attention(
             load_v_tile(
                 v_hbm_tile=v_hbm_tile,
                 cur_v_tile=cur_v_tile,
-                large_tile_idx=0,
                 v_i=v_i,
-                LARGE_TILE_SZ=LARGE_TILE_SZ,
             )
 
         for i in nl.affine_range(n_tile_q):
