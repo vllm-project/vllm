@@ -106,7 +106,9 @@ class OutputProcessor:
         request_ids: List[str],
     ) -> None:
         for request_id in request_ids:
-            self.request_states.pop(request_id, None)
+            req_state = self.request_states.pop(request_id, None)
+            if req_state is not None:
+                self._abort_lora_request(req_state)
 
     def add_request(
         self,
@@ -117,11 +119,13 @@ class OutputProcessor:
         if request_id in self.request_states:
             raise ValueError(f"Request id {request_id} already running.")
 
-        self.request_states[request_id] = RequestState.from_new_request(
+        req_state = RequestState.from_new_request(
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
             queue=queue,
             log_stats=self.log_stats)
+        self.request_states[request_id] = req_state
+        self._add_lora_request(req_state)
 
     def process_outputs(
         self,
@@ -226,6 +230,13 @@ class OutputProcessor:
             reqs_to_abort=reqs_to_abort,
         )
 
+    def _get_lora_stats(self, req_state) -> Optional[LoRAStats]:
+        if req_state.lora_name is None:
+            return None
+        if req_state.lora_name not in self.lora_stats:
+            self.lora_stats[req_state.lora_name] = LoRAStats()
+        return self.lora_stats[req_state.lora_name]
+
     def _update_stats_from_output(self, req_state: RequestState,
                                   engine_core_output: EngineCoreOutput,
                                   engine_core_timestamp: Optional[float],
@@ -233,19 +244,14 @@ class OutputProcessor:
         if iteration_stats is None:
             return
 
-        lora_stats: Optional[LoRAStats] = None
-        if req_state.lora_name:
-            if req_state.lora_name not in self.lora_stats:
-                self.lora_stats[req_state.lora_name] = LoRAStats()
-            lora_stats = self.lora_stats[req_state.lora_name]
-
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
         iteration_stats.update_from_output(engine_core_output,
                                            engine_core_timestamp,
                                            req_state.is_prefilling,
                                            req_state.prompt_len,
-                                           req_state.stats, lora_stats)
+                                           req_state.stats,
+                                           self._get_lora_stats(req_state))
 
     def _update_stats_from_finished(self, req_state: RequestState,
                                     request_output: RequestOutput,
@@ -254,16 +260,22 @@ class OutputProcessor:
         if iteration_stats is None:
             return
 
-        lora_stats: Optional[LoRAStats] = None
-        if req_state.lora_name:
-            lora_stats = self.lora_stats[req_state.lora_name]
-
         assert finish_reason is not None
         assert req_state.stats is not None
-        iteration_stats.update_from_finished_request(finish_reason,
-                                                     request_output,
-                                                     req_state.stats,
-                                                     lora_stats)
+        iteration_stats.update_from_finished_request(
+            finish_reason, request_output, req_state.stats,
+            self._get_lora_stats(req_state))
+
+    def _add_lora_request(self, req_state: RequestState):
+        if (lora_stats := self._get_lora_stats(req_state)) is not None:
+            lora_stats.waiting_requests.add(req_state.request_id)
+
+    def _abort_lora_request(self, req_state: RequestState):
+        if req_state.lora_name is None:
+            return
+        lora_stats = self.lora_stats[req_state.lora_name]
+        lora_stats.waiting_requests.discard(req_state.request_id)
+        lora_stats.running_requests.discard(req_state.request_id)
 
     def _update_lora_iteration_stats(
             self, iteration_stats: Optional[IterationStats]):
