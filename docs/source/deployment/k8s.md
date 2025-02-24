@@ -12,7 +12,145 @@ Before you begin, ensure that you have the following:
 - NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
 - Available GPU resources in your cluster
 
-## Deployment Steps
+If you just start using Kubernetes, don't worry: we provide step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and [video](https://www.youtube.com/watch?v=EsTJbQtzj0g) in vLLM production stack [repo](https://github.com/vllm-project/production-stack) to help you get started!
+
+
+## Deployment using helm chart
+
+Helm chart hides Kubernetes complications from you so that yoiu can focus on configurations that really matters for your vLLM cluster. This [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) helps you install helm chart.
+
+Here is an minimal helm chart example:
+```
+servingEngineSpec:
+  runtimeClassName: ""
+  modelSpec:
+  - name: "opt125m"
+    repository: "vllm/vllm-openai"
+    tag: "latest"
+    modelURL: "facebook/opt-125m"
+
+    replicaCount: 1
+
+    requestCPU: 6
+    requestMemory: "16Gi"
+    requestGPU: 1
+
+    pvcStorage: "10Gi"
+```
+In this helm chart:
+- **`modelSpec`** includes:
+  - `name`: A nickname that you prefer to call the model.
+  - `repository`: Docker repository of vLLM.
+  - `tag`: Docker image tag.
+  - `modelURL`: the LLM model that you want to use.
+- **`replicaCount`**: Number of replicas.
+- **`requestCPU` and `requestMemory`**: Specifies the CPU and memory resource requests for the pod.
+- **`requestGPU`**: Specifies the number of GPUs required.
+- **`pvcStorage`**: Allocates persistent storage for the model.
+
+**NOTE:** If you intend to set up two or multiple vllm pods, please refer to this [yaml file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
+
+**NOTE:** Feel free to check more [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and vLLM production stack [repo](https://github.com/vllm-project/production-stack)!
+
+To run this helm chart, execute the following command:
+```bash
+sudo helm repo add vllm https://vllm-project.github.io/production-stack
+sudo helm install vllm vllm/vllm-stack -f tutorials/assets/values-01-minimal-example.yaml
+```
+where `tutorials/assets/values-01-minimal-example.yaml` is the helm chart shown in previous example.
+
+
+### Validate Installation
+
+Monitor the deployment status using:
+
+```bash
+sudo kubectl get pods
+```
+
+And you will see that pods for the `vllm` deployment should transition to `Ready` and the `Running` state.
+
+```plaintext
+NAME                                               READY   STATUS    RESTARTS   AGE
+vllm-deployment-router-859d8fb668-2x2b7        1/1     Running   0          2m38s
+vllm-opt125m-deployment-vllm-84dfc9bd7-vb9bs   1/1     Running   0          2m38s
+```
+
+**NOTE:**: It may take some time for the containers to download the Docker images and LLM weights.
+
+### Send a Query to the Stack
+
+Forward the `vllm-router-service` port to the host machine:
+
+```bash
+sudo kubectl port-forward svc/vllm-router-service 30080:80
+```
+
+And then you can send out a query to the OpenAI-compatible API to check the available models:
+
+```bash
+curl -o- http://localhost:30080/models
+```
+
+Expected output:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "facebook/opt-125m",
+      "object": "model",
+      "created": 1737428424,
+      "owned_by": "vllm",
+      "root": null
+    }
+  ]
+}
+```
+
+
+To send an actual chatting request, you can issue a curl request to the OpenAI `/completion` endpoint:
+
+```bash
+curl -X POST http://localhost:30080/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "facebook/opt-125m",
+    "prompt": "Once upon a time,",
+    "max_tokens": 10
+  }'
+```
+
+Expected output:
+
+```json
+{
+  "id": "completion-id",
+  "object": "text_completion",
+  "created": 1737428424,
+  "model": "facebook/opt-125m",
+  "choices": [
+    {
+      "text": " there was a brave knight who...",
+      "index": 0,
+      "finish_reason": "length"
+    }
+  ]
+}
+```
+
+This demonstrates the model generating a continuation for the provided prompt.
+
+### Uninstall
+
+To remove the deployment, run:
+
+```bash
+sudo helm uninstall vllm
+```
+
+## Deployment using native k8s 
 
 1. Create a PVC, Secret and Deployment for vLLM
 
