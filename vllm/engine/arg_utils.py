@@ -1099,97 +1099,6 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def _set_default_args_v0(
-        self,
-        model_config: ModelConfig,
-    ):
-        max_model_len = model_config.max_model_len
-        use_long_context = max_model_len > 32768
-        if self.enable_chunked_prefill is None:
-            # Chunked prefill not supported for Multimodal or MLA in V0.
-            if model_config.is_multimodal_model or model_config.use_mla:
-                self.enable_chunked_prefill = False
-
-            # Enable chunked prefill by default for long context (> 32K)
-            # models to avoid OOM errors in initial memory profiling phase.
-            elif use_long_context:
-                from vllm.platforms import current_platform
-                is_gpu = current_platform.is_cuda()
-                use_sliding_window = (model_config.get_sliding_window()
-                                      is not None)
-                use_spec_decode = self.speculative_model is not None
-
-                if (is_gpu and not use_sliding_window and not use_spec_decode
-                        and not self.enable_lora
-                        and not self.enable_prompt_adapter
-                        and model_config.runner_type != "pooling"):
-                    self.enable_chunked_prefill = True
-                    logger.warning(
-                        "Chunked prefill is enabled by default for models "
-                        "with max_model_len > 32K. Chunked prefill might "
-                        "not work with some features or models. If you "
-                        "encounter any issues, please disable by launching"
-                        "with --enable-chunked-prefill=False.")
-
-            if self.enable_chunked_prefill is None:
-                self.enable_chunked_prefill = False
-
-        if not self.enable_chunked_prefill and use_long_context:
-            logger.warning(
-                "The model has a long context length (%s). This may cause"
-                "OOM during the initial memory profiling phase, or result "
-                "in low performance due to small KV cache size. Consider "
-                "setting --max-model-len to a smaller value.", max_model_len)
-        elif (self.enable_chunked_prefill
-              and model_config.runner_type == "pooling"):
-            msg = "Chunked prefill is not supported for pooling models"
-            raise ValueError(msg)
-
-        # Disable prefix caching for multimodal models for VLLM_V0.
-        if (model_config.is_multimodal_model and self.enable_prefix_caching):
-            logger.warning(
-                "--enable-prefix-caching is not supported for multimodal "
-                "models in V0 and has been disabled.")
-            self.enable_prefix_caching = False
-
-        # Set max_num_seqs to 256 for VLLM_V0.
-        if self.max_num_seqs is None:
-            self.max_num_seqs = 256
-
-    def _set_default_args_v1(self, usage_context: UsageContext):
-        # VLLM_V1 only supports chunked prefill.
-        self.enable_chunked_prefill = True
-
-        # Set the default values based on the usage context.
-        # Use different default values for different hardware.
-        from vllm.platforms import current_platform
-        device_name = current_platform.get_device_name().lower()
-        if "h100" in device_name or "h200" in device_name:
-            # For H100 and H200, we use larger default values.
-            default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 16384,
-                UsageContext.OPENAI_API_SERVER: 8192,
-            }
-        else:
-            # TODO(woosuk): Tune the default values for other hardware.
-            default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 8192,
-                UsageContext.OPENAI_API_SERVER: 2048,
-            }
-        if (self.max_num_batched_tokens is None
-                and usage_context in default_max_num_batched_tokens):
-            self.max_num_batched_tokens = default_max_num_batched_tokens[
-                usage_context]
-            logger.info(
-                "Setting max_num_batched_tokens to %d for %s usage context.",
-                self.max_num_batched_tokens, usage_context.value)
-
-        default_max_num_seqs = 1024
-        if self.max_num_seqs is None:
-            self.max_num_seqs = default_max_num_seqs
-            logger.info("Setting max_num_seqs to %d for %s usage context.",
-                        self.max_num_seqs, usage_context.value)
-
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
@@ -1199,6 +1108,7 @@ class EngineArgs:
         current_platform.pre_register_and_update()
 
         # TODO(rob): move this to create_model_config
+        # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
 
@@ -1709,6 +1619,98 @@ class EngineArgs:
             "issues, set VLLM_USE_V1=0 to force the V0 Engine and make a "
             "bug report on GitHub.")
         return True
+
+    def _set_default_args_v0(self, model_config: ModelConfig) -> None:
+        """Set Default Arguments for V0 Engine."""
+
+        max_model_len = model_config.max_model_len
+        use_long_context = max_model_len > 32768
+        if self.enable_chunked_prefill is None:
+            # Chunked prefill not supported for Multimodal or MLA in V0.
+            if model_config.is_multimodal_model or model_config.use_mla:
+                self.enable_chunked_prefill = False
+
+            # Enable chunked prefill by default for long context (> 32K)
+            # models to avoid OOM errors in initial memory profiling phase.
+            elif use_long_context:
+                from vllm.platforms import current_platform
+                is_gpu = current_platform.is_cuda()
+                use_sliding_window = (model_config.get_sliding_window()
+                                      is not None)
+                use_spec_decode = self.speculative_model is not None
+
+                if (is_gpu and not use_sliding_window and not use_spec_decode
+                        and not self.enable_lora
+                        and not self.enable_prompt_adapter
+                        and model_config.runner_type != "pooling"):
+                    self.enable_chunked_prefill = True
+                    logger.warning(
+                        "Chunked prefill is enabled by default for models "
+                        "with max_model_len > 32K. Chunked prefill might "
+                        "not work with some features or models. If you "
+                        "encounter any issues, please disable by launching"
+                        "with --enable-chunked-prefill=False.")
+
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = False
+
+        if not self.enable_chunked_prefill and use_long_context:
+            logger.warning(
+                "The model has a long context length (%s). This may cause"
+                "OOM during the initial memory profiling phase, or result "
+                "in low performance due to small KV cache size. Consider "
+                "setting --max-model-len to a smaller value.", max_model_len)
+        elif (self.enable_chunked_prefill
+              and model_config.runner_type == "pooling"):
+            msg = "Chunked prefill is not supported for pooling models"
+            raise ValueError(msg)
+
+        # Disable prefix caching for multimodal models for VLLM_V0.
+        if (model_config.is_multimodal_model and self.enable_prefix_caching):
+            logger.warning(
+                "--enable-prefix-caching is not supported for multimodal "
+                "models in V0 and has been disabled.")
+            self.enable_prefix_caching = False
+
+        # Set max_num_seqs to 256 for VLLM_V0.
+        if self.max_num_seqs is None:
+            self.max_num_seqs = 256
+
+    def _set_default_args_v1(self, usage_context: UsageContext) -> None:
+        """Set Default Arguments for V1 Engine."""
+
+        # VLLM_V1 only supports chunked prefill.
+        self.enable_chunked_prefill = True
+
+        # Set the default values based on the usage context.
+        # Use different default values for different hardware.
+        from vllm.platforms import current_platform
+        device_name = current_platform.get_device_name().lower()
+        if "h100" in device_name or "h200" in device_name:
+            # For H100 and H200, we use larger default values.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 8192,
+            }
+        else:
+            # TODO(woosuk): Tune the default values for other hardware.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 8192,
+                UsageContext.OPENAI_API_SERVER: 2048,
+            }
+        if (self.max_num_batched_tokens is None
+                and usage_context in default_max_num_batched_tokens):
+            self.max_num_batched_tokens = default_max_num_batched_tokens[
+                usage_context]
+            logger.info(
+                "Setting max_num_batched_tokens to %d for %s usage context.",
+                self.max_num_batched_tokens, usage_context.value)
+
+        default_max_num_seqs = 1024
+        if self.max_num_seqs is None:
+            self.max_num_seqs = default_max_num_seqs
+            logger.info("Setting max_num_seqs to %d for %s usage context.",
+                        self.max_num_seqs, usage_context.value)
 
 
 @dataclass
