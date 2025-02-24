@@ -1198,13 +1198,33 @@ class EngineArgs:
         if self.num_scheduler_steps != EngineArgs.num_scheduler_steps:
             if envs.VLLM_USE_V1:
                 raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with num_scheduler_steps "
-                    "> 1. We recommend disabling multi-step scheduling so "
+                    "VLLM_USE_V1=1 is not supported with --num_scheduler_steps "
+                    "We recommend disabling multi-step scheduling "
                     "in favor of the V1 Engine.")
             logger.warning(
                 "Multistep scheduling is not supported by the V1 Engine. "
-                "Falling back to V0. Remove --num-scheduler-steps 1 so "
-                "you can use the V1 Engine.")
+                "Falling back to V0. We recommend removing --num-scheduler-"
+                "steps from your config in favor of the V1 Engine.")
+            return False
+
+        if self.scheduler_delay_factor != EngineArgs.scheduler_delay_factor:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with "
+                    "--scheduler-delay-factor.")
+            logger.info(
+                "--scheduler-delay-factor is not supported by the V1 Engine."
+                "Falling back to V0. We recommend removing --scheduler-delay-"
+                "factor from your config in favor of the V1 Engine.")
+            return False
+
+        if self.additional_config != EngineArgs.additional_config:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with --additional-config.")
+            logger.info(
+                "--additional-config is not supported by the V1 Engine. "
+                "Falling back to V0 Engine.")
             return False
 
         if disable_frontend_multiprocessing:
@@ -1334,6 +1354,24 @@ class EngineArgs:
                 return True
             logger.info("Mamba-style, Encoder-Decoder, and MLA models are not"
                         "yet supported by the V1 Engine. Falling back to V0.")
+            return False
+
+        # No concurrent partial prefills so far.
+        if (self.max_num_partial_prefills
+                != EngineArgs.max_num_partial_prefills
+                or self.max_long_partial_prefills
+                != EngineArgs.max_long_partial_prefills
+                or self.long_prefill_token_threshold
+                != EngineArgs.long_prefill_token_threshold):
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 on unsupported scheduler params "
+                    "--max-num-partial-prefills, --max-long-partial-prefills, "
+                    "or --long-prefill-token-threshold. Usage should be "
+                    "considered experimental and you may encounter bugs."
+                    "Please report any issues on Github.")
+            logger.info("Concurrent partial prefills are not yet supported. "
+                        "by the V1 Engine. Falling back to V0.")
             return False
 
         return True
