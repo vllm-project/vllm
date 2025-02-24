@@ -526,6 +526,7 @@ class TPUModelRunner():
         xm.mark_step()
         xm.wait_device_ops()
         model = ModelWrapperV1(model)
+        # self.model = model
         self.model = torch.compile(model,
                                    backend="openxla",
                                    fullgraph=True,
@@ -551,7 +552,8 @@ class TPUModelRunner():
             (num_tokens, self.block_table_cpu.shape[1]),
             dtype=torch.int32,
             device=self.device)
-        query_start_loc = torch.zeros(num_tokens+1, dtype=torch.int32, device=self.device)
+        query_lens = [1] * num_tokens
+        query_start_loc = torch.cumsum(torch.tensor([0] + query_lens, dtype=torch.int32), dim=0, dtype=torch.int32).to(self.device)
         context_lens = torch.ones((num_tokens, ),
                                   dtype=torch.int32,
                                   device=self.device)
