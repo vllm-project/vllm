@@ -654,7 +654,8 @@ class HPUModelRunner:
         self.max_prefill_batch_size = 16  # TODO(kzawora): add knob for that
         self.padding_aware_scheduling = True  # TODO(kzawora): add knob for that
         self.padding_ratio_threshold = 0.9  # TODO(kzawora): add knob for that
-        os.environ['VLLM_CONTIGUOUS_PA'] = 'false' # NOTE(kzawora): this is a workaround
+        os.environ[
+            'VLLM_CONTIGUOUS_PA'] = 'false'  # NOTE(kzawora): this is a workaround
         self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
                                                 'true').lower() == 'true'
         self.seen_configs: set = set()
@@ -882,7 +883,7 @@ class HPUModelRunner:
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids,
                                 prompt_scheduled_tokens)
 
-    def _prepare_sampling(self,
+    def _prepare_sampling_old(self,
                           scheduler_output: "SchedulerOutput",
                           start_idx: Optional[int] = None,
                           end_idx: Optional[int] = None,
@@ -928,6 +929,28 @@ class HPUModelRunner:
             pad_to=pad_to)
         return sampling_metadata
 
+    def _prepare_sampling(
+        self,
+        batch_changed: bool,
+        request_ids: Union[None, List[str]] = None,
+        pad_to: Optional[int]=None
+    ) -> SamplingMetadata:
+        # Create the sampling metadata.
+        req_id_output_token_ids: Dict[str, List[int]] = \
+            {req_id: req.output_token_ids \
+                for req_id, req in self.requests.items()}
+        if request_ids is not None:
+            req_id_output_token_ids = {
+                req_id: req_id_output_token_ids[req_id] \
+                    for req_id in request_ids}
+        req_id_output_token_ids = list(req_id_output_token_ids.items())
+        if pad_to is not None:
+            while len(req_id_output_token_ids) < pad_to:
+                req_id_output_token_ids.append(req_id_output_token_ids[0])
+        sampling_metadata = self.input_batch.make_selective_sampling_metadata(
+            req_id_output_token_ids, skip_copy=not batch_changed)
+        return sampling_metadata
+    
     def get_habana_paged_attn_buffers(self,
                                       block_tables,
                                       slot_mapping,
@@ -1064,10 +1087,12 @@ class HPUModelRunner:
                 # Else, we'll break on first batch size that fits token budget.
                 if not self.padding_aware_scheduling or can_schedule:
                     break
-            context_lens = torch.zeros(padded_batch_size, dtype=torch.int32,device='cpu')
+            context_lens = torch.zeros(padded_batch_size,
+                                       dtype=torch.int32,
+                                       device='cpu')
             if use_prefix_caching:
-                self.input_batch.num_computed_tokens_cpu[
-                    batch_idx:batch_idx + num_prefills]
+                self.input_batch.num_computed_tokens_cpu[batch_idx:batch_idx +
+                                                         num_prefills]
             # TODO(kzawora): this is an ugly hack for prefix caching, remove
             # that once batch padding works properly (idk why it doesn't)
             if use_prefix_caching:
@@ -1270,7 +1295,7 @@ class HPUModelRunner:
                                                          self.block_size))
         # NOTE(kzawora): the "-1" is what causes this entire thing to work
         # properly and have good accuracy - why? beats me...
-        block_offsets = (padded_index-1) % self.block_size
+        block_offsets = (padded_index - 1) % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
         # Set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
@@ -1350,7 +1375,8 @@ class HPUModelRunner:
         num_scheduled_tokens = []
         num_prompt_tokens = []
         for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            seq_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            seq_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
             seq_num_prompt_tokens = self.input_batch.num_prompt_tokens[idx]
             num_scheduled_tokens.append(seq_num_scheduled_tokens)
             num_prompt_tokens.append(seq_num_prompt_tokens)
@@ -1364,7 +1390,6 @@ class HPUModelRunner:
             self._prepare_decode_inputs(num_decodes, num_scheduled_tokens,
                                         bucketing),
         )
-
 
     def _seq_len(self, attn_metadata):
         return attn_metadata.slot_mapping.size(1)
@@ -1506,7 +1531,7 @@ class HPUModelRunner:
         # Transfer [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] to CPU
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
-        self._update_states(scheduler_output)
+        batch_changed = self._update_states(scheduler_output)
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
         # Prepare prompts/decodes info
@@ -1538,27 +1563,15 @@ class HPUModelRunner:
                 decode_data.attn_metadata, decode_data.logits_indices,
                 self.kv_caches)
             htorch.core.mark_step()
-            #sampling_metadata = self._prepare_sampling(
-            #    scheduler_output,
-            #    start_idx=0,
-            #    end_idx=num_decodes,
-            #    pad_to=num_padded_decodes)
-            htorch.core.mark_step()
-            #sampler_output = self.model.sample(
-            #   logits=logits_device, sampling_metadata=sampling_metadata)
-            # sampler now returns cpu list instead of device tensor -
-            # and i don't like it
-            argmax_token_ids = torch.argmax(logits_device,
-                                            dim=-1,
-                                            keepdim=True)
-            argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
-            decode_output_device = argmax_token_ids
+            sampling_metadata = self._prepare_sampling(batch_changed, pd_info.decode_req_ids, pad_to=logits_device.shape[0])
+            sampler_output = self.model.sample(
+                logits=logits_device, sampling_metadata=sampling_metadata)
+            decode_output_device = sampler_output.sampled_token_ids
             htorch.core.mark_step()
 
         ######################### PREFILLS #########################
         # Prefills run with shape [padded_prefill_bs, padded_prefill_len]
         if num_prefills > 0:
-            prefill_seq_offset_start = num_decodes
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids,
                       attn_metadata,
@@ -1568,29 +1581,12 @@ class HPUModelRunner:
                     token_ids, position_ids, attn_metadata, logits_indices,
                     self.kv_caches)
                 htorch.core.mark_step()
-                num_curr_prefills = token_ids.shape[0]
-                prefill_seq_offset_end = prefill_seq_offset_start + \
-                    num_curr_prefills
-                if prefill_seq_offset_start == prefill_seq_offset_end:
-                    import pdb
-                    pdb.set_trace()
-                #sampling_metadata = self._prepare_sampling(
-                #    scheduler_output,
-                #    start_idx=prefill_seq_offset_start,
-                #    end_idx=prefill_seq_offset_end,
-                #    pad_to=num_curr_prefills)
-                #htorch.core.mark_step()
-                #sampler_output = self.model.sample(
-                #    logits=logits_device, sampling_metadata=sampling_metadata)
-                #sampled_token_ids_device = sampler_output.sampled_token_ids
-                argmax_token_ids = torch.argmax(logits_device,
-                                                dim=-1,
-                                                keepdim=True)
-                argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+                sampling_metadata = self._prepare_sampling(batch_changed, req_id, pad_to=logits_device.shape[0])
+                sampler_output = self.model.sample(
+                    logits=logits_device, sampling_metadata=sampling_metadata)
+                sampled_token_ids_device = sampler_output.sampled_token_ids
                 htorch.core.mark_step()
-                prefill_seq_offset_end = prefill_seq_offset_start
-                #prefill_output_tokens.extend(sampled_token_ids_device)
-                prefill_output_tokens.extend(argmax_token_ids)
+                prefill_output_tokens.extend(sampled_token_ids_device)
 
             # sampler now returns cpu list instead of device tensor -
             # and i don't like it
