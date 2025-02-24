@@ -360,6 +360,12 @@ class _ModelRegistry:
                 raise ValueError(msg)
 
             model = _LazyRegisteredModel(*split_str)
+
+            try:
+                model.inspect_model_cls()
+            except Exception as exc:
+                msg = f"Unable to inspect model {model_cls}"
+                raise RuntimeError(msg) from exc
         else:
             model = _RegisteredModel.from_model_cls(model_cls)
 
