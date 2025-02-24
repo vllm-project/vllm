@@ -131,6 +131,12 @@ class PaliGemmaMultiModalProcessor(
             # HF processor always adds placeholders even when there's no image
             tokenizer = self.info.get_tokenizer()
             prompt_ids = tokenizer.encode(prompt)
+            # Paligemma2 is NOT adding <bos> token at the beginning of the prompt
+            # Adding <bos> token (value 2) to adapt with prompt replacement
+            if len(prompt_ids) == 0:
+                prompt_ids = [2]
+            elif prompt_ids[0] != 2:
+                prompt_ids = [2] + prompt_ids
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         return super()._call_hf_processor(
