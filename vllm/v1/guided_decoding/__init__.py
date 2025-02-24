@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import enum
-import functools
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import torch
 import xgrammar as xgr
@@ -103,43 +102,11 @@ class GuidedDecodingManager:
         self.executor = ThreadPoolExecutor()
         self.requests: Set[Request] = set()
         self._requests_lock = threading.Lock()
-        self._grammar_bitmask: Optional[Union[torch.Tensor,
-                                              Future[torch.Tensor]]] = None
+        self.grammar_bitmask: torch.Tensor = xgr.allocate_token_bitmask(
+            self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
 
     def __getitem__(self, key: GuidedDecodingKey) -> Optional[Grammar]:
         return self.request_key_to_grammar.get(key)
-
-    def allocate_bitmask(self) -> None:
-        # NOTE: We will only want to allocate this once
-        if self._grammar_bitmask is None:
-            self._grammar_bitmask = self.executor.submit(
-                xgr.allocate_token_bitmask,
-                self.vllm_config.scheduler_config.max_num_seqs,
-                self.vocab_size,
-            )
-
-    def _ensure_bitmask_ready(self) -> bool:
-        if isinstance(self._grammar_bitmask, Future):
-            try:
-                self._grammar_bitmask = self._grammar_bitmask.result(
-                    timeout=0.05)
-            except TimeoutError:
-                return False
-        return True
-
-    @functools.cached_property
-    def grammar_bitmask(self) -> Optional[torch.Tensor]:
-        self._ensure_bitmask_ready()
-        return self._grammar_bitmask if not isinstance(self._grammar_bitmask,
-                                                       Future) else None
-
-    @property
-    def is_bitmask_ready(self) -> bool:
-        self._ensure_bitmask_ready()
-        if isinstance(self._grammar_bitmask, Future):
-            return not self._grammar_bitmask.running(
-            ) and self._grammar_bitmask.done()
-        return self._grammar_bitmask is not None
 
     def reset_bitmask(self):
         reset_bitmask(self.grammar_bitmask)
@@ -222,4 +189,3 @@ class GuidedDecodingManager:
                 if grammar is not None:
                     req.grammar = grammar
                     continue
-        self.allocate_bitmask()

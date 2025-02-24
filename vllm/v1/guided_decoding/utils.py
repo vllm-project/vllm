@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-
 def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
