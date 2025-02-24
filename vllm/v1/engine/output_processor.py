@@ -219,6 +219,8 @@ class OutputProcessor:
                                                      finish_reason,
                                                      iteration_stats)
 
+        self._update_lora_iteration_stats(iteration_stats)
+
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
