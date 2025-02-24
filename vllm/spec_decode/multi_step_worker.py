@@ -128,13 +128,9 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         in-place with the hidden states from the model output. 
         """
         if expanded_request.previous_hidden_states is not None:
-            seq_group_meta_with_hidden = [
-                sg for sg in expanded_request.seq_group_metadata_list
-                if sg.do_sample
-            ]
             expanded_request.previous_hidden_states = HiddenStates(
-                model_output.hidden_states, seq_group_meta_with_hidden,
-                expanded_request.previous_hidden_states.hidden_states)
+                model_output.hidden_states,
+                expanded_request.seq_group_metadata_list)
 
     @staticmethod
     def _expand_execute_model_request(
