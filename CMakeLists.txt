@@ -580,6 +580,8 @@ if (NOT VLLM_GPU_LANG STREQUAL "CUDA")
   return()
 endif ()
 
+include(cmake/flashmla.cmake)
+
 # vLLM flash attention requires VLLM_GPU_ARCHES to contain the set of target
 # arches in the CMake syntax (75-real, 89-virtual, etc), since we clear the
 # arches in the CUDA case (and instead set the gencodes on a per file basis)
