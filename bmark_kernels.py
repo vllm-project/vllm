@@ -3,7 +3,7 @@ import pytest
 
 import jax
 from jax import numpy as jnp
-from vllm.lora.ops.xla_ops.pallas import _bgmv
+from vllm.lora.ops.xla_ops.pallas import bgmv
 
 def create_tensors(T, D, L, N):
     """
@@ -30,18 +30,18 @@ def create_tensors(T, D, L, N):
 
     return inputs, loras, idxs
 
-# SEQ_LENS = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-# HIDDEN_DIM = [1024, 2048, 3072, 4096]
-# LORA_RANKS = [8, 16, 32, 64, 128, 256]
-# N_LORAS = [1, 2, 4, 8, 16, 32]
-SEQ_LENS = [16, 8192]
-HIDDEN_DIM = [1024, 4096]
-LORA_RANKS = [8, 256]
-N_LORAS = [1, 32]
+def ref_bgmv(inputs, loras, idxs):
+    return jnp.einsum("td,__ld->tl", inputs, loras[idxs])
+
+SEQ_LENS = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+HIDDEN_DIM = [1024, 2048, 3072, 4096]
+LORA_RANKS = [8, 16, 32, 64, 128, 256]
+N_LORAS = [1, 2, 4, 8, 16, 32]
+
 
 @pytest.mark.parametrize("T,D,L,N", itertools.product(SEQ_LENS, HIDDEN_DIM, LORA_RANKS, N_LORAS))
+@pytest.mark.parametrize("func", [bgmv, ref_bgmv])
 def test_bgmv_benchmark(benchmark, T, D, L, N):
     inputs, loras, idxs = create_tensors(T, D, L, N)
 
-    benchmark(_bgmv, inputs, loras, idxs)
-
+    benchmark.pedantic(ref_bgmv, args=(inputs, loras, idxs), rounds=10, warmup_rounds=5, iterations=10)
