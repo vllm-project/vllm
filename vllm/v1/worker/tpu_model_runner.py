@@ -21,6 +21,7 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingType
+from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata)
@@ -583,6 +584,7 @@ class TPUModelRunner:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
         # Update cached state
         self._update_states(scheduler_output)
