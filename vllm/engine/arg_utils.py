@@ -1149,7 +1149,7 @@ class EngineArgs:
         # separately from this method. In fact, this method is
         # usually called from AsyncLLMEngine.from_engine_args.
         try_v1 = use_v1_if_supported or envs.VLLM_USE_V1
-        use_v1 = try_v1 and self._is_v1_supported_oracle(model_config)
+        use_v1 = try_v1 and self._use_v1_oracle(model_config)
         if not envs.is_set("VLLM_USE_V1"):
             assert use_v1 == envs.VLLM_USE_V1
 
@@ -1338,7 +1338,7 @@ class EngineArgs:
 
         return config
 
-    def _is_v1_supported_oracle(self, model_config: ModelConfig) -> bool:
+    def _use_v1_oracle(self, model_config: ModelConfig) -> bool:
         """Oracle for whether to use V0 or V1 Engine by default."""
 
         # If VLLM_USE_V1=0, then use the V0 Engine.
