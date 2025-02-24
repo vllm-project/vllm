@@ -11,12 +11,11 @@ jinja2
 ray[default]
 
 # Install torch_xla
---pre
---extra-index-url https://download.pytorch.org/whl/nightly/cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
 --find-links https://storage.googleapis.com/libtpu-wheels/index.html
 --find-links https://storage.googleapis.com/libtpu-releases/index.html
 --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 torch==2.6.0
-torchvision==0.21.0
-torch_xla[tpu, pallas]==2.6.0
+torchvision  # Install whichever version is compatible with torch
+torch_xla[tpu, pallas]  # Install whichever version is compatible with torch
