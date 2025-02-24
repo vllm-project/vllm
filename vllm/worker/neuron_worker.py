@@ -131,7 +131,9 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         neuron_framework = get_neuron_framework_to_use()
         if neuron_framework == NeuronFramework.TRANSFORMERS_NEURONX:
             self.model_runner = self.get_tnx_model_runner(vllm_config)
-
+        elif neuron_framework == NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE:
+            self.model_runner = self.get_neuronx_distributed_model_runner(
+                vllm_config)
         else:
             raise NotImplementedError(
                 "Specified framework" +
