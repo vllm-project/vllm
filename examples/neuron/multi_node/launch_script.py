@@ -3,16 +3,10 @@ import json
 import os
 import sys
 import subprocess
-from typing import Dict, Any
 
 from vllm.logger import init_logger
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.usage.usage_lib import UsageContext
-
 
 logger = init_logger("vllm.neuron.multi-node")
-
 
 NEURON_RT_ROOT_COMM_ID_PORT = 63423
 
@@ -21,24 +15,43 @@ def error_exit(message: str) -> None:
     logger.error(message)
     sys.exit(1)
 
+
 def arg_parser():
     parser = argparse.ArgumentParser(description="vLLM multi-node launcher")
-    parser.add_argument("--model", type=str, required=True, help="Model or model path")
-    parser.add_argument("--world-size", type=int, required=True, help="World size for distributed inference")
-    parser.add_argument("--max-num-seqs", type=int, required=True, help="Maximum number of sequences (or batch size)")
-    parser.add_argument("--max-model-len", type=int, default=8192, help="Maximum sequence length")
-    parser.add_argument("--max-context-length", type=int, help="Maximum context length")
-    parser.add_argument("--compiled-model-path", help="Path to the compiled model. If not present, model artifacts will be created in local-models folder")
-    parser.add_argument("--local-ranks-size", type=int, default=32, help="Local ranks size")
-    parser.add_argument("--on-device-sampling-config", type=json.loads, help="On-device sampling configuration")
-    parser.add_argument("--quantized", type=bool, default=False, help="Enable quantized mode (default: False)")
-    parser.add_argument("--quantized-checkpoints-path", type=str, help="Path to quantized checkpoints (required if --quantized is True)")
-    parser.add_argument("--port", type=int, default=8080, help="Port for the API server")
+    parser.add_argument("--model", type=str, required=True,
+                        help="Model or model path")
+    parser.add_argument("--world-size", type=int, required=True,
+                        help="World size for distributed inference")
+    parser.add_argument("--max-num-seqs", type=int, required=True,
+                        help="Maximum number of sequences (or batch size)")
+    parser.add_argument("--max-model-len", type=int, default=8192,
+                        help="Maximum sequence length")
+    parser.add_argument("--max-context-length", type=int,
+                        help="Maximum context length")
+    parser.add_argument("--compiled-model-path",
+                        help="Path to the compiled model. If not present, "
+                             "model artifacts will be created in local-models "
+                             "folder")
+    parser.add_argument("--local-ranks-size", type=int, default=32,
+                        help="Local ranks size")
+    parser.add_argument("--on-device-sampling-config",
+                        type=json.loads,
+                        help="On-device sampling configuration")
+    parser.add_argument("--quantized", type=bool, default=False,
+                        help="Enable quantized mode (default: False)")
+    parser.add_argument("--quantized-checkpoints-path", type=str,
+                        help="Path to quantized checkpoints "
+                             "(required if --quantized is True)")
+    parser.add_argument("--port", type=int, default=8080,
+                        help="Port for the API server")
 
     args = parser.parse_args()
     if args.quantized and not args.quantized_checkpoints_path:
-        parser.error("--quantized-checkpoints-path is required when --quantized is enabled.")
+        parser.error(
+            "--quantized-checkpoints-path is required when "
+            "--quantized is enabled.")
     return args
+
 
 def make_override_config(args, rank):
     if rank < 0:
@@ -54,13 +67,15 @@ def make_override_config(args, rank):
     if args.max_context_length:
         override_config["max_context_length"] = args.max_context_length
     if args.on_device_sampling_config:
-        override_config["on_device_sampling_config"] = args.on_device_sampling_config
+        override_config[
+            "on_device_sampling_config"] = args.on_device_sampling_config
     if args.quantized:
-        override_config["quantized_checkpoints_path"] = args.quantized_checkpoints_path
+        override_config[
+            "quantized_checkpoints_path"] = args.quantized_checkpoints_path
         override_config["quantized"] = args.quantized
 
     return override_config
-    
+
 
 def main() -> None:
     args = arg_parser()
@@ -75,7 +90,8 @@ def main() -> None:
     os.environ.update({
         "ENABLE_NEURON_MULTI_NODE": "true",
         "WORLD_SIZE": str(mpi_world_size),
-        "NEURON_RT_ROOT_COMM_ID": f"{master_addr}:{NEURON_RT_ROOT_COMM_ID_PORT}",
+        "NEURON_RT_ROOT_COMM_ID":
+            f"{master_addr}:{NEURON_RT_ROOT_COMM_ID_PORT}",
         "NEURON_LOCAL_TP": str(args.local_ranks_size),
         "NEURON_RANK_ID": str(rank)
     })
@@ -92,13 +108,13 @@ def main() -> None:
             f"--max-model-len={args.max_model_len}",
             f"--override-neuron-config={json.dumps(override_config)}"
         ]
-        logger.debug(f"Command ran: {cmd}")
+        logger.debug("Command ran", extra={"command": cmd})
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError:
             error_exit(f"Failed to start vLLM API server on rank {rank}")
     else:
-        logger.info(f"Starting worker on rank {rank}...")
+        logger.info("Starting worker on rank", extra={"rank": rank})
         current_script_dir = os.path.dirname(os.path.abspath(__file__))
         worker_file_path = os.path.join(current_script_dir, "worker.py")
         cmd = [
@@ -109,11 +125,12 @@ def main() -> None:
             f"--max-model-len={args.max_model_len}",
             f"--override-neuron-config={json.dumps(override_config)}"
         ]
-        logger.debug(f"Command ran: {cmd}")
+        logger.debug("Command ran", extra={"command": cmd})
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError:
             error_exit(f"Failed to start worker on rank {rank}")
+
 
 if __name__ == "__main__":
     main()

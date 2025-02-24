@@ -33,8 +33,8 @@ def main():
     try:
         start_worker()
     except Exception as e:
-        logger.error(f"Failed starting worker: {e}")
+        logger.error("Failed starting worker", extra={"error": e})
         exit(1)
 
-if "__main__" == __name__:
+if __name__ == "__main__":
     main()

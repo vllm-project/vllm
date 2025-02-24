@@ -83,7 +83,8 @@ class StopChecker:
             return
 
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() + self.num_lookahead_slots > self._get_max_model_len(lora_req):
+        if (seq.get_len() +
+                self.num_lookahead_slots > self._get_max_model_len(lora_req)):
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 

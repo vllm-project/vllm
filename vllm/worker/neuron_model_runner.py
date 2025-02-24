@@ -18,7 +18,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad, is_transformers_neuronx, is_neuronx_distributed_inference
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
-from vllm.worker.neuron_worker import use_neuronx_distributed, use_transformers_neuronx
+from vllm.worker.neuron_worker import use_neuronx_distributed, \
+    use_transformers_neuronx
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -49,9 +50,9 @@ class ModelInputForNeuron(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls,
-        tensor_dict: Dict[str, Any],
-        attn_backend: Optional["AttentionBackend"] = None,
+            cls,
+            tensor_dict: Dict[str, Any],
+            attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForNeuron":
         return ModelInputForNeuron(
             input_tokens=tensor_dict["input_tokens"],
@@ -69,16 +70,18 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     _MAX_NEURON_SAMPLING_TOP_K = 256
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
+            self,
+            vllm_config: VllmConfig,
     ):
         ModelRunnerBase.__init__(self, vllm_config)
 
-        if self.model_config is not None and self.model_config.get_sliding_window():
+        if (self.model_config is not None
+                and self.model_config.get_sliding_window()):
             logger.warning("Sliding window is not supported on Neuron. "
                            "The model will run without sliding window.")
         self.device_config = (self.device_config
-                              if self.device_config is not None else DeviceConfig())
+                              if self.device_config is not None
+                              else DeviceConfig())
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
 
@@ -108,17 +111,17 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         else:
             from transformers import GenerationConfig
         logger.warning(
-                "On-device sampling is turned on in Neuron by default, only "
-                "top_k, top_p, and temperature are current supported sampling "
-                "parameters. To turn off the on-device sampling, please set "
-                "the environment variable NEURON_ON_DEVICE_SAMPLING_DISABLED=1."
-            )
+            "On-device sampling is turned on in Neuron by default, only "
+            "top_k, top_p, and temperature are current supported sampling "
+            "parameters. To turn off the on-device sampling, please set "
+            "the environment variable NEURON_ON_DEVICE_SAMPLING_DISABLED=1."
+        )
         self.model_config.neuron_sampling_params = GenerationConfig(
             max_length=self.scheduler_config.max_model_len,
             do_sample=True,
             per_batch_line=True,
             top_k=[self._MAX_NEURON_SAMPLING_TOP_K] \
-                * self.scheduler_config.max_num_seqs,
+                  * self.scheduler_config.max_num_seqs,
             top_p=[1.0] * self.scheduler_config.max_num_seqs,
             temperature=[1.0] * self.scheduler_config.max_num_seqs,
             dynamic=True,
@@ -135,10 +138,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         return self.model
 
     def _prepare_prompt(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[int],
-               BatchedTensorInputs]:
+    BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
@@ -165,7 +168,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             assert len(block_table) == 1
             input_block_ids.append(block_table[0])
 
-            mm_data = seq_group_metadata.multi_modal_data
+            # mm_data = seq_group_metadata.multi_modal_data
             # if mm_data:
             #     # Process multi-modal data
             #     multi_modal_inputs_list.append(mm_data)
@@ -192,8 +195,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 multi_modal_kwargs)
 
     def _prepare_decode(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
@@ -245,10 +248,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         return ModelInputForNeuron.from_broadcasted_tensor_dict(tensor_dict)
 
     def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            virtual_engine: int = 0,
+            finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForNeuron:
         multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
@@ -263,15 +266,16 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             (input_tokens, input_positions,
              input_block_ids) = self._prepare_decode(seq_group_metadata_list)
             seq_lens = None
-        
+
         if not self._on_device_sampling_disabled:
             for seq_group_metadata in seq_group_metadata_list:
                 sampling_params = seq_group_metadata.sampling_params
-                top_k, top_p, temperature = self._convert_to_neuron_sampling_params(sampling_params)
+                top_k, top_p, temperature = (
+                    self._convert_to_neuron_sampling_params(sampling_params))
                 sampling_params.top_k = top_k
                 sampling_params.top_p = top_p
                 sampling_params.temperature = temperature
-        
+
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens,
@@ -301,7 +305,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                    multi_modal_kwargs=multi_modal_kwargs)
 
     def _update_neuron_sampling_params(
-        self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+            self, seq_group_metadata_list: List[SequenceGroupMetadata]):
         # Update Neuron sampling parameters (GenerationConfig in Neuron)
         current_sampling_params = self.model_config.neuron_sampling_params
         assert current_sampling_params is not None, (
@@ -327,9 +331,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             for seq_id in seq_ids:
                 index = seq_group_metadata.block_tables[seq_id][0]
                 if (
-                    top_k[index] != seq_group_top_k
-                    or top_p[index] != seq_group_top_p
-                    or temperature[index] != seq_group_temperature
+                        top_k[index] != seq_group_top_k
+                        or top_p[index] != seq_group_top_p
+                        or temperature[index] != seq_group_temperature
                 ):
                     is_update_needed = True
 
@@ -358,29 +362,35 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
     @torch.inference_mode()
     def execute_model(
-        self,
-        model_input: ModelInputForNeuron,
-        kv_caches: Optional[List[torch.Tensor]] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        num_steps: int = 1,
+            self,
+            model_input: ModelInputForNeuron,
+            kv_caches: Optional[List[torch.Tensor]] = None,
+            intermediate_tensors: Optional[IntermediateTensors] = None,
+            num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")
 
-        # extract top_k, top_p and temperature from model_input for neuron forward call
-        sampling_params = torch.tensor([[seq_group.sampling_params.top_k,
-                                       seq_group.sampling_params.top_p,
-                                       seq_group.sampling_params.temperature] for seq_group in model_input.sampling_metadata.seq_groups])
+        # extract top_k, top_p and temperature from model_input for neuron
+        # forward call
+        sampling_params = (
+            torch.tensor(
+                [[seq_group.sampling_params.top_k,
+                  seq_group.sampling_params.top_p,
+                  seq_group.sampling_params.temperature]
+                 for seq_group in model_input.sampling_metadata.seq_groups]))
+
         if use_neuronx_distributed():
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
                 sampling_params=sampling_params,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
-                                            device=self.device),
-            )            
+                **MultiModalKwargs.as_kwargs(
+                    model_input.multi_modal_kwargs or {},
+                    device=self.device),
+            )
         elif use_transformers_neuronx():
             # [TODO] validate on-device sampling
             # The model signature may need change for on-device sampling
@@ -388,8 +398,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
-                                            device=self.device),
+                **MultiModalKwargs.as_kwargs(
+                    model_input.multi_modal_kwargs or {},
+                    device=self.device),
             )
 
         # Compute the logits only if the on-device sampling is turned off as
