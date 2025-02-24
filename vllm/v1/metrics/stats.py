@@ -174,7 +174,7 @@ class LoRARequestStates:
     def __init__(self):
         self.lora_name_to_stats: Dict[str, LoRAStats] = {}
 
-    def get_stats(self, req_state) -> Optional[LoRAStats]:
+    def get_stats(self, req_state: 'RequestState') -> Optional[LoRAStats]:
         if req_state.lora_name is None:
             return None
         if req_state.lora_name not in self.lora_name_to_stats:
