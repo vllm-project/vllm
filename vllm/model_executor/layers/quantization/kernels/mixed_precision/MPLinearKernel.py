@@ -39,7 +39,8 @@ class MPLinearKernel(ABC):
                  w_q_param_name: str,
                  w_s_param_name: str,
                  w_zp_param_name: Optional[str] = None,
-                 w_gidx_param_name: Optional[str] = None) -> None:
+                 w_gidx_param_name: Optional[str] = None,
+                 prefix: Optional[str] = None) -> None:
         assert self.can_implement(c)
         self.config = c
         self.w_q_name = w_q_param_name
@@ -50,6 +51,7 @@ class MPLinearKernel(ABC):
             assert w_gidx_param_name is not None
         self.w_zp_name = w_zp_param_name
         self.w_gidx_name = w_gidx_param_name
+        self.prefix = prefix
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
