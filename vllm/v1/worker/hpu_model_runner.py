@@ -654,6 +654,7 @@ class HPUModelRunner:
         self.max_prefill_batch_size = 16  # TODO(kzawora): add knob for that
         self.padding_aware_scheduling = True  # TODO(kzawora): add knob for that
         self.padding_ratio_threshold = 0.9  # TODO(kzawora): add knob for that
+        os.environ['VLLM_CONTIGUOUS_PA'] = 'false' # NOTE(kzawora): this is a workaround
         self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
                                                 'true').lower() == 'true'
         self.seen_configs: set = set()
