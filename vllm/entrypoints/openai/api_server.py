@@ -162,8 +162,7 @@ async def build_async_engine_client_from_engine_args(
         if disable_frontend_multiprocessing:
             logger.warning(
                 "V1 is enabled, but got --disable-frontend-multiprocessing. "
-                "To truly disable frontend multiprocessing, set VLLM_USE_V1=0."
-            )
+                "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
 
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
