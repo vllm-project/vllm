@@ -1185,7 +1185,8 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                                    quant_config=quant_config,
                                    prefix=prefix)
 
-        return resampler.to(device=current_platform.device_type, dtype=torch.get_default_dtype())
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
@@ -1267,7 +1268,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                                      quant_config=quant_config,
                                      prefix=prefix)
 
-        return resampler.to(device=current_platform.device_type, dtype=torch.get_default_dtype())
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
@@ -1361,7 +1363,8 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                                      quant_config=quant_config,
                                      prefix=prefix)
 
-        return resampler.to(device=current_platform.device_type, dtype=torch.get_default_dtype())
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,

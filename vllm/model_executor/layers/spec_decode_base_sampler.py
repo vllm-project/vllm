@@ -6,7 +6,9 @@ from typing import Dict, Optional, Union
 import torch
 import torch.jit
 import torch.nn as nn
+
 from vllm.platforms import current_platform
+
 
 class SpecDecodeBaseSampler(nn.Module):
     """Base class for samplers used for Speculative Decoding verification
