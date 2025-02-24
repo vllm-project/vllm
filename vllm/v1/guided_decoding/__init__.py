@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import enum
 import functools
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
@@ -98,6 +99,7 @@ class GuidedDecodingManager:
 
         self.executor = ThreadPoolExecutor()
         self.requests: Set[Request] = set()
+        self._requests_lock = threading.Lock()
         self._grammar_bitmask: Optional[Union[torch.Tensor,
                                               Future[torch.Tensor]]] = None
 
@@ -140,10 +142,11 @@ class GuidedDecodingManager:
         reset_bitmask(self.grammar_bitmask)
 
     def remove_requests(self, request_ids: List[str]) -> None:
-        self.requests = {
-            req
-            for req in self.requests if req.request_id not in request_ids
-        }
+        with self._requests_lock:
+            self.requests = {
+                req
+                for req in self.requests if req.request_id not in request_ids
+            }
 
     def should_cache(self, request: Request):
         if not request.use_guided_decoding:
@@ -160,7 +163,8 @@ class GuidedDecodingManager:
 
     def _executor_loop(self, request: Request) -> Grammar:
         key = request.guided_decoding_key
-        self.requests.add(request)
+        with self._requests_lock:
+            self.requests.add(request)
         if key in self.request_key_to_grammar:
             return self.request_key_to_grammar[key]
 
@@ -192,3 +196,16 @@ class GuidedDecodingManager:
             vocab_size=self.vocab_size,
             ctx=ctx,
         )
+
+    def setup_grammars(self):
+        with self._requests_lock:
+            for req in self.requests:
+                if req.grammar is not None:
+                    continue
+
+                # Check if grammar is ready in cache
+                grammar = self[req.guided_decoding_key]
+                if grammar is not None:
+                    req.grammar = grammar
+                    continue
+        self.allocate_bitmask()

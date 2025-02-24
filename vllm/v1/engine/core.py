@@ -254,16 +254,7 @@ class EngineCore:
         self.model_executor.add_lora(lora_request)
 
     def setup_grammars(self):
-        for req in self.guided_decoding_manager.requests:
-            if req.grammar is not None:
-                continue
-
-            # Check if grammar is ready in cache
-            grammar = self.guided_decoding_manager[req.guided_decoding_key]
-            if grammar is not None:
-                req.grammar = grammar
-                continue
-        self.guided_decoding_manager.allocate_bitmask()
+        self.guided_decoding_manager.setup_grammars()
 
 
 class EngineCoreProc(EngineCore):
