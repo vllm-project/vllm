@@ -1053,16 +1053,6 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
-        # NOTE: gguf file needs specific model loader and doesn't use hf_repo
-        if check_gguf_file(self.model):
-            self.quantization = self.load_format = "gguf"
-
-        # NOTE: This is to allow model loading from S3 in CI
-        if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
-                and self.model in MODELS_ON_S3
-                and self.load_format == LoadFormat.AUTO):  # noqa: E501
-            self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
-            self.load_format = LoadFormat.RUNAI_STREAMER
 
         return ModelConfig(
             model=self.model,
@@ -1508,6 +1498,18 @@ class EngineArgs:
         current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(device=self.device)
+
+        # TODO(rob): move this to create_model_config
+        if check_gguf_file(self.model):
+            self.quantization = self.load_format = "gguf"
+
+        # NOTE: This is to allow model loading from S3 in CI
+        if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
+                and self.model in MODELS_ON_S3
+                and self.load_format == LoadFormat.AUTO):  # noqa: E501
+            self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
+            self.load_format = LoadFormat.RUNAI_STREAMER
+
         model_config = self.create_model_config()
 
         # Attempt to use the V1 Engine if prompted.
