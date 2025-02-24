@@ -53,7 +53,7 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND FLASH_MLA_ARCHS)
         CUDA_ARCHS "${FLASH_MLA_ARCHS}")
 
     define_gpu_extension_target(
-        _C_flashmla
+        _flashmla_C
         DESTINATION vllm
         LANGUAGE ${VLLM_GPU_LANG}
         SOURCES ${FlashMLA_SOURCES}
@@ -62,5 +62,8 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND FLASH_MLA_ARCHS)
         INCLUDE_DIRECTORIES ${FlashMLA_INCLUDES}
         USE_SABI 3
         WITH_SOABI)
+else()
+    # Create an empty target for setup.py
+    add_custom_target(_flashmla_C)
 endif()
 

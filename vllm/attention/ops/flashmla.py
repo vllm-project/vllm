@@ -11,18 +11,28 @@ logger = init_logger(__name__)
 
 if not current_platform.is_tpu() and not current_platform.is_hpu():
     try:
-        import vllm._C_flashmla  # noqa: F401
-        _C_flashmla_AVAILABLE = True
+        import vllm._flashmla_C  # noqa: F401
+        _flashmla_C_AVAILABLE = True
     except ImportError as e:
-        logger.warning("Failed to import from vllm._C_flashmla with %r", e)
-        _C_flashmla_AVAILABLE = False
+        logger.warning("Failed to import from vllm._flashmla_C with %r", e)
+        _flashmla_C_AVAILABLE = False
 else:
-    _C_flashmla_AVAILABLE = False
+    _flashmla_C_AVAILABLE = False
 
 
-def is_flashmla_supported() -> bool:
-    return _C_flashmla_AVAILABLE and \
-        current_platform.get_device_capability()[0] == 9
+def is_flashmla_supported() -> Tuple[bool, Optional[str]]:
+    """
+    Return: is_supported_flag, unsupported_reason (optional).
+    """
+    if not current_platform.is_cuda():
+        return False, "FlashMLA is only supported on CUDA devices."
+    if current_platform.get_device_capability()[0] != 9:
+        return False, "FlashMLA is only supported on Hopper devices."
+    if not _flashmla_C_AVAILABLE:
+        return False, "vllm._flashmla_C is not available, likely was not "\
+            "compiled due to insufficient nvcc version or a supported arch"\
+            "was not in the list of target arches to compile for."
+    return True, None
 
 
 def get_mla_metadata(
@@ -41,7 +51,7 @@ def get_mla_metadata(
                                  dtype torch.int32.
         num_splits: (batch_size + 1), dtype torch.int32.
     """
-    return torch.ops._C_flashmla.get_mla_metadata(cache_seqlens,
+    return torch.ops._flashmla_C.get_mla_metadata(cache_seqlens,
                                                   num_heads_per_head_k,
                                                   num_heads_k)
 
@@ -77,7 +87,7 @@ def flash_mla_with_kvcache(
     """
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
-    out, softmax_lse = torch.ops._C_flashmla.fwd_kvcache_mla(
+    out, softmax_lse = torch.ops._flashmla_C.fwd_kvcache_mla(
         q,
         k_cache,
         None,
@@ -95,11 +105,11 @@ def flash_mla_with_kvcache(
 #
 # TODO: Add fake functions
 #
-# @register_fake("_C_flashmla::get_mla_metadata")
+# @register_fake("_flashmla_C::get_mla_metadata")
 # def _get_mla_metadata_fake(....) -> Tuple[torch.Tensor, torch.Tensor]:
 #     return ....
 #
-# @register_fake("_C_flashmla::fwd_kvcache_mla")
+# @register_fake("_flashmla_C::fwd_kvcache_mla")
 # def _fwd_kvcache_mla_fake(....) -> Tuple[torch.Tensor, torch.Tensor]:
 #     return ....
 #
