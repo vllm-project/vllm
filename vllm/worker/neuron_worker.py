@@ -109,8 +109,9 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                 os.getenv("ENABLE_NEURON_MULTI_NODE",
                           DEFAULT_ENABLE_NEURON_MULTI_NODE).lower() == "true")
 
+        self.world_size = int(os.getenv("WORLD_SIZE", DEFAULT_WORLD_SIZE))
+
         if self.enable_neuron_multi_node:
-            self.world_size = int(os.getenv("WORLD_SIZE", DEFAULT_WORLD_SIZE))
             self.rank = int(os.getenv("NEURON_RANK_ID", DEFAULT_NEURON_RANK_ID))
             self.distributed_init_method = "env://"
             self.is_driver_worker = self.rank == 0
