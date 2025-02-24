@@ -1271,7 +1271,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             # so the cache size and config are already set correctly and
             # do not need to be adjusted.
             intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
-            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk]
+            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk * topk_ids.shape[1]]
             intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
             config = get_config_func(tokens_in_chunk)
 
