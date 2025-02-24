@@ -37,6 +37,12 @@ class SchedulerStats:
 
 
 @dataclass
+class LoRAStats:
+    waiting_requests: Set[str] = field(default_factory=set)
+    running_requests: Set[str] = field(default_factory=set)
+
+
+@dataclass
 class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
@@ -50,12 +56,6 @@ class RequestStateStats:
     scheduled_ts: float = 0.0
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
-
-
-@dataclass
-class LoRAStats:
-    waiting_requests: Set[str] = field(default_factory=set)
-    running_requests: Set[str] = field(default_factory=set)
 
 
 @dataclass
