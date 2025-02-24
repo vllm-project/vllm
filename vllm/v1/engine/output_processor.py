@@ -4,7 +4,6 @@ import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
-from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -56,13 +55,13 @@ class RequestState:
         cls,
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
-        lora_request: Optional[LoRARequest],
         queue: Optional[asyncio.Queue[RequestOutput]],
         log_stats: bool,
     ) -> "RequestState":
         return cls(
             request_id=request.request_id,
-            lora_name=lora_request.name if lora_request is not None else None,
+            lora_name=(request.lora_request.name
+                       if request.lora_request is not None else None),
             output_kind=request.sampling_params.output_kind,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
@@ -112,7 +111,6 @@ class OutputProcessor:
     def add_request(
         self,
         request: EngineCoreRequest,
-        lora_request: Optional[LoRARequest] = None,
         queue: Optional[asyncio.Queue[RequestOutput]] = None,
     ) -> None:
         request_id = request.request_id
@@ -122,7 +120,6 @@ class OutputProcessor:
         self.request_states[request_id] = RequestState.from_new_request(
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
-            lora_request=lora_request,
             queue=queue,
             log_stats=self.log_stats)
 
