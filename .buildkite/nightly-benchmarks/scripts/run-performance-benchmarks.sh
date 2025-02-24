@@ -309,11 +309,14 @@ run_serving_tests() {
 
       new_test_name=$test_name"_qps_"$qps
 
+      # pass the tensor parallel size to the client so that it can be displayed
+      # on the benchmark dashboard
       client_command="python3 benchmark_serving.py \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
         --request-rate $qps \
+        --metadata "tensor_parallel_size=$tp" \
         $client_args"
 
       echo "Running test case $test_name with qps $qps"
