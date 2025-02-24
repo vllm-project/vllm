@@ -272,7 +272,7 @@ def get_config(
                 "   - For Hugging Face models: ensure the presence of a "
                 "'config.json'.\n"
                 "   - For MISTRAL models: ensure the presence of a "
-                "'mistral_config.json'.\n")
+                "'params.json'.\n")
 
             raise ValueError(error_message) from e
 
