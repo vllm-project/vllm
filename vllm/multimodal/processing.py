@@ -995,7 +995,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
         if cache is None or passthrough_data:
-            print("NO CACHE!")
             return self._apply_hf_processor_main(
                 prompt=prompt,
                 mm_items=mm_data_items,
@@ -1040,7 +1039,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             modality: 0
             for modality in mm_missing_data_items
         }
-        print("CACHED!", mm_missing_idxs)
 
         merged_kw_items = list[MultiModalKwargsItem]()
         for modality, kw_items in mm_maybe_cached_kw_items.items():
@@ -1234,16 +1232,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         else:
             mm_hashes = None
 
-        # prompt_ids, mm_kwargs, is_repl_applied = self._cached_apply_hf_processor(
-        #     prompt,
-        #     mm_items,
-        #     hf_processor_mm_kwargs,
-        # )
-        prompt_ids, mm_kwargs, is_repl_applied = self._apply_hf_processor_main(
-            prompt=prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            enable_hf_prompt_replacement=True,
+        prompt_ids, mm_kwargs, is_repl_applied = self._cached_apply_hf_processor(
+            prompt,
+            mm_items,
+            hf_processor_mm_kwargs,
         )
 
         unbound_prompt_repls = self._get_prompt_replacements(
@@ -1283,13 +1275,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        print("DONE HERE?", mm_placeholder_ranges)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
-            mm_hashes=None, #mm_hashes,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
 

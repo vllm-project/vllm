@@ -129,11 +129,9 @@ class EngineCore:
             assert request.mm_inputs is not None
             request.mm_inputs = self.mm_input_cache_server.get_and_update(
                 request.mm_inputs, request.mm_hashes)
-            # print("request.mm_hashes is None", request.mm_inputs[0] is None) # V1 ADDED HERE IF CACHED from MMInputMapperServer
 
         req = Request.from_engine_core_request(request)
 
-        # print("self.scheduler.add_request", self.scheduler.add_request) # vllm.v1.core.scheduler.Scheduler.add_request
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
@@ -152,9 +150,7 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        scheduler_output = self.scheduler.schedule() # kinda allocated new kv cache and updates many internal stats for the requests
-        # print("scheduler_output", scheduler_output) # DEFI HAS pixel values when V1 is set
-        # print("self.model_executor", self.model_executor.execute_model)
+        scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore

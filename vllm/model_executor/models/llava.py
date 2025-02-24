@@ -530,7 +530,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
-        print("self.language_model", self.language_model.__class__, self.vision_tower.__class__)
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)

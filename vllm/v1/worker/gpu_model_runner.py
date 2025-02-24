@@ -813,7 +813,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # depending on the input multimodal items.
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
-            print("curr_group_outputs", curr_group_outputs[0].shape)
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
@@ -895,7 +894,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_input_tokens = num_scheduled_tokens
         attn_metadata.num_input_tokens = num_input_tokens
 
-        print("self.is_multimodal_model", num_scheduled_tokens, num_input_tokens)
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -935,7 +933,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
-        print("inputs_embeds", inputs_embeds.shape) # THIS IN THE ENTRYPOINT IN V1
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):

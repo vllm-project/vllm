@@ -100,7 +100,6 @@ class MMInputCacheClient:
                 mm_input = self.mm_cache.get(mm_hash)
 
             self.mm_cache_total += 1
-            # print("mm_input is None", mm_input is None)
             if mm_input is None:
                 if precomputed_mm_inputs is not None:
                     # Reuse precomputed input (for merged preprocessor)
@@ -119,9 +118,7 @@ class MMInputCacheClient:
             else:
                 self.mm_cache_hits += 1
                 mm_input = None  # Avoids sending mm_input to Server
-                print(" Avoids sending mm_input to Server, use cache somewhow, I dunno how yet")
 
-            # print("mm_input is None", mm_input is None)
             ret_inputs.append(mm_input)
 
         return ret_inputs

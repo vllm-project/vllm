@@ -176,7 +176,6 @@ class InputProcessingContext(InputContext):
             allow_var_kwargs=True,
         )
 
-        # print("CTX", data.keys(), merged_kwargs.keys())
         try:
             return hf_processor(**data, **merged_kwargs, return_tensors="pt")
         except Exception as exc:
@@ -388,7 +387,6 @@ class InputRegistry:
                     f"Expected at least {num_expected} dummy '{k}' instances "
                     f"for profiling, but found {num_items} instances instead.")
 
-        print(dummy_data.multi_modal_data["pixel_values"].shape)
         return dummy_data
 
     def _default_input_processor(
@@ -463,7 +461,6 @@ class InputRegistry:
             processor,
         )
 
-        print("process_input", processor, mm_processor_kwargs.keys())
         processed_inputs = processor(
             InputContext(model_config),
             inputs,

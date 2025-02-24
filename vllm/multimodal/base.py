@@ -219,7 +219,6 @@ class MultiModalPlugin(ABC):
         if not supports_multimodal(model_cls):
             return 0
 
-        print("_max_mm_tokens", self._max_mm_tokens, model_cls, self.__class__)
         max_mm_tokens = self._max_mm_tokens.get(model_cls)
         if max_mm_tokens is None:
             return 0

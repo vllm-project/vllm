@@ -112,8 +112,6 @@ class Processor:
         #   multimodal data and expand prompt token ids accordingly.
         # 3. Apply prompt adapter to prompt token ids if one exists.
         # Process inputs.
-
-        # CALL input_preprocessor (preprocess.py) where print(add request)
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
             request_id=request_id,
@@ -158,7 +156,6 @@ class Processor:
             # Fallback to using MultiModalHasher directly.
             else:
                 mm_hashes = MultiModalHasher.hash_prompt_mm_data(prompt)
-            print('HASHING', bool(decoder_inputs.multi_modal_hashes), mm_hashes)
 
         # For merged preprocessor, mm_data is already mm_inputs
         precomputed_mm_inputs: Optional[list[MultiModalKwargs]] = None
@@ -191,7 +188,6 @@ class Processor:
                 mm_positions,
                 mm_hashes,
             )
-            print("mm_positions", mm_positions)
 
             # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
             # modalities involved AND the model supports merged input processor.

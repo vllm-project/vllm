@@ -230,7 +230,6 @@ class MultiModalProcessor(BaseMultiModalProcessor):
             mm_data=processor_data,
             mm_kwargs=hf_processor_mm_kwargs,
         )
-        print("prompt_text", prompt_text, processed_data["pixel_values"][0].shape)
         processed_data.update(passthrough_data)
 
         prompt_ids, = processed_data.pop("input_ids").tolist()
