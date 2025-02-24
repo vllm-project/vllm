@@ -1978,14 +1978,20 @@ class LLMEngine:
         those fields and adds the constructed logits processors to the
         logits_processors field. Returns the modified sampling params."""
         from hashlib import md5
+        import json
 
         logits_processors = []
 
         if sampling_params.guided_decoding is not None:
-            cache_key = md5(str(sampling_params.guided_decoding).encode()).hexdigest()
+            # Create a more reliable cache key by converting guided_decoding to a JSON-serializable dict
+            guided_dict = sampling_params.guided_decoding.dict()
+            # Sort keys to ensure consistent ordering
+            cache_key = md5(json.dumps(guided_dict, sort_keys=True).encode()).hexdigest()
+            print(f"Cache key: {cache_key}")
+            
             if cache_key in self._guided_decoding_logits_processors_cache:
-                processor = self._guided_decoding_logits_processors_cache.get(cache_key)
-                logger.debug(f"Using cached guided decoding logits processor for {sampling_params.guided_decoding}")
+                processor = self._guided_decoding_logits_processors_cache[cache_key]
+                logger.debug(f"Using cached guided decoding logits processor for key {cache_key}")
             else:
                 # Defensively copy sampling params since guided decoding logits
                 # processors can have different state for each request
