@@ -159,11 +159,11 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata]):
             attn_type: str,
             # MLA Specific Arguments
             **kwargs) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
+        torch.nn.Module.__init__(self)
+        MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          blocksparse_params, logits_soft_cap, attn_type,
                          **kwargs)
-        
         self.matmul_qk = Matmul()
         self.softmax = Softmax()
         self.matmul_av = Matmul()

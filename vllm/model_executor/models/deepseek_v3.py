@@ -461,7 +461,17 @@ class DeepseekV3MLAAttention(nn.Module):
             scaling_factor = rope_scaling["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
-
+        if self.q_lora_rank is not None:
+            q_proj = self.q_b_proj
+            # transfer q_proj to impl
+            delattr(self, "q_b_proj")
+        else:
+            q_proj = self.q_proj
+            delattr(self, "q_proj")
+        kv_b_proj = self.kv_b_proj
+        delattr(self, "kv_b_proj")
+        o_proj = self.o_proj
+        delattr(self, "o_proj")
         self.mla_attn = Attention(
             num_heads=self.num_local_heads,
             head_size=self.kv_lora_rank,
@@ -479,9 +489,10 @@ class DeepseekV3MLAAttention(nn.Module):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             rotary_emb=self.rotary_emb,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
-            kv_b_proj=self.kv_b_proj,
-            o_proj=self.o_proj,
+            # q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
+            q_proj=q_proj, #if self.q_lora_rank is None else self.q_b_proj,
+            kv_b_proj=kv_b_proj,
+            o_proj=o_proj,
         )
 
         self.prefix = prefix

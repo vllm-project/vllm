@@ -7,7 +7,7 @@
         "names": []
     },
     "blacklist": {
-        "types": ["KVCache", "VLLMKVCache"],
+        "types": [],
         "names": ["lm_head"]
     },
     "quantize_weight": false,
