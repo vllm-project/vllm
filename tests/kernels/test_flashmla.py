@@ -113,24 +113,3 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
     bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (torch.finfo(dtype).bits // 8)
     print(f"{t:.3f} ms, {FLOPS / 10 ** 9 / t:.0f} TFLOPS, {bytes / 10 ** 6 / t:.0f} GB/s")
-
-
-# if __name__ == "__main__":
-#     dtype = torch.bfloat16
-#     device = torch.device("cuda:0")
-#     torch.set_default_dtype(dtype)
-#     torch.set_default_device(device)
-#     torch.cuda.set_device(device)
-#     torch.manual_seed(0)
-#     random.seed(0)
-
-#     h_kv = 1
-#     d, dv = 576, 512
-#     causal = True
-
-#     for b in [128]:
-#         for s in [4096, 8192]:
-#             for h_q in [16, 32, 64, 128]:  # TP = 8, 4, 2, 1
-#                 for s_q in [1, 2]:  # MTP = 1, 2
-#                     for varlen in [False, True]:
-#                         test_flash_mla(b, s_q, s, h_q, h_kv, d, dv, causal, varlen)

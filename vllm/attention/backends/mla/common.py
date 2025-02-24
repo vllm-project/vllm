@@ -506,8 +506,8 @@ class MLACommonMetadata(AttentionMetadata):
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor] = None
 
-    _cached_prefill_metadata: Optional["MLACommonMetadata"] = None
-    _cached_decode_metadata: Optional["MLACommonMetadata"] = None
+    _cached_prefill_common_metadata: Optional["MLACommonMetadata"] = None
+    _cached_decode_common_metadata: Optional["MLACommonMetadata"] = None
 
     num_prefill_tokens: int
 
@@ -540,8 +540,8 @@ class MLACommonMetadata(AttentionMetadata):
         if self.num_prefills == 0:
             return None
 
-        if self._cached_prefill_metadata is not None:
-            return self._cached_prefill_metadata
+        if self._cached_prefill_common_metadata is not None:
+            return self._cached_prefill_common_metadata
 
         assert self.seq_lens is not None
         assert self.seq_lens_tensor is not None
@@ -564,7 +564,7 @@ class MLACommonMetadata(AttentionMetadata):
         input_positions = (None if self.input_positions is None else
                            self.input_positions[:self.num_prefill_tokens])
 
-        self._cached_prefill_metadata = MLACommonMetadata(
+        self._cached_prefill_common_metadata = MLACommonMetadata(
             # Required by ModelRunner
             use_cuda_graph=False,  # Not Attention Related
             # Required by Attention Metadata
@@ -595,15 +595,15 @@ class MLACommonMetadata(AttentionMetadata):
             context_chunk_seq_tot=self.context_chunk_seq_tot,
             context_chunk_max_seq_lens=self.context_chunk_max_seq_lens,
         )
-        return self._cached_prefill_metadata
+        return self._cached_prefill_common_metadata
 
     @property
     def decode_metadata(self) -> Optional["MLACommonMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
-        if self._cached_decode_metadata is not None:
-            return self._cached_decode_metadata
+        if self._cached_decode_common_metadata is not None:
+            return self._cached_decode_common_metadata
         assert self.seq_lens_tensor is not None
 
         # Compute some attn_metadata fields which default to None
@@ -616,7 +616,7 @@ class MLACommonMetadata(AttentionMetadata):
         input_positions = (None if self.input_positions is None else
                            self.input_positions[self.num_prefill_tokens:])
 
-        self._cached_decode_metadata = MLACommonMetadata(
+        self._cached_decode_common_metadata = MLACommonMetadata(
             # Required by ModelRunner
             use_cuda_graph=self.use_cuda_graph,  # Not Attention Related
             # Required by Attention Metadata
@@ -647,7 +647,7 @@ class MLACommonMetadata(AttentionMetadata):
             input_positions=input_positions,
             head_dim=self.head_dim,
             is_profile_run=self.is_profile_run)
-        return self._cached_decode_metadata
+        return self._cached_decode_common_metadata
 
     def advance_step(self,
                      model_input: "ModelInputForGPUWithSamplingMetadata",
