@@ -213,7 +213,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: List[ChatCompletionMessageParam]
-    model: str
+    model: Optional[str] = None
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[bool] = False
@@ -642,7 +642,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
-    model: str
+    model: Optional[str] = None
     prompt: Union[List[int], List[List[int]], str, List[str]]
     best_of: Optional[int] = None
     echo: Optional[bool] = False
@@ -907,7 +907,7 @@ class CompletionRequest(OpenAIBaseModel):
 class EmbeddingCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/embeddings
-    model: str
+    model: Optional[str] = None
     input: Union[List[int], List[List[int]], str, List[str]]
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
@@ -939,7 +939,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
-    model: str
+    model: Optional[str] = None
     messages: List[ChatCompletionMessageParam]
 
     encoding_format: Literal["float", "base64"] = "float"
@@ -1007,7 +1007,7 @@ PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
 
 
 class ScoreRequest(OpenAIBaseModel):
-    model: str
+    model: Optional[str] = None
     text_1: Union[List[str], str]
     text_2: Union[List[str], str]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
@@ -1031,7 +1031,7 @@ class ScoreRequest(OpenAIBaseModel):
 
 
 class RerankRequest(OpenAIBaseModel):
-    model: str
+    model: Optional[str] = None
     query: str
     documents: List[str]
     top_n: int = Field(default_factory=lambda: 0)
@@ -1345,7 +1345,7 @@ class BatchRequestOutput(OpenAIBaseModel):
 
 
 class TokenizeCompletionRequest(OpenAIBaseModel):
-    model: str
+    model: Optional[str] = None
     prompt: str
 
     add_special_tokens: bool = Field(
@@ -1357,7 +1357,7 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
 
 
 class TokenizeChatRequest(OpenAIBaseModel):
-    model: str
+    model: Optional[str] = None
     messages: List[ChatCompletionMessageParam]
 
     add_generation_prompt: bool = Field(
@@ -1423,7 +1423,7 @@ class TokenizeResponse(OpenAIBaseModel):
 
 
 class DetokenizeRequest(OpenAIBaseModel):
-    model: str
+    model: Optional[str] = None
     tokens: List[int]
 
 
@@ -1456,7 +1456,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm.
     """
 
-    model: str
+    model: Optional[str] = None
     """ID of the model to use.
     """
 

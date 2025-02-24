@@ -31,6 +31,7 @@ from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
@@ -1048,6 +1049,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
+            time_before_load = time.perf_counter()
             self.model = get_model(vllm_config=self.vllm_config)
             if self.lora_config:
                 self.model = self.load_lora_model(self.model,
@@ -1055,10 +1057,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.scheduler_config,
                                                   self.lora_config,
                                                   self.device)
-
+            time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
+        logger.info("Loading model weights took %.4f GB and %.6f seconds",
+                    self.model_memory_usage / float(2**30),
+                    time_after_load - time_before_load)
 
     def _get_prompt_logprobs_dict(
         self,
@@ -1164,7 +1167,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
-        with set_forward_context(None, self.vllm_config):
+        with set_forward_context(None, self.vllm_config,
+                                 num_tokens=num_tokens):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1174,6 +1178,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
             )
         return hidden_states
+
+    @torch.inference_mode()
+    def _dummy_sampler_run(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+
+        logits = self.model.compute_logits(hidden_states, None)
+        num_reqs = logits.size(0)
+
+        dummy_tensors = lambda v: torch.full(
+            (num_reqs, ), v, device=self.device)
+
+        dummy_metadata = SamplingMetadata(
+            temperature=dummy_tensors(0.5),
+            all_greedy=False,
+            all_random=False,
+            spec_token_ids=None,
+            top_p=dummy_tensors(0.9),
+            top_k=dummy_tensors(logits.size(1) - 1),
+            min_p=None,
+            generators={},
+            max_num_logprobs=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=dummy_tensors(0.1),
+            presence_penalties=dummy_tensors(0.1),
+            repetition_penalties=dummy_tensors(0.1),
+            output_token_ids=[[] for _ in range(num_reqs)],
+            min_tokens={},
+            logit_bias=[None for _ in range(num_reqs)],
+            allowed_token_ids_mask=None,
+        )
+        sampler_output = self.model.sample(logits=logits,
+                                           sampling_metadata=dummy_metadata)
+
+        return sampler_output
 
     def profile_run(self) -> None:
         # use an empty tensor instead of `None`` to force Dynamo to pass
@@ -1302,12 +1343,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                             dummy_kv_caches)
             if get_pp_group().is_last_rank:
                 hidden_states = hidden_states[logit_indices]
-                logits = self.model.compute_logits(hidden_states, None)
-                # TODO(woosuk): Consider the memory usage of the sampler.
+                sampler_output = self._dummy_sampler_run(hidden_states)
             else:
-                logits = None
+                sampler_output = None
             torch.cuda.synchronize()
-            del hidden_states, logits
+            del hidden_states, sampler_output
             self.encoder_cache.clear()
         gc.collect()
 

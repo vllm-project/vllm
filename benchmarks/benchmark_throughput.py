@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import uvloop
-from benchmark_utils import convert_to_pytorch_benchmark_format
+from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -171,7 +171,12 @@ def run_vllm(
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
-
+    assert all(
+        llm.llm_engine.model_config.max_model_len >= (
+            request.prompt_len + request.expected_output_len)
+        for request in requests), (
+            "Please ensure that max_model_len is greater than the sum of"
+            " prompt_len and expected_output_len for all requests.")
     # Add the requests to the engine.
     prompts: List[TextPrompt] = []
     sampling_params: List[SamplingParams] = []
@@ -229,6 +234,12 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:
+        assert all(
+            llm.model_config.max_model_len >= (request.prompt_len +
+                                               request.expected_output_len)
+            for request in requests), (
+                "Please ensure that max_model_len is greater than the sum of"
+                " prompt_len and expected_output_len for all requests.")
 
         # Add the requests to the engine.
         prompts: List[TextPrompt] = []
@@ -355,8 +366,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
     if pt_records:
         # Don't use json suffix here as we don't want CI to pick it up
         pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
-        with open(pt_file, "w") as f:
-            json.dump(pt_records, f)
+        write_to_json(pt_file, pt_records)
 
 
 def main(args: argparse.Namespace):
