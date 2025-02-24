@@ -38,7 +38,7 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -417,11 +417,11 @@ class MllamaVisionSdpaAttention(nn.Module):
                  prefix: str = ""):
         super().__init__()
 
-        model_parallel_size = get_tensor_model_parallel_world_size()
+        tensor_parallel_size = get_tp_group().world_size
         self.embed_dim = config.hidden_size
         self.num_heads = config.attention_heads
         self.head_dim = config.hidden_size // config.attention_heads
-        self.num_local_heads = self.num_heads // model_parallel_size
+        self.num_local_heads = self.num_heads // tensor_parallel_size
         self.q_size = self.num_local_heads * self.head_dim
         self.kv_size = self.num_local_heads * self.head_dim
 
@@ -772,12 +772,13 @@ class MllamaTextCrossAttention(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.model_parallel_size = get_tensor_model_parallel_world_size()
+        self.pipeline_parallel_rank = get_pp_group().rank_in_group
+        self.tensor_parallel_size = get_tp_group().world_size
         self.num_heads = self.config.num_attention_heads
-        self.num_local_heads = self.num_heads // self.model_parallel_size
+        self.num_local_heads = self.num_heads // self.tensor_parallel_size
         self.num_key_value_heads = self.config.num_key_value_heads
         self.num_local_key_value_heads = \
-            self.num_key_value_heads // self.model_parallel_size
+            self.num_key_value_heads // self.tensor_parallel_size
         self.dropout = config.dropout
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
@@ -861,7 +862,7 @@ class MllamaTextCrossAttention(nn.Module):
         attention_mask: torch.Tensor,
         kv_range_for_decode: List[Tuple[int, int]],
     ) -> torch.Tensor:
-        kv_cache = self.attn.kv_cache
+        kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         # Skip writing kv-cache for the initial profiling run.
         if len(kv_cache.shape) > 1:
