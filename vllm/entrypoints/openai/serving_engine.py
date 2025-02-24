@@ -164,6 +164,7 @@ class OpenAIServing:
         prompt: str,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
         add_special_tokens: bool,
+        split_special_tokens: bool = False,
     ) -> TextTokensPrompt:
         if (self.model_config.encoder_config is not None
                 and self.model_config.encoder_config.get(
@@ -171,10 +172,13 @@ class OpenAIServing:
             prompt = prompt.lower()
 
         if truncate_prompt_tokens is None:
-            encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
+            encoded = tokenizer(prompt,
+                                add_special_tokens=add_special_tokens,
+                                split_special_tokens=split_special_tokens)
         else:
             encoded = tokenizer(prompt,
                                 add_special_tokens=add_special_tokens,
+                                split_special_tokens=split_special_tokens,
                                 truncation=True,
                                 max_length=truncate_prompt_tokens)
 
@@ -312,6 +316,7 @@ class OpenAIServing:
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
+        split_special_tokens: bool = False,
     ) -> List[TextTokensPrompt]:
         """
         Tokenize/detokenize depending on the input format.
@@ -330,8 +335,9 @@ class OpenAIServing:
                 tokenizer,
                 prompt=prompt_input["content"],
                 truncate_prompt_tokens=truncate_prompt_tokens,
-                add_special_tokens=add_special_tokens)
-            if prompt_input["is_tokens"] is False else
+                add_special_tokens=add_special_tokens,
+                split_special_tokens=split_special_tokens,
+            ) if prompt_input["is_tokens"] is False else
             self._normalize_prompt_tokens_to_input(
                 request,
                 tokenizer,
@@ -347,6 +353,7 @@ class OpenAIServing:
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
+        split_special_tokens: bool = False,
     ) -> Tuple[List[TextTokensPrompt], List[TokensPrompt]]:
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
             request,
@@ -354,6 +361,7 @@ class OpenAIServing:
             input_or_inputs,
             truncate_prompt_tokens=truncate_prompt_tokens,
             add_special_tokens=add_special_tokens,
+            split_special_tokens=split_special_tokens,
         )
 
         engine_prompts = [
