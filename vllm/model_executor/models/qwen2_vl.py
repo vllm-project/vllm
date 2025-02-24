@@ -24,8 +24,8 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import cached_property, partial
-from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
-                    Set, Tuple, Type, TypedDict, Union)
+from typing import (Any, Callable, Iterable, Literal, Mapping, Optional, Set,
+                    Tuple, Type, TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -38,7 +38,6 @@ from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLConfig, Qwen2VLVisionConfig)
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
@@ -1302,8 +1301,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -1354,8 +1351,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )

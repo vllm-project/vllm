@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
 import torch
 from torch import nn
 from transformers import PaliGemmaConfig
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
@@ -288,8 +287,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs: object) -> Union[SamplerOutput, IntermediateTensors]:
@@ -306,8 +303,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 

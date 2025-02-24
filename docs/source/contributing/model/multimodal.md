@@ -16,8 +16,6 @@ Further update the model as follows:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
   +     pixel_values: torch.Tensor,
     ) -> SamplerOutput:
   ```
