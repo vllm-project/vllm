@@ -17,6 +17,6 @@ ray[default]
 --find-links https://storage.googleapis.com/libtpu-releases/index.html
 --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-torch==2.6.0+cpu
-torchvision==0.21.0+cpu
+torch==2.6.0
+torchvision==0.21.0
 torch_xla[tpu, pallas]==2.6.0
