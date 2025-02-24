@@ -111,7 +111,6 @@ class Processor:
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
         # 3. Apply prompt adapter to prompt token ids if one exists.
-        # Process inputs.
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
             request_id=request_id,
@@ -215,7 +214,7 @@ class Processor:
                 mm_hashes=sorted_mm_hashes,
                 mm_processor_kwargs=decoder_inputs.mm_processor_kwargs,
                 precomputed_mm_inputs=precomputed_mm_inputs,
-            ) # THIS ONE REMOVES INPUT IMAGES IF CACHED with MMInputMapperClient
+            )
         else:
             sorted_mm_inputs = None
             sorted_mm_hashes = None

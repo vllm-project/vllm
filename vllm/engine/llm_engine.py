@@ -724,7 +724,6 @@ class LLMEngine:
         if inputs is not None:
             prompt = inputs
         assert prompt is not None and params is not None
-        print("CALL add_request", prompt)
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -755,7 +754,6 @@ class LLMEngine:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        print("mm_hashes", preprocessed_inputs.get('mm_hashes'))
         processed_inputs = self.input_processor(preprocessed_inputs)
 
         self._add_processed_request(

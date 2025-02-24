@@ -343,7 +343,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 execute_model_req.virtual_engine,
                 execute_model_req.finished_requests_ids))
 
-        # print("self.model_runner.prepare_model_input", self.model_runner.prepare_model_input)
         kwargs = extract_previous_hidden_states(execute_model_req)
 
         if self.do_metadata_broadcast:
@@ -418,7 +417,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 orig_model_execute_time = intermediate_tensors.tensors.get(
                     "model_execute_time", torch.tensor(0)).item()
 
-        # print("self.model_runner.execute_model", self.model_runner.execute_model)
         output = self.model_runner.execute_model(
             model_input=model_input,
             kv_caches=self.kv_cache[worker_input.virtual_engine]

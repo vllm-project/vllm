@@ -1232,7 +1232,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         else:
             mm_hashes = None
 
-        prompt_ids, mm_kwargs, is_repl_applied = self._cached_apply_hf_processor(
+        (
+            prompt_ids,
+            mm_kwargs,
+            is_repl_applied,
+        ) = self._cached_apply_hf_processor(
             prompt,
             mm_items,
             hf_processor_mm_kwargs,
