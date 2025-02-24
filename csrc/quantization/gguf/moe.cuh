@@ -2,7 +2,8 @@
 
 template <int qk, int qr, int qi, bool need_sum, typename block_q_t, int mmq_x,
           int mmq_y, int nwarps, allocate_tiles_cuda_t allocate_tiles,
-          load_tiles_cuda_t load_tiles, int vdr, vec_dot_q_moe_cuda_t vec_dot>
+          load_tiles_cuda_t load_tiles, int vdr,
+          vec_dot_q_mul_mat_cuda_t vec_dot>
 static __device__ __forceinline__ void moe_q(
     const void* __restrict__ vx, const void* __restrict__ vy,
     half* __restrict__ dst, const int* __restrict__ sorted_token_ids,
