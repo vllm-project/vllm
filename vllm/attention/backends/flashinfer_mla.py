@@ -494,7 +494,7 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder):
             paged_kv_indptr_host=paged_kv_indptr_tensor,
             query_start_loc_host=query_start_loc_host,
             seq_lens_tensor_host=seq_lens_tensor_host,
-            page_size=self.page_size,
+            page_size=self.runner.block_size,
             data_type=kv_cache_dtype,
             q_data_type=self.runner.model_config.dtype,
             sm_scale=self.sm_scale,
