@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import argparse
 import json
 import os
 from pathlib import Path
@@ -8,6 +8,9 @@ import pandas as pd
 from tabulate import tabulate
 
 results_folder = Path("results/")
+
+parser = argparse.ArgumentParser(description="Select vllm version")
+parser.add_argument('--version', type=int, default=0, help='vllm version')
 
 # latency results and the keys that will be printed into markdown
 latency_results = []
@@ -74,8 +77,19 @@ def results_to_json(latency, throughput, serving):
 
 if __name__ == "__main__":
 
+    args = parser.parse_args()
+    suffix = "" if args.version == 0 else "_v1"
+
     # collect results
-    for test_file in results_folder.glob("*.json"):
+    if args.version == 0:
+        files = [
+            f for f in results_folder.glob("*.json")
+            if "_v1.json" not in f.name
+        ]
+    else:
+        files = list(results_folder.glob("*_v1.json"))
+
+    for test_file in files:
 
         with open(test_file) as f:
             raw_result = json.loads(f.read())
@@ -94,7 +108,7 @@ if __name__ == "__main__":
             raw_result.update(command)
 
             # update the test name of this result
-            raw_result.update({"test_name": test_file.stem})
+            raw_result.update({"test_name": test_file.stem.replace('_v1', '')})
 
             # add the result to raw_result
             serving_results.append(raw_result)
@@ -114,7 +128,7 @@ if __name__ == "__main__":
             raw_result.update(command)
 
             # update the test name of this result
-            raw_result.update({"test_name": test_file.stem})
+            raw_result.update({"test_name": test_file.stem.replace('_v1', '')})
 
             # get different percentiles
             for perc in [10, 25, 50, 75, 90, 99]:
@@ -141,7 +155,7 @@ if __name__ == "__main__":
             raw_result.update(command)
 
             # update the test name of this result
-            raw_result.update({"test_name": test_file.stem})
+            raw_result.update({"test_name": test_file.stem.replace('_v1', '')})
 
             # add the result to raw_result
             throughput_results.append(raw_result)
@@ -201,7 +215,7 @@ if __name__ == "__main__":
                                    showindex=False)
 
     # document the result
-    with open(results_folder / "benchmark_results.md", "w") as f:
+    with open(results_folder / f"benchmark_results{suffix}.md", "w") as f:
 
         results = read_markdown("../.buildkite/nightly-benchmarks/" +
                                 "performance-benchmarks-descriptions.md")
@@ -213,7 +227,7 @@ if __name__ == "__main__":
         f.write(results)
 
     # document benchmarking results in json
-    with open(results_folder / "benchmark_results.json", "w") as f:
+    with open(results_folder / f"benchmark_results{suffix}.json", "w") as f:
 
         results = latency_results.to_dict(
             orient='records') + throughput_results.to_dict(
