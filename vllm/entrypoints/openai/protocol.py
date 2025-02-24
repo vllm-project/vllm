@@ -2047,6 +2047,16 @@ class TranscriptionRequest(OpenAIBaseModel):
     """The presence penalty to use for sampling."""
     # --8<-- [end:transcription-sampling-params]
 
+    use_beam_search: bool = False
+    """Use beam search to generate the transcription.
+    """
+
+    beam_width: int = Field(default=2)
+    """The beam width to use for beam search."""
+
+    length_penalty: float = Field(default=1.0)
+    """The length penalty to use for beam search."""
+
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "repetition_penalty": 1.0,
@@ -2055,6 +2065,32 @@ class TranscriptionRequest(OpenAIBaseModel):
         "top_k": 0,
         "min_p": 0.0,
     }
+
+    def to_beam_search_params(
+            self,
+            default_max_tokens: int,
+            default_sampling_params: Optional[dict] = None
+    ) -> BeamSearchParams:
+        max_tokens = default_max_tokens
+
+        if default_sampling_params is None:
+            default_sampling_params = {}
+
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get("temperature", 1.0)
+
+        if (beam_width := self.beam_width) is None:
+            beam_width = default_sampling_params.get("beam_width", 2)
+
+        if (length_penalty := self.length_penalty) is None:
+            length_penalty = default_sampling_params.get("length_penalty", 1.0)
+
+        return BeamSearchParams(beam_width=beam_width,
+                                max_tokens=max_tokens,
+                                ignore_eos=False,
+                                temperature=temperature,
+                                length_penalty=length_penalty,
+                                include_stop_str_in_output=False)
 
     def to_sampling_params(
         self, default_max_tokens: int, default_sampling_params: dict | None = None
