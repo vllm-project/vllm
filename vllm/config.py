@@ -3160,10 +3160,12 @@ class CompilationConfig(BaseModel):
             self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
-        if len(self.splitting_ops) == 0:
-            # v1 must split the graph on attention ops
-            # for piecewise cudagraph
-            pass
+        # If default, override splitting ops for piecewise cudagraph on V1.
+        if (self.splitting_ops is None or len(self.splitting_ops) == 0):
+            self.splitting_ops = [
+                "vllm.unified_attention",
+                "vllm.unified_attention_with_output",
+            ]
 
 
 @dataclass

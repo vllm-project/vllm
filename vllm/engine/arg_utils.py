@@ -1158,6 +1158,7 @@ class EngineArgs:
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
             self._set_default_args_v1(usage_context)
+            self.compilation_config.set_splitting_ops_for_v1()
         else:
             self._set_default_args_v0(model_config)
 
