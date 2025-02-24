@@ -161,10 +161,10 @@ class EngineCore:
         Note that if nothing to output in this step, None is returned.
 
         The execution flow is as follows:
-        1. Try to schedule a new batch if there are unscheduled requests
-        and the job queue is not full. If a new batch is scheduled, directly
-        return an empty engine core output. In other words, we won't check
-        and return model outputs before the batch queue is full.
+        1. Try to schedule a new batch if the batch queue is not full.
+        If a new batch is scheduled, directly return an empty engine core
+        output. In other words, fulfilling the batch queue has a higher priority
+        then getting model outputs.
         2. If there is no new scheduled batch, meaning that the batch queue
         is full or no other requests can be scheduled, we block until the first
         batch in the job queue is finished.
@@ -174,10 +174,10 @@ class EngineCore:
 
         engine_core_outputs = None
         scheduler_output = None
-        # If there are unscheduled requests and the job queue
-        # is not full, schedule a new batch. Note that this is not blocking.
-        if (self.scheduler.get_num_unscheduled_requests() > 0
-                and not self.batch_queue.full()):
+        # Try to schedule a new batch if the batch queue is not full, but
+        # the scheduler may return an empty batch if all requests are scheduled.
+        # Note that this is not blocking.
+        if not self.batch_queue.full():
             scheduler_output = self.scheduler.schedule()
             if scheduler_output.total_num_scheduled_tokens > 0:
                 future = self.model_executor.execute_model(scheduler_output)
