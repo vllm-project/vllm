@@ -570,15 +570,16 @@ class Scheduler:
                     token_ids = sampled_token_ids[index]
                     if len(token_ids) > 1:
                         logger.error(
-                            "Structured output does not currently support more than one token at a time. Only the first token will be used."
-                        )
+                            "Structured output does not currently support "
+                            "more than one token at a time. Only the first "
+                            "token will be used.")
                     token_id = token_ids[0]
                     # accept_token advances the FSM
                     accepted = request.grammar.accept_token(token_id)
                     if not accepted:
                         logger.error(
-                            "Failed to advance FSM for request %s with token %d",
-                            req_id, token_id)
+                            "Failed to advance FSM for request %s "
+                            "with token %d", req_id, token_id)
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
