@@ -5,9 +5,12 @@ from typing import Any, Optional
 
 import torch
 from msgspec import msgpack
+import msgspec
+import numpy as np
 
 CUSTOM_TYPE_TENSOR = 1
 CUSTOM_TYPE_PICKLE = 2
+CUSTOM_TYPE_NDARRAY = 3
 
 
 class MsgpackEncoder:
@@ -34,12 +37,28 @@ class MsgpackDecoder:
         return self.decoder.decode(obj)
 
 
+class NumpySerializedRepresentation(msgspec.Struct, gc=False, array_like=True):
+    dtype:str
+    shape:tuple
+    data:bytes
+
+numpy_array_encoder = msgspec.msgpack.Encoder()
+numpy_array_decoder = msgspec.msgpack.Decoder(type=NumpySerializedRepresentation)
+
+
 def custom_enc_hook(obj: Any) -> Any:
     if isinstance(obj, torch.Tensor):
         # NOTE(rob): it is fastest to use numpy + pickle
         # when serializing torch tensors.
         # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
         return msgpack.Ext(CUSTOM_TYPE_TENSOR, pickle.dumps(obj.numpy()))
+
+    if isinstance(obj, np.ndarray):
+        return msgspec.msgpack.Ext(CUSTOM_TYPE_NDARRAY,
+                                   numpy_array_encoder.encode(NumpySerializedRepresentation(
+                                       dtype=obj.dtype.str,
+                                       shape=obj.shape,
+                                       data=obj.data)))
 
     return msgpack.Ext(CUSTOM_TYPE_PICKLE, pickle.dumps(obj))
 
@@ -49,5 +68,9 @@ def custom_ext_hook(code: int, data: memoryview) -> Any:
         return torch.from_numpy(pickle.loads(data))
     if code == CUSTOM_TYPE_PICKLE:
         return pickle.loads(data)
+    if code == CUSTOM_TYPE_NDARRAY:
+        serialized_array_rep = numpy_array_decoder.decode(data)
+        return np.frombuffer(serialized_array_rep.data, dtype=serialized_array_rep.dtype).reshape(
+            serialized_array_rep.shape)
 
     raise NotImplementedError(f"Extension type code {code} is not supported")

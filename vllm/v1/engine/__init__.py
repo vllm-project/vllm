@@ -128,9 +128,9 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     request_ids: List[str] = []
-    req_id_to_index : Dict[str, int] = {}
-    new_token_id_counts: Optional[np.ndarray] = None
-    new_token_ids: np.ndarray = np.empty(0, dtype=int) # List[int]
+    new_token_id_offsets : List[int] = []
+    new_token_id_counts: Optional[List[int]] = None  # ndarray?
+    new_token_ids: np.ndarray = np.empty(0, dtype=int) # Optional?
 
     # req_id -> LogprobsLists
     new_logprobs: Dict[str, LogprobsLists] = {}

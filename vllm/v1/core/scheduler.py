@@ -17,6 +17,7 @@ from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
 
 import cProfile
 import pyinstrument
@@ -101,7 +102,7 @@ class Scheduler:
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
-        self.profiler = cProfile.Profile()
+        #self.profiler = cProfile.Profile()
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
@@ -477,7 +478,7 @@ class Scheduler:
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
-    def _update_from_output(
+    def Xupdate_from_output(
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
@@ -517,9 +518,6 @@ class Scheduler:
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
 
-            # MASK
-
-            #print(f"TY = {type(generated_token_ids)} {generated_token_ids} {sampled_token_ids}")
             if not isinstance(generated_token_ids, np.ndarray):
                 generated_token_ids = [generated_token_ids]
 
@@ -541,11 +539,9 @@ class Scheduler:
                 scheduled_spec_token_ids = (
                     scheduler_output.scheduled_spec_decode_tokens[req_id])
 
-                num_generated_token_ids = len(generated_token_ids)
-
                 num_computed_tokens_step = num_scheduled_tokens[req_id] - (
                     len(scheduled_spec_token_ids) + 1 -
-                    num_generated_token_ids)
+                    len(generated_token_ids))
                 request.num_computed_tokens += num_computed_tokens_step
 
             cached_encoder_input_ids = (
@@ -567,7 +563,6 @@ class Scheduler:
 
             stopped = False
             new_logprobs = None
-            new_token_ids = np.empty(0, dtype=int)
             num_new_tokens = 0
 
             if request.num_computed_tokens >= request.num_tokens:
@@ -575,7 +570,8 @@ class Scheduler:
                 #print(f"G = {generated_token_ids}")
                 for output_token_id in generated_token_ids:
                     output_token_id = int(output_token_id)
-                    #print(f"{output_token_id}, {type(output_token_id)}")
+                    if output_token_id == INVALID_TOKEN_ID:
+                        continue
                     request.append_output_token_ids(output_token_id)
                     num_new_tokens = num_new_tokens + 1
 
@@ -594,11 +590,14 @@ class Scheduler:
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             # Transmit partial if chunked prefill & prompt logprobs is enabled
-            if new_token_ids or req_id in prompt_logprobs_dict:
+            if num_new_tokens > 0 or req_id in prompt_logprobs_dict:
                 # Update EngineCoreOutputs for this Request.
                 output.request_ids.append(req_id)
 
-                if (num_new_tokens > 1 or
+                # TODO: try to eliminate this if all the offsets are adjacent?
+                output.new_token_id_offsets.append(model_runner_output.req_id_to_index[req_id])
+
+                if (num_new_tokens != 1 or
                     output.new_token_id_counts is not None):
                     if output.new_token_id_counts is None:
                         output.new_token_id_counts = [1] * i
@@ -621,12 +620,8 @@ class Scheduler:
             if not stopped:
                 new_running.append(request)
 
-        output.req_id_to_index = model_runner_output.req_id_to_index
-        output.new_token_ids = sampled_token_ids
-
-        #print(f"NEW TOK IDS {output.new_token_ids}")
-
         self.running = new_running
+        output.new_token_ids = sampled_token_ids
         output.new_prompt_logprobs_tensors = prompt_logprobs_dict
         output.scheduler_stats = self.make_stats()
         return output
