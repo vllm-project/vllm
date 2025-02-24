@@ -70,7 +70,7 @@ sudo kubectl get pods
 
 And you will see that pods for the `vllm` deployment should transition to `Ready` and the `Running` state.
 
-```plaintext
+```
 NAME                                               READY   STATUS    RESTARTS   AGE
 vllm-deployment-router-859d8fb668-2x2b7        1/1     Running   0          2m38s
 vllm-opt125m-deployment-vllm-84dfc9bd7-vb9bs   1/1     Running   0          2m38s
