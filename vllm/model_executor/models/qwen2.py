@@ -419,16 +419,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ],
     }
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -513,16 +503,6 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
             "up_proj",
         ],
     }
-
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 

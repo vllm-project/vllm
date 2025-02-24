@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from benchmark_utils import convert_to_pytorch_benchmark_format
+from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
@@ -30,8 +30,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                     for k in ["avg_latency", "percentiles"]})
     if pt_records:
         pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
-        with open(pt_file, "w") as f:
-            json.dump(pt_records, f)
+        write_to_json(pt_file, pt_records)
 
 
 def main(args: argparse.Namespace):
@@ -42,6 +41,10 @@ def main(args: argparse.Namespace):
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(**dataclasses.asdict(engine_args))
+    assert llm.llm_engine.model_config.max_model_len >= (
+        args.input_len +
+        args.output_len), ("Please ensure that max_model_len is greater than"
+                           " the sum of input_len and output_len.")
 
     sampling_params = SamplingParams(
         n=args.n,
