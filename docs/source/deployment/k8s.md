@@ -3,9 +3,9 @@
 # Using Kubernetes
 
 Using Kubernetes to deploy vLLM is a scalable and efficient way to serve machine learning models. 
-This guide will walk you through the process of deploying vLLM with [production-stack](https://github.com/vllm-project/production-stack) and native Kubernetes.
+This guide will walk you through the process of deploying vLLM with [vLLM production-stack](https://github.com/vllm-project/production-stack) and native Kubernetes.
 
-Note that though it is doable to deploy vLLM using native Kubernetes, [production-stack](https://github.com/vllm-project/production-stack) allows you to serve LLM models on multi-node Kubernetes cluster, while including a wide range of usability, observability and performance-related features.
+Note that though it is doable to deploy vLLM using native Kubernetes, [vLLM production-stack](https://github.com/vllm-project/production-stack) allows you to serve LLM models on multi-node Kubernetes cluster, while including a wide range of usability, observability and performance-related features.
 
 
 ## Prerequisites
@@ -16,12 +16,12 @@ Before you begin, ensure that you have the following:
 - NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
 - Available GPU resources in your cluster
 
-If you just start using Kubernetes, don't worry: we provide step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and [video](https://www.youtube.com/watch?v=EsTJbQtzj0g) in vLLM production stack [repo](https://github.com/vllm-project/production-stack) to help you get started!
+If you just start using Kubernetes, don't worry: we provide step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and [video](https://www.youtube.com/watch?v=EsTJbQtzj0g) in [vLLM production-stack](https://github.com/vllm-project/production-stack) to help you get started!
 
 
-## Deployment using helm chart
+## Deployment using vLLM production-stack
 
-Helm chart hides Kubernetes complications from you so that yoiu can focus on configurations that really matters for your vLLM cluster. This [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) helps you install helm.
+vLLM production-stack uses helm chart, which hides Kubernetes complications from you so that yoiu can focus on configurations that really matters for your vLLM cluster. This [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) helps you install helm.
 
 Here is an minimal helm chart example:
 ```
@@ -54,7 +54,7 @@ In this helm chart:
 
 **NOTE:** If you intend to set up two or multiple vllm pods, please refer to this [yaml file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
 
-**NOTE:** Feel free to check more [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and vLLM production stack [repo](https://github.com/vllm-project/production-stack)!
+**NOTE:** Feel free to check more [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and vLLM production stack [repo](https://github.com/vllm-project/production-stack).
 
 To run this helm chart, execute the following command:
 ```bash
@@ -75,7 +75,7 @@ sudo kubectl get pods
 And you will see that pods for the `vllm` deployment should transition to `Ready` and the `Running` state.
 
 ```
-NAME                                               READY   STATUS    RESTARTS   AGE
+NAME                                           READY   STATUS    RESTARTS   AGE
 vllm-deployment-router-859d8fb668-2x2b7        1/1     Running   0          2m38s
 vllm-opt125m-deployment-vllm-84dfc9bd7-vb9bs   1/1     Running   0          2m38s
 ```
@@ -143,8 +143,6 @@ Expected output:
   ]
 }
 ```
-
-This demonstrates the model generating a continuation for the provided prompt.
 
 ### Uninstall
 
