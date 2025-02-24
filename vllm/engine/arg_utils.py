@@ -1131,11 +1131,7 @@ class EngineArgs:
         model_config: ModelConfig,
         disable_frontend_multiprocessing: bool,
     ) -> bool:
-        """
-        Oracle for whether to use V0 or V1 Engine by default.
-
-        DO NOT MODIFY WITHOUT APPROVAL FROM WOOSUK OR ROB.
-        """
+        """Oracle for whether to use V0 or V1 Engine by default."""
 
         # If the user has explicitly set VLLM_USE_V1=0, then we should
         # always use V0 Engine.
