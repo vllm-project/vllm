@@ -43,7 +43,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsQuant
+from .interfaces import SupportsLoRA, SupportsQuant
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -154,7 +154,7 @@ def replace_linear_class(
     )
 
 
-class TransformersModel(nn.Module, SupportsQuant):
+class TransformersModel(nn.Module, SupportsLoRA, SupportsQuant):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
