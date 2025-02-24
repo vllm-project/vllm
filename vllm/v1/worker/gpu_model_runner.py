@@ -401,18 +401,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_index, start_index:end_token_index] = spec_token_ids
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
-            # Fill the bitmask
-            if (req_id in scheduler_output.guided_decoding_request_ids
-                    and req_state.grammar is not None):
-                idx = scheduler_output.guided_decoding_request_ids[req_id]
-                # should already be ready
-                assert scheduler_output.grammar_bitmask is not None
-                if not req_state.grammar.matcher.is_terminated():
-                    # NOTE: this relies on xgrammar internal bitmask,
-                    # so we need to give the actual index
-                    # of the the request_id in the batch
-                    req_state.grammar.fill_bitmask(
-                        scheduler_output.grammar_bitmask, idx)
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
@@ -966,20 +954,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
-        # NOTE: We are currently broadcasting the bitmask
-        # to each worker
-        grammar_bitmask = scheduler_output.grammar_bitmask
-
         # Apply guided decoding bitmasks if present
+        grammar_bitmask = scheduler_output.grammar_bitmask
         if grammar_bitmask is not None:
-            if len(self.input_batch.req_ids) < self.input_batch.max_num_reqs:
-                # The bitmask is pre-allocated for the maximum batch size.
-                # When the batch size is smaller, we need to resize the bitmask
-                # to match the batch size.
-                grammar_bitmask = grammar_bitmask[:len(self.input_batch.req_ids
-                                                       )]
-            # TODO: we probably should move this before and
-            # after, this might not be correct
             apply_bitmask(
                 logits, grammar_bitmask.to(self.device, non_blocking=True),
                 list(scheduler_output.guided_decoding_request_ids.values()))

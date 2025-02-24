@@ -121,13 +121,4 @@ class SchedulerOutput:
     # for filling the next token bitmask
     guided_decoding_request_ids: Dict[str, int]
     # the bitmask for the whole batch
-    _grammar_bitmask: Optional["torch.Tensor"] = field(default=None,
-                                                       repr=False)
-
-    @property
-    def grammar_bitmask(self) -> Optional["torch.Tensor"]:
-        return self._grammar_bitmask
-
-    @grammar_bitmask.setter
-    def grammar_bitmask(self, bitmask: "torch.Tensor") -> None:
-        self._grammar_bitmask = bitmask
+    grammar_bitmask: Optional["torch.Tensor"]

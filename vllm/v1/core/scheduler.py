@@ -13,9 +13,11 @@ from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreOutput, EngineCoreOutputs)
+from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+
 
 logger = init_logger(__name__)
 
@@ -30,13 +32,14 @@ class Scheduler:
         lora_config: Optional[LoRAConfig],
         speculative_config: Optional[SpeculativeConfig],
         log_stats: bool,
+        guided_decoding_manager: GuidedDecodingManager,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.speculative_config = speculative_config
         self.log_stats = log_stats
-        self.vocab_size = model_config.get_vocab_size()
+        self.guided_decoding_manager = guided_decoding_manager
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -346,6 +349,22 @@ class Scheduler:
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
+        # Prepare the guided decoding bitmask for this batch.
+        grammar_bitmask = None
+        if guided_decoding_request_ids:
+            # Fill the bitmask using the index of each request equal to its
+            # position in the batch. Resize the bitmask down to the size of
+            # the batch.
+            grammar_bitmask = self.guided_decoding_manager.grammar_bitmask
+            assert grammar_bitmask is not None
+            for req_id, batch_index in guided_decoding_request_ids.items():
+                request = self.requests[req_id]
+                assert request.grammar is not None
+                if not request.grammar.matcher.is_terminated():
+                    request.grammar.fill_bitmask(grammar_bitmask, batch_index)
+            if len(self.running) < grammar_bitmask.shape[0]:
+                grammar_bitmask = grammar_bitmask[:len(self.running)]
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -385,6 +404,7 @@ class Scheduler:
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             guided_decoding_request_ids=guided_decoding_request_ids,
+            grammar_bitmask=grammar_bitmask,
         )
 
         self.finished_req_ids = set()

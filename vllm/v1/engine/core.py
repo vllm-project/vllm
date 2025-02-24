@@ -62,6 +62,8 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        self.guided_decoding_manager = GuidedDecodingManager(vllm_config)
+
         # Setup scheduler.
         self.scheduler = Scheduler(
             scheduler_config=vllm_config.scheduler_config,
@@ -70,13 +72,12 @@ class EngineCore:
             lora_config=vllm_config.lora_config,
             speculative_config=vllm_config.speculative_config,
             log_stats=self.log_stats,
+            guided_decoding_manager=self.guided_decoding_manager,
         )
 
         # Setup MM Input Mapper.
         self.mm_input_cache_server = MMInputCacheServer(
             vllm_config.model_config)
-
-        self.guided_decoding_manager = GuidedDecodingManager(vllm_config)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -158,7 +159,7 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        # Calculate bitmasks for all active requests
+        # Check for cached grammars and allocate bitmask if necessary
         self.setup_grammars()
 
         scheduler_output = self.scheduler.schedule()
