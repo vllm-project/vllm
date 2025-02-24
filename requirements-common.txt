@@ -38,3 +38,4 @@ compressed-tensors == 0.9.2 # required for compressed-tensors
 depyf==0.18.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
 watchfiles # required for http server to monitor the updates of TLS files
+python-json-logger # Used by logging as per examples/other/logging_configuration.md
