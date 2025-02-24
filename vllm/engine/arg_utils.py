@@ -1117,15 +1117,15 @@ class EngineArgs:
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
         if (self.quantization == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
-                self.load_format != "bitsandbytes":
+           self.qlora_adapter_name_or_path is not None) and \
+           self.load_format != "bitsandbytes":
             raise ValueError(
                 "BitsAndBytes quantization and QLoRA adapter only support "
                 f"'bitsandbytes' load format, but got {self.load_format}")
 
         if (self.load_format == "bitsandbytes" or
             self.qlora_adapter_name_or_path is not None) and \
-                self.quantization != "bitsandbytes":
+            self.quantization != "bitsandbytes":
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
@@ -1216,14 +1216,15 @@ class EngineArgs:
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
+
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
-            speculative_model_quantization= \
+            speculative_model_quantization = \
                 self.speculative_model_quantization,
-            speculative_draft_tensor_parallel_size= \
+            speculative_draft_tensor_parallel_size = \
                 self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
             speculative_disable_mqa_scorer=self.speculative_disable_mqa_scorer,
@@ -1234,7 +1235,7 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
-            draft_token_acceptance_method= \
+            draft_token_acceptance_method=\
                 self.spec_decoding_acceptance_method,
             typical_acceptance_sampler_posterior_threshold=self.
             typical_acceptance_sampler_posterior_threshold,
@@ -1318,7 +1319,7 @@ class EngineArgs:
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
         if self.qlora_adapter_name_or_path is not None and \
-                self.qlora_adapter_name_or_path != "":
+            self.qlora_adapter_name_or_path != "":
             if self.model_loader_extra_config is None:
                 self.model_loader_extra_config = {}
             self.model_loader_extra_config[
@@ -1329,7 +1330,7 @@ class EngineArgs:
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,
             max_prompt_adapter_token=self.max_prompt_adapter_token) \
-            if self.enable_prompt_adapter else None
+                                        if self.enable_prompt_adapter else None
 
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
