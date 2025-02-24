@@ -772,6 +772,8 @@ class LLMEngine:
             priority=priority,
         )
 
+        logger.debug(f"Added request {request_id} to engine")
+
     def _validate_token_prompt(self, prompt: PromptType,
                                tokenizer: AnyTokenizer):
         # Guard against out-of-vocab tokens.
