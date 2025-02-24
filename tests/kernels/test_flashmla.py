@@ -1,24 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
 import math
 import random
-import pytest
 
+import pytest
 import torch
 import triton
 
-from vllm.attention.ops.flashmla import (
-    is_flashmla_supported,
-    flash_mla_with_kvcache,
-    get_mla_metadata,
-)
+from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
+                                         get_mla_metadata)
 
 
 def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str) -> None:
     x, y = x.double(), y.double()
-    RMSE = ((x - y) * (x - y)).mean().sqrt().item()
-    cos_diff = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
-    amax_diff = (x - y).abs().max().item()
-    # print(f"{name}: {cos_diff=}, {RMSE=}, {amax_diff=}")
+    cos_diff = 1 - 2 * (x * y).sum().item() / max(
+        (x * x + y * y).sum().item(), 1e-12)
     assert cos_diff < 1e-5
+
 
 @pytest.mark.parametrize("b", [128])
 @pytest.mark.parametrize("s_q", [1, 2])
@@ -31,7 +28,8 @@ def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str) -> None:
 @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("varlen", [False, True])
 @torch.inference_mode()
-def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen):
+def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
+                   varlen):
     # TODO: parametrize using pytest
     dtype = torch.bfloat16
     device = torch.device("cuda:0")
@@ -41,32 +39,42 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen
     torch.manual_seed(0)
     random.seed(0)
 
-    print(f"{b=}, {s_q=}, {mean_sk=}, {h_q=}, {h_kv=}, {d=}, {dv=}, {causal=}, {varlen=}")
+    print(f"{b=}, {s_q=}, {mean_sk=}, {h_q=}, {h_kv=}, "
+          f"{d=}, {dv=}, {causal=}, {varlen=}")
 
-    cache_seqlens = torch.full((b,), mean_sk, dtype=torch.int32)
+    cache_seqlens = torch.full((b, ), mean_sk, dtype=torch.int32)
     if varlen:
         for i in range(b):
-            cache_seqlens[i] = max(random.normalvariate(mean_sk, mean_sk / 2), s_q)
+            cache_seqlens[i] = max(random.normalvariate(mean_sk, mean_sk / 2),
+                                   s_q)
     total_seqlens = cache_seqlens.sum().item()
-    mean_seqlens = cache_seqlens.float().mean().int().item()
     max_seqlen = cache_seqlens.max().item()
     max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
     # print(f"{total_seqlens=}, {mean_seqlens=}, {max_seqlen=}")
 
     q = torch.randn(b, s_q, h_q, d)
-    block_table = torch.arange(b * max_seqlen_pad // block_size, dtype=torch.int32).view(b, max_seqlen_pad // block_size)
+    block_table = torch.arange(b * max_seqlen_pad // block_size,
+                               dtype=torch.int32).view(
+                                   b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
     for i in range(b):
-        blocked_k.view(b, max_seqlen_pad, h_kv, d)[i, cache_seqlens[i].item():] = float("nan")
+        blocked_k.view(b, max_seqlen_pad, h_kv,
+                       d)[i, cache_seqlens[i].item():] = float("nan")
     blocked_v = blocked_k[..., :dv]
 
     tile_scheduler_metadata, num_splits = get_mla_metadata(
-            cache_seqlens, s_q * h_q // h_kv, h_kv)
+        cache_seqlens, s_q * h_q // h_kv, h_kv)
 
     def flash_mla():
         return flash_mla_with_kvcache(
-            q, blocked_k, block_table, cache_seqlens, dv,
-            tile_scheduler_metadata, num_splits, causal=causal,
+            q,
+            blocked_k,
+            block_table,
+            cache_seqlens,
+            dv,
+            tile_scheduler_metadata,
+            num_splits,
+            causal=causal,
         )
 
     def scaled_dot_product_attention(query, key, value, is_causal=False):
@@ -80,7 +88,8 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen
             s_q = query.shape[-2]
             s_k = key.shape[-2]
             attn_bias = torch.zeros(s_q, s_k, dtype=query.dtype)
-            temp_mask = torch.ones(s_q, s_k, dtype=torch.bool).tril(diagonal=s_k - s_q)
+            temp_mask = torch.ones(s_q, s_k,
+                                   dtype=torch.bool).tril(diagonal=s_k - s_q)
             attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
             attn_bias.to(query.dtype)
             attn_weight += attn_bias
@@ -94,13 +103,13 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen
         for i in range(b):
             begin = i * max_seqlen_pad
             end = begin + cache_seqlens[i]
-            O, LSE = scaled_dot_product_attention(
+            ref_O, LSE = scaled_dot_product_attention(
                 q[i].transpose(0, 1),
                 blocked_k.view(-1, h_kv, d)[begin:end].transpose(0, 1),
                 blocked_v.view(-1, h_kv, dv)[begin:end].transpose(0, 1),
                 is_causal=causal,
             )
-            out[i] = O.transpose(0, 1)
+            out[i] = ref_O.transpose(0, 1)
             lse[i] = LSE
         return out, lse
 
@@ -111,5 +120,7 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen
 
     t = triton.testing.do_bench(flash_mla, fast_flush=False)
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
-    bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (torch.finfo(dtype).bits // 8)
-    print(f"{t:.3f} ms, {FLOPS / 10 ** 9 / t:.0f} TFLOPS, {bytes / 10 ** 6 / t:.0f} GB/s")
+    bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d +
+             b * s_q * h_q * dv) * (torch.finfo(dtype).bits // 8)
+    print(f"{t:.3f} ms, {FLOPS / 10 ** 9 / t:.0f} "
+          f"TFLOPS, {bytes / 10 ** 6 / t:.0f} GB/s")
