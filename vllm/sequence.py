@@ -105,12 +105,14 @@ class RequestMetrics:
         time_in_queue: The time the request spent in the queue.
         finished_time: The time when the request was finished.
         scheduler_time: The time spent in the scheduler when this request was
-                        being considered by the scheduler.
+                       being considered by the scheduler.
         model_forward_time: The time spent in the model forward pass when this
-                            request was in the batch.
+                           request was in the batch.
         model_execute_time: The time spent in the model execute function. This
-                            will include model forward, block/sync across
-                            workers, cpu-gpu sync time and sampling time.
+                           will include model forward, block/sync across
+                           workers, cpu-gpu sync time and sampling time.
+        num_evicted_tokens: The number of tokens that were evicted 
+                           from KV cache.
     """
     arrival_time: float
     last_token_time: float
@@ -121,6 +123,7 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
+    num_evicted_tokens: int = 0
 
 
 class SequenceDataDelta(
@@ -433,6 +436,11 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+        self.metrics = RequestMetrics(arrival_time=0.0,
+                                      last_token_time=0.0,
+                                      first_scheduled_time=None,
+                                      first_token_time=None,
+                                      time_in_queue=None)
 
     @property
     def n_blocks(self) -> int:
@@ -602,6 +610,17 @@ class Sequence:
 
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
+
+    def get_num_evicted_tokens(self) -> int:
+        """Returns the number of tokens that were evicted from KV cache."""
+        return self.metrics.num_evicted_tokens
+
+    def increment_evicted_tokens(self, num_tokens: int = 1) -> None:
+        """Increments the count of evicted tokens.
+        Args:
+            num_tokens: Number of tokens that were evicted from KV cache.
+        """
+        self.metrics.num_evicted_tokens += num_tokens
 
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "

@@ -119,6 +119,10 @@ class Metrics:
             name="vllm:tokens_total",
             documentation="Number of prefill plus generation tokens processed.",
             labelnames=labelnames)
+        self.counter_total_evicted_tokens = self._counter_cls(
+            name="vllm:total_evicted_tokens_total",
+            documentation="Total number of tokens evicted from KV cache",
+            labelnames=labelnames)
         buckets = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
         if not vllm_config.model_config.enforce_eager:
             buckets = vllm_config.compilation_config.\
@@ -199,7 +203,8 @@ class Metrics:
             "Histogram of time spent in the model execute function in ms.",
             labelnames=labelnames,
             buckets=build_1_2_3_5_8_buckets(3000))
-        #   Metadata
+
+        # Metadata
         self.histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
             documentation="Number of prefill tokens processed.",
@@ -231,6 +236,16 @@ class Metrics:
             labelnames=labelnames,
             buckets=build_1_2_5_buckets(max_model_len),
         )
+        self.gauge_max_token_capacity_per_batch = self._gauge_cls(
+            name="vllm:max_token_capacity_per_batch",
+            documentation=
+            "Maximum tokens processed by the model server at max batch size",
+            labelnames=labelnames)
+        self.gauge_total_tokens_in_queue = self._gauge_cls(
+            name="vllm:total_tokens_in_queue",
+            documentation="Total number of tokens in queue (prefill + decode).",
+            labelnames=labelnames,
+            multiprocess_mode="sum")
         self.counter_request_success = self._counter_cls(
             name="vllm:request_success_total",
             documentation="Count of successfully processed requests.",
@@ -608,6 +623,14 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.model_forward_time_requests)
         self._log_histogram(self.metrics.histogram_model_execute_time_request,
                             stats.model_execute_time_requests)
+        self._log_gauge(self.metrics.gauge_total_tokens_in_queue,
+                        stats.total_tokens_in_queue)
+
+        total_evicted = sum(stats.total_evicted_tokens_requests
+                            ) if stats.total_evicted_tokens_requests else 0
+        self._log_counter(self.metrics.counter_total_evicted_tokens,
+                          total_evicted)
+
         # Metadata
         finished_reason_counter = CollectionsCounter(
             stats.finished_reason_requests)
@@ -625,6 +648,8 @@ class PrometheusStatLogger(StatLoggerBase):
             stats.max_num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_max_tokens_request,
                             stats.max_tokens_requests)
+        self._log_gauge(self.metrics.gauge_max_token_capacity_per_batch,
+                        stats.max_token_capacity_per_batch)
 
     def log(self, stats: Stats):
         """Logs to prometheus and tracked stats every iteration."""

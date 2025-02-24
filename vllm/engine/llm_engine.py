@@ -435,6 +435,17 @@ class LLMEngine:
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
+        if self.device_config.device_type == "cuda":
+            model_gpu_load_time = (
+                self.model_executor.driver_worker.model_runner.model_load_time)
+            profile_time = self.model_executor.driver_worker.profile_time
+            cuda_graph_time = (self.model_executor.driver_worker.model_runner.
+                               cuda_graph_capture_time)
+            total_gpu_load_time = (elapsed + model_gpu_load_time +
+                                   profile_time + cuda_graph_time)
+            logger.info(("GPU model loading (loading model weights, "
+                         "memory profiling, capturing graphs, init engine) "
+                         " %.2f seconds"), total_gpu_load_time)
 
     @classmethod
     def _get_executor_cls(cls,
@@ -1627,6 +1638,13 @@ class LLMEngine:
         n_requests: List[int] = []
         max_num_generation_tokens_requests: List[int] = []
         max_tokens_requests: List[int] = []
+        max_token_capacity_per_batch: int = min(
+            self.model_config.max_model_len *
+            self.scheduler_config.max_num_seqs,
+            self.scheduler_config.max_num_batched_tokens)
+        total_tokens_in_queue = sum(scheduler.get_num_tokens_in_queue()
+                                    for scheduler in self.scheduler)
+        total_evicted_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
         # Lora requests
@@ -1679,6 +1697,7 @@ class LLMEngine:
                 # NOTE: a seq_group that completed all of its prefill tokens
                 # in the last iteration will have seq_group.is_prefill() = False
                 # with group_was_prefill = True
+                # Add token counting for current batch
                 if group_was_prefill:
                     # Number of prompt tokens.
                     num_prompt_tokens_iter += (
@@ -1693,6 +1712,7 @@ class LLMEngine:
                         # One generation token per finished prefill.
                         num_generation_tokens_from_prefill_groups += (
                             seq_group.num_seqs())
+
                 else:
                     # TPOTs.
                     latency = seq_group.get_last_token_latency()
@@ -1755,6 +1775,12 @@ class LLMEngine:
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
                     ])
+                    # Track if this request had any token evictions
+                    if self.device_config.device_type == "cuda":
+                        total_evicted = seq_group.metrics.num_evicted_tokens
+                    else:
+                        total_evicted = 0
+                    total_evicted_tokens_requests.append(total_evicted)
 
             # Number of generation tokens.
             #   num_batched_tokens equals the number of prompt_tokens plus the
@@ -1815,10 +1841,14 @@ class LLMEngine:
             max_num_generation_tokens_requests,
             n_requests=n_requests,
             max_tokens_requests=max_tokens_requests,
+            max_token_capacity_per_batch=max_token_capacity_per_batch,
+            total_tokens_in_queue=total_tokens_in_queue,
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
             waiting_lora_adapters=list(waiting_lora_adapters.keys()),
-            running_lora_adapters=list(running_lora_adapters.keys()))
+            running_lora_adapters=list(running_lora_adapters.keys()),
+            total_evicted_tokens_requests=total_evicted_tokens_requests,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
