@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# CHLOE IDEA: for all typing, use Dora-specific types, since these are subtypes of LoRA types
-
 import copy
 import math
 import os
