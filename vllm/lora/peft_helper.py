@@ -16,9 +16,9 @@ logger = init_logger(__name__)
 
 @dataclass
 class PEFTHelper:
-    """ 
+    """
     A helper class for PEFT configurations, specifically designed for LoRA.
-    This class handles configuration validation, compatibility checks for 
+    This class handles configuration validation, compatibility checks for
     various LoRA implementations.
     """
 
@@ -47,8 +47,6 @@ class PEFTHelper:
         error_msg = []
         if self.modules_to_save:
             error_msg.append("vLLM only supports modules_to_save being None.")
-        if self.use_dora:
-            error_msg.append("vLLM does not yet support DoRA.")
         return error_msg
 
     def __post_init__(self):
@@ -61,8 +59,8 @@ class PEFTHelper:
             if self.vllm_max_position_embeddings is None:
                 self.vllm_max_position_embeddings = self.context_length
             self.vllm_long_context_scaling_factor = float(
-                math.ceil(self.context_length /
-                          self.vllm_max_position_embeddings))
+                math.ceil(self.context_length / self.vllm_max_position_embeddings)
+            )
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PEFTHelper":
@@ -78,19 +76,16 @@ class PEFTHelper:
         # Identify any missing required fields
         missing_fields = required_fields - set(config_dict.keys())
         if missing_fields:
-            raise ValueError(
-                f"Missing required configuration fields: {missing_fields}")
+            raise ValueError(f"Missing required configuration fields: {missing_fields}")
 
         # Filter out fields that aren't defined in the class
-        filtered_dict = {
-            k: v
-            for k, v in config_dict.items() if k in class_fields
-        }
+        filtered_dict = {k: v for k, v in config_dict.items() if k in class_fields}
         return cls(**filtered_dict)
 
     @classmethod
-    def from_local_dir(cls, lora_path: str,
-                       max_position_embeddings: Optional[int]) -> "PEFTHelper":
+    def from_local_dir(
+        cls, lora_path: str, max_position_embeddings: Optional[int]
+    ) -> "PEFTHelper":
         lora_config_path = os.path.join(lora_path, "adapter_config.json")
 
         with open(lora_config_path) as f:
@@ -100,16 +95,16 @@ class PEFTHelper:
 
     def validate_legal(self, lora_config: LoRAConfig) -> None:
         """
-        Validates the LoRA configuration settings against application 
+        Validates the LoRA configuration settings against application
         constraints and requirements.
         """
         error_msg = self._validate_features()
         if self.r > lora_config.max_lora_rank:
             error_msg.append(
                 f"LoRA rank {self.r} is greater than max_lora_rank"
-                f" {lora_config.max_lora_rank}.")
+                f" {lora_config.max_lora_rank}."
+            )
         if self.bias != "none" and not lora_config.bias_enabled:
-            error_msg.append(
-                "Adapter bias cannot be used without bias_enabled.")
+            error_msg.append("Adapter bias cannot be used without bias_enabled.")
         if error_msg:
             raise ValueError(f"{' '.join(error_msg)}")
