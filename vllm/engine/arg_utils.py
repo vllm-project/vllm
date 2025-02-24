@@ -1153,6 +1153,8 @@ class EngineArgs:
         # usually called from AsyncLLMEngine.from_engine_args.
         try_v1 = use_v1_if_supported or envs.VLLM_USE_V1
         use_v1 = try_v1 and self._is_v1_supported_oracle(model_config)
+        if not envs.is_set("VLLM_USE_V1"):
+            assert use_v1 == envs.VLLM_USE_V1
 
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
@@ -1561,7 +1563,7 @@ class EngineArgs:
                 logger.info(
                     "LoRA is not yet enabled by default for V1 Engine. "
                     "Falling back to V0 Engine.")
-            return False
+                return False
 
         # PP is supported on V1, but off by default for now.
         if self.pipeline_parallel_size > 1:
@@ -1588,7 +1590,7 @@ class EngineArgs:
                 logger.info(
                     "Speculative decoding is not yet enabled by default for"
                     "V1 Engine. Falling back to V0 Engine.")
-            return False
+                return False
 
         # ROCm is supported on V1, but off by default for now.
         if (not current_platform.is_cuda() and not current_platform.is_tpu()):
