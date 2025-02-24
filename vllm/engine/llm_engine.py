@@ -1987,7 +1987,7 @@ class LLMEngine:
             guided_dict = sampling_params.guided_decoding.dict()
             # Sort keys to ensure consistent ordering
             cache_key = md5(json.dumps(guided_dict, sort_keys=True).encode()).hexdigest()
-            print(f"Cache key: {cache_key}")
+            logger.debug(f"Cache key: {cache_key}")
             
             if cache_key in self._guided_decoding_logits_processors_cache:
                 processor = self._guided_decoding_logits_processors_cache[cache_key]
