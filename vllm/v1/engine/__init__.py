@@ -65,6 +65,7 @@ class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""
     QUEUED = 1
     SCHEDULED = 2
+    PREEMPTED = 3
 
 
 class EngineCoreEvent(msgspec.Struct):
