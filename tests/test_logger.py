@@ -15,7 +15,7 @@ import pytest
 
 from vllm.logger import (_DATE_FORMAT, _FORMAT, _configure_vllm_root_logger,
                          enable_trace_function_call, init_logger)
-from vllm.logging_utils import NewLineFormatter
+from vllm.logging_utils import NewLineFormatter, RedactFilter
 
 
 def f1(x):
@@ -59,6 +59,10 @@ def test_default_vllm_root_logger_configuration():
     assert isinstance(formatter, NewLineFormatter)
     assert formatter._fmt == _FORMAT
     assert formatter.datefmt == _DATE_FORMAT
+
+    filters = handler.filters
+    assert filters is not None
+    assert any(isinstance(f, RedactFilter) for f in filters)
 
 
 @patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 1)
@@ -216,3 +220,35 @@ def test_custom_logging_config_causes_an_error_if_configure_logging_is_off():
         assert other_logger.handlers != root_logger.handlers
         assert other_logger.level != root_logger.level
         assert other_logger.propagate
+
+
+@patch("vllm.logger.VLLM_LOG_FILTER_PATTERNS",
+       '["GuidedDecodingParams\\\\([^)]*\\\\)"]')
+def test_logger_filter():
+    """This test uses a regex to capture guided decoding parameters to confirm 
+    that they are redacted to [...]."""
+
+    # Clear and reinitialize so that the filter pattern patch is used
+    logging.getLogger('vllm').handlers.clear()
+    _configure_vllm_root_logger()
+    logger = logging.getLogger("vllm")
+    handler = logger.handlers[0]
+
+    message = """guided_decoding=GuidedDecodingParams(json={'type': 'object', 
+    'properties': {'name': {'type': 'string'}, 'age': {'type': 'integer'}, 
+    'skills': {'type': 'array', 'items': {'type': 'string', 'maxLength': 10}, 
+    'minItems': 3}, 'work_history': {'type': 'array', 'items': {'type': 
+    'object', 'properties': {'company': {'type': 'string'}, 'duration': 
+    {'type': 'number'}, 'position': {'type': 'string'}}, 'required': 
+    ['company', 'position']}}}}, regex=None, choice=None, grammar=None, 
+    json_object=None, backend=None, whitespace_pattern=None)"""
+
+    with patch.object(handler, "emit") as root_handle_mock:
+        logger.info(message)
+
+    root_handle_mock.assert_called_once()
+    _, call_args, _ = root_handle_mock.mock_calls[0]
+    log_record = call_args[0]
+
+    assert "json={" not in log_record.msg
+    assert log_record.msg == "guided_decoding=[...]"
