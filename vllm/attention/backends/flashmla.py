@@ -44,7 +44,7 @@ class FlashMLABackend(MLACommonBackend):
 
 
 @dataclass
-class FlashMLAMetadata(MLACommonMetadata):
+class FlashMLAMetadata(MLACommonMetadata["FlashMLAMetadata"]):
     decode_tile_scheduler_metadata: Optional[Tuple[torch.Tensor,
                                                    torch.Tensor]] = None
     decode_num_splits: Optional[torch.Tensor] = None
@@ -53,20 +53,14 @@ class FlashMLAMetadata(MLACommonMetadata):
 
     @property
     def decode_metadata(self):
-        if self.num_decode_tokens == 0:
-            return None
-
-        if self._cached_decode_metadata is not None:
-            return self._cached_decode_metadata
-
-        common_decode_metadata = super().decode_metadata
-        self._cached_decode_metadata = FlashMLAMetadata(
-            # TODO: cached but can this be faster?
-            **asdict(common_decode_metadata),
-            decode_tile_scheduler_metadata=self.decode_tile_scheduler_metadata,
-            decode_num_splits=self.decode_num_splits,
-        )
-        return self._cached_decode_metadata
+        decode_metadata = super().decode_metadata
+        # TODO: cache assignment?
+        if decode_metadata is not None:
+            decode_metadata.decode_tile_scheduler_metadata=\
+                self.decode_tile_scheduler_metadata
+            decode_metadata.decode_num_splits=\
+                self.decode_num_splits
+        return decode_metadata
 
     def advance_step(self,
                      model_input: "ModelInputForGPUWithSamplingMetadata",
@@ -141,15 +135,14 @@ class FlashMLAState(MLACommonState[FlashMLAMetadata]):
         assert metadata.num_decode_tokens > 0
 
         decoder_tile_scheduler_metadata, decode_num_splits = get_mla_metadata(
-            metadata.seq_lens_tensor,
+            self._graph_seq_lens[:batch_size],
             self.num_q_heads,
             1,  # MQA for the decode path
         )
 
         self._graph_decoder_tile_scheduler_metadata.copy_(
-            decoder_tile_scheduler_metadata, non_blocking=True)
-        self._graph_decode_num_splits[:batch_size + 1].copy_(decode_num_splits,
-                                                             non_blocking=True)
+            decoder_tile_scheduler_metadata)
+        self._graph_decode_num_splits[:batch_size + 1].copy_(decode_num_splits)
 
         metadata.decode_tile_scheduler_metadata=\
             self._graph_decoder_tile_scheduler_metadata
