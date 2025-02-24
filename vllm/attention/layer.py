@@ -116,6 +116,7 @@ class Attention(nn.Module):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,
                              **extra_impl_args)
+        self.use_mla = use_mla
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -166,15 +167,19 @@ class Attention(nn.Module):
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
-            # Reshape the query, key, and value tensors.
-            # NOTE(woosuk): We do this outside the custom op to minimize the
-            # CPU overheads from the non-CUDA-graph regions.
-            query = query.view(-1, self.num_heads, self.head_size)
-            output = output.view(-1, self.num_heads, self.head_size)
-            if key is not None:
-                key = key.view(-1, self.num_kv_heads, self.head_size)
-            if value is not None:
-                value = value.view(-1, self.num_kv_heads, self.head_size)
+            # We skip reshaping query, key and value tensors for the MLA
+            # backend since these tensors have different semantics and are
+            # processed differently.
+            if not self.use_mla:
+                # Reshape the query, key, and value tensors.
+                # NOTE(woosuk): We do this outside the custom op to minimize the
+                # CPU overheads from the non-CUDA-graph regions.
+                query = query.view(-1, self.num_heads, self.head_size)
+                output = output.view(-1, self.num_heads, self.head_size)
+                if key is not None:
+                    key = key.view(-1, self.num_kv_heads, self.head_size)
+                if value is not None:
+                    value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
                 forward_context: ForwardContext = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
