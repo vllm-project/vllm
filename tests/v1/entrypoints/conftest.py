@@ -29,6 +29,7 @@ def sample_regex():
             r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
 
 
+# Note: Ensure this only uses attributes compatible with xgrammar
 @pytest.fixture
 def sample_json_schema():
     return {
@@ -44,7 +45,6 @@ def sample_json_schema():
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "maxLength": 10
                 },
                 "minItems": 3
             },
