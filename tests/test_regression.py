@@ -59,7 +59,7 @@ def test_model_from_modelscope(monkeypatch):
     MODELSCOPE_MODEL_NAME = "qwen/Qwen1.5-0.5B-Chat"
     monkeypatch.setenv("VLLM_USE_MODELSCOPE", "True")
     try:
-        llm = LLM(model=MODELSCOPE_MODEL_NAME)
+        llm = LLM(model=MODELSCOPE_MODEL_NAME, dtype=torch.float16)
 
         prompts = [
             "Hello, my name is",

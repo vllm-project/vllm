@@ -35,7 +35,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, device_count_stateless,
                         identity, is_list_of)
 
 logger = init_logger(__name__)
@@ -258,7 +258,7 @@ class HfRunner:
             return x
 
         if device is None:
-            device = "cpu" if current_platform.is_cpu() else "cuda"
+            device = current_platform.device_type
 
         if isinstance(x, dict):
             return {k: self.wrap_device(v, device) for k, v in x.items()}
@@ -994,7 +994,7 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    return cuda_device_count_stateless()
+    return device_count_stateless()
 
 
 temp_dir = tempfile.gettempdir()
