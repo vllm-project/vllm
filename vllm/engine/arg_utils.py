@@ -1148,6 +1148,35 @@ class EngineArgs:
         # We raise a NotImplementedError is VLLM_USE_V1=1 is set
         # when any of these features are enabled and default to V0.
 
+        if disable_frontend_multiprocessing:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with "
+                    "--disable-frontend-multiprocessing.")
+            logger.info("--disable-frontend-multiprocessing is not supported "
+                        "by the V1 Engine. Falling back to V0 Engine.")
+            return False
+
+        if (self.logits_processor_pattern
+                != EngineArgs.logits_processor_pattern):
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with "
+                    "--logits-processor-pattern.")
+            logger.info("--logits-processor-pattern is not supported by "
+                        "the V1 Engine. Falling back to V0 Engine.")
+            return False
+
+        if self.kv_transfer_config != EngineArgs.kv_transfer_config:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with --kv-transfer-config."
+                )
+            logger.info(
+                "--kv-transfer-config is not supported by the V1 Engine."
+                "Falling back to V0 Engine.")
+            return False
+
         if self.preemption_mode != EngineArgs.preemption_mode:
             if envs.VLLM_USE_V1:
                 raise NotImplementedError(
@@ -1227,17 +1256,26 @@ class EngineArgs:
                 "Falling back to V0 Engine.")
             return False
 
-        if disable_frontend_multiprocessing:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with "
-                    "--disable-frontend-multiprocessing.")
-            logger.info("--disable-frontend-multiprocessing is not supported "
-                        "for V1 Engine. Falling back to V0 Engine.")
-            return False
-
         #############################################################
         # Important feature flags we plan to support on V1.
+
+        # We log a warning is VLLM_USE_V1=1 is set for these since
+        # we are actively developing these features.
+
+        # TODO: this might be a problem right? Since we fall back
+        # dynamically at runtime even if xgrammar is specified.
+        if self.guided_decoding_backend != "xgrammar":
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 with guided decoding backend "
+                    "other than xgrammar. Usage should be considered "
+                    "experimental and you may encounter bugs. Please report "
+                    "any issues on Github.")
+                return True
+
+            logger.info("Guided decoding is only supported with xgrammar "
+                        "for V1 Engine. Falling back to V0 Engine.")
+            return False
 
         # LoRA is supported on V1, but off by default for now.
         if self.enable_lora:
@@ -1292,7 +1330,7 @@ class EngineArgs:
                 "Falling back to V0 Engine.", current_platform.device_type)
             return False
 
-        # Require at least Ampere (Flash Attention Support needed for V1.)
+        # Require at least Ampere (Flash Attention needed for V1 so far).
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability().major < 8):
             if envs.VLLM_USE_V1:
@@ -1330,7 +1368,7 @@ class EngineArgs:
                 "Falling back to V0 Engine.")
             return False
 
-        # No embedding / scoring models so far.
+        # No Embedding Models so far.
         if model_config.task not in ["generate"]:
             if envs.VLLM_USE_V1:
                 logger.warning(
