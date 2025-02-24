@@ -22,6 +22,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                  device: Union[torch.device, str], **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
+        
+        # PunicaWrapperBase defines some tensors with dtype=torch.int64, which isn't supported by the TPU.
+        # So convert those tensors to int32. 
+        # Not all of them are used by the TPU so only convert the useful ones.
+        self._token_lora_indices = self._token_lora_indices.to(dtype=torch.int32)
 
     def shrink(
         self,
