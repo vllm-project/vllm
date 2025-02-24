@@ -1126,11 +1126,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def _is_v1_supported_oracle(
-        self,
-        model_config: ModelConfig,
-        disable_frontend_multiprocessing: bool,
-    ) -> bool:
+    def _is_v1_supported_oracle(self, model_config: ModelConfig) -> bool:
         """Oracle for whether to use V0 or V1 Engine by default."""
 
         # If the user has explicitly set VLLM_USE_V1=0, then we should
@@ -1143,15 +1139,6 @@ class EngineArgs:
 
         # We raise a NotImplementedError is VLLM_USE_V1=1 is set
         # when any of these features are enabled and default to V0.
-
-        if disable_frontend_multiprocessing:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with "
-                    "--disable-frontend-multiprocessing.")
-            logger.info("--disable-frontend-multiprocessing is not supported "
-                        "by the V1 Engine. Falling back to V0 Engine.")
-            return False
 
         if (self.logits_processor_pattern
                 != EngineArgs.logits_processor_pattern):
@@ -1520,7 +1507,6 @@ class EngineArgs:
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
-        disable_frontend_multiprocessing: bool = False,
         use_v1_if_supported: bool = False,
     ) -> VllmConfig:
         from vllm.platforms import current_platform
@@ -1536,8 +1522,7 @@ class EngineArgs:
         # separately from this method. In fact, this method is
         # usually called from AsyncLLMEngine.from_engine_args.
         try_v1 = use_v1_if_supported or envs.VLLM_USE_V1
-        use_v1 = (try_v1 and self._is_v1_supported_oracle(
-            model_config, disable_frontend_multiprocessing))
+        use_v1 = try_v1 and self._is_v1_supported_oracle(model_config)
 
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
