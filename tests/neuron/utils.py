@@ -6,6 +6,18 @@ import torch
 import torch.nn.functional as F
 
 
+def ceil_div(a, b):
+    return (a + b - 1) // b
+
+
+def pad_to_multiple(a, b):
+    return ceil_div(a, b) * b
+
+
+def pad_to_next_power_of_2(a):
+    return 2**int(a - 1).bit_length() if a > 0 else 1
+
+
 class BlockDiagonalCausalFromBottomRightMask:
 
     @staticmethod

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+
 import os
 
 import numpy as np
@@ -6,25 +7,26 @@ import pytest
 import torch
 import torch.nn.functional as F
 import torch_xla.core.xla_model as xm
-from utils import (BlockDiagonalCausalFromBottomRightMask,
-                   get_active_block_tables, ref_context_attention,
+from utils import (BlockDiagonalCausalFromBottomRightMask, ceil_div,
+                   get_active_block_tables, pad_to_multiple,
+                   pad_to_next_power_of_2, ref_context_attention,
                    sample_inputs)
 
 from vllm.attention.ops.nki_blocksparse_flash_attn import (
-    FlashPAByGridTile, flash_attn_varlen_blocksparse_nkifunc)
+    FlashAttentionPlanner, flash_attn_varlen_blocksparse_nkifunc)
 
 
 @pytest.mark.parametrize(
-    "block_size, large_q_tile_size, large_kv_tile_size",
+    "prefill_batch_size,decode_batch_size,tile_size_q,tile_size_kv,block_size",
     [
-        (1, 128, 512),  # 512 blocks
-        (16, 128, 2048),  # 128 blocks
-        (4, 128, 1024),  # 256 blocks
-        (1, 128, 512),  # 512 blocks
-        (32, 128, 2048),  # 64 blocks
-        (32, 128, 4096),  # 128 blocks
-        (32, 128, 8192),  # 256 blocks
-        (64, 128, 8192),  # 128 blocks
+        (1, 33, 128, 512, 1),  # 512 blocks
+        (4, 12, 256, 2048, 256),  # 128 blocks
+        (4, 12, 128, 2048, 16),  # 128 blocks
+        (4, 12, 256, 1024, 4),  # 256 blocks
+        (4, 12, 128, 2048, 32),  # 64 blocks
+        (4, 12, 256, 4096, 32),  # 128 blocks
+        (4, 12, 128, 8192, 32),  # 256 blocks
+        (4, 12, 256, 8192, 64),  # 128 blocks
     ],
 )
 @pytest.mark.parametrize(
@@ -36,13 +38,6 @@ from vllm.attention.ops.nki_blocksparse_flash_attn import (
         (8, 1, 32),
     ],
 )
-@pytest.mark.parametrize(
-    "prefill_batch_size,decode_batch_size",
-    [
-        (4, 12),
-        (1, 199),
-    ],
-)
 @pytest.mark.parametrize("mixed_precision", [True, False])
 @torch.inference_mode()
 def test_blocksparse_flash_paged_attention(
@@ -52,17 +47,16 @@ def test_blocksparse_flash_paged_attention(
     num_queries_per_kv: int,
     head_size: int,
     block_size: int,
-    large_q_tile_size,
-    large_kv_tile_size,
+    tile_size_q: int,
+    tile_size_kv: int,
     mixed_precision: bool,
 ) -> None:
-    assert large_kv_tile_size % block_size == 0
+    assert tile_size_kv % block_size == 0
 
     device = xm.xla_device()
 
     compiler_flags = [
-        "--model-type=transformer -O1",
-        "--internal-hlo2tensorizer-options='--verify-hlo'",
+        "-O1",
         "--retry_failed_compilation",
     ]
     compiler_flags_str = " ".join(compiler_flags)
@@ -115,18 +109,8 @@ def test_blocksparse_flash_paged_attention(
 
     # build neuron program
     B_P_SIZE = 128
-    LARGE_KV_TILE_SZ = large_kv_tile_size
+    LARGE_KV_TILE_SZ = tile_size_kv
     assert LARGE_KV_TILE_SZ >= B_P_SIZE
-
-    def ceil_div(a, b):
-        return (a + b - 1) // b
-
-    def pad_to_multiple(a, b):
-        return ceil_div(a, b) * b
-
-    def pad_to_next_power_of_2(a):
-        assert a > 0
-        return 2**int(a - 1).bit_length()
 
     # calculate input shapes
     max_num_queries = pad_to_next_power_of_2(sum(query_lens))
@@ -184,17 +168,17 @@ def test_blocksparse_flash_paged_attention(
         0,
     ).bool()
 
-    pa_scheduler = FlashPAByGridTile(
+    blocksparse_planner = FlashAttentionPlanner(
         np.array(query_lens, dtype=np.int32),
         context_lens.int().numpy(),
-        tile_size_q=large_q_tile_size,
-        tile_size_kv=large_kv_tile_size,
+        tile_size_q=tile_size_q,
+        tile_size_kv=tile_size_kv,
         block_size=block_size,
     )
-    ctx_token_scheduler = pa_scheduler.compute_schedule()
-    tile_block_tables = ctx_token_scheduler.build_tile_block_tables(
+    ctx_token_plan = blocksparse_planner.plan()
+    tile_block_tables = ctx_token_plan.build_tile_block_tables(
         active_block_table)
-    tile_masks = ctx_token_scheduler.build_tile_masks()
+    tile_masks = ctx_token_plan.build_tile_masks()
 
     input_args = (
         query.to(device=device),
@@ -202,7 +186,7 @@ def test_blocksparse_flash_paged_attention(
         v.to(device=device),
         k_cache.to(device=device),
         v_cache.to(device=device),
-        torch.tensor(ctx_token_scheduler.tile_q_indices).to(device=device),
+        torch.tensor(ctx_token_plan.tile_q_indices).to(device=device),
         torch.tensor(tile_block_tables).to(device=device),
         torch.tensor(tile_masks).to(device=device),
         active_mask.to(device=device),
@@ -210,7 +194,6 @@ def test_blocksparse_flash_paged_attention(
     input_kwargs = dict(
         n_kv_head=num_kv_heads,
         head_size=head_size,
-        LARGE_KV_TILE_SZ=LARGE_KV_TILE_SZ,
         mixed_precision=mixed_precision,
     )
 

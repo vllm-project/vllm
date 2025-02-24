@@ -1,24 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
+
 import numpy as np
 import pytest
 
-from vllm.attention.ops.nki_blocksparse_flash_attn import (FlashPAByGridTile,
-                                                           FlashPASchedule)
+from vllm.attention.ops.nki_blocksparse_flash_attn import (
+    BlockSparsePlan, FlashAttentionPlanner)
 
 
-def _ceil_div(a, b):
+def ceil_div(a, b):
     return (a + b - 1) // b
 
 
-def validate_schedule(pa_schedule, truth):
-    assert np.all(pa_schedule.tile_q_indices == truth.tile_q_indices)
+def validate_plan(plan, truth):
+    assert np.all(plan.tile_q_indices == truth.tile_q_indices)
     assert np.all(
-        pa_schedule.tile_block_table_offsets == truth.tile_block_table_offsets)
-    assert np.all(pa_schedule.tile_q_seq_ids == truth.tile_q_seq_ids)
-    assert np.all(pa_schedule.tile_kv_seq_ids == truth.tile_kv_seq_ids)
+        plan.tile_block_table_offsets == truth.tile_block_table_offsets)
+    assert np.all(plan.tile_q_seq_ids == truth.tile_q_seq_ids)
+    assert np.all(plan.tile_kv_seq_ids == truth.tile_kv_seq_ids)
 
 
-class TestPagedAttentionSchedule:
+class TestFlashAttentionPlanner:
 
     def _compute_truth(
         self,
@@ -32,15 +33,15 @@ class TestPagedAttentionSchedule:
         prompt_ends = np.cumsum(prompt_lens)
         prompt_starts = np.concatenate([[0], prompt_ends[:-1]])
 
-        padded_context_lens = _ceil_div(context_lens, block_size) * block_size
+        padded_context_lens = ceil_div(context_lens, block_size) * block_size
         context_starts = np.concatenate([[0],
                                          np.cumsum(padded_context_lens)[:-1]])
         context_ends = context_starts + context_lens
 
         total_prompt = prompt_ends[-1]
         total_context = context_ends[-1]
-        num_q_tile = _ceil_div(total_prompt, tile_size_q)
-        num_kv_tile = _ceil_div(total_context, tile_size_kv)
+        num_q_tile = ceil_div(total_prompt, tile_size_q)
+        num_kv_tile = ceil_div(total_context, tile_size_kv)
 
         def _is_tile_needed(q_tile_idx, kv_tile_idx):
             q_start = q_tile_idx * tile_size_q
@@ -94,26 +95,27 @@ class TestPagedAttentionSchedule:
                         kv_seq_ids[kv_tile_idx *
                                    tile_size_kv:(kv_tile_idx + 1) *
                                    tile_size_kv])
-        return FlashPASchedule(
+        return BlockSparsePlan(
             tile_q_indices=np.array(tile_q_indices, dtype=np.int32),
             tile_block_table_offsets=np.array(tile_block_table_offsets,
                                               dtype=np.int32),
             tile_q_seq_ids=np.array(tile_q_seq_ids, dtype=np.int32),
             tile_kv_seq_ids=np.array(tile_kv_seq_ids, dtype=np.int32),
+            block_size=block_size,
         )
 
     def _run_test(self, prompt_lens, context_lens, block_size, tile_size_q,
                   tile_size_kv):
         assert len(prompt_lens) == len(context_lens)
         num_seqs = len(prompt_lens)
-        scheduler = FlashPAByGridTile(
+        blocksparse_planner = FlashAttentionPlanner(
             prompt_lens=prompt_lens,
             context_lens=context_lens,
             tile_size_q=tile_size_q,
             tile_size_kv=tile_size_kv,
             block_size=block_size,
         )
-        pa_schedule = scheduler.compute_schedule()
+        plan = blocksparse_planner.plan()
         truth = self._compute_truth(
             num_seqs=num_seqs,
             block_size=block_size,
@@ -122,7 +124,7 @@ class TestPagedAttentionSchedule:
             prompt_lens=prompt_lens,
             context_lens=context_lens,
         )
-        validate_schedule(pa_schedule, truth)
+        validate_plan(plan, truth)
 
     @pytest.mark.parametrize(
         "num_seqs, block_size, tile_size_q, tile_size_kv",
@@ -169,11 +171,11 @@ class TestPagedAttentionSchedule:
         prompt_lens = np.random.randint(1,
                                         MAX_QUERY_LEN_PER_SEQ,
                                         size=(num_seqs, ))
-        prompt_lens = _ceil_div(prompt_lens, tile_size_q) * tile_size_q
+        prompt_lens = ceil_div(prompt_lens, tile_size_q) * tile_size_q
         context_lens = np.random.randint(1,
                                          MAX_KV_LEN_PER_SEQ,
                                          size=(num_seqs, ))
-        context_lens = _ceil_div(context_lens, block_size) * block_size
+        context_lens = ceil_div(context_lens, block_size) * block_size
         # shift the first element by offset so that all elements are aligned to
         # tile boundary + offset
         prompt_lens[0] += offset

@@ -3,8 +3,9 @@
 import pytest
 import torch
 import torch.nn.functional as F
-from utils import (BlockDiagonalCausalFromBottomRightMask,
-                   get_active_block_tables, ref_context_attention,
+from utils import (BlockDiagonalCausalFromBottomRightMask, ceil_div,
+                   get_active_block_tables, pad_to_multiple,
+                   pad_to_next_power_of_2, ref_context_attention,
                    sample_inputs)
 
 
@@ -109,15 +110,6 @@ def test_contexted_kv_attention(
     B_P_SIZE = 128
     assert (large_tile_size >= B_P_SIZE
             ), f"Expect {large_tile_size=} to be larger than {B_P_SIZE=}"
-
-    def ceil_div(a, b):
-        return (a + b - 1) // b
-
-    def pad_to_multiple(a, b):
-        return ceil_div(a, b) * b
-
-    def pad_to_next_power_of_2(a):
-        return 2**int(a - 1).bit_length() if a > 0 else 1
 
     # calculate input shapes
     max_num_queries = pad_to_next_power_of_2(sum(query_lens))
