@@ -1,6 +1,7 @@
 import functools
-from torch_xla.experimental.custom_kernel import jax_import_guard, make_kernel_from_pallas
-jax_import_guard()
+import torch
+from torch.library import impl
+from torch_xla.experimental.custom_kernel import jax_import_guard, make_kernel_from_pallas, XLA_LIB
 
 import jax
 from jax.experimental import pallas as pl
@@ -82,7 +83,20 @@ def bgmv_shape_function(idxs, inputs, loras):
     
     return [((T, L), inputs.dtype)]
 
-def bgmv(inputs, loras, idxs):
+XLA_LIB.define(
+    "bgmv(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor",
+)
+
+@impl(XLA_LIB, "bgmv", "XLA")
+def bgmv_xla(inputs, loras, idxs):
+    jax_import_guard()
     kernel = make_kernel_from_pallas(_bgmv, bgmv_shape_function)
     
     return kernel(idxs, inputs, loras)
+
+@impl(XLA_LIB, "bgmv", "CompositeExplicitAutograd")
+def bgmv_non_xla(inputs, loras, idxs):
+    T, _ = inputs.shape
+    _, _, L, _ = loras.shape
+    
+    return torch.empty((T, L), device=inputs.device)
