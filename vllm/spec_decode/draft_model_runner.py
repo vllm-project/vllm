@@ -50,12 +50,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     """
 
     def __init__(self, model_runner: ModelRunnerBase):
-        # if hasattr(
-        #         model_runner,
-        #         "return_hidden_states") and model_runner.return_hidden_states:
-        #     raise ValueError(
-        #         "return_hidden_states is not supported for TP1DraftModelRunner."
-        #     )
         super().__init__(model_runner)
 
         self.indices_of_seq_with_bonus_tokens = None
@@ -313,8 +307,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 assert model_input.sampling_metadata is not None
                 indices = model_input.sampling_metadata.selected_token_indices
                 if model_input.is_prompt:
-                    save_hidden_states = hidden_states.index_select(
-                        0, indices)
+                    save_hidden_states = hidden_states.index_select(0, indices)
                     output.prefill_hidden_states = hidden_states
                 elif use_cuda_graph:
                     save_hidden_states = hidden_states[:len(indices)]
