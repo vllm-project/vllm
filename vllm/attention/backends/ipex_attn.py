@@ -357,7 +357,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             shape = [num_tokens, num_heads * head_size]
         """
         # NOTE(woosuk): IPEXAttention does not support FP8 KV cache.
-        assert layer._k_scale == 1.0 and layer._v_scale == 1.0, (
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0, (
             "key/v_scale is not supported in IPEXAttention.")
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None or attn_metadata.seq_start_loc is None:
