@@ -45,8 +45,7 @@ def sample_json_schema():
                 "type": "array",
                 "items": {
                     "type": "string",
-                },
-                "minItems": 3
+                }
             },
             "work_history": {
                 "type": "array",

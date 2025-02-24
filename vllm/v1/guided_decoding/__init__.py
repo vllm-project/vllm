@@ -12,9 +12,13 @@ import xgrammar as xgr
 
 from vllm.config import VllmConfig
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.v1.guided_decoding.utils import (
+    has_xgrammar_unsupported_json_features)
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
+
+import json
 
 
 class GuidedDecodingOptions(enum.Enum):
@@ -177,6 +181,17 @@ class GuidedDecodingManager:
             if not isinstance(grammar_spec, str):
                 ctx = self.compiler.compile_builtin_json_grammar()
             else:
+                try:
+                    schema = json.loads(grammar_spec)
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        "Invalid JSON grammar specification.") from e
+
+                if has_xgrammar_unsupported_json_features(schema):
+                    raise ValueError(
+                        "The provided JSON schema contains features not "
+                        "supported by xgrammar.")
+
                 # TODO -- allow any_whitespace to be configurable
                 # pending merge of https://github.com/vllm-project/vllm/pull/12744
                 ctx = self.compiler.compile_json_schema(grammar_spec,
