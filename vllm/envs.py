@@ -636,3 +636,10 @@ def __getattr__(name: str):
 
 def __dir__():
     return list(environment_variables.keys())
+
+
+def is_set(name: str):
+    """Check if an environment variable is explicitly set."""
+    if name in environment_variables:
+        return os.environ.get(name, "UNSET") != "UNSET"
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

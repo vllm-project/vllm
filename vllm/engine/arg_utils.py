@@ -1129,8 +1129,7 @@ class EngineArgs:
     def _is_v1_supported_oracle(self, model_config: ModelConfig) -> bool:
         """Oracle for whether to use V0 or V1 Engine by default."""
 
-        # If the user has explicitly set VLLM_USE_V1=0, then we should
-        # always use V0 Engine.
+        # If VLLM_USE_V1=0, then use the V0 Engine.
         if envs.is_set("VLLM_USE_V1") and not envs.VLLM_USE_V1:
             return False
 
@@ -1241,88 +1240,30 @@ class EngineArgs:
 
         #############################################################
         # Important feature flags we plan to support on V1 but are
-        # currently disabled by default.
-
-        # We log a warning if VLLM_USE_V1=1 is set for these since
-        # we are actively developing these features.
+        # currently not yet supported.
 
         # TODO: this might be a problem right? Since we fall back
         # dynamically at runtime even if xgrammar is specified.
         if self.guided_decoding_backend != "xgrammar":
             if envs.VLLM_USE_V1:
-                logger.warning(
+                raise NotImplementedError(
                     "Detected VLLM_USE_V1=1 with guided decoding backend "
-                    "other than xgrammar. Usage should be considered "
-                    "experimental and you may encounter bugs. Please report "
-                    "any issues on Github.")
+                    "other than xgrammar. This is currently unsupported.")
                 return True
 
             logger.info("Guided decoding is only supported with xgrammar "
                         "for V1 Engine. Falling back to V0 Engine.")
             return False
 
-        # LoRA is supported on V1, but off by default for now.
-        if self.enable_lora:
-            if envs.VLLM_USE_V1:
-                logger.warning(
-                    "Detected VLLM_USE_V1=1 with LoRA. Usage should be"
-                    "considered experimental and you may encounter bugs"
-                    "Please report any issues on Github.")
-                return True
-            logger.info("LoRA is not yet enabled by default for V1 Engine. "
-                        "Falling back to V0 Engine.")
-            return False
-
-        # PP is supported on V1, but off by default for now.
-        if self.pipeline_parallel_size > 1:
-            if envs.VLLM_USE_V1:
-                logger.warning(
-                    "Detected VLLM_USE_V1=1 with pipeline parallelism. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
-                return True
-            logger.info(
-                "Pipeline parallelism is not yet enabled by default for V1 "
-                "Engine. Falling back to V0 Engine.")
-            return False
-
-        # ngram is supported on V1, but off by default for now.
-        if SpeculativeConfig.is_speculation_enabled(
-                self.speculative_model, self.num_speculative_tokens):
-            if envs.VLLM_USE_V1:
-                logger.warning(
-                    "Detected VLLM_USE_V1=1 with speculative decoding. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
-                return True
-            logger.info(
-                "Speculative decoding is not yet enabled by default for V1 "
-                "Engine. Falling back to V0 Engine.")
-            return False
-
-        # Only CUDA and TPU are enabled by default so far.
-        from vllm.platforms import current_platform
-        if (not current_platform.is_cuda() and not current_platform.is_tpu()):
-            if envs.VLLM_USE_V1:
-                logger.warning(
-                    "Detected VLLM_USE_V1=1 on unsupported platform. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
-                return True
-            logger.info(
-                "Platform %s not yet enabled by default for V1 Engine. "
-                "Falling back to V0 Engine.", current_platform.device_type)
-            return False
-
         # Require at least Ampere (Flash Attention needed for V1 so far).
+        from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability().major < 8):
             if envs.VLLM_USE_V1:
-                logger.warning(
-                    "Detected VLLM_USE_V1=1 on unsupported GPU capbility. "
+                raise NotImplementedError(
+                    "Detected VLLM_USE_V1=1 on unsupported GPU capability. "
                     "Usage should be considered experimental and you may "
                     "encounter bugs. Please report any issues on Github.")
-                return True
             logger.info("GPU with compute capability < 8.0 not yet enabled "
                         "for V1 Engine. Falling back to V0 Engine.")
             return False
@@ -1330,11 +1271,10 @@ class EngineArgs:
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
             if envs.VLLM_USE_V1:
-                logger.warning(
+                raise NotImplementedError(
                     "Detected VLLM_USE_V1=1 with fp8 KV cache. "
                     "Usage should be considered experimental and you may "
                     "encounter bugs. Please report any issues on Github.")
-                return True
             logger.info("Fp8 KV cache is not yet supported by the V1 Engine. "
                         "Falling back to V0 Engine.")
             return False
@@ -1342,11 +1282,10 @@ class EngineArgs:
         # No Prompt Adapter so far.
         if self.enable_prompt_adapter:
             if envs.VLLM_USE_V1:
-                logger.warning(
+                raise NotImplementedError(
                     "Detected VLLM_USE_V1=1 with prompt adapter. "
                     "Usage should be considered experimental and you may "
                     "encounter bugs. Please report any issues on Github.")
-                return True
             logger.info(
                 "Prompt Adapter is not yet supported by the V1 Engine. "
                 "Falling back to V0 Engine.")
@@ -1355,7 +1294,7 @@ class EngineArgs:
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
             if envs.VLLM_USE_V1:
-                logger.warning(
+                raise NotImplementedError(
                     "Detected VLLM_USE_V1=1 on unsupported task. "
                     "Usage should be considered experimental and you may "
                     "encounter bugs. Please report any issues on Github.")
@@ -1407,10 +1346,66 @@ class EngineArgs:
                         "V1 Engine. Falling back to V0.")
             return False
 
-        logger.warning(
-            "Deployment is compatible with VLLM_V1. Enabling V1 Engine. If you "
-            "encounter issues, please set VLLM_USE_V1=0 to force the V0 Engine."
-        )
+        #############################################################
+        # Supported or partially supported features. We allow users
+        # to opt into this and log a warning if they do.
+
+        # LoRA is supported on V1, but off by default for now.
+        if self.enable_lora:
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 with LoRA. Usage should be"
+                    "considered experimental and you may encounter bugs"
+                    "Please report any issues on Github.")
+                return True
+            logger.info("LoRA is not yet enabled by default for V1 Engine. "
+                        "Falling back to V0 Engine.")
+            return False
+
+        # PP is supported on V1, but off by default for now.
+        if self.pipeline_parallel_size > 1:
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 with pipeline parallelism. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+            logger.info(
+                "Pipeline parallelism is not yet enabled by default for V1 "
+                "Engine. Falling back to V0 Engine.")
+            return False
+
+        # ngram is supported on V1, but off by default for now.
+        if SpeculativeConfig.is_speculation_enabled(
+                self.speculative_model, self.num_speculative_tokens):
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 with speculative decoding. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+            logger.info(
+                "Speculative decoding is not yet enabled by default for V1 "
+                "Engine. Falling back to V0 Engine.")
+            return False
+
+        # ROCm is supported on V1, but off by default for now.
+        if (not current_platform.is_cuda() and not current_platform.is_tpu()):
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 on unsupported platform. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+            logger.info(
+                "Platform %s not yet enabled by default for V1 Engine. "
+                "Falling back to V0 Engine.", current_platform.device_type)
+            return False
+
+        logger.info(
+            "Detected deployment is compatible with V1. If you encounter"
+            "issues, set VLLM_USE_V1=0 to force the V0 Engine and make a "
+            "bug report on GitHub.")
         return True
 
     def _set_default_args_v0(
