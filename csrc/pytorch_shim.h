@@ -3,16 +3,29 @@
 #include <torch/library.h>
 
 /**
- * Unforunately, the type signatures of the flash_attn ops are not compatible
- * with the PyTorch library bindings. To get around that we use
- * `make_pytorch_shim` which creates a lambda that exponses the API using
- * PyTorch compatible types to the types, then converts them to the types
- * expected by the flash_attn ops. This shims allows us to make minimal changes
- * to `flash_api.cpp` making it easier to synchronize with upstream changes.
+ * PyBind and PyTorch Library apis generally require different type signatures.
+ * This file provides a shim to (mostly, there may be missing conversions) to
+ * convert from function designed to be used with PyBind to one that can be used
+ * with PyTorch Library. This is done using `make_pytorch_shim` which creates a
+ * lambda that exponses the API using PyTorch compatible types to the types.
+ * This is useful when trying to ingergate PyBind based external libraries into
+ * vLLM.
+ *
+ * Example:
+ *
+ * PYBIND11_MODULE(NAME, m) {
+ *   m.def("foo", &foo);
+ * }
+ *
+ * could be replaced with (using the shim):
+ * TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
+ *   m.def("foo", make_pytorch_shim(&foo));
+ *   m.impl("foo", torch::kCUDA, make_pytorch_shim(&foo));
+ * }
  *
  * The `pytorch_library_compatible_type` struct is used to map from the
  * flash_attn ops types to a PyTorch library compatible one. The main issues is
- * that the following types are not support by PyTorch libary bindings:
+ * that the following types are not support by PyTorch library bindings:
  *  - `int`
  *  - `float`
  *  - `c10::optional<T> &`
