@@ -1131,16 +1131,93 @@ class EngineArgs:
         model_config: ModelConfig,
         disable_frontend_multiprocessing: bool,
     ) -> bool:
-        """Oracle for whether to use V0 or V1 Engine by default."""
+        """
+        Oracle for whether to use V0 or V1 Engine by default.
 
-        # This flag only has impact on V0 Engine.
+        DO NOT MODIFY WITHOUT APPROVAL FROM WOOSUK OR ROB.
+        """
+
+        # If the user has explicitly set VLLM_USE_V1=0, then we should
+        # always use V0 Engine.
+        if envs.is_set("VLLM_USE_V1") and not envs.VLLM_USE_V1:
+            return False
+
+        #############################################################
+        # Low priority feature flags that are not supported on V1.
+
+        # We raise a NotImplementedError is VLLM_USE_V1=1 is set
+        # when any of these features are enabled and default to V0.
+
+        if self.preemption_mode != EngineArgs.preemption_mode:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with "
+                    "--preemption-mode.")
+            logger.info("Setting preemption mode is not supported by "
+                        "the V1 Engine. Falling back to V0 Engine. We suggest "
+                        "removing this argument from your deployment config.")
+            return False
+
+        if (self.disable_async_output_proc
+                != EngineArgs.disable_async_output_proc):
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with "
+                    "--disable-async-output-proc.")
+            logger.info("--disable-async-output-proc is not supported by "
+                        "the V1 Engine. Falling back to V0 Engine. We suggest "
+                        "removing this argument from your deployment config.")
+            return False
+
+        if self.scheduling_policy != EngineArgs.scheduling_policy:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with "
+                    "--scheduling-policy.")
+            logger.info("--scheduling-policy is not supported by "
+                        "the V1 Engine. Falling back to V0 Engine.")
+            return False
+
+        if self.scheduler_cls != EngineArgs.scheduler_cls:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with "
+                    "--scheduler-cls.")
+            logger.info("--scheduler-cls is not support by the V1 Engine "
+                        "Faling back to V0 Engine.")
+            return False
+
+        if self.worker_cls != EngineArgs.worker_cls:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with --worker-cls.")
+            logger.info("--worker-cls is not support by the V1 Engine "
+                        "Faling back to V0 Engine.")
+            return False
+
+        if self.num_scheduler_steps != EngineArgs.num_scheduler_steps:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with num_scheduler_steps "
+                    "> 1. We recommend disabling multi-step scheduling so "
+                    "in favor of the V1 Engine.")
+            logger.warning(
+                "Multistep scheduling is not supported by the V1 Engine. "
+                "Falling back to V0. Remove --num-scheduler-steps 1 so "
+                "you can use the V1 Engine.")
+            return False
+
         if disable_frontend_multiprocessing:
             if envs.VLLM_USE_V1:
-                raise ValueError("VLLM_USE_V1=1 is not supported with "
-                                 "--disable-frontend-multiprocessing.")
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with "
+                    "--disable-frontend-multiprocessing.")
             logger.info("--disable-frontend-multiprocessing is not supported "
                         "for V1 Engine. Falling back to V0 Engine.")
             return False
+
+        #############################################################
+        # Important feature flags we plan to support on V1.
 
         # LoRA is supported on V1, but off by default for now.
         if self.enable_lora:
@@ -1220,7 +1297,20 @@ class EngineArgs:
                         "Falling back to V0 Engine.")
             return False
 
-        # No embedding / score models so far.
+        # No Prompt Adapter so far.
+        if self.enable_prompt_adapter:
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 with prompt adapter. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+            logger.info(
+                "Prompt Adapter is not yet supported by the V1 Engine. "
+                "Falling back to V0 Engine.")
+            return False
+
+        # No embedding / scoring models so far.
         if model_config.task not in ["generate"]:
             if envs.VLLM_USE_V1:
                 logger.warning(
@@ -1246,84 +1336,66 @@ class EngineArgs:
                         "yet supported by the V1 Engine. Falling back to V0.")
             return False
 
-        # No Multistep Scheduling.
-        if self.num_scheduler_steps > 1:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with num_scheduler_steps "
-                    "> 1. We recommend disabling multi-step scheduling so "
-                    "in favor of the V1 Engine.")
-            logger.warning(
-                "Multistep scheduling is not supported by the V1 Engine. "
-                "Falling back to V0. We recommend deploying with"
-                "--num-scheduler-steps 1 so you can use V1")
-            return False
-
         return True
 
-    def _set_default_args(self, model_config: ModelConfig,
-                          usage_context: UsageContext):
-        """Configure SchedulerArgs for V0 and V1."""
+    def _set_default_args_v0(
+        self,
+        model_config: ModelConfig,
+    ):
+        max_model_len = model_config.max_model_len
+        use_long_context = max_model_len > 32768
+        if self.enable_chunked_prefill is None:
+            # Chunked prefill not supported for Multimodal or MLA in V0.
+            if model_config.is_multimodal_model or model_config.use_mla:
+                self.enable_chunked_prefill = False
 
-        # Set Default Args for V0 Engine.
-        if not self.use_v1:
-            max_model_len = model_config.max_model_len
-            use_long_context = max_model_len > 32768
+            # Enable chunked prefill by default for long context (> 32K)
+            # models to avoid OOM errors in initial memory profiling phase.
+            elif use_long_context:
+                from vllm.platforms import current_platform
+                is_gpu = current_platform.is_cuda()
+                use_sliding_window = (model_config.get_sliding_window()
+                                      is not None)
+                use_spec_decode = self.speculative_model is not None
+
+                if (is_gpu and not use_sliding_window and not use_spec_decode
+                        and not self.enable_lora
+                        and not self.enable_prompt_adapter
+                        and model_config.runner_type != "pooling"):
+                    self.enable_chunked_prefill = True
+                    logger.warning(
+                        "Chunked prefill is enabled by default for models "
+                        "with max_model_len > 32K. Chunked prefill might "
+                        "not work with some features or models. If you "
+                        "encounter any issues, please disable by launching"
+                        "with --enable-chunked-prefill=False.")
+
             if self.enable_chunked_prefill is None:
-                # Chunked prefill not supported for Multimodal or MLA in V0.
-                if model_config.is_multimodal_model or model_config.use_mla:
-                    self.enable_chunked_prefill = False
+                self.enable_chunked_prefill = False
 
-                # Enable chunked prefill by default for long context (> 32K)
-                # models to avoid OOM errors in initial memory profiling phase.
-                elif use_long_context:
-                    from vllm.platforms import current_platform
-                    is_gpu = current_platform.is_cuda()
-                    use_sliding_window = (model_config.get_sliding_window()
-                                          is not None)
-                    use_spec_decode = self.speculative_model is not None
+        if not self.enable_chunked_prefill and use_long_context:
+            logger.warning(
+                "The model has a long context length (%s). This may cause"
+                "OOM during the initial memory profiling phase, or result "
+                "in low performance due to small KV cache size. Consider "
+                "setting --max-model-len to a smaller value.", max_model_len)
+        elif (self.enable_chunked_prefill
+              and model_config.runner_type == "pooling"):
+            msg = "Chunked prefill is not supported for pooling models"
+            raise ValueError(msg)
 
-                    if (is_gpu and not use_sliding_window
-                            and not use_spec_decode and not self.enable_lora
-                            and not self.enable_prompt_adapter
-                            and model_config.runner_type != "pooling"):
-                        self.enable_chunked_prefill = True
-                        logger.warning(
-                            "Chunked prefill is enabled by default for models "
-                            "with max_model_len > 32K. Chunked prefill might "
-                            "not work with some features or models. If you "
-                            "encounter any issues, please disable by launching"
-                            "with --enable-chunked-prefill=False.")
+        # Disable prefix caching for multimodal models for VLLM_V0.
+        if (model_config.is_multimodal_model and self.enable_prefix_caching):
+            logger.warning(
+                "--enable-prefix-caching is not supported for multimodal "
+                "models in V0 and has been disabled.")
+            self.enable_prefix_caching = False
 
-                if self.enable_chunked_prefill is None:
-                    self.enable_chunked_prefill = False
+        # Set max_num_seqs to 256 for VLLM_V0.
+        if self.max_num_seqs is None:
+            self.max_num_seqs = 256
 
-            if not self.enable_chunked_prefill and use_long_context:
-                logger.warning(
-                    "The model has a long context length (%s). This may cause"
-                    "OOM during the initial memory profiling phase, or result "
-                    "in low performance due to small KV cache size. Consider "
-                    "setting --max-model-len to a smaller value.",
-                    max_model_len)
-            elif (self.enable_chunked_prefill
-                  and model_config.runner_type == "pooling"):
-                msg = "Chunked prefill is not supported for pooling models"
-                raise ValueError(msg)
-
-            # Disable prefix caching for multimodal models for VLLM_V0.
-            if (model_config.is_multimodal_model
-                    and self.enable_prefix_caching):
-                logger.warning(
-                    "--enable-prefix-caching is not supported for multimodal "
-                    "models in V0 and has been disabled.")
-                self.enable_prefix_caching = False
-
-            # Set max_num_seqs to 256 for VLLM_V0.
-            if self.max_num_seqs is None:
-                self.max_num_seqs = 256
-
-            return
-
+    def _set_default_args_v1(self, usage_context: UsageContext):
         # VLLM_V1 only supports chunked prefill.
         self.enable_chunked_prefill = True
 
@@ -1368,12 +1440,15 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        # Enable the V1 Engine if we can.
+        # Enable the V1 Engine by default if supported.
         self.use_v1 = self._is_v1_supported_oracle(
             model_config, disable_frontend_multiprocessing)
 
-        # Set default arguments for the scheduler.
-        self._set_default_args(usage_context)
+        # Set default arguments for V0 or V1 Engine.
+        if self.use_v1:
+            self._set_default_args_v1(usage_context)
+        else:
+            self._set_default_args_v0(model_config)
 
         cache_config = CacheConfig(
             block_size=self.block_size,
