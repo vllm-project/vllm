@@ -12,22 +12,37 @@ MODEL = "facebook/opt-125m"
 DTYPE = "half"
 
 
+def _vllm_model(apc: bool, vllm_runner, monkeypatch):
+    """Set up VllmRunner instance."""
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    # TODO(nick): Single-proc to work around a ZMQ shutdown hang for now.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    return vllm_runner(
+        MODEL,
+        dtype=DTYPE,
+        max_model_len=128,
+        enforce_eager=True,
+        enable_prefix_caching=apc,
+        gpu_memory_utilization=0.5,
+    )
+
+
 @pytest.fixture(
-    scope="module",
+    # Function scope decouples tests & allows
+    # env var adjustment via monkeypatch
+    scope="function",
     # Prefix caching
     params=[False, True])
-def vllm_model(vllm_runner, request):
-    """VllmRunner test fixture parameterized by APC."""
-    enable_prefix_caching = request.param
-    with vllm_runner(
-            MODEL,
-            dtype=DTYPE,
-            max_model_len=128,
-            enforce_eager=True,
-            enable_prefix_caching=enable_prefix_caching,
-            gpu_memory_utilization=0.5,
-    ) as vllm_model:
-        # VllmRunner instance is cleaned up after test.
+def vllm_model(vllm_runner, request, monkeypatch):
+    """VllmRunner test fixture parameterized by APC True/False."""
+    with _vllm_model(request.param, vllm_runner, monkeypatch) as vllm_model:
+        yield vllm_model
+
+
+@pytest.fixture(scope="function")
+def vllm_model_apc(vllm_runner, monkeypatch):
+    """VllmRunner test fixture with APC."""
+    with _vllm_model(True, vllm_runner, monkeypatch) as vllm_model:
         yield vllm_model
 
 
@@ -53,15 +68,13 @@ def _get_test_sampling_params(
     ], n_list
 
 
-def test_parallel_sampling(monkeypatch, vllm_model, example_prompts) -> None:
+def test_parallel_sampling(vllm_model, example_prompts) -> None:
     """Test passes if parallel sampling `n>1` yields `n` unique completions.
     
     Args:
-      monkeypatch: test fixture for modifying text env, scoped to the test.
       vllm_model: VllmRunner instance under test.
       example_prompt: test fixture providing prompts for testing.
     """
-    monkeypatch.setenv("VLLM_USE_V1", "1")
     sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
     model: LLM = vllm_model.model
     outputs = model.generate(example_prompts, sampling_params_list)
@@ -89,16 +102,13 @@ def test_parallel_sampling(monkeypatch, vllm_model, example_prompts) -> None:
                 f" {n}. Repeats: {repeats}")
 
 
-def test_llm_engine_refuses_prompt_logprobs_with_apc(monkeypatch):
+def test_llm_engine_refuses_prompt_logprobs_with_apc(vllm_model_apc):
     """Test passes if LLMEngine raises an exception when it is configured
     for automatic prefix caching and it receives a request with
     prompt_logprobs enabled, which is incompatible."""
-
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-    # TODO(nick): Single-proc to work around a ZMQ shutdown hang for now.
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    model: LLM = vllm_model_apc.model
     with pytest.raises(ValueError) as excinfo:
-        LLM(model=MODEL, enable_prefix_caching=True).generate(
+        model.generate(
             "Hello, my name is",
             SamplingParams(temperature=0.8, top_p=0.95, prompt_logprobs=5))
 
