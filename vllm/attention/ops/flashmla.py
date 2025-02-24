@@ -1,17 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
 # adapted from: https://github.com/deepseek-ai/FlashMLA/blob/main/flash_mla/flash_mla_interface.py
 from typing import Optional, Tuple
 
 import torch
 
 from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 from vllm.platforms import current_platform
 
+logger = init_logger(__name__)
 
 if not current_platform.is_tpu() and not current_platform.is_hpu():
     try:
-        import vllm._C_flashmla
+        import vllm._C_flashmla  # noqa: F401
         _C_flashmla_AVAILABLE = True
     except ImportError as e:
         logger.warning("Failed to import from vllm._C_flashmla with %r", e)
@@ -37,10 +37,13 @@ def get_mla_metadata(
         num_heads_k: num_heads_k.
 
     Return:
-        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), dtype torch.int32.
+        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), 
+                                 dtype torch.int32.
         num_splits: (batch_size + 1), dtype torch.int32.
     """
-    return torch.ops._C_flashmla.get_mla_metadata(cache_seqlens, num_heads_per_head_k, num_heads_k)
+    return torch.ops._C_flashmla.get_mla_metadata(cache_seqlens,
+                                                  num_heads_per_head_k,
+                                                  num_heads_k)
 
 
 def flash_mla_with_kvcache(
@@ -61,9 +64,11 @@ def flash_mla_with_kvcache(
         block_table: (batch_size, max_num_blocks_per_seq), torch.int32.
         cache_seqlens: (batch_size), torch.int32.
         head_dim_v: Head_dim of v.
-        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), torch.int32, return by get_mla_metadata.
+        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), 
+                                 torch.int32, return by get_mla_metadata.
         num_splits: (batch_size + 1), torch.int32, return by get_mla_metadata.
-        softmax_scale: float. The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim).
+        softmax_scale: float. The scaling of QK^T before applying softmax. 
+                       Default to 1 / sqrt(head_dim).
         causal: bool. Whether to apply causal attention mask.
 
     Return:
@@ -71,7 +76,7 @@ def flash_mla_with_kvcache(
         softmax_lse: (batch_size, num_heads_q, seq_len_q), torch.float32.
     """
     if softmax_scale is None:
-        softmax_scale = q.shape[-1] ** (-0.5)
+        softmax_scale = q.shape[-1]**(-0.5)
     out, softmax_lse = torch.ops._C_flashmla.fwd_kvcache_mla(
         q,
         k_cache,
@@ -85,6 +90,7 @@ def flash_mla_with_kvcache(
         num_splits,
     )
     return out, softmax_lse
+
 
 #
 # TODO: Add fake functions

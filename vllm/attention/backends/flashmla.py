@@ -1,21 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional, Type, Set, Tuple
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
-from dataclasses import asdict, dataclass
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonImpl,
                                                 MLACommonMetadata,
                                                 MLACommonMetadataBuilder,
                                                 MLACommonState)
-from vllm.attention.ops.flashmla import (
-    is_flashmla_supported,
-    flash_mla_with_kvcache,
-    get_mla_metadata,
-)
+from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
+                                         get_mla_metadata,
+                                         is_flashmla_supported)
 
 
 class FlashMLABackend(MLACommonBackend):
@@ -40,9 +38,11 @@ class FlashMLABackend(MLACommonBackend):
     def get_state_cls() -> Type["FlashMLAState"]:
         return FlashMLAState
 
+
 @dataclass
 class FlashMLAMetadata(MLACommonMetadata):
-    decode_tile_scheduler_metadata: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    decode_tile_scheduler_metadata: Optional[Tuple[torch.Tensor,
+                                                   torch.Tensor]] = None
     decode_num_splits: Optional[torch.Tensor] = None
 
     _cached_decode_metadata: Optional["MLACommonMetadata"] = None
@@ -66,45 +66,48 @@ class FlashMLAMetadata(MLACommonMetadata):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
-        common_metadata = super().build(
-            seq_lens, query_lens, cuda_graph_pad_size, batch_size)
+        common_metadata = super().build(seq_lens, query_lens,
+                                        cuda_graph_pad_size, batch_size)
 
         decode_tile_scheduler_metadata, decode_num_splits = None, None
         if common_metadata.num_decode_tokens > 0:
-            decode_tile_scheduler_metadata, decode_num_splits = get_mla_metadata(
+            decode_tile_scheduler_metadata, decode_num_splits = \
+                get_mla_metadata(
                 common_metadata.seq_lens_tensor[common_metadata.num_prefills:],
                 self.runner.model_config.get_num_attention_heads(
                     self.runner.parallel_config),
-                1,   
+                1,
             )
 
         return FlashMLAMetadata(
             # TODO: not on hotpath but can this be faster?
-            **asdict(common_metadata), 
+            **asdict(common_metadata),
             decode_tile_scheduler_metadata=decode_tile_scheduler_metadata,
             decode_num_splits=decode_num_splits,
         )
 
+
 class FlashMLAState(MLACommonState):
+
     def get_graph_input_buffers(self,
                                 attn_metadata,
                                 is_encoder_decoder_model: bool = False):
-        input_buffers = super().get_graph_input_buffers(attn_metadata,
-                                                        is_encoder_decoder_model)
+        input_buffers = super().get_graph_input_buffers(
+            attn_metadata, is_encoder_decoder_model)
         if attn_metadata.tile_scheduler_metadata is not None:
             tile_scheduler_metadata = attn_metadata.tile_scheduler_metadata
             num_splits = attn_metadata.num_splits
             input_buffers["tile_scheduler_metadata"] = tile_scheduler_metadata
             input_buffers["num_splits"] = num_splits
-            
+
         return input_buffers
-    
-    
+
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
@@ -164,7 +167,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         o, _ = flash_mla_with_kvcache(
             q=q,
-            k_cache=kv_c_and_k_pe_cache.unsqueeze(-2), # Add head dim of 1
+            k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             block_table=decode_meta.block_tables,
             cache_seqlens=decode_meta.seq_lens_tensor,
             head_dim_v=self.kv_lora_rank,
