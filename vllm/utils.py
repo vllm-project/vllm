@@ -2268,3 +2268,43 @@ def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
 
     type.__setattr__(cls, '__init__', wrapped_init)
     return cls
+
+
+def prefix_sort(prompts):
+    """
+    Sort the prompts by their prefix token ids.
+
+    Suggestions:
+    - The input prompts will be a list of dictionaries
+        (prompt_token_ids) or a list of strs (prompts).
+    - This method is mainly aimed at throughput optimization
+        in offline scenarios.
+        It clusters requests with the same prefix,
+        shortens the lifecycle length of the prefix kv cache,
+        and improves the cache hit rate at the same time.
+    - Because there are still performance issues with the current
+        Flashinfer cascade(),
+        it will only be enabled when using `--enable-chunked-prefill`.
+    """
+    if not prompts:
+        return prompts, []
+
+    # 检查输入数据类型
+    is_dict_list = isinstance(prompts[0], dict)
+
+    def get_key(item_with_index):
+        index, item = item_with_index
+        if is_dict_list:
+            tokens = item['prompt_token_ids']
+            return ''.join(str(t) for t in tokens)
+        else:
+            return item
+
+    indexed_prompts = list(enumerate(prompts))
+
+    sorted_with_index = sorted(indexed_prompts, key=get_key)
+
+    sorted_indices = [i for i, _ in sorted_with_index]
+    sorted_prompts = [d for _, d in sorted_with_index]
+
+    return sorted_prompts, sorted_indices

@@ -42,7 +42,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
+from vllm.utils import (Counter, deprecate_args, deprecate_kwargs, is_list_of,
+                        prefix_sort)
 
 logger = init_logger(__name__)
 
@@ -1326,15 +1327,38 @@ class LLM:
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
-        for i, prompt in enumerate(prompts):
-            self._add_request(
-                prompt,
-                params[i] if isinstance(params, Sequence) else params,
-                lora_request=lora_request[i] if isinstance(
-                    lora_request, Sequence) else lora_request,
-                prompt_adapter_request=prompt_adapter_request,
-                priority=priority[i] if priority else 0,
-            )
+        if self.llm_engine.cache_config.enable_prefix_sorting:
+            logger.warning(
+                "Prefix sorting is enabled. The order of the prompts may "
+                "be changed based on the prefix length. ")
+
+            sorted_prompts, sort_indices = prefix_sort(prompts)
+
+            request_ids = [str(next(self.request_counter)) for _ in prompts]
+
+            for idx in range(len(sorted_prompts)):
+                original_idx = sort_indices[idx]
+                prompt = sorted_prompts[idx]
+                self._add_request(
+                    prompt,
+                    params[original_idx]
+                    if isinstance(params, Sequence) else params,
+                    lora_request=lora_request[original_idx] if isinstance(
+                        lora_request, Sequence) else lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
+                    priority=priority[original_idx] if priority else 0,
+                    request_id=request_ids[original_idx],
+                )
+        else:
+            for i, prompt in enumerate(prompts):
+                self._add_request(
+                    prompt,
+                    params[i] if isinstance(params, Sequence) else params,
+                    lora_request=lora_request[i] if isinstance(
+                        lora_request, Sequence) else lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
+                    priority=priority[i] if priority else 0,
+                )
 
     def _add_request(
         self,
@@ -1343,8 +1367,10 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        request_id: Optional[str] = None,
     ) -> None:
-        request_id = str(next(self.request_counter))
+        request_id = str(next(
+            self.request_counter)) if request_id is None else request_id
         self.llm_engine.add_request(
             request_id,
             prompt,

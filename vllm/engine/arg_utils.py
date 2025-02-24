@@ -169,6 +169,7 @@ class EngineArgs:
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: Optional[bool] = None
+    enable_prefix_sorting: bool = None
 
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
@@ -749,6 +750,16 @@ class EngineArgs:
             const="True",
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
+        parser.add_argument(
+            '--enable-prefix-sorting',
+            action=StoreBoolean,
+            default=EngineArgs.enable_prefix_sorting,
+            nargs="?",
+            const="True",
+            help='If set, the prefix cache will be sorted based on the prefix '
+            'length. This can improve the throughput of the offline prefix '
+            'generation process (only applicable when enable_prefix_caching '
+            'and enable_chunked_prefill are both set).')
 
         parser.add_argument(
             '--speculative-model',
@@ -1106,15 +1117,15 @@ class EngineArgs:
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
         if (self.quantization == "bitsandbytes" or
-           self.qlora_adapter_name_or_path is not None) and \
-           self.load_format != "bitsandbytes":
+            self.qlora_adapter_name_or_path is not None) and \
+                self.load_format != "bitsandbytes":
             raise ValueError(
                 "BitsAndBytes quantization and QLoRA adapter only support "
                 f"'bitsandbytes' load format, but got {self.load_format}")
 
         if (self.load_format == "bitsandbytes" or
             self.qlora_adapter_name_or_path is not None) and \
-            self.quantization != "bitsandbytes":
+                self.quantization != "bitsandbytes":
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
@@ -1142,6 +1153,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
+            enable_prefix_sorting=self.enable_prefix_sorting,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
         )
@@ -1204,15 +1216,14 @@ class EngineArgs:
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
-
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
-            speculative_model_quantization = \
+            speculative_model_quantization= \
                 self.speculative_model_quantization,
-            speculative_draft_tensor_parallel_size = \
+            speculative_draft_tensor_parallel_size= \
                 self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
             speculative_disable_mqa_scorer=self.speculative_disable_mqa_scorer,
@@ -1223,7 +1234,7 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
-            draft_token_acceptance_method=\
+            draft_token_acceptance_method= \
                 self.spec_decoding_acceptance_method,
             typical_acceptance_sampler_posterior_threshold=self.
             typical_acceptance_sampler_posterior_threshold,
@@ -1266,6 +1277,14 @@ class EngineArgs:
                 "SelfAttnBlockSpaceManager (i.e. block manager v2),"
                 " please file an issue with detailed information.")
 
+        if self.enable_prefix_sorting and not (self.enable_prefix_caching and
+                                               self.enable_chunked_prefill):
+            logger.warning(
+                "--enable-prefix-sorting is only applicable when "
+                "--enable-prefix-caching and --enable-chunked-prefill "
+                "are both set. It has been disabled.")
+            self.enable_prefix_sorting = False
+
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -1299,7 +1318,7 @@ class EngineArgs:
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
         if self.qlora_adapter_name_or_path is not None and \
-            self.qlora_adapter_name_or_path != "":
+                self.qlora_adapter_name_or_path != "":
             if self.model_loader_extra_config is None:
                 self.model_loader_extra_config = {}
             self.model_loader_extra_config[
@@ -1310,7 +1329,7 @@ class EngineArgs:
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,
             max_prompt_adapter_token=self.max_prompt_adapter_token) \
-                                        if self.enable_prompt_adapter else None
+            if self.enable_prompt_adapter else None
 
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
