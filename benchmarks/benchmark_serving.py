@@ -25,9 +25,7 @@ On the client side, run:
 """
 import argparse
 import asyncio
-import base64
 import gc
-import io
 import json
 import os
 import random
@@ -38,11 +36,11 @@ from datetime import datetime
 from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
                                   RequestFuncOutput)
-from datasets import load_dataset
-from PIL.Image import Image
+from dataset_sample_func import (BurstGPTSampler, RandomSampler,
+                                 ShareGPTSampler, SonnetSampler,
+                                 get_hf_dataset_sampler)
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -97,41 +95,8 @@ def sample_sharegpt_requests(
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int, None]]:
-    # Load the dataset.
-    with open(dataset_path, encoding='utf-8') as f:
-        dataset = json.load(f)
-    # Filter out the conversations with less than 2 turns.
-    dataset = [data for data in dataset if len(data["conversations"]) >= 2]
-    # Only keep the first two turns of each conversation.
-    dataset = [(data["conversations"][0]["value"],
-                data["conversations"][1]["value"]) for data in dataset]
-
-    # Shuffle the dataset.
-    random.shuffle(dataset)
-
-    # Filter out sequences that are too long or too short
-    filtered_dataset: List[Tuple[str, int, int]] = []
-    for i in range(len(dataset)):
-        if len(filtered_dataset) == num_requests:
-            break
-
-        # Tokenize the prompts and completions.
-        prompt = dataset[i][0]
-        prompt_token_ids = tokenizer(prompt).input_ids
-        completion = dataset[i][1]
-        completion_token_ids = tokenizer(completion).input_ids
-        prompt_len = len(prompt_token_ids)
-        output_len = len(completion_token_ids
-                         ) if fixed_output_len is None else fixed_output_len
-        if prompt_len < 4 or (fixed_output_len is None and output_len < 4):
-            # Prune too short sequences.
-            continue
-        if prompt_len > 1024 or prompt_len + output_len > 2048:
-            # Prune too long sequences.
-            continue
-        filtered_dataset.append((prompt, prompt_len, output_len, None))
-
-    return filtered_dataset
+    hf_dataset_sampler = ShareGPTSampler(dataset_path, tokenizer=tokenizer)
+    return hf_dataset_sampler.sample(num_requests, fixed_output_len)
 
 
 def sample_burstgpt_requests(
@@ -140,27 +105,10 @@ def sample_burstgpt_requests(
     random_seed: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, int, int, None]]:
-    df = pd.read_csv(dataset_path)
-    gpt4_df = df[df["Model"] == "GPT-4"]
-    # Remove the failed requests (i.e., response length is 0)
-    gpt4_df = gpt4_df[gpt4_df["Response tokens"] > 0]
-    # Randomly sample num_requests from the dataset
-    if num_requests <= len(gpt4_df):
-        gpt4_df = gpt4_df.sample(n=num_requests, random_state=random_seed)
-    else:
-        gpt4_df = gpt4_df.sample(n=num_requests,
-                                 random_state=random_seed,
-                                 replace=True)
-    # Convert the dataframe to a list of tuples
-    dataset = gpt4_df.values.tolist()
-    input_requests = []
-    for i in range(num_requests):
-        input_len = int(dataset[i][2])
-        output_len = int(dataset[i][3])
-        prompt = tokenizer.decode([(i + j) % tokenizer.vocab_size
-                                   for j in range(input_len)])
-        input_requests.append((prompt, input_len, output_len, None))
-    return input_requests
+    burstgpt_sampler = BurstGPTSampler(dataset_path,
+                                       tokenizer=tokenizer,
+                                       seed=random_seed)
+    return burstgpt_sampler.sample(num_requests)
 
 
 def sample_sonnet_requests(
@@ -171,110 +119,13 @@ def sample_sonnet_requests(
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, str, int, int, None]]:
-    assert (
-        input_len > prefix_len
-    ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
-
-    # Load the dataset.
-    with open(dataset_path, encoding='utf-8') as f:
-        poem_lines = f.readlines()
-
-    # Tokenize the poem lines.
-    poem_token_ids = tokenizer(poem_lines).input_ids
-    average_poem_len = sum(
-        len(token_ids) for token_ids in poem_token_ids) / len(poem_token_ids)
-
-    # Base prefix for all requests.
-    base_prompt = "Pick as many lines as you can from these poem lines:\n"
-    base_message = [{
-        "role": "user",
-        "content": base_prompt,
-    }]
-    base_prompt_formatted = tokenizer.apply_chat_template(
-        base_message, add_generation_prompt=True, tokenize=False)
-    base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
-
-    assert (
-        input_len > base_prompt_offset
-    ), f"Please set 'args.sonnet-input-len' higher than {base_prompt_offset}."
-    num_input_lines = round(
-        (input_len - base_prompt_offset) / average_poem_len)
-
-    # First approximately `prefix_len` number of tokens in the
-    # prompt are fixed poem lines.
-    assert (
-        prefix_len > base_prompt_offset
-    ), f"Please set 'args.sonnet-prefix-len' higher than {base_prompt_offset}."
-
-    num_prefix_lines = round(
-        (prefix_len - base_prompt_offset) / average_poem_len)
-    prefix_lines = poem_lines[:num_prefix_lines]
-
-    # Sample the rest of lines per request.
-    sampled_requests: List[Tuple[str, int, int]] = []
-    for _ in range(num_requests):
-        num_lines_needed = num_input_lines - num_prefix_lines
-        sampled_lines = "".join(prefix_lines +
-                                random.choices(poem_lines, k=num_lines_needed))
-
-        prompt = f"{base_prompt}{sampled_lines}"
-        message = [
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ]
-        prompt_formatted = tokenizer.apply_chat_template(
-            message, add_generation_prompt=True, tokenize=False)
-        prompt_len = len(tokenizer(prompt_formatted).input_ids)
-        sampled_requests.append(
-            (prompt, prompt_formatted, prompt_len, output_len, None))
-
-    return sampled_requests
-
-
-def sample_vision_arena_requests(
-    dataset,
-    num_requests: int,
-    tokenizer: PreTrainedTokenizerBase,
-    fixed_output_len: Optional[int] = None,
-) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
-    sampled_requests: List[Tuple[str, int, int, Dict[str,
-                                                     Collection[str]]]] = []
-    for data in dataset:
-        if len(sampled_requests) == num_requests:
-            break
-
-        prompt = data["turns"][0][0]['content']
-
-        prompt_token_ids = tokenizer(prompt).input_ids
-        if fixed_output_len is None:
-            # Default max output len is set to 128
-            print("--hf-output-len is not provided. Using default value 128.")
-            fixed_output_len = 128
-
-        prompt_len = len(prompt_token_ids)
-        output_len = fixed_output_len
-
-        assert isinstance(
-            data["images"][0],
-            Image), ("Input image format must be `PIL.Image.Image`, "
-                     f"given {type(data['image'])}.")
-        image: Image = data["images"][0]
-        image = image.convert("RGB")
-        image_data = io.BytesIO()
-        image.save(image_data, format='JPEG')
-        image_base64 = base64.b64encode(image_data.getvalue()).decode("utf-8")
-        mm_content = {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{image_base64}"
-            },
-        }
-
-        sampled_requests.append((prompt, prompt_len, output_len, mm_content))
-
-    return sampled_requests
+    sonnet_sampler = SonnetSampler(
+        dataset_path,
+        input_len=input_len,
+        prefix_len=prefix_len,
+        tokenizer=tokenizer,
+    )
+    return sonnet_sampler.sample(num_requests, output_len)
 
 
 def sample_hf_requests(
@@ -285,82 +136,13 @@ def sample_hf_requests(
     tokenizer: PreTrainedTokenizerBase,
     random_seed: int,
     fixed_output_len: Optional[int] = None,
-) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
-
-    # Special case for vision_arena dataset
-    if dataset_path == 'lmarena-ai/vision-arena-bench-v0.1' \
-        and dataset_subset is None:
-        assert dataset_split == "train"
-        dataset = load_dataset(dataset_path,
-                               name=dataset_subset,
-                               split=dataset_split,
-                               streaming=True)
-        dataset = dataset.shuffle(seed=random_seed)
-        return sample_vision_arena_requests(dataset, num_requests, tokenizer,
-                                            fixed_output_len)
-
-    dataset = load_dataset(dataset_path,
-                           name=dataset_subset,
-                           split=dataset_split,
-                           streaming=True)
-    assert "conversations" in dataset.features, (
-        "HF Dataset must have 'conversations' column.")
-    filter_func = lambda x: len(x["conversations"]) >= 2
-    filtered_dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
-    sampled_requests: List[Tuple[str, int, int, Dict[str,
-                                                     Collection[str]]]] = []
-    for data in filtered_dataset:
-        if len(sampled_requests) == num_requests:
-            break
-
-        # Tokenize the prompts and completions.
-        prompt = data["conversations"][0]["value"]
-        prompt_token_ids = tokenizer(prompt).input_ids
-        completion = data["conversations"][1]["value"]
-        completion_token_ids = tokenizer(completion).input_ids
-        prompt_len = len(prompt_token_ids)
-        output_len = len(completion_token_ids
-                         ) if fixed_output_len is None else fixed_output_len
-        if fixed_output_len is None and (prompt_len < 4 or output_len < 4):
-            # Prune too short sequences.
-            continue
-        if fixed_output_len is None and \
-            (prompt_len > 1024 or prompt_len + output_len > 2048):
-            # Prune too long sequences.
-            continue
-
-        if "image" in data and isinstance(data["image"], Image):
-            image: Image = data["image"]
-            image = image.convert("RGB")
-            image_data = io.BytesIO()
-            image.save(image_data, format='JPEG')
-            image_base64 = base64.b64encode(
-                image_data.getvalue()).decode("utf-8")
-            mm_content = {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{image_base64}"
-                },
-            }
-        elif "image" in data and isinstance(data["image"], str):
-            if (data["image"].startswith("http://") or \
-                data["image"].startswith("file://")):
-                image_url = data["image"]
-            else:
-                image_url = f"file://{data['image']}"
-
-            mm_content = {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                },
-            }
-        else:
-            mm_content = None
-
-        sampled_requests.append((prompt, prompt_len, output_len, mm_content))
-
-    return sampled_requests
+) -> list[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
+    hf_dataset_sampler = get_hf_dataset_sampler(dataset_path,
+                                                dataset_subset,
+                                                dataset_split,
+                                                tokenizer=tokenizer,
+                                                seed=random_seed)
+    return hf_dataset_sampler.sample(num_requests, fixed_output_len)
 
 
 def sample_random_requests(
@@ -371,31 +153,11 @@ def sample_random_requests(
     range_ratio: float,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, int, int]]:
-    prefix_token_ids = np.random.randint(0,
-                                         tokenizer.vocab_size,
-                                         size=prefix_len).tolist()
-
-    input_lens = np.random.randint(
-        int(input_len * range_ratio),
-        input_len + 1,
-        size=num_prompts,
-    )
-    output_lens = np.random.randint(
-        int(output_len * range_ratio),
-        output_len + 1,
-        size=num_prompts,
-    )
-    offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
-    input_requests = []
-    for i in range(num_prompts):
-        prompt = tokenizer.decode(prefix_token_ids +
-                                  [(offsets[i] + i + j) % tokenizer.vocab_size
-                                   for j in range(input_lens[i])])
-
-        input_requests.append((prompt, int(prefix_len + input_lens[i]),
-                               int(output_lens[i]), None))
-
-    return input_requests
+    random_sampler = RandomSampler(prefix_len,
+                                   input_len,
+                                   range_ratio,
+                                   tokenizer=tokenizer)
+    return random_sampler.sample(num_prompts, output_len)
 
 
 async def get_request(
@@ -1280,7 +1042,7 @@ if __name__ == "__main__":
     hf_group.add_argument(
         "--hf-output-len",
         type=int,
-        default=None,
+        default=128,
         help="Output length for each request. Overrides the output lengths "
         "from the sampled HF dataset.",
     )
