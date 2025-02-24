@@ -139,27 +139,28 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+        device = w13_weight.device
         # TODO strides can be shared across multiple layers
         ab_strides1 = torch.nn.Parameter(torch.full((num_experts, ),
                                                     hidden_size,
-                                                    device="cuda",
+                                                    device=device,
                                                     dtype=torch.int64),
                                          requires_grad=False)
         c_strides1 = torch.nn.Parameter(torch.full(
             (num_experts, ),
             2 * intermediate_size_per_partition,
-            device="cuda",
+            device=device,
             dtype=torch.int64),
                                         requires_grad=False)
         ab_strides2 = torch.nn.Parameter(torch.full(
             (num_experts, ),
             intermediate_size_per_partition,
-            device="cuda",
+            device=device,
             dtype=torch.int64),
                                          requires_grad=False)
         c_strides2 = torch.nn.Parameter(torch.full((num_experts, ),
                                                    hidden_size,
-                                                   device="cuda",
+                                                   device=device,
                                                    dtype=torch.int64),
                                         requires_grad=False)
         layer.register_parameter("ab_strides1", ab_strides1)

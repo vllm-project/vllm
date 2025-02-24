@@ -1385,64 +1385,40 @@ def cutlass_moe(
 ):
     topk = topk_ids.shape[1]
     per_act_token = a_scale.numel() != 1
+    device = a_q.device
 
     expert_offsets = torch.empty((num_groups + 1),
                                  dtype=torch.int32,
-                                 device="cuda")
+                                 device=device)
     problem_sizes1 = torch.empty((num_groups, 3),
                                  dtype=torch.int32,
-                                 device="cuda")
+                                 device=device)
     problem_sizes2 = torch.empty((num_groups, 3),
                                  dtype=torch.int32,
-                                 device="cuda")
+                                 device=device)
 
-    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device="cuda")
-    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device="cuda")
+    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
 
     torch.ops._C.get_grouped_mm_data(topk_ids, expert_offsets, problem_sizes1,
                                      problem_sizes2, a_map, c_map, num_groups,
                                      n, k)
 
-    # TODO use extend here, or try to create map without repeating and
-    # interleaving
-    # TODO reuse MoE align_block kernel?
-    # rep_a_q = a_q.repeat_interleave(
-    #     topk, dim=0).view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
     rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
     rep_a_scales = a_scale[a_map] if per_act_token else a_scale
 
-    # TODO check if we need zeros here
-    c1 = torch.empty((m * topk, n * 2), device="cuda", dtype=torch.half)
-    c2 = torch.empty((m * topk, k), device="cuda", dtype=torch.half)
-    # TODO move stride creation outside this function, they're going to be
-    # constant for all calls
-    # ab_strides1 = torch.full((num_groups, ),
-    #                          a_q.stride(0),
-    #                          device="cuda",
-    #                          dtype=torch.int64)
-    # c_strides1 = torch.full((num_groups, ),
-    #                         c1.stride(0),
-    #                         device="cuda",
-    #                         dtype=torch.int64)
+    c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.half)
+    c2 = torch.empty((m * topk, k), device=device, dtype=torch.half)
 
     torch.ops._C.cutlass_grouped_mm(c1, rep_a_q, w1_q, rep_a_scales, w1_scale,
                                     expert_offsets[:-1], problem_sizes1,
                                     ab_strides1, ab_strides1, c_strides1)
 
-    intermediate = torch.empty((m * topk, n), device="cuda", dtype=torch.half)
+    intermediate = torch.empty((m * topk, n), device=device, dtype=torch.half)
     torch.ops._C.silu_and_mul(intermediate, c1)
 
     intemediate_q, intermediate_scales = ops.scaled_fp8_quant(
         intermediate, use_per_token_if_dynamic=per_act_token)
-
-    # ab_strides2 = torch.full((num_groups, ),
-    #                          intemediate_q.stride(0),
-    #                          device="cuda",
-    #                          dtype=torch.int64)
-    # c_strides2 = torch.full((num_groups, ),
-    #                         c2.stride(0),
-    #                         device="cuda",
-    #                         dtype=torch.int64)
 
     torch.ops._C.cutlass_grouped_mm(c2, intemediate_q, w2_q,
                                     intermediate_scales, w2_scale,
