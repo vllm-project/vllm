@@ -11,7 +11,8 @@ from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
-from vllm.v1.metrics.stats import IterationStats, LoRAStats, RequestStateStats
+from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
+                                   RequestStateStats)
 
 
 @dataclass
@@ -90,7 +91,7 @@ class OutputProcessor:
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: Dict[str, RequestState] = {}
-        self.lora_stats: Dict[str, LoRAStats] = {}
+        self.lora_states = LoRARequestStates()
 
     def is_request_active(self, request_id: str) -> bool:
         return request_id in self.request_states
@@ -108,7 +109,7 @@ class OutputProcessor:
         for request_id in request_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
-                self._abort_lora_request(req_state)
+                self.lora_states.abort_request(req_state)
 
     def add_request(
         self,
@@ -125,7 +126,7 @@ class OutputProcessor:
             queue=queue,
             log_stats=self.log_stats)
         self.request_states[request_id] = req_state
-        self._add_lora_request(req_state)
+        self.lora_states.add_request(req_state)
 
     def process_outputs(
         self,
@@ -223,19 +224,12 @@ class OutputProcessor:
                                                      finish_reason,
                                                      iteration_stats)
 
-        self._update_lora_iteration_stats(iteration_stats)
+        self.lora_states.update_iteration_stats(iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
-
-    def _get_lora_stats(self, req_state) -> Optional[LoRAStats]:
-        if req_state.lora_name is None:
-            return None
-        if req_state.lora_name not in self.lora_stats:
-            self.lora_stats[req_state.lora_name] = LoRAStats()
-        return self.lora_stats[req_state.lora_name]
 
     def _update_stats_from_output(self, req_state: RequestState,
                                   engine_core_output: EngineCoreOutput,
@@ -244,14 +238,15 @@ class OutputProcessor:
         if iteration_stats is None:
             return
 
+        lora_stats = self.lora_states.get_stats(req_state)
+
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
         iteration_stats.update_from_output(engine_core_output,
                                            engine_core_timestamp,
                                            req_state.is_prefilling,
                                            req_state.prompt_len,
-                                           req_state.stats,
-                                           self._get_lora_stats(req_state))
+                                           req_state.stats, lora_stats)
 
     def _update_stats_from_finished(self, req_state: RequestState,
                                     request_output: RequestOutput,
@@ -262,26 +257,10 @@ class OutputProcessor:
 
         assert finish_reason is not None
         assert req_state.stats is not None
-        iteration_stats.update_from_finished_request(
-            finish_reason, request_output, req_state.stats,
-            self._get_lora_stats(req_state))
-
-    def _add_lora_request(self, req_state: RequestState):
-        if (lora_stats := self._get_lora_stats(req_state)) is not None:
-            lora_stats.waiting_requests.add(req_state.request_id)
-
-    def _abort_lora_request(self, req_state: RequestState):
-        if req_state.lora_name is None:
-            return
-        lora_stats = self.lora_stats[req_state.lora_name]
-        lora_stats.waiting_requests.discard(req_state.request_id)
-        lora_stats.running_requests.discard(req_state.request_id)
-
-    def _update_lora_iteration_stats(
-            self, iteration_stats: Optional[IterationStats]):
-        if iteration_stats is None:
-            return
-        iteration_stats.update_from_lora_stats(self.lora_stats)
+        iteration_stats.update_from_finished_request(finish_reason,
+                                                     request_output,
+                                                     req_state.stats)
+        self.lora_states.finish_request(req_state)
 
     @staticmethod
     def _make_request_output(
