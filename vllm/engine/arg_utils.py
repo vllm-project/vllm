@@ -1679,10 +1679,11 @@ class EngineArgs:
     def _set_default_args_v1(self, usage_context: UsageContext) -> None:
         """Set Default Arguments for V1 Engine."""
 
-        # VLLM_V1 only supports chunked prefill.
+        # V1 always uses chunked prefills.
         self.enable_chunked_prefill = True
 
-        # Set the default values based on the usage context.
+        # When no user override, set the default values based on the usage
+        # context.
         # Use different default values for different hardware.
         from vllm.platforms import current_platform
         device_name = current_platform.get_device_name().lower()
@@ -1698,11 +1699,12 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 8192,
                 UsageContext.OPENAI_API_SERVER: 2048,
             }
+
         if (self.max_num_batched_tokens is None
                 and usage_context in default_max_num_batched_tokens):
             self.max_num_batched_tokens = default_max_num_batched_tokens[
                 usage_context]
-            logger.info(
+            logger.warning(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, usage_context.value)
 
