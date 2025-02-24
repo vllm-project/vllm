@@ -8,6 +8,7 @@ import uuid
 import weakref
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
+from dataclasses import dataclass
 from threading import Thread
 from typing import Any, Dict, List, Optional, Type, Union
 
@@ -87,6 +88,12 @@ class EngineCoreClient(ABC):
     def wake_up(self) -> None:
         raise NotImplementedError
 
+    def execute_dummy_batch(self) -> None:
+        raise NotImplementedError
+
+    async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
@@ -156,8 +163,36 @@ class InprocClient(EngineCoreClient):
     def wake_up(self) -> None:
         self.engine_core.wake_up()
 
+    def execute_dummy_batch(self) -> None:
+        self.engine_core.execute_dummy_batch()
+
     def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine_core.add_lora(lora_request)
+
+
+@dataclass
+class BackgroundResources:
+    """Used as a finalizer for clean shutdown, avoiding
+    circular reference back to the client object."""
+
+    ctx: Union[zmq.Context, zmq.asyncio.Context] = None
+    output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    proc_handle: Optional[BackgroundProcHandle] = None
+
+    def __call__(self):
+        """Clean up background resources."""
+
+        if self.proc_handle is not None:
+            self.proc_handle.shutdown()
+        # ZMQ context termination can hang if the sockets
+        # aren't explicitly closed first.
+        if self.output_socket is not None:
+            self.output_socket.close(linger=0)
+        if self.input_socket is not None:
+            self.input_socket.close(linger=0)
+        if self.ctx is not None:
+            self.ctx.destroy(linger=0)
 
 
 class MPClient(EngineCoreClient):
@@ -203,21 +238,22 @@ class MPClient(EngineCoreClient):
             zmq.asyncio.Context()  # type: ignore[attr-defined]
             if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
 
-        # Note(rob): shutdown function cannot be a bound method,
-        # else the gc cannot collect the object.
-        self._finalizer = weakref.finalize(self, lambda x: x.destroy(linger=0),
-                                           self.ctx)
+        # This will ensure resources created so far are closed
+        # when the client is garbage collected,  even if an
+        # exception is raised mid-construction.
+        resources = BackgroundResources(ctx=self.ctx)
+        self._finalizer = weakref.finalize(self, resources)
 
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
-        self.output_socket = make_zmq_socket(self.ctx, output_path,
-                                             zmq.constants.PULL)
-        self.input_socket = make_zmq_socket(self.ctx, input_path,
-                                            zmq.constants.PUSH)
+        resources.output_socket = make_zmq_socket(self.ctx, output_path,
+                                                  zmq.constants.PULL)
+        resources.input_socket = make_zmq_socket(self.ctx, input_path,
+                                                 zmq.constants.PUSH)
 
         # Start EngineCore in background process.
-        self.proc_handle = BackgroundProcHandle(
+        resources.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
             process_name="EngineCore",
@@ -228,13 +264,11 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
+        self.output_socket = resources.output_socket
+        self.input_socket = resources.input_socket
         self.utility_results: Dict[int, AnyFuture] = {}
 
     def shutdown(self):
-        """Clean up background resources."""
-        if hasattr(self, "proc_handle"):
-            self.proc_handle.shutdown()
-
         self._finalizer()
 
 
@@ -331,6 +365,9 @@ class SyncMPClient(MPClient):
     def wake_up(self) -> None:
         self._call_utility("wake_up")
 
+    def execute_dummy_batch(self) -> None:
+        self._call_utility("execute_dummy_batch")
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -413,6 +450,9 @@ class AsyncMPClient(MPClient):
 
     async def wake_up_async(self) -> None:
         await self._call_utility_async("wake_up")
+
+    async def execute_dummy_batch_async(self) -> None:
+        await self._call_utility_async("execute_dummy_batch")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> None:
         await self._call_utility_async("add_lora", lora_request)
