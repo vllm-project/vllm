@@ -5,11 +5,16 @@ Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
 import os
 import weakref
+from unittest.mock import Mock
 
 import pytest
 
 from vllm import LLM
 from vllm.platforms import current_platform
+from vllm.v1.engine.core import ModelExecutionV1Error
+from vllm.v1.engine.core_client import EngineCoreClient, InprocClient
+from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
+from vllm.worker.worker_base import ModelExecutionError
 
 from ..conftest import VllmRunner
 from ..models.utils import check_outputs_equal
@@ -147,3 +152,47 @@ def test_models_distributed(
         name_0="hf",
         name_1="vllm",
     )
+
+
+def test_failed_model_execution(vllm_runner) -> None:
+
+    def make_client(
+        multiprocess_mode: bool,
+        asyncio_mode: bool,
+        vllm_config,  # "VllmConfig"
+        executor_class,  # "Type[Executor]"
+        log_stats: bool,
+    ) -> "EngineCoreClient":
+        return InprocClient(vllm_config, executor_class, log_stats)
+
+    EngineCoreClient.make_client = Mock(side_effect=make_client)
+    with vllm_runner('facebook/opt-125m', enforce_eager=True) as vllm_model:
+
+        engine = vllm_model.model.llm_engine
+        mocked_execute_model = Mock(
+            side_effect=RuntimeError("Mocked Critical Error"))
+
+        if isinstance(engine, LLMEngineV1):
+            is_v1 = True
+            engine.engine_core.engine_core.model_executor.execute_model =\
+                mocked_execute_model
+        else:  # V0
+            is_v1 = False
+            engine.model_executor.driver_worker.model_runner.execute_model = \
+                mocked_execute_model
+
+        with pytest.raises(RuntimeError) as exc_info:
+            prompts = [
+                "Hello, my name is",
+                "The president of the United States is",
+                "The capital of France is",
+                "The future of AI is",
+            ]
+            vllm_model.generate_greedy(prompts, 200, use_tqdm=False)
+        if is_v1:
+            assert isinstance(exc_info.value, ModelExecutionV1Error)
+            assert exc_info.value.scheduler_output is not None
+        else:
+            assert isinstance(exc_info.value, ModelExecutionError)
+            assert exc_info.value.model_input is not None
+        assert "Mocked Critical Error" in str(exc_info.value)
