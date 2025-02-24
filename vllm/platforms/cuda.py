@@ -157,8 +157,10 @@ class CudaPlatformBase(Platform):
             logger.info("Using Flash Attention backend on V1 engine.")
             return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
         if use_mla:
-            logger.info("Using Triton MLA backend.")
-            return "vllm.attention.backends.triton_mla.TritonMLABackend"
+            logger.info("Using FlashInfer MLA backend.")
+            return "vllm.attention.backends.flashinfer_mla.FlashInferMLABackend"
+            # logger.info("Using Triton MLA backend.")
+            # return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
