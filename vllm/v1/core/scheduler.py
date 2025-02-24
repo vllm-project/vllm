@@ -140,8 +140,7 @@ class Scheduler:
             assert num_new_tokens > 0
 
             # Guided decoding related.
-            if (request.use_guided_decoding
-                    and request.request_id not in guided_decoding_request_ids):
+            if request.use_guided_decoding:
                 guided_decoding_request_ids[request.request_id] = req_index
 
             # Schedule encoder inputs.
@@ -231,16 +230,13 @@ class Scheduler:
 
                 request = self.waiting[num_to_skip]
 
-                if request.use_guided_decoding:
-                    guided_decoding_request_ids[request.request_id] = req_index
-
-                    if request.status == RequestStatus.WAITING_FOR_FSM:
-                        if request.grammar and request.is_grammar_ready:
-                            request.status = RequestStatus.WAITING
-                            request.grammar.prefilled = True
-                        else:
-                            num_to_skip += 1
-                            continue
+                if (request.use_guided_decoding
+                        and request.status == RequestStatus.WAITING_FOR_FSM):
+                    if request.grammar and request.is_grammar_ready:
+                        request.status = RequestStatus.WAITING
+                    else:
+                        num_to_skip += 1
+                        continue
 
                 #
                 # Check that adding the request still respects the max_loras
@@ -297,6 +293,9 @@ class Scheduler:
                     break
 
                 self.waiting.pop(num_to_skip)
+                if request.use_guided_decoding:
+                    guided_decoding_request_ids[request.request_id] = req_index
+                req_index += 1
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
                 if RequestStatus.is_waiting(request.status):
