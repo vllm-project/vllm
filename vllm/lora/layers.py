@@ -561,7 +561,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         return bias
 
     def slice_lora_magnitudes(self, magnitudes: torch.Tensor) -> torch.Tensor:
-        # TODO: Fix the slicing logic of bias.
+        # TODO: Fix the slicing logic of magnitudes since it's based on slicing logic for bias.
         if magnitudes is None:
             return magnitudes
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
@@ -686,6 +686,17 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 )
                 for output_size in self.output_slices
             )
+        if lora_config.dora_enabled:
+            self.lora_magnitudes_stacked = tuple(
+                torch.zeros(
+                    max_loras,
+                    1,
+                    output_size,
+                    dtype=lora_config.lora_dtype,
+                    device=self.device,
+                )
+                for output_size in self.output_slices
+            )
 
     def slice_lora_a(
         self, lora_a: List[Union[torch.Tensor, None]]
@@ -714,6 +725,18 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 bias[i] = bias_i[shard_size * shard_id : shard_size * (shard_id + 1)]
         return bias
 
+    def slice_lora_magnitudes(
+        self, magnitudes: List[Union[torch.Tensor, None]]
+    ) -> List[Union[torch.Tensor, None]]:
+        for i, (shard_id, shard_size) in enumerate(
+            zip(self.output_ids, self.output_slices)
+        ):
+            if (magnitudes_i := magnitudes[i]) is not None:
+                magnitudes[i] = magnitudes_i[
+                    shard_size * shard_id : shard_size * (shard_id + 1)
+                ]
+        return magnitudes
+
     def set_lora(
         self,
         index: int,
@@ -721,6 +744,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         lora_bias: Optional[torch.Tensor] = None,
+        lora_magnitudes: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
 
@@ -749,6 +773,16 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                     self.lora_bias_stacked[i][index, 0, : lora_bias_i.shape[0]].copy_(
                         lora_bias_i.T, non_blocking=True
                     )
+
+        if lora_magnitudes is not None:
+            self.lora_magnitudes_stacked = cast(
+                Tuple[torch.Tensor, ...], self.lora_magnitudes_stacked
+            )
+            for i in range(self.n_slices):
+                if (lora_magnitudes_i := lora_magnitudes[i]) is not None:
+                    self.lora_magnitudes_stacked[i][
+                        index, 0, : lora_magnitudes_i.shape[0]
+                    ].copy_(lora_magnitudes_i.T, non_blocking=True)
 
     @classmethod
     @_not_fully_sharded_can_replace
@@ -840,6 +874,27 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         ]
         bias = torch.cat([bias_q, bias_k, bias_v], dim=1)
         return bias
+
+    def slice_lora_magnitudes(self, magnitudes: torch.Tensor) -> torch.Tensor:
+        magnitudes_q = magnitudes[
+            self.q_proj_shard_size
+            * self.q_shard_id : self.q_proj_shard_size
+            * (self.q_shard_id + 1)
+        ]
+        k_offset = self.q_proj_total_size
+        magnitudes_k = magnitudes[
+            k_offset
+            + self.kv_proj_shard_size * self.kv_shard_id : k_offset
+            + self.kv_proj_shard_size * (self.kv_shard_id + 1)
+        ]
+        v_offset = k_offset + self.kv_proj_total_size
+        magnitudes_v = magnitudes[
+            v_offset
+            + self.kv_proj_shard_size * self.kv_shard_id : v_offset
+            + self.kv_proj_shard_size * (self.kv_shard_id + 1)
+        ]
+        magnitudes = torch.cat([magnitudes_q, magnitudes_k, magnitudes_v], dim=0)
+        return magnitudes
 
     @classmethod
     @_not_fully_sharded_can_replace
@@ -941,6 +996,9 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         return bias
 
+    def slice_lora_magnitudes(self, magnitudes: torch.Tensor) -> torch.Tensor:
+        return magnitudes
+
     def forward(
         self, input_: torch.Tensor
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -982,6 +1040,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         else:
             output = output_
             output_bias = self.base_layer.bias
+        # TODO: do we care about adding DoRA magnitude scaling here? if so, how?
         return output, output_bias
 
     @property
