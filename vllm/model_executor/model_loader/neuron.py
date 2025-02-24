@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Utilities for selecting and loading Neuron models in transformers-neuronx framework."""
+"""Utilities for selecting and loading Neuron models in transformers-neuronx
+framework."""
 import ast
 import copy
 import importlib
@@ -10,7 +11,8 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, SpeculativeConfig
+from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, \
+    SpeculativeConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -58,10 +60,10 @@ class NeuronCausalLM(nn.Module):
         self.model: nn.Module
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        input_block_ids: torch.Tensor,
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            input_block_ids: torch.Tensor,
     ) -> torch.Tensor:
         logits = self.model(input_ids,
                             cache_ids=positions,
@@ -74,9 +76,9 @@ class NeuronCausalLM(nn.Module):
         return logits
 
     def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+            self,
+            logits: torch.Tensor,
+            sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
 
         if self.on_device_sampling_disabled:
@@ -116,21 +118,21 @@ class NeuronCausalLM(nn.Module):
 
 class NeuronSpeculationCausalLM(nn.Module):
     """A Neuron-optimized causal language model with speculative decoding."""
-    
+
     SPECULATION_TERMINATION_ID = -1
 
     def __init__(
-        self,
-        speculation_model
+            self,
+            speculation_model
     ) -> None:
         super().__init__()
         self.model = speculation_model
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        input_block_ids: torch.Tensor,
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            input_block_ids: torch.Tensor,
     ) -> torch.Tensor:
         tokens, counts = self.model.speculative_iteration(
             input_ids, positions, input_block_ids)
@@ -144,12 +146,13 @@ class NeuronSpeculationCausalLM(nn.Module):
         return tokens
 
     def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+            self,
+            logits: torch.Tensor,
+            sampling_metadata: SamplingMetadata,
     ) -> Optional[List[SamplerOutput]]:
         batch_size, num_steps = logits.shape
-        seq_ids = [seq_id for sg in sampling_metadata.seq_groups for seq_id in sg.seq_ids]
+        seq_ids = [seq_id for sg in sampling_metadata.seq_groups for seq_id in
+                   sg.seq_ids]
         # Organize input tensors by step instead of by sequence.
         accepted_token_ids_by_step = logits.transpose(0, 1)
         accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
@@ -161,8 +164,14 @@ class NeuronSpeculationCausalLM(nn.Module):
                 break
             step_output_token_ids = []
             for sequence_index in range(batch_size):
-                token_id = accepted_token_ids_by_step[step_index][sequence_index]
-                step_output_token_ids.append(CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=seq_ids[sequence_index], output_token=token_id, logprobs={token_id: Logprob(token_id)})], prompt_logprobs=None))
+                token_id = accepted_token_ids_by_step[step_index][
+                    sequence_index]
+                step_output_token_ids.append(CompletionSequenceGroupOutput(
+                    samples=[
+                        SequenceOutput(parent_seq_id=seq_ids[sequence_index],
+                                       output_token=token_id,
+                                       logprobs={token_id: Logprob(token_id)})],
+                    prompt_logprobs=None))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
         return sampler_output_list
@@ -219,11 +228,12 @@ def _get_default_neuron_config(model_config: ModelConfig,
 
 
 def _get_default_neuron_config_for_speculation(
-    model_config: ModelConfig,
-    parallel_config: ParallelConfig,
-    scheduler_config: SchedulerConfig
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig
 ):
-    """Generate a neuron config for speculative decoding based on vllm config args."""
+    """Generate a neuron config for speculative decoding based on
+    vllm config args."""
     from transformers_neuronx.config import ContinuousBatchingConfig
     from transformers_neuronx.constants import LAYOUT_BSH
 
@@ -292,19 +302,20 @@ def get_neuron_model(model_config: ModelConfig,
 
 
 def get_neuron_speculation_model(
-    model_config: ModelConfig,
-    parallel_config: ParallelConfig,
-    scheduler_config: SchedulerConfig,
-    speculation_config: SpeculativeConfig
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        speculation_config: SpeculativeConfig
 ) -> None:
     """Initializes a neuron-optimized speculation model for inference.
     
-    This method is only applicable for speculation with a standalone draft model.
+    This method is only applicable for speculation with a standalone draft model
     """
     from transformers_neuronx.fused_speculation import FusedSpeculativeDecoder
 
     # For Eagle SD, we need to pass in additional parameters in neuron config.
-    is_eagle = getattr(speculation_config.draft_model_config.hf_config, "is_eagle", False)
+    is_eagle = getattr(speculation_config.draft_model_config.hf_config,
+                       "is_eagle", False)
 
     # Create target model instance.
     target_model = NeuronCausalLM(model_config.hf_config)
@@ -320,7 +331,7 @@ def get_neuron_speculation_model(
     context_length_estimates = _get_buckets("NEURON_CONTEXT_LENGTH_BUCKETS",
                                             [scheduler_config.max_model_len])
     n_positions = _get_buckets("NEURON_TOKEN_GEN_BUCKETS",
-                                [scheduler_config.max_model_len])
+                               [scheduler_config.max_model_len])
 
     target_model.load_weights(
         model_config.model,
@@ -334,21 +345,27 @@ def get_neuron_speculation_model(
     target_model.eval()
 
     # Create draft model instance.
-    draft_model = NeuronCausalLM(speculation_config.draft_model_config.hf_config)
+    draft_model = NeuronCausalLM(
+        speculation_config.draft_model_config.hf_config)
 
-    default_draft_neuron_config_args = _get_default_neuron_config_for_speculation(
-        speculation_config.draft_model_config, parallel_config, scheduler_config)
+    default_draft_neuron_config_args = (
+        _get_default_neuron_config_for_speculation(
+        speculation_config.draft_model_config,
+        parallel_config,
+        scheduler_config))
     if is_eagle:
         default_draft_neuron_config_args['is_eagle_draft'] = True
         default_draft_neuron_config_args['has_pre_attention_norm'] = False
 
     draft_neuron_config = _get_neuron_config_after_override(
-        default_draft_neuron_config_args, speculation_config.draft_model_config.override_neuron_config)
+        default_draft_neuron_config_args,
+        speculation_config.draft_model_config.override_neuron_config)
 
     draft_model.load_weights(
         speculation_config.draft_model_config.model,
         tp_degree=speculation_config.draft_parallel_config.tensor_parallel_size,
-        amp=TORCH_DTYPE_TO_NEURON_AMP[speculation_config.draft_model_config.dtype],
+        amp=TORCH_DTYPE_TO_NEURON_AMP[
+            speculation_config.draft_model_config.dtype],
         neuron_config=draft_neuron_config,
         context_length_estimate=context_length_estimates,
         n_positions=n_positions,
@@ -356,8 +373,11 @@ def get_neuron_speculation_model(
 
     draft_model.eval()
 
+    num_speculative_tokens= speculation_config.num_speculative_tokens
     # Create speculation model instance.
-    speculation_model = FusedSpeculativeDecoder(draft_model.model, target_model.model, speculation_config.num_speculative_tokens)
+    speculation_model = FusedSpeculativeDecoder(draft_model.model,
+                                                target_model.model,
+                                                num_speculative_tokens)
     speculation_model.to_neuron()
 
     return NeuronSpeculationCausalLM(speculation_model)
@@ -366,10 +386,10 @@ def get_neuron_speculation_model(
 def get_neuron_eagle_speculation_model(model_config: ModelConfig,
                                        parallel_config: ParallelConfig,
                                        scheduler_config: SchedulerConfig,
-                                       speculation_config: SpeculativeConfig) -> None:
+                                       speculation_config: SpeculativeConfig):
     """Initializes a neuron-optimized EAGLE speculation model for inference."""
     from transformers_neuronx.eagle_speculation import EagleSpeculativeDecoder
- 
+
     # Create target model instance.
     target_model = NeuronCausalLM(model_config.hf_config)
 
@@ -382,8 +402,8 @@ def get_neuron_eagle_speculation_model(model_config: ModelConfig,
     context_length_estimates = _get_buckets("NEURON_CONTEXT_LENGTH_BUCKETS",
                                             [scheduler_config.max_model_len])
     n_positions = _get_buckets("NEURON_TOKEN_GEN_BUCKETS",
-                                [scheduler_config.max_model_len])
- 
+                               [scheduler_config.max_model_len])
+
     target_model.load_weights(
         model_config.model,
         tp_degree=parallel_config.tensor_parallel_size,
@@ -392,33 +412,41 @@ def get_neuron_eagle_speculation_model(model_config: ModelConfig,
         context_length_estimate=context_length_estimates,
         n_positions=n_positions,
         batch_size=scheduler_config.max_num_seqs)
- 
+
     target_model.eval()
- 
+
     # Create draft model instance.
-    draft_model = NeuronCausalLM(speculation_config.draft_model_config.hf_config)
- 
-    default_draft_neuron_config_args = _get_default_neuron_config_for_speculation(
-        speculation_config.draft_model_config, parallel_config, scheduler_config)
+    draft_model = NeuronCausalLM(
+        speculation_config.draft_model_config.hf_config)
+
+    default_draft_neuron_config_args = (
+        _get_default_neuron_config_for_speculation(
+        speculation_config.draft_model_config, parallel_config,
+        scheduler_config))
     default_draft_neuron_config_args['is_eagle_draft'] = True
     default_draft_neuron_config_args['has_pre_attention_norm'] = False
     draft_neuron_config = _get_neuron_config_after_override(
-        default_draft_neuron_config_args, speculation_config.draft_model_config.override_neuron_config)
- 
+        default_draft_neuron_config_args,
+        speculation_config.draft_model_config.override_neuron_config)
+
     draft_model.load_weights(
         speculation_config.draft_model_config.model,
         tp_degree=speculation_config.draft_parallel_config.tensor_parallel_size,
-        amp=TORCH_DTYPE_TO_NEURON_AMP[speculation_config.draft_model_config.dtype],
+        amp=TORCH_DTYPE_TO_NEURON_AMP[
+            speculation_config.draft_model_config.dtype],
         neuron_config=draft_neuron_config,
         context_length_estimate=context_length_estimates,
         n_positions=n_positions,
         batch_size=scheduler_config.max_num_seqs)
- 
+
     draft_model.eval()
- 
-    token_tree: Dict[int, List[int]] = ast.literal_eval(speculation_config.speculative_token_tree)
- 
-    speculation_model = EagleSpeculativeDecoder(draft_model.model, target_model.model, token_tree=token_tree)
+
+    token_tree: Dict[int, List[int]] = ast.literal_eval(
+        speculation_config.speculative_token_tree)
+
+    speculation_model = EagleSpeculativeDecoder(draft_model.model,
+                                                target_model.model,
+                                                token_tree=token_tree)
     speculation_model.to_neuron()
- 
+
     return NeuronSpeculationCausalLM(speculation_model)

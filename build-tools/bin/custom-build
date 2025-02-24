@@ -28,6 +28,7 @@ mkdir -p "$DIST_PATH"
 # Build Process
 #------------------------------------------------------------------------------
 # Run build commands
+ruff check --fix
 brazilpython brazil_build
 brazilpython brazil_wheel
 

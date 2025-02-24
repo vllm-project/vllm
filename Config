@@ -29,6 +29,7 @@ package.Vllm = {
             Python3PBuildTool = 2.0;
             Python-wheel = 0.x;
             BrazilPython = 3.0;
+            Python-ruff = 0.x
         };
     };
 
