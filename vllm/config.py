@@ -9,6 +9,7 @@ import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
                     Final, List, Literal, Mapping, Optional, Protocol, Set,
@@ -293,6 +294,14 @@ class ModelConfig:
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
+
+        if (backend := envs.VLLM_ATTENTION_BACKEND
+            ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
+            raise ValueError(
+                "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
+                "module was not found."
+                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile"
+                "for instructions on how to install it.")
 
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
@@ -677,6 +686,23 @@ class ModelConfig:
                 "fallback to the eager mode.")
             self.enforce_eager = True
 
+    def _verify_with_expert_parallelism(self) -> None:
+        num_expert_names = [
+            "moe_num_experts",  # Dbrx
+            "num_experts",  # Jamba
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+        num_experts = 0
+        for name in num_expert_names:
+            num_experts = getattr(self.hf_text_config, name, 0)
+            if num_experts > 0:
+                break
+        if num_experts < 1:
+            raise ValueError(
+                "Number of experts in the model must be greater than 0 "
+                "when expert parallelism is enabled.")
+
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
         if not self.use_async_output_proc:
@@ -729,6 +755,9 @@ class ModelConfig:
                 f"Total number of attention heads ({total_num_attention_heads})"
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
+
+        if envs.VLLM_TEST_ENABLE_EP:
+            self._verify_with_expert_parallelism()
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
