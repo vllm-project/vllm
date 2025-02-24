@@ -1424,6 +1424,10 @@ class EngineArgs:
                         "V1 Engine. Falling back to V0.")
             return False
 
+        logger.warning(
+            "Deployment is compatible with VLLM_V1. Enabling V1 Engine. If you "
+            "encounter issues, please set VLLM_USE_V1=0 to force the V0 Engine."
+        )
         return True
 
     def _set_default_args_v0(
