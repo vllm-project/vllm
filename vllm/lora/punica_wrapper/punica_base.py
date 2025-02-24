@@ -268,16 +268,45 @@ class PunicaWrapperBase(PunicaWrapperABC):
         return output.view_as(org_output)
 
     def _apply_magnitude(
-        self, output: torch.Tensor, magnitude_param: torch.Tensor
+        self,
+        indices: torch.Tensor,
+        output: torch.Tensor,
+        output_slices: Tuple[int, ...],
+        lora_magnitudes_stacked: Tuple[Optional[torch.Tensor], ...],
     ) -> torch.Tensor:
-        # Compute column norms
-        norms = torch.norm(output, dim=0, keepdim=True)
-        # Normalize columns
-        normalized = output / (norms + 1e-6)  # Add epsilon for numerical stability
-        # Scale by magnitudes
-        return normalized * magnitude_param.view(
-            1, -1
-        )  # Broadcast magnitudes across rows
+        """Applies magnitude scaling to output, similar to bias application
+
+        Input shapes:
+            lora_magnitudes_stacked: Tuple of tensors, each (num_loras, slice_size)
+            indices: (batch_size)
+            output: (batch_size, total_size)
+            output_slices: Tuple of slice sizes that sum to total_size
+        """
+        org_output = output
+        output = output.view(-1, output.shape[-1])
+        indices = indices.view(-1)
+
+        offset_left = 0
+        for slice_idx, slice in enumerate(output_slices):
+            magnitudes = lora_magnitudes_stacked[slice_idx]
+            if magnitudes is not None:
+                # Get slice of output to normalize
+                slice_output = output[:, offset_left : offset_left + slice]
+                # Normalize columns in this slice
+                norms = torch.norm(slice_output, dim=0, keepdim=True)
+                normalized = slice_output / (norms + 1e-6)
+
+                # Select and apply appropriate magnitudes for each position
+                magnitudes = magnitudes.view(-1, magnitudes.shape[-1])
+                magnitudes = magnitudes[indices]
+                magnitudes[indices == -1] = 1.0  # No scaling for positions without LoRA
+
+                # Apply magnitudes and store back in output
+                output[:, offset_left : offset_left + slice] = normalized * magnitudes
+
+            offset_left += slice
+
+        return output.view_as(org_output)
 
     @property
     def prefill_metadata(

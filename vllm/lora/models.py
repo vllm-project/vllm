@@ -32,15 +32,10 @@ from vllm.lora.layers import (
     BaseLayerWithLoRA,
     LinearScalingRotaryEmbeddingWithLora,
     LoRAMapping,
-    BaseLayerWithDora,
-    LinearScalingRotaryEmbeddingWithDora,
-    LoRAMappingWithDora,
 )
 from vllm.lora.lora import (
     LoRALayerWeights,
     PackedLoRALayerWeights,
-    DoraLayerWeights,
-    PackedDoraLayerWeights,
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
