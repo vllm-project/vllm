@@ -9,6 +9,7 @@ import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
                     Final, List, Literal, Mapping, Optional, Protocol, Set,
@@ -293,6 +294,14 @@ class ModelConfig:
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
+
+        if (backend := envs.VLLM_ATTENTION_BACKEND
+            ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
+            raise ValueError(
+                "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
+                "module was not found."
+                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile"
+                "for instructions on how to install it.")
 
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
