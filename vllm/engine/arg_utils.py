@@ -1257,9 +1257,10 @@ class EngineArgs:
             return False
 
         #############################################################
-        # Important feature flags we plan to support on V1.
+        # Important feature flags we plan to support on V1 but are
+        # currently disabled by default.
 
-        # We log a warning is VLLM_USE_V1=1 is set for these since
+        # We log a warning if VLLM_USE_V1=1 is set for these since
         # we are actively developing these features.
 
         # TODO: this might be a problem right? Since we fall back
@@ -1528,11 +1529,11 @@ class EngineArgs:
         model_config = self.create_model_config()
 
         # Enable the V1 Engine by default if supported.
-        self.use_v1 = self._is_v1_supported_oracle(
+        use_v1 = self._is_v1_supported_oracle(
             model_config, disable_frontend_multiprocessing)
 
         # Set default arguments for V0 or V1 Engine.
-        if self.use_v1:
+        if use_v1:
             self._set_default_args_v1(usage_context)
         else:
             self._set_default_args_v0(model_config)
@@ -1701,6 +1702,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             additional_config=self.additional_config,
+            use_v1=use_v1,
         )
 
         return config
