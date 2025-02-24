@@ -407,15 +407,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 idx = scheduler_output.guided_decoding_request_ids[req_id]
                 # should already be ready
                 assert scheduler_output.grammar_bitmask is not None
-                if not req_state.grammar.prefilled:
-                    req_state.grammar.prefilled = True
-                else:
-                    if not req_state.grammar.matcher.is_terminated():
-                        # NOTE: this relies on xgrammar internal bitmask,
-                        # so we need to give the actual index
-                        # of the the request_id in the batch
-                        req_state.grammar.fill_bitmask(
-                            scheduler_output.grammar_bitmask, idx)
+                if not req_state.grammar.matcher.is_terminated():
+                    # NOTE: this relies on xgrammar internal bitmask,
+                    # so we need to give the actual index
+                    # of the the request_id in the batch
+                    req_state.grammar.fill_bitmask(
+                        scheduler_output.grammar_bitmask, idx)
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.

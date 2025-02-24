@@ -55,7 +55,6 @@ class Grammar:
         self.matcher = matcher
         self.vocab_size = vocab_size
         self.ctx = ctx
-        self.prefilled = False
 
     def accept_token(self, token: int) -> bool:
         # NOTE: accept_token will determines whether we accept this token
