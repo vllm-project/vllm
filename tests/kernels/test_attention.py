@@ -39,6 +39,7 @@ HEAD_SIZES = [32, 64, 80, 96, 112, 120, 128, 192, 256]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
+USE_CUSTOM_ATTN_BIAS = [False, True]
 KV_CACHE_DTYPE = ["auto", "fp8"]
 SEEDS = [0]
 CUDA_DEVICES = [
@@ -62,16 +63,11 @@ def ref_masked_attention(
 
 
 def ref_single_query_cached_kv_attention(
-    output: torch.Tensor,
-    query: torch.Tensor,
-    num_queries_per_kv: int,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    block_tables: torch.Tensor,
-    seq_lens: torch.Tensor,
-    scale: float,
-    alibi_slopes: Optional[torch.Tensor],
-) -> None:
+        output: torch.Tensor, query: torch.Tensor, num_queries_per_kv: int,
+        key_cache: torch.Tensor, value_cache: torch.Tensor,
+        block_tables: torch.Tensor, seq_lens: torch.Tensor, scale: float,
+        alibi_slopes: Optional[torch.Tensor],
+        attn_bias: Optional[List[torch.Tensor]]) -> None:
     num_query_heads = query.shape[1]
     num_kv_heads = value_cache.shape[1]
     head_size = value_cache.shape[2]
@@ -104,15 +100,17 @@ def ref_single_query_cached_kv_attention(
             keys = torch.repeat_interleave(keys, num_queries_per_kv, dim=1)
             values = torch.repeat_interleave(values, num_queries_per_kv, dim=1)
 
-        alibi_bias = None
+        bias = None
         if alibi_slopes is not None:
             # Create the ALiBi bias used in the paged attention kernel.
             position_ids = torch.arange(seq_len).int()
             alibi_bias = (position_ids - seq_len + 1).float()
             alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
                 1, 1, -1)
-
-        out = ref_masked_attention(q, keys, values, scale, alibi_bias)
+            bias = alibi_bias
+        if attn_bias is not None:
+            bias = attn_bias[i] if bias is None else bias + attn_bias[i]
+        out = ref_masked_attention(q, keys, values, scale, bias)
         out = out.view(num_query_heads, head_size)
         output[i].copy_(out, non_blocking=True)
 
@@ -124,6 +122,7 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("use_alibi", USE_ALIBI)
+@pytest.mark.parametrize("use_custom_attn_bias", USE_CUSTOM_ATTN_BIAS)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
@@ -136,6 +135,7 @@ def test_paged_attention(
     num_heads: Tuple[int, int],
     head_size: int,
     use_alibi: bool,
+    use_custom_attn_bias: bool,
     block_size: int,
     dtype: torch.dtype,
     kv_cache_dtype: str,
@@ -155,7 +155,7 @@ def test_paged_attention(
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
-    alibi_slopes = None
+    alibi_slopes, attn_bias = None, None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
 
@@ -163,9 +163,30 @@ def test_paged_attention(
     seq_lens[-1] = MAX_SEQ_LEN
     max_seq_len = max(seq_lens)
     seq_lens = torch.tensor(seq_lens, dtype=torch.int)
+    attn_bias_list = None
+    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    if use_custom_attn_bias:
+        # NOTE (NickLucche) each sequence can have a different bias,
+        # depending on its len, but it *must* be padded to the block
+        # aligned max_seq_len and of type float32!
+        attn_bias_list = [
+            torch.randn(num_query_heads, 1, seq_len, dtype=torch.float)
+            for seq_len in seq_lens
+        ]
+        block_aligned_max_seq_len = max_num_blocks_per_seq * block_size
+        attn_bias = torch.empty(
+            num_seqs,
+            num_query_heads,
+            1,
+            block_aligned_max_seq_len,  # padded dim
+            device=device,
+            dtype=torch.float)
+
+        for i, (seq_len, bias) in enumerate(zip(seq_lens, attn_bias_list)):
+            # first `seq_len` entries of the bias matrix for each head/seq
+            attn_bias[i, :, :, :seq_len] = bias
 
     # Create the block tables.
-    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
     block_tables_lst: List[List[int]] = []
     for _ in range(num_seqs):
         block_table = [
@@ -201,6 +222,7 @@ def test_paged_attention(
             block_size,
             max_seq_len,
             alibi_slopes,
+            attn_bias,
             kv_cache_dtype,
             k_scale,
             v_scale,
@@ -209,7 +231,7 @@ def test_paged_attention(
         opcheck(torch.ops._C.paged_attention_v1,
                 (output, query, key_cache, value_cache, num_kv_heads, scale,
                  block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
-                 kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
+                 attn_bias, kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
                 cond=(head_size == HEAD_SIZES[0]
                       and block_size == BLOCK_SIZES[0]))
 
@@ -242,18 +264,20 @@ def test_paged_attention(
                 block_size,
                 max_seq_len,
                 alibi_slopes,
+                attn_bias,
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
             )
 
-            opcheck(torch.ops._C.paged_attention_v2,
-                    (output, exp_sums, max_logits, tmp_output, query,
-                     key_cache, value_cache, num_kv_heads, scale, block_tables,
-                     seq_lens, block_size, max_seq_len, alibi_slopes,
-                     kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
-                    cond=(head_size == HEAD_SIZES[0]
-                          and block_size == BLOCK_SIZES[0]))
+            opcheck(
+                torch.ops._C.paged_attention_v2,
+                (output, exp_sums, max_logits, tmp_output, query, key_cache,
+                 value_cache, num_kv_heads, scale, block_tables, seq_lens,
+                 block_size, max_seq_len, alibi_slopes, attn_bias,
+                 kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
+                cond=(head_size == HEAD_SIZES[0]
+                      and block_size == BLOCK_SIZES[0]))
 
         else:
             ops.paged_attention_rocm(
@@ -307,17 +331,10 @@ def test_paged_attention(
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)
-    ref_single_query_cached_kv_attention(
-        ref_output,
-        query,
-        num_queries_per_kv,
-        key_cache,
-        value_cache,
-        block_tables,
-        seq_lens,
-        scale,
-        alibi_slopes,
-    )
+    ref_single_query_cached_kv_attention(ref_output, query, num_queries_per_kv,
+                                         key_cache, value_cache, block_tables,
+                                         seq_lens, scale, alibi_slopes,
+                                         attn_bias_list)
 
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
