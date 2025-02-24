@@ -114,8 +114,11 @@ try:
 
         def execute_model_ray(
             self,
-            scheduler_output: "SchedulerOutput",
-        ) -> "ModelRunnerOutput":
+            scheduler_output: Union["SchedulerOutput",
+                                    Tuple["SchedulerOutput",
+                                          "IntermediateTensors"]],
+        ) -> Union["ModelRunnerOutput", Tuple["SchedulerOutput",
+                                              "IntermediateTensors"]]:
             # this method is used to compile ray CG,
             # and it needs a special logic of self.setup_device_if_necessary()
             self.setup_device_if_necessary()
