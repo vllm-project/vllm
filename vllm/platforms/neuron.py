@@ -32,6 +32,10 @@ class NeuronPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if vllm_config.use_v1:
+            raise NotImplementedError(
+                "V1 is not supported on Neuron. Set VLLM_USE_V1=0")
+
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = \
