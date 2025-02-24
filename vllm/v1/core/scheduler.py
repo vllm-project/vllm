@@ -140,14 +140,9 @@ class Scheduler:
             assert num_new_tokens > 0
 
             # Guided decoding related.
-            if request.use_guided_decoding:
-                if request.status == RequestStatus.WAITING_FOR_FSM:
-                    # Still waiting for FSM initialization
-                    req_index += 1
-                    continue
-
-                if request.request_id not in guided_decoding_request_ids:
-                    guided_decoding_request_ids[request.request_id] = req_index
+            if (request.use_guided_decoding
+                    and request.request_id not in guided_decoding_request_ids):
+                guided_decoding_request_ids[request.request_id] = req_index
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
