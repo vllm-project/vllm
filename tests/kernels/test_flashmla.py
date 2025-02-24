@@ -1,3 +1,4 @@
+# Adapted from: https://github.com/deepseek-ai/FlashMLA/blob/main/tests/test_flash_mla.py
 # SPDX-License-Identifier: Apache-2.0
 import math
 import random
