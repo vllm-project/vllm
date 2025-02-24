@@ -95,9 +95,11 @@ def apply_top_k_top_p(
 
     if k is not None:
         # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k.to(torch.long)
+        top_k_mask = logits_sort.size(1) - k
+        # Broadcast to each element (xla friendly). 
+        indices = torch.ones((logits.shape[0], 1), dtype=torch.long, device=logits_sort.device) * top_k_mask
         # Get all the top_k values.
-        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
+        top_k_mask = logits_sort.gather(1, indices)
         top_k_mask = logits_sort < top_k_mask
         logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
