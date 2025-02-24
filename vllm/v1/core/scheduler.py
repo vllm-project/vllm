@@ -18,7 +18,6 @@ from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
-
 logger = init_logger(__name__)
 
 
