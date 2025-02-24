@@ -26,6 +26,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -74,6 +75,8 @@ class EngineCore:
         # Setup MM Input Mapper.
         self.mm_input_cache_server = MMInputCacheServer(
             vllm_config.model_config)
+
+        self.guided_decoding_manager = GuidedDecodingManager(vllm_config)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -131,6 +134,9 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
+        if req.use_guided_decoding:
+            # Start grammar compilation asynchronously
+            self.guided_decoding_manager.should_cache(req)
 
         self.scheduler.add_request(req)
 
@@ -143,6 +149,8 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
+        self.guided_decoding_manager.remove_requests(request_ids)
+
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
@@ -150,10 +158,30 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
+        # Calculate bitmasks for all active requests
+        self.setup_grammars()
+
         scheduler_output = self.scheduler.schedule()
+
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            return EngineCoreOutputs(
+                outputs=[], scheduler_stats=self.scheduler.make_stats())
+
+        # the bitmask allocation for grammars
+        # should be ready at this point.
+        # Currently we will broadcast the bitmask
+        if len(self.guided_decoding_manager.requests) > 0:
+            scheduler_output.grammar_bitmask = \
+                self.guided_decoding_manager.grammar_bitmask
+
         output = self.model_executor.execute_model(scheduler_output)
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
+
+        if len(self.guided_decoding_manager.requests) > 0:
+            self.guided_decoding_manager.reset_bitmask()
+
         return engine_core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
@@ -224,6 +252,9 @@ class EngineCore:
 
     def add_lora(self, lora_request: LoRARequest) -> None:
         self.model_executor.add_lora(lora_request)
+
+    def setup_grammars(self):
+        self.guided_decoding_manager.setup_grammars()
 
 
 class EngineCoreProc(EngineCore):

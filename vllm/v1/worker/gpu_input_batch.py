@@ -17,7 +17,10 @@ from vllm.v1.worker.block_table import BlockTable
 _SAMPLING_EPS = 1e-5
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.multimodal.inputs import PlaceholderRange
+    from vllm.v1.guided_decoding import Grammar
 
 
 @dataclass
@@ -39,6 +42,7 @@ class CachedRequestState:
     mrope_position_delta: Optional[int] = None
 
     lora_request: Optional[LoRARequest] = None
+    grammar: Optional["Grammar"] = None
 
     @property
     def num_tokens(self) -> int:
@@ -209,7 +213,7 @@ class InputBatch:
 
     def add_request(
         self,
-        request: "CachedRequestState",
+        request: CachedRequestState,
         req_index: Optional[int] = None,
     ) -> None:
         if req_index is None:

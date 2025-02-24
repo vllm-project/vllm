@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
+from vllm.v1.guided_decoding import apply_bitmask
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -307,6 +308,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                grammar=new_req_data.grammar,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -399,6 +401,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_index, start_index:end_token_index] = spec_token_ids
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
+            # Fill the bitmask
+            if (req_id in scheduler_output.guided_decoding_request_ids
+                    and req_state.grammar is not None):
+                idx = scheduler_output.guided_decoding_request_ids[req_id]
+                # should already be ready
+                assert scheduler_output.grammar_bitmask is not None
+                if not req_state.grammar.matcher.is_terminated():
+                    # NOTE: this relies on xgrammar internal bitmask,
+                    # so we need to give the actual index
+                    # of the the request_id in the batch
+                    req_state.grammar.fill_bitmask(
+                        scheduler_output.grammar_bitmask, idx)
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
@@ -952,6 +966,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
+        # NOTE: We are currently broadcasting the bitmask
+        # to each worker
+        grammar_bitmask = scheduler_output.grammar_bitmask
+
+        # Apply guided decoding bitmasks if present
+        if grammar_bitmask is not None:
+            if len(self.input_batch.req_ids) < self.input_batch.max_num_reqs:
+                # The bitmask is pre-allocated for the maximum batch size.
+                # When the batch size is smaller, we need to resize the bitmask
+                # to match the batch size.
+                grammar_bitmask = grammar_bitmask[:len(self.input_batch.req_ids
+                                                       )]
+            # TODO: we probably should move this before and
+            # after, this might not be correct
+            apply_bitmask(
+                logits, grammar_bitmask.to(self.device, non_blocking=True),
+                list(scheduler_output.guided_decoding_request_ids.values()))
+
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.get_sampling_metadata(
             scheduler_output.scheduled_spec_decode_tokens)
@@ -1373,7 +1405,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
-            kv_cache_config: Configuration for the KV cache, including the KV 
+            kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
         if len(kv_cache_config.groups) > 1:
@@ -1405,10 +1437,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
-        Generates the KVCacheSpec by parsing the kv cache format from each 
+        Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
         Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
 
