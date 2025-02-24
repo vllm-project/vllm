@@ -1126,19 +1126,59 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def _is_v1_supported(
+    def _is_v1_supported_oracle(
         self,
         model_config: ModelConfig,
         disable_frontend_multiprocessing: bool,
     ) -> bool:
-        """Detect if the current configuration is supported in V1."""
+        """Oracle for whether to use V0 or V1 Engine by default."""
 
+        # This flag only has impact on V0 Engine.
         if disable_frontend_multiprocessing:
             if envs.VLLM_USE_V1:
                 raise ValueError("VLLM_USE_V1=1 is not supported with "
                                  "--disable-frontend-multiprocessing.")
-            logger.info("Detected --disable-frontend-multiprocessing. "
-                        "Falling back to VLLM_USE_V1=0.")
+            logger.info("--disable-frontend-multiprocessing is not supported "
+                        "for V1 Engine. Falling back to V0 Engine.")
+            return False
+
+        # LoRA is supported on V1, but off by default for now.
+        if self.enable_lora:
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 with LoRA. Usage should be"
+                    "considered experimental and you may encounter bugs"
+                    "Please report any issues on Github.")
+                return True
+            logger.info("LoRA is not yet enabled by default for V1 Engine. "
+                        "Falling back to V0 Engine.")
+            return False
+
+        # PP is supported on V1, but off by default for now.
+        if self.pipeline_parallel_size > 1:
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 with pipeline parallelism. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+            logger.info(
+                "Pipeline parallelism is not yet enabled by default for V1 "
+                "Engine. Falling back to V0 Engine.")
+            return False
+
+        # ngram is supported on V1, but off by default for now.
+        if SpeculativeConfig.is_speculation_enabled(
+                self.speculative_model, self.num_speculative_tokens):
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 with speculative decoding. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+            logger.info(
+                "Speculative decoding is not yet enabled by default for V1 "
+                "Engine. Falling back to V0 Engine.")
             return False
 
         # Only CUDA and TPU are enabled by default so far.
@@ -1155,6 +1195,31 @@ class EngineArgs:
                 "Falling back to V0 Engine.", current_platform.device_type)
             return False
 
+        # Require at least Ampere (Flash Attention Support needed for V1.)
+        if (current_platform.is_cuda()
+                and current_platform.get_device_capability().major < 8):
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 on unsupported GPU capbility. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+            logger.info("GPU with compute capability < 8.0 not yet enabled "
+                        "for V1 Engine. Falling back to V0 Engine.")
+            return False
+
+        # No Fp8 KV cache so far.
+        if self.kv_cache_dtype != "auto":
+            if envs.VLLM_USE_V1:
+                logger.warning(
+                    "Detected VLLM_USE_V1=1 with fp8 KV cache. "
+                    "Usage should be considered experimental and you may "
+                    "encounter bugs. Please report any issues on Github.")
+                return True
+            logger.info("Fp8 KV cache is not yet supported by the V1 Engine. "
+                        "Falling back to V0 Engine.")
+            return False
+
         # No embedding / score models so far.
         if model_config.task not in ["generate"]:
             if envs.VLLM_USE_V1:
@@ -1163,7 +1228,7 @@ class EngineArgs:
                     "Usage should be considered experimental and you may "
                     "encounter bugs. Please report any issues on Github.")
             logger.info(
-                "Task %s not yet supported by V1 Engine. "
+                "Task %s is not yet supported by V1 Engine. "
                 "Falling back to V0 Engine.", model_config.task)
             return False
 
@@ -1177,9 +1242,21 @@ class EngineArgs:
                     "Usage should be considered experimental and you may "
                     "encounter bugs. Please report any issues on Github.")
                 return True
-            logger.info("Mamba-style, Encoder-Decoder, and MLA models are"
-                        "not yet supported by the V1 Engine. "
-                        "Falling back to V0.")
+            logger.info("Mamba-style, Encoder-Decoder, and MLA models are not"
+                        "yet supported by the V1 Engine. Falling back to V0.")
+            return False
+
+        # No Multistep Scheduling.
+        if self.num_scheduler_steps > 1:
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "VLLM_USE_V1=1 is not supported with num_scheduler_steps "
+                    "> 1. We recommend disabling multi-step scheduling so "
+                    "in favor of the V1 Engine.")
+            logger.warning(
+                "Multistep scheduling is not supported by the V1 Engine. "
+                "Falling back to V0. We recommend deploying with"
+                "--num-scheduler-steps 1 so you can use V1")
             return False
 
         return True
@@ -1291,9 +1368,9 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        # Check if we can use the V1 Engine.
-        self.use_v1 = self._is_v1_supported(model_config,
-                                            disable_frontend_multiprocessing)
+        # Enable the V1 Engine if we can.
+        self.use_v1 = self._is_v1_supported_oracle(
+            model_config, disable_frontend_multiprocessing)
 
         # Set default arguments for the scheduler.
         self._set_default_args(usage_context)
@@ -1375,16 +1452,6 @@ class EngineArgs:
         num_lookahead_slots = num_lookahead_slots \
             if speculative_config is None \
             else speculative_config.num_lookahead_slots
-
-        if not self.use_v2_block_manager:
-            logger.warning(
-                "[DEPRECATED] Block manager v1 has been removed, "
-                "and setting --use-v2-block-manager to True or False has "
-                "no effect on vLLM behavior. Please remove "
-                "--use-v2-block-manager in your engine argument. "
-                "If your use case is not supported by "
-                "SelfAttnBlockSpaceManager (i.e. block manager v2),"
-                " please file an issue with detailed information.")
 
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,

@@ -1788,6 +1788,11 @@ class SpeculativeConfig:
         return hf_config
 
     @staticmethod
+    def is_speculation_enabled(speculative_model: Optional[str],
+                               num_speculative_tokens: Optional[int]) -> bool:
+        return (speculative_model is None and num_speculative_tokens is None)
+
+    @staticmethod
     def maybe_create_spec_config(
         target_model_config: ModelConfig,
         target_parallel_config: ParallelConfig,
