@@ -3,9 +3,9 @@
 # Using Kubernetes
 
 Using Kubernetes to deploy vLLM is a scalable and efficient way to serve machine learning models. 
-This guide will walk you through the process of deploying vLLM with helm chart and native Kubernetes.
+This guide will walk you through the process of deploying vLLM with [production-stack](https://github.com/vllm-project/production-stack) and native Kubernetes.
 
-Note that though it is doable to deploy vLLM using native Kubernetes, [`vllm-project/production-stack`](https://github.com/vllm-project/production-stack) allows you to serve LLM models on multi-node Kubernetes cluster, while including a wide range of usability, observability and performance-related features.
+Note that though it is doable to deploy vLLM using native Kubernetes, [production-stack](https://github.com/vllm-project/production-stack) allows you to serve LLM models on multi-node Kubernetes cluster, while including a wide range of usability, observability and performance-related features.
 
 
 ## Prerequisites
