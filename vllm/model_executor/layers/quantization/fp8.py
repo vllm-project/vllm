@@ -670,6 +670,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
@@ -697,6 +699,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             use_fp8_w8a8=True,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             w1_scale=(layer.w13_weight_scale_inv
                       if self.block_quant else layer.w13_weight_scale),
             w2_scale=(layer.w2_weight_scale_inv

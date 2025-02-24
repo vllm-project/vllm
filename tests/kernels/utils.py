@@ -1053,7 +1053,7 @@ def compute_max_diff(output, output_ref):
         torch.abs(output_ref))
 
 
-def torch_moe(a, w1, w2, score, topk):
+def torch_moe(a, w1, w2, score, topk, expert_map):
     B, D = a.shape
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
     out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
@@ -1061,6 +1061,8 @@ def torch_moe(a, w1, w2, score, topk):
     topk_weight, topk_ids = torch.topk(score, topk)
     topk_weight = topk_weight.view(-1)
     topk_ids = topk_ids.view(-1)
+    if expert_map is not None:
+        topk_ids = expert_map[topk_ids]
     for i in range(w1.shape[0]):
         mask = topk_ids == i
         if mask.sum():
