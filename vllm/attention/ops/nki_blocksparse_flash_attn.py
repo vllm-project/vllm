@@ -1,56 +1,54 @@
 # SPDX-License-Identifier: Apache-2.0
-import math
-from collections import namedtuple
+
+from dataclasses import dataclass
 
 import neuronxcc.nki as nki
 import neuronxcc.nki.language as nl
 import numpy as np
+import numpy.typing as npt
 from neuronxcc.nki.language import par_dim
-from nki_flash_attn import (FlashConfig, _flash_attention_core,
-                            load_block_tables, load_kv_tile_from_cache,
-                            load_v_tile,
-                            transform_block_tables_for_indirect_load)
+
+from .nki_flash_attn import (_flash_attention_core, ceil_div, is_power_of_2,
+                             load_block_tables, load_kv_tile_from_cache,
+                             load_v_tile,
+                             transform_block_tables_for_indirect_load)
 
 
-def is_power_of_2(x):
-    return x > 0 and (x & (x - 1)) == 0
+@dataclass(frozen=True)
+class BlockSparsePlan:
+    tile_q_indices: npt.NDArray[np.int32]
+    tile_block_table_offsets: npt.NDArray[np.int32]
+    tile_q_seq_ids: npt.NDArray[np.int32]
+    tile_kv_seq_ids: npt.NDArray[np.int32]
+    block_size: int
 
-
-def ceil_div(a, b):
-    return (a + b - 1) // b
-
-
-class FlashPASchedule(
-        namedtuple(
-            "FlashPASchedule",
-            [
-                "tile_q_indices",
-                "tile_block_table_offsets",
-                "tile_q_seq_ids",
-                "tile_kv_seq_ids",
-                "block_size",
-            ],
-        )):
-
-    def __init__(self, *args, **kwargs):
-        super(__class__, self).__init__()
-        for x in [
+    def __post_init__(self):
+        for arg in [
                 self.tile_q_indices,
                 self.tile_block_table_offsets,
                 self.tile_q_seq_ids,
                 self.tile_kv_seq_ids,
         ]:
-            assert isinstance(x, np.ndarray) and x.dtype == np.int32, type(x)
+            assert isinstance(arg,
+                              np.ndarray) and arg.dtype == np.int32, type(arg)
+            assert arg.shape[0] == self.num_tiles, (arg.shape, self.num_tiles)
+
+    @property
+    def num_tiles(self):
+        return len(self.tile_q_indices)
 
     def build_tile_masks(self):
         tile_kv_seq_ids = self.tile_kv_seq_ids
         B_P_SIZE = 128
         num_tiles, tile_size_kv = tile_kv_seq_ids.shape
-        assert (tile_size_kv % B_P_SIZE == 0
-                and tile_size_kv % self.block_size == 0)
-        num_tiled_blocks = max(B_P_SIZE, tile_size_kv // self.block_size)
+        block_size = self.block_size
+        num_tiled_blocks = max(B_P_SIZE, tile_size_kv // block_size)
+        assert (
+            tile_size_kv % B_P_SIZE == 0 and tile_size_kv % block_size == 0
+        ), f"{tile_size_kv=} is not multiple of {B_P_SIZE=} and {block_size=}"
         tiled_block_size = tile_size_kv // num_tiled_blocks
         if tiled_block_size > 1:
+            # reorder mask is needed somewhere as long as tiled_block_size > 1
             tile_kv_seq_ids = tile_kv_seq_ids.reshape((
                 num_tiles,
                 num_tiled_blocks // B_P_SIZE,
@@ -64,8 +62,9 @@ class FlashPASchedule(
 
     def build_tile_block_tables(self, block_tables):
         tile_size_kv = self.tile_kv_seq_ids.shape[1]
-        assert tile_size_kv % self.block_size == 0
         num_blocks_per_tile = tile_size_kv // self.block_size
+        assert (tile_size_kv % self.block_size == 0
+                ), f"{tile_size_kv=} is not multiple of {self.block_size=}"
         block_tables = block_tables.squeeze()
         in_tile_offset = np.arange(num_blocks_per_tile)
         indices = self.tile_block_table_offsets.reshape(
@@ -81,10 +80,7 @@ def _check_np_int_array(*arrays):
     return True
 
 
-class FlashPagedAttentionSchedulerBase:
-    """
-    Generate schedule for flash attention
-    """
+class FlashAttentionPlanner:
 
     def __init__(self, prompt_lens, context_lens, tile_size_q, tile_size_kv,
                  block_size):
@@ -93,35 +89,28 @@ class FlashPagedAttentionSchedulerBase:
             context_lens
         ), "prompt_lens and context_lens must have the same length"
         self.num_seq = len(prompt_lens)
-        assert (self.num_seq
-                > 0), "prompt_lens and context_lens must be non-empty"
+        assert self.num_seq > 0, "prompt_lens and context_lens can't be empty"
         self.prompt_lens = prompt_lens.astype(np.int32)
         self.context_lens = context_lens.astype(np.int32)
         self.tile_size_q = tile_size_q
         self.tile_size_kv = tile_size_kv
         self.block_size = block_size
 
-    def compute_schedule(self):
-        raise NotImplementedError
-
-
-def _get_seq_start_end(seqlens, padded_seqlens=None):
-    if padded_seqlens is None:
-        padded_seqlens = seqlens
-    cu_seqlen = np.cumsum(padded_seqlens)
-    seqlens_starts = np.concatenate(([0], cu_seqlen[:-1]))
-    seqlens_ends = seqlens_starts + seqlens
-    return seqlens_starts, seqlens_ends, cu_seqlen[-1]
-
-
-class FlashPAByGridTile(FlashPagedAttentionSchedulerBase):
-
-    def compute_schedule(self):
+    def plan(self):
         """
         Generate schedule for flash attention
         """
         num_context_blocks = ceil_div(self.context_lens, self.block_size)
         padded_context_lens = num_context_blocks * self.block_size
+
+        def _get_seq_start_end(seqlens, padded_seqlens=None):
+            if padded_seqlens is None:
+                padded_seqlens = seqlens
+            cu_seqlen = np.cumsum(padded_seqlens)
+            seqlens_starts = np.concatenate(([0], cu_seqlen[:-1]))
+            seqlens_ends = seqlens_starts + seqlens
+            return seqlens_starts, seqlens_ends, cu_seqlen[-1]
+
         prompt_starts, prompt_ends, max_seqlen_q = _get_seq_start_end(
             self.prompt_lens)
         context_starts, context_ends, max_seqlen_kv = _get_seq_start_end(
@@ -158,8 +147,10 @@ class FlashPAByGridTile(FlashPagedAttentionSchedulerBase):
         num_q_tiles = len(tile_q_starts)
         num_kv_tiles = len(tile_kv_starts)
         q_seq_ids = np.repeat(
-            np.arange(self.num_seq + 1,
-                      dtype=np.int32),  # use num_seq as padding value
+            np.arange(
+                self.num_seq + 1,
+                dtype=np.int32,
+            ),  # use num_seq as padding value
             np.concatenate((
                 self.prompt_lens,
                 [num_q_tiles * self.tile_size_q - max_seqlen_q],
@@ -190,7 +181,7 @@ class FlashPAByGridTile(FlashPagedAttentionSchedulerBase):
         tile_bt_offsets = tile_kv_offsets // self.block_size
         tile_q_seq_ids = q_seq_ids[tile_q_indices]
         tile_kv_seq_ids = kv_seq_ids[tile_kv_indices]
-        return FlashPASchedule(
+        return BlockSparsePlan(
             tile_q_indices,
             tile_bt_offsets,
             tile_q_seq_ids,
@@ -210,7 +201,6 @@ def flash_paged_attention_with_schedule(
     tile_block_tables,
     tile_masks,
     active_mask,
-    config,
     softmax_scale=None,
     mixed_precision=True,
 ):
@@ -222,7 +212,7 @@ def flash_paged_attention_with_schedule(
     IO tensor layouts:
       - query: shape (1, n_heads, d, seq_q)
       - key:   shape (1, n_kv_heads, d, seq_k)
-      - value: shape  (1, n_kv_heads, seq_v, d)
+      - value: shape (1, n_kv_heads, seq_v, d)
       - key_cache: (max_num_blocks, block_size, n_kv_heads, d)
       - value_cache: (max_num_blocks, block_size, n_kv_heads, d)
       - block_tables: (num_large_tile, num_block_per_large_tile)
@@ -244,8 +234,6 @@ def flash_paged_attention_with_schedule(
         Otherwise the intermediates will be in the same type as the inputs.
 
     Compile-time Constants:
-      - sequence_parallel_group: sequence parallel group to shard the cache
-        blocks, List[int].
       - softmax_scale: scaling for softmax, is None, default is `1.0/(d**0.5)`
       - mixed_precision: flag to set non-matmul ops in fp32 precision, default
         is set to `true`, if false, we use same precision as input types
@@ -264,7 +252,8 @@ def flash_paged_attention_with_schedule(
     B_P_SIZE = 128
 
     NUM_LARGE_TILE, LARGE_Q_TILE_SIZE, LARGE_KV_TILE_SIZE = tile_masks.shape
-    assert config.seq_tile_size == LARGE_KV_TILE_SIZE
+    assert (NUM_LARGE_TILE
+            > 0), f"At least 1 tile is needed, got {NUM_LARGE_TILE=}"
     b, h, d, seqlen_q = query.shape
     assert seqlen_q % LARGE_Q_TILE_SIZE == 0
     n_large_q_tile = seqlen_q // LARGE_Q_TILE_SIZE
@@ -287,33 +276,26 @@ def flash_paged_attention_with_schedule(
         block_size,
         d,
     ), f"{value_cache.shape=} mismatch!"
-    if key is not None or value is not None:
-        assert tuple(key.shape) == (
-            1,
-            k_h,
-            d,
-            seqlen_q,
-        ), f"key shape {key.shape} mismatch!"
-        if config.should_transpose_v:
-            assert tuple(value.shape) == (
-                1,
-                k_h,
-                d,
-                seqlen_q,
-            ), f"value shape {value.shape} mismatch!"
-        else:
-            assert tuple(value.shape) == (
-                1,
-                k_h,
-                seqlen_q,
-                d,
-            ), f"value shape {value.shape} mismatch!"
+    assert key is None or tuple(key.shape) == (
+        1,
+        k_h,
+        d,
+        seqlen_q,
+    ), f"key shape {key.shape} mismatch!"
+    assert value is None or tuple(value.shape) == (
+        1,
+        k_h,
+        seqlen_q,
+        d,
+    ), f"value shape {value.shape} mismatch!"
 
     kernel_dtype = nl.bfloat16 if mixed_precision else query.dtype
     acc_type = np.dtype(np.float32) if mixed_precision else kernel_dtype
-    o = nl.ndarray((b, h, seqlen_q, d),
-                   dtype=query.dtype,
-                   buffer=nl.shared_hbm)
+    o = nl.ndarray(
+        (b, h, seqlen_q, d),
+        dtype=query.dtype,
+        buffer=nl.shared_hbm,
+    )
 
     assert (
         nl.program_ndim() == 2
@@ -326,23 +308,33 @@ def flash_paged_attention_with_schedule(
 
     assert LARGE_Q_TILE_SIZE % B_P_SIZE == 0
     n_small_in_large_q_tile = LARGE_Q_TILE_SIZE // B_P_SIZE
-    assert (
-        LARGE_KV_TILE_SIZE % B_F_SIZE == 0
-    ), f"Need LARGE_KV_TILE_SIZE ({LARGE_KV_TILE_SIZE=}) divisible by B_P_SIZE"
+    assert (LARGE_KV_TILE_SIZE % B_F_SIZE == 0
+            ), f"Need {LARGE_KV_TILE_SIZE=} to be divisible by {B_F_SIZE=}"
 
     num_blocks_per_large_tile = LARGE_KV_TILE_SIZE // block_size
     assert is_power_of_2(
         num_blocks_per_large_tile
     ), f"{num_blocks_per_large_tile=} is expected of be power of 2"
-    assert is_power_of_2(seqlen_q), f"{seqlen_q=} is expected to be power of 2"
+    if seqlen_q > B_F_SIZE:
+        MAX_REDUCTION_TILE = 2048
+        if seqlen_q // 2 > MAX_REDUCTION_TILE:
+            assert (
+                seqlen_q % MAX_REDUCTION_TILE == 0
+            ), f"{seqlen_q=} should be divisible by {MAX_REDUCTION_TILE=}"
+        else:
+            assert (seqlen_q % B_F_SIZE == 0
+                    ), f"{seqlen_q=} should be divisible by {B_F_SIZE=})"
 
-    tile_q_indices_sbuf = nl.load(tile_q_indices.reshape((1, NUM_LARGE_TILE)),
-                                  dtype=nl.int32)
+    tile_q_indices_sbuf = nl.load(
+        tile_q_indices.reshape((1, NUM_LARGE_TILE)),
+        dtype=nl.int32,
+    )
     block_tables_sbuf = load_block_tables(
         block_tables_hbm=tile_block_tables,
         num_tiles=NUM_LARGE_TILE,
         num_blocks_per_tile=num_blocks_per_large_tile,
     )
+    # We need B_P_SIZE=128 blocks to make DMA efficient
     if num_blocks_per_large_tile < B_P_SIZE:
         # we checked num_blocks_per_tile is a power of 2
         assert B_P_SIZE % num_blocks_per_large_tile == 0
@@ -352,6 +344,7 @@ def flash_paged_attention_with_schedule(
         block_size_tiling_factor = 1
     tiled_block_size = block_size // block_size_tiling_factor
 
+    # Indirect DMA load must be placed along Partition dimension
     block_tables_sbuf = transform_block_tables_for_indirect_load(
         block_tables_sbuf,
         block_size_tiling_factor=block_size_tiling_factor,
@@ -367,36 +360,33 @@ def flash_paged_attention_with_schedule(
     key_cache = key_cache.reshape(new_cache_shape)
     value_cache = value_cache.reshape(new_cache_shape)
 
-    NEG_INF = (
-        -9984.0
-    )  # Magic number to replace -inf similar to what Tensorizer uses
+    NEG_INF = -9984.0  # Magic number to replace -inf
     q_h_per_k_h = h // k_h
     # =============== Global Flash Attention accumulators ==================== #
-    o_buffer = nl.zeros(
-        (n_large_q_tile, n_small_in_large_q_tile, q_h_per_k_h, B_P_SIZE, d),
+    o_buffer = nl.ndarray(
+        (B_P_SIZE, n_large_q_tile, n_small_in_large_q_tile * q_h_per_k_h * d),
         dtype=acc_type,
         buffer=nl.hbm,
-        lazy_initialization=True,
     )
-    m_buffer = nl.full(
-        (n_large_q_tile, n_small_in_large_q_tile, q_h_per_k_h, B_P_SIZE, 1),
-        NEG_INF,
+    m_buffer = nl.ndarray(
+        (B_P_SIZE, n_large_q_tile, n_small_in_large_q_tile * q_h_per_k_h * 1),
         dtype=acc_type,
         buffer=nl.hbm,
-        lazy_initialization=True,
     )
     # L buffer stores LSE + M
     # L_0 = LSE_0 + M_0 = log(sum([])) + max([]) = -inf + -inf
-    # TODO: since we only do inference, we should consider save SumExp instead
-    # of LSE + M
-    l_buffer = nl.full(
-        (n_large_q_tile, n_small_in_large_q_tile, q_h_per_k_h, B_P_SIZE, 1),
-        NEG_INF * 2,  # multiply 2 to make sure exp(L - M) == 0
+    # TODO: since we target inference, we only need to save SumExp instead of
+    #       LSE + M
+    l_buffer = nl.ndarray(
+        (B_P_SIZE, n_large_q_tile, n_small_in_large_q_tile * q_h_per_k_h * 1),
         dtype=acc_type,
         buffer=nl.hbm,
-        lazy_initialization=True,
     )
-    # =============== Global Flash Attention accumulators END ================ #
+
+    for large_q_idx in nl.affine_range(n_large_q_tile):
+        nl.store(dst=o_buffer[:, large_q_idx], value=0.0)
+        nl.store(dst=m_buffer[:, large_q_idx], value=NEG_INF)
+        nl.store(dst=l_buffer[:, large_q_idx], value=NEG_INF + NEG_INF)
 
     for large_tile_idx in nl.sequential_range(0, NUM_LARGE_TILE):
         num_loads = ceil_div(num_blocks_per_large_tile, B_P_SIZE)
@@ -422,39 +412,49 @@ def flash_paged_attention_with_schedule(
         )
 
         large_q_idx = tile_q_indices_sbuf[0, large_tile_idx]
+
+        # load aggregation buffer from HBM to SBUF
+        m_sbuf_tile = nl.ndarray(
+            (par_dim(B_P_SIZE), n_small_in_large_q_tile, q_h_per_k_h, 1),
+            dtype=acc_type,
+            buffer=nl.sbuf,
+        )
+        l_sbuf_tile = nl.ndarray(
+            (par_dim(B_P_SIZE), n_small_in_large_q_tile, q_h_per_k_h, 1),
+            dtype=acc_type,
+            buffer=nl.sbuf,
+        )
+        o_sbuf_tile = nl.ndarray(
+            (par_dim(B_P_SIZE), n_small_in_large_q_tile, q_h_per_k_h, d),
+            dtype=acc_type,
+            buffer=nl.sbuf,
+        )
+        m_sbuf_tile_flattened = m_sbuf_tile.reshape(
+            (B_P_SIZE, n_small_in_large_q_tile * q_h_per_k_h * 1))
+        l_sbuf_tile_flattened = l_sbuf_tile.reshape(
+            (B_P_SIZE, n_small_in_large_q_tile * q_h_per_k_h * 1))
+        o_sbuf_tile_flattened = o_sbuf_tile.reshape(
+            (B_P_SIZE, n_small_in_large_q_tile * q_h_per_k_h * d))
+        m_sbuf_tile_flattened[...] = nl.load(m_buffer[:, large_q_idx])
+        l_sbuf_tile_flattened[...] = nl.load(l_buffer[:, large_q_idx])
+        o_sbuf_tile_flattened[...] = nl.load(o_buffer[:, large_q_idx])
+
+        # load query
         q_sbuf_tile = nl.ndarray(
             (q_h_per_k_h, par_dim(B_D_SIZE), LARGE_Q_TILE_SIZE),
             dtype=kernel_dtype,
         )
-        explicit_conversion = (
-            kernel_dtype != query.dtype and math.prod(q_sbuf_tile.shape)
-            == B_P_SIZE * B_D_SIZE  # dst_buf_size == load_size
-        )
         for i_q_h in nl.affine_range(q_h_per_k_h):
-            for small_q_idx in nl.affine_range(n_small_in_large_q_tile):
-                q_hbm_tile = query[
-                    batch_id,
-                    head_id * q_h_per_k_h + i_q_h,
-                    :,
-                    large_q_idx,
-                    nl.ds(small_q_idx * B_P_SIZE, B_P_SIZE),
-                ]
-                if explicit_conversion:
-                    # FIXME: this explicit conversion workaround can be removed
-                    q_hbm_tile = nl.load(q_hbm_tile)
-                    q_sbuf_tile[i_q_h, :,
-                                nl.ds(small_q_idx *
-                                      B_P_SIZE, B_P_SIZE)] = nl.copy(
-                                          q_hbm_tile,
-                                          dtype=kernel_dtype,
-                                      )  # load (d, 128) tile in SBUF
-                else:
-                    q_sbuf_tile[i_q_h, :,
-                                nl.ds(small_q_idx *
-                                      B_P_SIZE, B_P_SIZE)] = nl.load(
-                                          q_hbm_tile,
-                                          dtype=kernel_dtype,
-                                      )  # load (d, 128) tile in SBUF
+            q_hbm_tile = nl.load(query[
+                batch_id,
+                head_id * q_h_per_k_h + i_q_h,
+                :,
+                large_q_idx,
+                :,
+            ])
+            if kernel_dtype != query.dtype:
+                q_hbm_tile = nl.copy(q_hbm_tile, dtype=kernel_dtype)
+            q_sbuf_tile[i_q_h, :, :] = q_hbm_tile
         for small_q_idx in nl.affine_range(n_small_in_large_q_tile):
             cur_mask = nl.load(
                 tile_masks[large_tile_idx,
@@ -462,13 +462,6 @@ def flash_paged_attention_with_schedule(
                 dtype=tile_masks.dtype,
             )
             for i_q_h in nl.affine_range(q_h_per_k_h):
-                cur_m_tile = nl.load(m_buffer[large_q_idx, small_q_idx, i_q_h],
-                                     dtype=acc_type)
-                cur_l_tile = nl.load(l_buffer[large_q_idx, small_q_idx, i_q_h],
-                                     dtype=acc_type)
-                cur_o_tile = nl.load(o_buffer[large_q_idx, small_q_idx, i_q_h],
-                                     dtype=acc_type)
-
                 q_tile = (
                     q_sbuf_tile[i_q_h, :,
                                 nl.ds(small_q_idx * B_P_SIZE, B_P_SIZE)] *
@@ -478,35 +471,27 @@ def flash_paged_attention_with_schedule(
                     q_local_tile=q_tile,
                     k=cur_k_tile,
                     v=cur_v_tile,
-                    o_buffer=cur_o_tile,
-                    l_buffer=cur_l_tile,
-                    m_buffer=cur_m_tile,
+                    o_buffer=o_sbuf_tile[:, small_q_idx, i_q_h],
+                    l_buffer=l_sbuf_tile[:, small_q_idx, i_q_h],
+                    m_buffer=m_sbuf_tile[:, small_q_idx, i_q_h],
                     kernel_dtype=kernel_dtype,
                     acc_type=acc_type,
-                    flash_config=config,
                     tile_mask=cur_mask,
                     use_causal_mask=False,
                     q_tile_idx=None,
                     initialize=False,
+                    LARGE_TILE_SZ=LARGE_KV_TILE_SIZE,
                     B_P_SIZE=B_P_SIZE,
                     B_F_SIZE=B_F_SIZE,
                     B_D_SIZE=B_D_SIZE,
-                    qk_res_buffer=None,
-                )
-                nl.store(
-                    m_buffer[large_q_idx, small_q_idx, i_q_h, :, :],
-                    cur_m_tile,
-                )
-                nl.store(
-                    l_buffer[large_q_idx, small_q_idx, i_q_h, :, :],
-                    cur_l_tile,
-                )
-                nl.store(
-                    o_buffer[large_q_idx, small_q_idx, i_q_h, :, :],
-                    cur_o_tile,
                 )
 
-    # -------- Load l, m, o back to SBUF from HBM ------------ #
+        # write aggregation buffer from SBUF back to HBM
+        nl.store(m_buffer[:, large_q_idx], m_sbuf_tile_flattened)
+        nl.store(l_buffer[:, large_q_idx], l_sbuf_tile_flattened)
+        nl.store(o_buffer[:, large_q_idx], o_sbuf_tile_flattened)
+
+    # ------- Load l, m, o back to SBUF for attention on active tokens ------- #
     o_buffer_sbuf = nl.ndarray(
         (
             n_large_q_tile,
@@ -540,28 +525,33 @@ def flash_paged_attention_with_schedule(
     for i0 in nl.affine_range(n_large_q_tile):
         for i1 in nl.affine_range(n_small_in_large_q_tile):
             for i_q_h in nl.affine_range(q_h_per_k_h):
-                o_buffer_sbuf[i0, i1, i_q_h] = nl.load(o_buffer[i0, i1, i_q_h])
-                l_buffer_sbuf[i0, i1, i_q_h] = nl.load(l_buffer[i0, i1, i_q_h])
-                m_buffer_sbuf[i0, i1, i_q_h] = nl.load(m_buffer[i0, i1, i_q_h])
+                offset = i1 * q_h_per_k_h + i_q_h
+                o_buffer_sbuf[i0, i1, i_q_h] = nl.load(
+                    o_buffer[:, i0, nl.ds(offset * B_D_SIZE, B_D_SIZE)])
+                l_buffer_sbuf[i0, i1,
+                              i_q_h] = nl.load(l_buffer[:, i0,
+                                                        nl.ds(offset, 1)])
+                m_buffer_sbuf[i0, i1,
+                              i_q_h] = nl.load(m_buffer[:, i0,
+                                                        nl.ds(offset, 1)])
 
     # compute attention between input query, key and value
-    # TODO: mask out top right part for active tokens
     if key is not None and value is not None:
         B_F_SIZE = min(seqlen_q, B_F_SIZE)
         LARGE_Q_TILE_SIZE = seqlen_q
-        active_config = FlashConfig(
-            seq_tile_size=LARGE_Q_TILE_SIZE,
-            should_transpose_v=config.should_transpose_v,
+        cur_k_tile = nl.ndarray(
+            (par_dim(B_D_SIZE), LARGE_Q_TILE_SIZE),
+            dtype=kernel_dtype,
         )
-        cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_Q_TILE_SIZE),
-                                dtype=kernel_dtype)
         cur_v_tile = nl.ndarray(
             (par_dim(B_P_SIZE), LARGE_Q_TILE_SIZE // B_P_SIZE * B_D_SIZE),
             dtype=kernel_dtype,
         )
 
-        cur_k_tile[:, :] = nl.load(key[batch_id, head_id, :, :],
-                                   dtype=cur_k_tile.dtype)
+        cur_k_tile[:, :] = nl.load(
+            key[batch_id, head_id, :, :],
+            dtype=cur_k_tile.dtype,
+        )
 
         v_hbm_tile = value[batch_id, head_id]
         # load at granularity of B_P_SIZE
@@ -569,9 +559,7 @@ def flash_paged_attention_with_schedule(
             load_v_tile(
                 v_hbm_tile=v_hbm_tile,
                 cur_v_tile=cur_v_tile,
-                large_tile_idx=0,
                 v_i=v_i,
-                config=active_config,
             )
 
         for i0 in nl.affine_range(n_large_q_tile):
@@ -585,8 +573,10 @@ def flash_paged_attention_with_schedule(
                     dtype=active_mask.dtype,
                 )
                 for i_q_h in nl.affine_range(q_h_per_k_h):
-                    q_tile = nl.ndarray((B_D_SIZE, B_P_SIZE),
-                                        dtype=kernel_dtype)
+                    q_tile = nl.ndarray(
+                        (B_D_SIZE, B_P_SIZE),
+                        dtype=kernel_dtype,
+                    )
                     q_hbm_tile = query[
                         batch_id,
                         head_id * q_h_per_k_h + i_q_h,
@@ -596,7 +586,8 @@ def flash_paged_attention_with_schedule(
                     ]
                     q_sbuf_tile = nl.load(
                         q_hbm_tile,
-                        dtype=kernel_dtype)  # load (d, 128) tile in SBUF
+                        dtype=kernel_dtype,
+                    )  # load (d, 128) tile in SBUF
                     q_tile[:, :] = q_sbuf_tile * softmax_scale
                     _flash_attention_core(
                         q_local_tile=q_tile,
@@ -607,15 +598,14 @@ def flash_paged_attention_with_schedule(
                         m_buffer=m_buffer_sbuf[i0, i1, i_q_h],
                         kernel_dtype=kernel_dtype,
                         acc_type=acc_type,
-                        flash_config=active_config,
                         tile_mask=cur_mask,
                         use_causal_mask=True,
                         q_tile_idx=i,
                         initialize=False,
+                        LARGE_TILE_SZ=LARGE_Q_TILE_SIZE,
                         B_P_SIZE=B_P_SIZE,
                         B_F_SIZE=B_F_SIZE,
                         B_D_SIZE=B_D_SIZE,
-                        qk_res_buffer=None,
                     )
 
     # -------- write output to buffer on HBM ------------ #
@@ -654,13 +644,8 @@ def flash_attn_varlen_blocksparse_nkifunc(
     active_mask,
     n_kv_head=None,
     head_size=None,
-    LARGE_KV_TILE_SZ=2048,
     mixed_precision=True,
 ):
-    config = FlashConfig(
-        seq_tile_size=LARGE_KV_TILE_SZ,
-        should_transpose_v=False,
-    )
     if n_kv_head is None:
         n_kv_head = key_cache.shape[1]
     assert key_cache.shape[1] == n_kv_head
@@ -678,7 +663,6 @@ def flash_attn_varlen_blocksparse_nkifunc(
         active_mask=active_mask,
         softmax_scale=1.0 / (head_size**0.5),
         mixed_precision=mixed_precision,
-        config=config,
     )
 
     o = flash_paged_attention_with_schedule[1, n_kv_head](**kwargs)
