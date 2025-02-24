@@ -1968,6 +1968,8 @@ class LLMEngine:
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
 
+    _guided_decoding_logits_processors_cache = {}
+
     def _build_logits_processors(
             self, sampling_params: SamplingParams,
             lora_request: Optional[LoRARequest]) -> SamplingParams:
@@ -1975,27 +1977,36 @@ class LLMEngine:
         logits_bias, and allowed_token_ids fields in sampling_params. Deletes
         those fields and adds the constructed logits processors to the
         logits_processors field. Returns the modified sampling params."""
+        from hashlib import md5
 
         logits_processors = []
 
         if sampling_params.guided_decoding is not None:
-            # Defensively copy sampling params since guided decoding logits
-            # processors can have different state for each request
-            sampling_params = copy.copy(sampling_params)
-            guided_decoding = sampling_params.guided_decoding
+            cache_key = md5(str(sampling_params.guided_decoding).encode()).hexdigest()
+            if cache_key in self._guided_decoding_logits_processors_cache:
+                processor = self._guided_decoding_logits_processors_cache.get(cache_key)
+                logger.debug(f"Using cached guided decoding logits processor for {sampling_params.guided_decoding}")
+            else:
+                # Defensively copy sampling params since guided decoding logits
+                # processors can have different state for each request
+                sampling_params = copy.copy(sampling_params)
+                guided_decoding = sampling_params.guided_decoding
 
-            logger.debug(
-                "Building guided decoding logits processor in "
-                "LLMEngine. Params: %s", guided_decoding)
+                logger.debug(
+                    "Building guided decoding logits processor in "
+                    "LLMEngine. Params: %s", guided_decoding)
 
-            tokenizer = self.get_tokenizer(lora_request=lora_request)
-            guided_decoding.backend = guided_decoding.backend or \
-                self.decoding_config.guided_decoding_backend
+                tokenizer = self.get_tokenizer(lora_request=lora_request)
+                guided_decoding.backend = guided_decoding.backend or \
+                    self.decoding_config.guided_decoding_backend
 
-            processor = get_local_guided_decoding_logits_processor(
-                guided_params=guided_decoding,
-                tokenizer=tokenizer,
-                model_config=self.model_config)
+                processor = get_local_guided_decoding_logits_processor(
+                    guided_params=guided_decoding,
+                    tokenizer=tokenizer,
+                    model_config=self.model_config)
+
+                self._guided_decoding_logits_processors_cache[cache_key] = processor
+
             if processor:
                 logits_processors.append(processor)
 
