@@ -127,7 +127,7 @@ def init_logger(name: str) -> _VllmLogger:
     retrieved in such a way that we can be sure the root vllm logger has
     already been configured."""
 
-    logger = logging.getLogger(name)
+    logger = logging.getLogger(f"vllm.{name}")
 
     methods_to_patch = {
         "info_once": _print_info_once,
