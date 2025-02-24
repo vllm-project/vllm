@@ -291,7 +291,7 @@ class FusedMoE(torch.nn.Module):
         else:
             self.ep_size = 1
         self.top_k = top_k
-        self.global_num_experts = num_experts
+        self.num_experts = num_experts  # Global number of experts
         assert intermediate_size % self.tp_size == 0
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
@@ -308,7 +308,7 @@ class FusedMoE(torch.nn.Module):
 
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1
-            self.expert_map = torch.full((self.global_num_experts, ),
+            self.expert_map = torch.full((self.num_experts, ),
                                          -1,
                                          dtype=torch.int32)
             # Create a expert map for the local experts
@@ -647,7 +647,7 @@ class FusedMoE(torch.nn.Module):
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
+            global_num_experts=self.num_experts,
             expert_map=self.expert_map,
             topk_group=self.topk_group,
             num_expert_group=self.num_expert_group,

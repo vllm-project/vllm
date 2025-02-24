@@ -121,7 +121,7 @@ def _compare_tp(
     test_options: EPTestOptions,
     num_gpus_available: int,
     *,
-    method: Literal["generate_close"],
+    method: Literal["generate"],
 ):
     (
         tp_size,
@@ -224,4 +224,4 @@ def test_ep(
                 task,
                 test_options,
                 num_gpus_available,
-                method="generate_close")
+                method="generate")
