@@ -168,6 +168,7 @@ class EngineClient(ABC):
 
             sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
             all_beams = sorted_beams[:beam_width]
+            # TODO: add exit condition !!!
 
         completed.extend(all_beams)
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
