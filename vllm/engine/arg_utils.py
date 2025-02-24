@@ -1107,12 +1107,10 @@ class EngineArgs:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
-        # TODO(rob): move this to create_model_config
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
 
-        # TODO(rob): move this to create_load_config
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
         if (self.quantization == "bitsandbytes" or
@@ -1129,7 +1127,6 @@ class EngineArgs:
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
 
-        # TODO(rob): move this to vllm/config.py:_verify_args
         assert self.cpu_offload_gb >= 0, (
             "CPU offload space must be non-negative"
             f", but got {self.cpu_offload_gb}")
