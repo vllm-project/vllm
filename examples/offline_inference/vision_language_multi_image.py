@@ -77,8 +77,8 @@ def load_deepseek_vl2(question: str, image_urls: List[str]):
     )
 
 
-def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
-    model_name = "h2oai/h2ovl-mississippi-2b"
+def load_h2ovl(question: str, image_urls: List[str]) -> ModelRequestData:
+    model_name = "h2oai/h2ovl-mississippi-800m"
 
     llm = LLM(
         model=model_name,
@@ -99,7 +99,7 @@ def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
                                            add_generation_prompt=True)
 
     # Stop tokens for H2OVL-Mississippi
-    # https://huggingface.co/h2oai/h2ovl-mississippi-2b
+    # https://huggingface.co/h2oai/h2ovl-mississippi-800m
     stop_token_ids = [tokenizer.eos_token_id]
 
     return ModelRequestData(
@@ -302,6 +302,7 @@ def load_qwen_vl_chat(question: str,
         trust_remote_code=True,
         max_model_len=1024,
         max_num_seqs=2,
+        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
         limit_mm_per_prompt={"image": len(image_urls)},
     )
     placeholders = "".join(f"Picture {i}: <img></img>\n"
@@ -452,7 +453,7 @@ def load_qwen2_5_vl(question, image_urls: List[str]) -> ModelRequestData:
 model_example_map = {
     "aria": load_aria,
     "deepseek_vl_v2": load_deepseek_vl2,
-    "h2ovl_chat": load_h2onvl,
+    "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
     "mllama": load_mllama,

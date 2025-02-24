@@ -3,6 +3,7 @@
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -24,8 +25,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, convert_to_channelwise,
     cutlass_block_fp8_supported, cutlass_fp8_supported,
-    normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize,
-    requantize_with_max_scale)
+    maybe_create_device_identity, normalize_e4m3fn_to_e4m3fnuz,
+    per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
@@ -47,6 +48,7 @@ class Fp8Config(QuantizationConfig):
         ignored_layers: Optional[List[str]] = None,
         weight_block_size: Optional[List[int]] = None,
     ) -> None:
+        super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
             logger.warning("Detected fp8 checkpoint. Please note that the "
@@ -161,6 +163,8 @@ class Fp8LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        maybe_create_device_identity()
+
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
@@ -248,6 +252,17 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.register_parameter("input_scale", None)
 
+    def add_padding_to_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        # Pad the weight tensor. This is an optimization on ROCm platform, which
+        # can benefit from tensors located far enough from one another in memory
+        if (envs.VLLM_ROCM_FP8_PADDING and current_platform.is_rocm()
+                and weight.stride(-1) == 1
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0):
+            num_pad = 256 // weight.element_size()
+            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+            torch.cuda.empty_cache()
+        return weight
+
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
@@ -260,6 +275,8 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 weight = layer.weight.data
                 weight_scale_inv = layer.weight_scale_inv.data
+
+            weight = self.add_padding_to_weight(weight)
 
             # Torch.compile cannot use Parameter subclasses.
             layer.weight = Parameter(weight, requires_grad=False)
@@ -324,6 +341,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     logical_widths=layer.logical_widths,
                 )
 
+            weight = self.add_padding_to_weight(weight)
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
