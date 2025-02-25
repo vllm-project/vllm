@@ -8,7 +8,7 @@ from argparse import Namespace
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
 
 import torch
-from fastapi import Form, UploadFile
+from fastapi import UploadFile
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import Annotated, TypeAlias
@@ -1507,30 +1507,6 @@ class TranscriptionRequest(OpenAIBaseModel):
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "temperature": 0,
     }
-
-    @classmethod
-    def from_form_data(
-        cls,
-        file: UploadFile,
-        model: Annotated[str, Form()],
-        language: Annotated[Optional[str], Form()] = None,
-        prompt: Annotated[Optional[str], Form()] = "",
-        response_format: Annotated[Optional[AudioResponseFormat],
-                                   Form()] = "json",
-        temperature: Annotated[Optional[float], Form()] = 0.0,
-        timestamp_granularities: Annotated[Optional[List[Literal["word",
-                                                                 "segment"]]],
-                                           Form()] = None
-    ) -> "TranscriptionRequest":
-        if timestamp_granularities is None:
-            timestamp_granularities = ["segment"]
-        return cls(file=file,
-                   model=model,
-                   language=language,
-                   prompt=prompt,
-                   response_format=response_format,
-                   temperature=temperature,
-                   timestamp_granularities=timestamp_granularities)
 
     def to_sampling_params(
             self,
