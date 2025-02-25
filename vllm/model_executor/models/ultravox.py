@@ -43,6 +43,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|reserved_special_token_0|>"
 _AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
+_MAX_AUDIO_CHUNKS = 20
 
 
 class UltravoxAudioFeatureInputs(TypedDict):
@@ -116,7 +117,7 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         max_audio_tokens = math.ceil(feature_extractor.chunk_length *
                                      _AUDIO_TOKENS_PER_SECOND)
 
-        return {"audio": max_audio_tokens * 20}
+        return {"audio": max_audio_tokens * _MAX_AUDIO_CHUNKS}
 
 
 class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo]
@@ -130,7 +131,8 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo]
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
-        audio_len = feature_extractor.chunk_length * sampling_rate
+        audio_len = (feature_extractor.chunk_length * sampling_rate *
+                     _MAX_AUDIO_CHUNKS)
         num_audios = mm_counts.get("audio", 0)
 
         mm_data = {
