@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Mapping, Optional, Type, Union
+from typing import Dict, List, Mapping, Optional, Set, Type, Union
 
 from typing_extensions import TypeVar
 
@@ -254,3 +254,19 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        """Load a new LoRA adapter into the engine for future requests."""
+        return self.engine_core.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter."""
+        return self.engine_core.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        """List all registered adapters."""
+        return self.engine_core.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return self.engine_core.pin_lora(lora_id)
