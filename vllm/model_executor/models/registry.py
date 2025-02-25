@@ -364,12 +364,6 @@ class _ModelRegistry:
                 raise ValueError(msg)
 
             model = _LazyRegisteredModel(*split_str)
-
-            try:
-                model.inspect_model_cls()
-            except Exception as exc:
-                msg = f"Unable to inspect model {model_cls}"
-                raise RuntimeError(msg) from exc
         elif isinstance(model_cls, type) and issubclass(model_cls, nn.Module):
             model = _RegisteredModel.from_model_cls(model_cls)
         else:
