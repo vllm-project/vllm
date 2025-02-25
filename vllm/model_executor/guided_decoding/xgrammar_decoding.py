@@ -367,6 +367,6 @@ class XGrammarLogitsProcessor:
         # Copy simple attributes
         new_processor.batch_size = self.batch_size
         # Reset prefilled state for new sequence
-        new_processor.prefilled = False  
+        new_processor.prefilled = False
 
         return new_processor
