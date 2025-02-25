@@ -191,11 +191,16 @@ class UltravoxMultiModalProcessor(
         self,
         prompt_tokens: list[int],
     ) -> list[int]:
-        # HF processor omits bos_token_id by setting add_special_tokens=False
         tokenizer = self.info.get_tokenizer()
         assert prompt_tokens[0] == tokenizer.bos_token_id
 
-        return prompt_tokens[1:]
+        # temporary fix: when running with api_server, the bos_token_id is not
+        # added to the prompt_tokens, but when using llm.generate(), it is.
+        # This is a hack to make the output consistent between the two cases.
+        # TODO: find the root cause and fix it.
+        if prompt_tokens[0] == prompt_tokens[1]:
+            return prompt_tokens[1:]
+        return prompt_tokens
 
     def _get_mm_fields_config(
         self,
