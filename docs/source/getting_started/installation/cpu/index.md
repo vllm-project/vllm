@@ -2,86 +2,87 @@
 
 vLLM is a Python library that supports the following CPU variants. Select your CPU type to see vendor specific instructions:
 
-::::{tab-set}
+:::::{tab-set}
 :sync-group: device
 
-:::{tab-item} x86
+::::{tab-item} Intel/AMD x86
+:selected:
 :sync: x86
 
-```{include} x86.inc.md
+:::{include} x86.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
-```
-
-:::
-
-:::{tab-item} ARM
-:sync: arm
-
-```{include} arm.inc.md
-:start-after: "# Installation"
-:end-before: "## Requirements"
-```
-
-:::
-
-:::{tab-item} Apple silicon
-:sync: apple
-
-```{include} apple.inc.md
-:start-after: "# Installation"
-:end-before: "## Requirements"
-```
-
 :::
 
 ::::
+
+::::{tab-item} ARM AArch64
+:sync: arm
+
+:::{include} arm.inc.md
+:start-after: "# Installation"
+:end-before: "## Requirements"
+:::
+
+::::
+
+::::{tab-item} Apple silicon
+:sync: apple
+
+:::{include} apple.inc.md
+:start-after: "# Installation"
+:end-before: "## Requirements"
+:::
+
+::::
+
+:::::
 
 ## Requirements
 
 - Python: 3.9 -- 3.12
 
-::::{tab-set}
+:::::{tab-set}
 :sync-group: device
 
-:::{tab-item} x86
+::::{tab-item} Intel/AMD x86
 :sync: x86
 
-```{include} x86.inc.md
+:::{include} x86.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
-```
-
-:::
-
-:::{tab-item} ARM
-:sync: arm
-
-```{include} arm.inc.md
-:start-after: "## Requirements"
-:end-before: "## Set up using Python"
-```
-
-:::
-
-:::{tab-item} Apple silicon
-:sync: apple
-
-```{include} apple.inc.md
-:start-after: "## Requirements"
-:end-before: "## Set up using Python"
-```
-
 :::
 
 ::::
+
+::::{tab-item} ARM AArch64
+:sync: arm
+
+:::{include} arm.inc.md
+:start-after: "## Requirements"
+:end-before: "## Set up using Python"
+:::
+
+::::
+
+::::{tab-item} Apple silicon
+:sync: apple
+
+:::{include} apple.inc.md
+:start-after: "## Requirements"
+:end-before: "## Set up using Python"
+:::
+
+::::
+
+:::::
 
 ## Set up using Python
 
 ### Create a new Python environment
 
-```{include} ../python_env_setup.inc.md
-```
+:::{include} ../python_env_setup.inc.md
+:::
 
 ### Pre-built wheels
 
@@ -89,40 +90,40 @@ Currently, there are no pre-built CPU wheels.
 
 ### Build wheel from source
 
-::::{tab-set}
+:::::{tab-set}
 :sync-group: device
 
-:::{tab-item} x86
+::::{tab-item} Intel/AMD x86
 :sync: x86
 
-```{include} x86.inc.md
+:::{include} x86.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
-```
-
-:::
-
-:::{tab-item} ARM
-:sync: arm
-
-```{include} arm.inc.md
-:start-after: "### Build wheel from source"
-:end-before: "## Set up using Docker"
-```
-
-:::
-
-:::{tab-item} Apple silicon
-:sync: apple
-
-```{include} apple.inc.md
-:start-after: "### Build wheel from source"
-:end-before: "## Set up using Docker"
-```
-
 :::
 
 ::::
+
+::::{tab-item} ARM AArch64
+:sync: arm
+
+:::{include} arm.inc.md
+:start-after: "### Build wheel from source"
+:end-before: "## Set up using Docker"
+:::
+
+::::
+
+::::{tab-item} Apple silicon
+:sync: apple
+
+:::{include} apple.inc.md
+:start-after: "### Build wheel from source"
+:end-before: "## Set up using Docker"
+:::
+
+::::
+
+:::::
 
 ## Set up using Docker
 
@@ -142,9 +143,9 @@ $ docker run -it \
              vllm-cpu-env
 ```
 
-:::{tip}
+::::{tip}
 For ARM or Apple silicon, use `Dockerfile.arm`
-:::
+::::
 
 ## Supported features
 
@@ -169,7 +170,7 @@ vLLM CPU backend supports the following vLLM features:
 sudo apt-get install libtcmalloc-minimal4 # install TCMalloc library
 find / -name *libtcmalloc* # find the dynamic link library path
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD # prepend the library to LD_PRELOAD
-python examples/offline_inference/basic.py # run vLLM
+python examples/offline_inference/basic/basic.py # run vLLM
 ```
 
 - When using the online serving, it is recommended to reserve 1-2 CPU cores for the serving framework to avoid CPU oversubscription. For example, on a platform with 32 physical CPU cores, reserving CPU 30 and 31 for the framework and using CPU 0-29 for OpenMP:
@@ -206,7 +207,7 @@ CPU NODE SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ      MHZ
 
 # On this platform, it is recommend to only bind openMP threads on logical CPU cores 0-7 or 8-15
 $ export VLLM_CPU_OMP_THREADS_BIND=0-7
-$ python examples/offline_inference/basic.py
+$ python examples/offline_inference/basic/basic.py
 ```
 
 - If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using `VLLM_CPU_OMP_THREADS_BIND` to avoid cross NUMA node memory access.

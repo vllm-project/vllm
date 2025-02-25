@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -24,6 +26,7 @@ class AWQConfig(QuantizationConfig):
         zero_point: bool,
         modules_to_not_convert: Optional[List[str]] = None,
     ) -> None:
+        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.zero_point = zero_point

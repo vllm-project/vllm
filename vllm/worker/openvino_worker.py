@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """An OpenVINO worker class."""
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -544,7 +545,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
                 "value. This may cause low performance due to "
                 "occupying the majority of available system "
                 "memory. Please consider decreasing "
-                "gpu_memory_utilization or explicitly setting"
+                "gpu_memory_utilization or explicitly setting "
                 "`VLLM_OPENVINO_KVCACHE_SPACE` (GB) environment "
                 "variable.", memory_utilization)
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Tuple, Type
 
 import numpy as np
@@ -13,7 +15,7 @@ from ....conftest import HfRunner, VllmRunner
 from ....utils import RemoteOpenAIServer
 from ...utils import check_logprobs_close
 
-MODEL_NAME = "fixie-ai/ultravox-v0_3"
+MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 
 AudioTuple = Tuple[np.ndarray, int]
 

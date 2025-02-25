@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 import math
 from functools import cached_property
-from typing import (Any, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from typing import (Any, Iterable, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.utils.checkpoint
@@ -14,12 +16,13 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from vllm import envs
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
@@ -31,7 +34,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings,
@@ -65,8 +68,9 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         *,
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
+        **kwargs: object,
     ) -> ProcessorMixin:
-        hf_processor = self.ctx.get_hf_processor()
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
 
         # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
         # placeholder that will cause confusion with the actual end of turn
@@ -90,7 +94,11 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         feature_extractor = self.get_feature_extractor()
         max_audio_tokens = math.ceil(feature_extractor.chunk_length *
                                      _AUDIO_TOKENS_PER_SECOND)
@@ -251,27 +259,35 @@ class UltravoxProjector(nn.Module):
         super().__init__()
         self.hidden_dim = config.hidden_size
         self._pad_and_stack = StackAudioFrames(config.stack_factor)
-        dim = config.audio_config.hidden_size * config.stack_factor
-        self.ln_pre = RMSNorm(dim)
-        self.linear_1 = nn.Linear(dim, self.hidden_dim, bias=False)
-        dim = self.hidden_dim
+        dim_in = config.audio_config.hidden_size * config.stack_factor
+        self.ln_pre = RMSNorm(dim_in)
+        self.linear_1 = nn.Linear(dim_in, self.hidden_dim, bias=False)
+        dim_mid = self.hidden_dim
 
         if config.projector_act == "swiglu":
             self.act = MulAndSilu()
-            dim = dim // 2
+            dim_mid = dim_mid // 2
         else:
             self.act = get_act_fn(config.projector_act)
 
-        self.linear_2 = nn.Linear(dim,
-                                  config.text_config.hidden_size,
-                                  bias=False)
-        self.ln_post = RMSNorm(config.text_config.hidden_size)
+        dim_out = config.text_config.hidden_size
+        self.linear_2 = nn.Linear(dim_mid, dim_out, bias=False)
+
+        # Ultravox v0.4.1 and below use layer_norm after the second linear layer
+        # while v0.5.0 and above uses layer_norm after the first linear layer.
+        if config.projector_ln_mid:
+            self.ln_mid: nn.Module = RMSNorm(dim_mid)
+            self.ln_post = nn.Identity()
+        else:
+            self.ln_mid = nn.Identity()
+            self.ln_post = RMSNorm(dim_out)
 
     def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
         audio_features = self._pad_and_stack(audio_features)
         audio_features = self.ln_pre(audio_features)
         hidden_states = self.linear_1(audio_features)
         hidden_states = self.act(hidden_states)
+        hidden_states = self.ln_mid(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         hidden_states = self.ln_post(hidden_states)
         return hidden_states
@@ -333,11 +349,16 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor,
-                                        info=UltravoxProcessingInfo,
-                                        dummy_inputs=UltravoxDummyInputsBuilder
-                                        )
-class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
+@MULTIMODAL_REGISTRY.register_processor(
+    UltravoxMultiModalProcessor,
+    info=UltravoxProcessingInfo,
+    dummy_inputs=UltravoxDummyInputsBuilder)
+class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
@@ -384,6 +405,16 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
             return self.language_model.sampler
 
         return get_sampler()
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model.",
+            connector="multi_modal_projector.",
+            tower_model="audio_tower.",
+        )
 
     def _audio_features_to_embeddings(
             self, input_features: torch.Tensor) -> torch.Tensor:
@@ -464,13 +495,13 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[NestedTensors] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
             if not envs.VLLM_USE_V1:
+                attn_metadata = get_forward_context().attn_metadata
                 merge_multimodal_embeddings_from_map(
                     inputs_embeds, multimodal_embeddings,
                     attn_metadata.multi_modal_placeholder_index_maps["audio"])
@@ -483,8 +514,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[torch.Tensor] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
@@ -509,17 +538,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         elif inputs_embeds is None:
             multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-            # TODO(ywang96): remove attn_metadata from get_input_embeddings
-            # after v0 is deprecated
             inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings,
-                                                      attn_metadata)
+                                                      multimodal_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
         return hidden_states

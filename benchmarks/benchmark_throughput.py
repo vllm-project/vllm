@@ -1,14 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
 """Benchmark offline inference throughput."""
 import argparse
 import dataclasses
 import json
+import os
 import random
 import time
 from functools import cache
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import uvloop
+from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -168,7 +171,12 @@ def run_vllm(
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
-
+    assert all(
+        llm.llm_engine.model_config.max_model_len >= (
+            request.prompt_len + request.expected_output_len)
+        for request in requests), (
+            "Please ensure that max_model_len is greater than the sum of"
+            " prompt_len and expected_output_len for all requests.")
     # Add the requests to the engine.
     prompts: List[TextPrompt] = []
     sampling_params: List[SamplingParams] = []
@@ -226,6 +234,12 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:
+        assert all(
+            llm.model_config.max_model_len >= (request.prompt_len +
+                                               request.expected_output_len)
+            for request in requests), (
+                "Please ensure that max_model_len is greater than the sum of"
+                " prompt_len and expected_output_len for all requests.")
 
         # Add the requests to the engine.
         prompts: List[TextPrompt] = []
@@ -337,6 +351,24 @@ def run_mii(
     return end - start
 
 
+def save_to_pytorch_benchmark_format(args: argparse.Namespace,
+                                     results: Dict[str, Any]) -> None:
+    pt_records = convert_to_pytorch_benchmark_format(
+        args=args,
+        metrics={
+            "requests_per_second": [results["requests_per_second"]],
+            "tokens_per_second": [results["tokens_per_second"]],
+        },
+        extra_info={
+            k: results[k]
+            for k in ["elapsed_time", "num_requests", "total_num_tokens"]
+        })
+    if pt_records:
+        # Don't use json suffix here as we don't want CI to pick it up
+        pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
+        write_to_json(pt_file, pt_records)
+
+
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -434,6 +466,7 @@ def main(args: argparse.Namespace):
         }
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
+        save_to_pytorch_benchmark_format(args, results)
 
 
 if __name__ == "__main__":

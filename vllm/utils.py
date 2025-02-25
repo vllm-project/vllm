@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import asyncio
 import concurrent
@@ -13,7 +15,6 @@ import ipaddress
 import multiprocessing
 import os
 import re
-import resource
 import signal
 import socket
 import subprocess
@@ -29,11 +30,10 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from functools import lru_cache, partial, wraps
+from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
-                    NamedTuple, Optional, Tuple, Type, TypeVar, Union,
-                    overload)
+                    NamedTuple, Optional, Tuple, Type, TypeVar, Union)
 from uuid import uuid4
 
 import cloudpickle
@@ -352,7 +352,7 @@ class PyObjectCache:
         self._index = 0
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
@@ -447,7 +447,7 @@ def get_ip() -> str:
         logger.warning(
             "The environment variable HOST_IP is deprecated and ignored, as"
             " it is often used by Docker and other software to"
-            "interact with the container's network stack. Please "
+            " interact with the container's network stack. Please "
             "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
             " to communicate with each other.")
     if host_ip:
@@ -501,6 +501,25 @@ def get_open_zmq_ipc_path() -> str:
 
 
 def get_open_port() -> int:
+    """
+    Get an open port for the vLLM process to listen on.
+    An edge case to handle, is when we run data parallel,
+    we need to avoid ports that are potentially used by
+    the data parallel master process.
+    Right now we reserve 10 ports for the data parallel master
+    process. Currently it uses 2 ports.
+    """
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        dp_port = envs.VLLM_DP_MASTER_PORT
+        while True:
+            port = _get_open_port()
+            if port >= dp_port and port < dp_port + 10:
+                continue
+            return port
+    return _get_open_port()
+
+
+def _get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
         while True:
@@ -559,6 +578,14 @@ def chunk_list(lst: List[T], chunk_size: int):
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
+
+
+def round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
+
+
+def round_down(x: int, y: int) -> int:
+    return (x // y) * y
 
 
 def _generate_random_fp8(
@@ -697,7 +724,7 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_pin_memory_available() -> bool:
     from vllm.platforms import current_platform
     return current_platform.is_pin_memory_available()
@@ -792,6 +819,12 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
+def align_to_256bytes(extent: int, dtype: torch.dtype) -> int:
+    dtype_size = get_dtype_size(dtype)
+    eles_per_256bytes = 256 // dtype_size
+    return round_up(extent, eles_per_256bytes)
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -813,38 +846,6 @@ def is_list_of(
 JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
                  Tuple["JSONTree[T]", ...], T]
 """A nested JSON structure where the leaves need not be JSON-serializable."""
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Dict[str, JSONTree[T]],
-) -> Dict[str, JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: List[JSONTree[T]],
-) -> List[JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Tuple[JSONTree[T], ...],
-) -> Tuple[JSONTree[U], ...]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: JSONTree[T],
-) -> JSONTree[U]:
-    ...
 
 
 def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
@@ -886,7 +887,7 @@ def init_cached_hf_modules() -> None:
     init_hf_modules()
 
 
-@lru_cache(maxsize=None)
+@cache
 def find_library(lib_name: str) -> str:
     """
     Find the library file in the system.
@@ -964,11 +965,16 @@ def current_stream() -> torch.cuda.Stream:
     the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
     from C/C++ code.
     """
+    from vllm.platforms import current_platform
     global _current_stream
     if _current_stream is None:
         # when this function is called before any stream is set,
         # we return the default stream.
-        _current_stream = torch.cuda.current_stream()
+        # On ROCm using the default 0 stream in combination with RCCL
+        # is hurting performance. Therefore creating a dedicated stream
+        # per process
+        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
+        ) else torch.cuda.current_stream()
     return _current_stream
 
 
@@ -1206,6 +1212,19 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
+
+    def check_port(self, value):
+        try:
+            value = int(value)
+        except ValueError:
+            msg = "Port must be an integer"
+            raise argparse.ArgumentTypeError(msg) from None
+
+        if not (1024 <= value <= 65535):
+            raise argparse.ArgumentTypeError(
+                "Port must be between 1024 and 65535")
+
+        return value
 
     def _pull_args_from_config(self, args: List[str]) -> List[str]:
         """Method to pull arguments specified in the config file
@@ -1607,7 +1626,7 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     return module
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_vllm_optional_dependencies():
     metadata = importlib.metadata.metadata("vllm")
     requirements = metadata.get_all("Requires-Dist", [])
@@ -2058,6 +2077,11 @@ def memory_profiling(
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
 def set_ulimit(target_soft_limit=65535):
+    if sys.platform.startswith('win'):
+        logger.info("Windows detected, skipping ulimit adjustment.")
+        return
+
+    import resource
     resource_type = resource.RLIMIT_NOFILE
     current_soft, current_hard = resource.getrlimit(resource_type)
 
@@ -2067,8 +2091,8 @@ def set_ulimit(target_soft_limit=65535):
                                (target_soft_limit, current_hard))
         except ValueError as e:
             logger.warning(
-                "Found ulimit of %s and failed to automatically increase"
-                "with error %s. This can cause fd limit errors like"
+                "Found ulimit of %s and failed to automatically increase "
+                "with error %s. This can cause fd limit errors like "
                 "`OSError: [Errno 24] Too many open files`. Consider "
                 "increasing with ulimit -n", current_soft, e)
 
@@ -2206,3 +2230,77 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     else:
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
+
+
+def import_pynvml():
+    """
+    Historical comments:
+
+    libnvml.so is the library behind nvidia-smi, and
+    pynvml is a Python wrapper around it. We use it to get GPU
+    status without initializing CUDA context in the current process.
+    Historically, there are two packages that provide pynvml:
+    - `nvidia-ml-py` (https://pypi.org/project/nvidia-ml-py/): The official
+        wrapper. It is a dependency of vLLM, and is installed when users
+        install vLLM. It provides a Python module named `pynvml`.
+    - `pynvml` (https://pypi.org/project/pynvml/): An unofficial wrapper.
+        Prior to version 12.0, it also provides a Python module `pynvml`,
+        and therefore conflicts with the official one. What's worse,
+        the module is a Python package, and has higher priority than
+        the official one which is a standalone Python file.
+        This causes errors when both of them are installed.
+        Starting from version 12.0, it migrates to a new module
+        named `pynvml_utils` to avoid the conflict.
+    It is so confusing that many packages in the community use the
+    unofficial one by mistake, and we have to handle this case.
+    For example, `nvcr.io/nvidia/pytorch:24.12-py3` uses the unofficial
+    one, and it will cause errors, see the issue
+    https://github.com/vllm-project/vllm/issues/12847 for example.
+    After all the troubles, we decide to copy the official `pynvml`
+    module to our codebase, and use it directly.
+    """
+    import vllm.third_party.pynvml as pynvml
+    return pynvml
+
+
+def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
+    """
+    A replacement for `abc.ABC`.
+    When we use `abc.ABC`, subclasses will fail to instantiate
+    if they do not implement all abstract methods.
+    Here, we only require `raise NotImplementedError` in the
+    base class, and log a warning if the method is not implemented
+    in the subclass.
+    """
+
+    original_init = cls.__init__
+
+    def find_unimplemented_methods(self: object):
+        unimplemented_methods = []
+        for attr_name in dir(self):
+            # bypass inner method
+            if attr_name.startswith('_'):
+                continue
+
+            try:
+                attr = getattr(self, attr_name)
+                # get the func of callable method
+                if callable(attr):
+                    attr_func = attr.__func__
+            except AttributeError:
+                continue
+            src = inspect.getsource(attr_func)
+            if "NotImplementedError" in src:
+                unimplemented_methods.append(attr_name)
+        if unimplemented_methods:
+            method_names = ','.join(unimplemented_methods)
+            msg = (f"Methods {method_names} not implemented in {self}")
+            logger.warning(msg)
+
+    @wraps(original_init)
+    def wrapped_init(self, *args, **kwargs) -> None:
+        original_init(self, *args, **kwargs)
+        find_unimplemented_methods(self)
+
+    type.__setattr__(cls, '__init__', wrapped_init)
+    return cls

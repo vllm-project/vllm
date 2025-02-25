@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import base64
 import time
@@ -81,7 +83,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             return self.create_error_response(
                 "dimensions is currently not supported")
 
-        model_name = request.model
+        model_name = self._get_model_name(request.model)
         request_id = f"embd-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 

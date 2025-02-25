@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import pickle
 import signal
@@ -214,9 +216,10 @@ class WorkerProc:
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
+            "is_driver_worker": rank == 0,
         }
         wrapper.init_worker(all_kwargs)
-        self.worker = wrapper.worker
+        self.worker = wrapper
 
         pid = os.getpid()
         _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)

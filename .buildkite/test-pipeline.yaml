@@ -2,7 +2,7 @@
 # adding a new command to an existing step. See different options here for examples.
 
 # This script will be feed into Jinja template in `test-template-aws.j2` at
-# https://github.com/vllm-project/buildkite-ci/blob/main/scripts/test-template-aws.j2 
+# https://github.com/vllm-project/buildkite-ci/blob/main/scripts/test-template-aws.j2
 # to generate the final pipeline yaml file.
 
 # Documentation
@@ -15,7 +15,7 @@
 # mirror_hardwares(list): the list of hardwares to run the test on as well. currently only supports [amd]
 # gpu(str): override the GPU selection for the test. default is on L4 GPUs. currently only supports a100
 # num_gpus(int): override the number of GPUs for the test. default to 1 GPU. currently support 2,4.
-# num_nodes(int): whether to simulate multi-node setup by launch multiple containers on one host, 
+# num_nodes(int): whether to simulate multi-node setup by launch multiple containers on one host,
 #     in this case, commands must be specified. the first command runs on first host, the second
 #     command runs on the second host.
 # working_dir(str): specify the place where command should execute, default to /vllm-workspace/tests
@@ -24,8 +24,8 @@
 # When adding a test
 # - If the test belong to an existing group, add it there
 # - If the test is short, add to any existing step
-# - If the test takes more than 10min, then it is okay to create a new step. 
-#   Note that all steps execute in parallel. 
+# - If the test takes more than 10min, then it is okay to create a new step.
+#   Note that all steps execute in parallel.
 
 steps:
 ##### fast check tests  #####
@@ -50,9 +50,9 @@ steps:
   - tests/multimodal
   - tests/test_utils
   - tests/worker
-  - tests/standalone_tests/lazy_torch_compile.py
+  - tests/standalone_tests/lazy_imports.py
   commands:
-  - python3 standalone_tests/lazy_torch_compile.py
+  - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
@@ -107,13 +107,17 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
+  - tests/entrypoints/llm
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/offline_mode
   commands:
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/correctness/
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -124,11 +128,15 @@ steps:
   source_file_dependencies:
   - vllm/distributed/
   - vllm/core/
-  - tests/distributed
+  - tests/distributed/test_utils
+  - tests/distributed/test_pynccl
   - tests/spec_decode/e2e/test_integration_dist_tp4
-  - tests/compile
+  - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
+  - examples/offline_inference/rlhf_colocate.py
+  - tests/examples/offline_inference/data_parallel.py
   commands:
+  - VLLM_USE_V1=1 python3 ../examples/offline_inference/data_parallel.py
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
@@ -136,16 +144,17 @@ steps:
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - python3 ../examples/offline_inference/rlhf.py
+  - RAY_DEDUP_LOGS=0 python3 ../examples/offline_inference/rlhf_colocate.py
 
 - label: Metrics, Tracing Test # 10min
-  num_gpus: 2 
+  num_gpus: 2
   fast_check: true
   source_file_dependencies:
   - vllm/
   - tests/metrics
   - tests/tracing
   commands:
-  - pytest -v -s metrics 
+  - pytest -v -s metrics
   - "pip install \
       'opentelemetry-sdk>=1.26.0,<1.27.0' \
       'opentelemetry-api>=1.26.0,<1.27.0' \
@@ -172,6 +181,9 @@ steps:
   - vllm/
   - tests/engine
   - tests/tokenization
+  - tests/test_sequence
+  - tests/test_config
+  - tests/test_logger
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
   # OOM in the CI unless we run this separately
@@ -183,7 +195,19 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    - VLLM_USE_V1=1 pytest -v -s v1
+    # split the test to avoid interference
+    - VLLM_USE_V1=1 pytest -v -s v1/core
+    - VLLM_USE_V1=1 pytest -v -s v1/engine
+    - VLLM_USE_V1=1 pytest -v -s v1/sample
+    - VLLM_USE_V1=1 pytest -v -s v1/worker
+    - VLLM_USE_V1=1 pytest -v -s v1/test_stats.py
+    - VLLM_USE_V1=1 pytest -v -s v1/test_utils.py
+    # TODO: accuracy does not match, whether setting
+    # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
+    - VLLM_USE_V1=1 pytest -v -s v1/e2e
+    # Integration test for streaming correctness (requires special branch).
+    - pip install -U git+https://github.com/robertgshaw2-neuralmagic/lm-evaluation-harness.git@streaming-api
+    - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: Examples Test # 25min
   working_dir: "/vllm-workspace/examples"
@@ -193,18 +217,18 @@ steps:
   - examples/
   commands:
     - pip install tensorizer # for tensorizer test
-    - python3 offline_inference/basic.py
-    - python3 offline_inference/cpu_offload.py
-    - python3 offline_inference/chat.py
+    - python3 offline_inference/basic/generate.py --model facebook/opt-125m
+    - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
+    - python3 offline_inference/basic/chat.py
     - python3 offline_inference/prefix_caching.py
     - python3 offline_inference/llm_engine_example.py
     - python3 offline_inference/vision_language.py
     - python3 offline_inference/vision_language_multi_image.py
     - python3 other/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 other/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/encoder_decoder.py
-    - python3 offline_inference/classification.py
-    - python3 offline_inference/embedding.py
-    - python3 offline_inference/scoring.py
+    - python3 offline_inference/basic/classify.py
+    - python3 offline_inference/basic/embed.py
+    - python3 offline_inference/basic/score.py
     - python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
@@ -232,7 +256,7 @@ steps:
   - vllm/model_executor/guided_decoding
   - tests/test_logits_processor
   - tests/model_executor/test_guided_processors
-  commands: 
+  commands:
     - pytest -v -s test_logits_processor.py
     - pytest -v -s model_executor/test_guided_processors.py
 
@@ -243,7 +267,7 @@ steps:
   - vllm/model_executor/models/eagle.py
   commands:
     - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
-    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
+    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py --ignore=spec_decode/e2e/test_mtp_correctness.py
     - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
@@ -254,7 +278,7 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_minicpmv_tp.py
   parallelism: 4
 
-- label: "PyTorch Fullgraph Smoke Test" # 9min
+- label: PyTorch Fullgraph Smoke Test # 9min
   fast_check: true
   source_file_dependencies:
   - vllm/
@@ -265,7 +289,7 @@ steps:
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
 
-- label: "PyTorch Fullgraph Test" # 18min
+- label: PyTorch Fullgraph Test # 18min
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -317,6 +341,14 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
+- label: OpenAI API correctness
+  source_file_dependencies:
+  - csrc/
+  - vllm/entrypoints/openai/
+  - vllm/model_executor/models/whisper.py
+  commands: # LMEval+Transcription WER check
+  - pytest -s entrypoints/openai/correctness/
+
 - label: Encoder Decoder tests # 5min
   source_file_dependencies:
   - vllm/
@@ -340,6 +372,7 @@ steps:
   - vllm/
   - tests/models
   commands:
+    - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_initialization.py
 
@@ -470,12 +503,14 @@ steps:
   - entrypoints/llm/test_collective_rpc.py
   commands:
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - VLLM_USE_V1=1 torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
+  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'
@@ -499,6 +534,7 @@ steps:
   - pip uninstall vllm_add_dummy_platform -y
   # end platform plugin tests
   # other tests continue here:
+  - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
   - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
@@ -548,7 +584,7 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # This test runs llama 13B, so it is required to run on 4 GPUs.
     - pytest -v -s -x lora/test_long_context.py
-    # There is some Tensor Parallelism related processing logic in LoRA that 
+    # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
@@ -573,7 +609,7 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
-    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt 
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
 
 
 ##### multi gpus test #####
@@ -585,7 +621,7 @@ steps:
   num_gpus: 4
   source_file_dependencies:
   - vllm/
-  commands: 
+  commands:
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py

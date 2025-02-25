@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Benchmark offline prioritization."""
 import argparse
 import dataclasses
@@ -10,6 +11,11 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
+
+
+#Select a equi-probable random priority
+def get_random_flag():
+    return 0 if random.random() < 0.5 else 1
 
 
 def sample_requests(
@@ -54,8 +60,7 @@ def sample_requests(
             # Prune too long sequences.
             continue
 
-        #Select a equi-probable random priority
-        priority = 0 if random.random() < 0.5 else 1
+        priority = get_random_flag()
 
         filtered_dataset.append((prompt, prompt_len, output_len, priority))
 
@@ -69,6 +74,12 @@ def run_vllm(
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
+
+    assert all(
+        llm.llm_engine.model_config.max_model_len >= (request[1] + request[2])
+        for request in requests), (
+            "Please ensure that max_model_len is greater than the sum of"
+            " input_len and output_len for all requests.")
 
     # Add the requests to the engine.
     prompts = []
@@ -102,8 +113,8 @@ def main(args: argparse.Namespace):
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
         prompt = "hi" * (args.input_len - 1)
-        requests = [(prompt, args.input_len, args.output_len)
-                    for _ in range(args.num_prompts)]
+        requests = [(prompt, args.input_len, args.output_len,
+                     get_random_flag()) for _ in range(args.num_prompts)]
     else:
         requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
                                    args.output_len)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from typing import Dict, List
 
@@ -17,7 +19,6 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
-from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.platforms import current_platform
 
 EMBEDDING_MODULES = {
@@ -112,19 +113,16 @@ def create_packed_lora(
 
 def test_replace_submodules(dist_init, dummy_model):
     model = dummy_model
-    model.supported_lora_modules = ["dense1", "layer1.dense2"]
-    model.packed_modules_mapping = {}
     manager = LoRAModelManager(
         model, 1, 1, 1,
         LoRAConfig(max_lora_rank=8, max_cpu_loras=8, max_loras=8),
         torch.device(DEVICES[0]))
     model = manager.model
-
     assert isinstance(model.get_submodule("dense1"),
                       ColumnParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense1"),
                       ColumnParallelLinearWithLoRA)
-    assert isinstance(model.get_submodule("dense2"), RowParallelLinear)
+    assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense2"),
                       RowParallelLinearWithLoRA)
 
@@ -132,8 +130,6 @@ def test_replace_submodules(dist_init, dummy_model):
 @pytest.mark.parametrize("device", DEVICES)
 def test_lora_model_manager(dist_init, dummy_model, device):
     model = dummy_model
-    model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
-    model.packed_modules_mapping = {}
     model_lora1 = create_lora(1,
                               model, ["layer1.dense1", "dense2", "lm_head"],
                               device=device)
@@ -188,13 +184,18 @@ def test_lora_model_manager(dist_init, dummy_model, device):
 
     assert manager.device == device
     assert manager.punica_wrapper.device == device
+    assert hasattr(manager, "supported_lora_modules")
+    assert sorted(manager.supported_lora_modules) == [
+        "dense1",
+        "dense2",
+        "lm_head",
+        "output",
+    ]
 
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
     model = dummy_model
-    model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
-    model.packed_modules_mapping = {}
     model_lora1 = create_lora(1,
                               model, ["layer1.dense1", "dense2", "lm_head"],
                               device=device)
@@ -287,8 +288,6 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
     model = dummy_model
-    model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
-    model.packed_modules_mapping = {}
     model_lora1 = create_lora(1,
                               model, ["layer1.dense1", "dense2", "lm_head"],
                               device=device)
@@ -570,13 +569,6 @@ def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
 @pytest.mark.parametrize("device", DEVICES)
 def test_packed_loras(dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
-    model.supported_lora_modules = ["gate_up_proj"]
-    model.packed_modules_mapping = {
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
     model_lora = create_packed_lora(
         1,
         model,
@@ -604,20 +596,26 @@ def test_packed_loras(dist_init, dummy_model_gate_up, device):
 
     assert isinstance(model.get_submodule("gate_up_proj"),
                       MergedColumnParallelLinearWithLoRA)
+    # Verify packed lora is correct
+    model_lora_clone = model_lora.clone(1)
+    model_lora_clone1 = model_lora1.clone(1)
     assert manager.add_adapter(model_lora)
     assert manager.add_adapter(model_lora1)
 
+    assert model_lora.get_lora("gate_proj") is None
+    assert model_lora.get_lora("up_proj") is None
+    assert model_lora1.get_lora("up_proj") is None
     packed_lora = model_lora.get_lora("gate_up_proj")
     assert packed_lora and isinstance(packed_lora, PackedLoRALayerWeights)
 
     torch.testing.assert_close(packed_lora.lora_a[0],
-                               model_lora.get_lora("gate_proj").lora_a)
+                               model_lora_clone.get_lora("gate_proj").lora_a)
     torch.testing.assert_close(packed_lora.lora_b[0],
-                               model_lora.get_lora("gate_proj").lora_b)
+                               model_lora_clone.get_lora("gate_proj").lora_b)
     torch.testing.assert_close(packed_lora.lora_a[1],
-                               model_lora.get_lora("up_proj").lora_a)
+                               model_lora_clone.get_lora("up_proj").lora_a)
     torch.testing.assert_close(packed_lora.lora_b[1],
-                               model_lora.get_lora("up_proj").lora_b)
+                               model_lora_clone.get_lora("up_proj").lora_b)
 
     packed_lora1 = model_lora1.get_lora("gate_up_proj")
     assert packed_lora1 and isinstance(packed_lora1, PackedLoRALayerWeights)
@@ -625,6 +623,6 @@ def test_packed_loras(dist_init, dummy_model_gate_up, device):
     assert packed_lora1.lora_a[0] is None
     assert packed_lora1.lora_b[0] is None
     torch.testing.assert_close(packed_lora1.lora_a[1],
-                               model_lora1.get_lora("up_proj").lora_a)
+                               model_lora_clone1.get_lora("up_proj").lora_a)
     torch.testing.assert_close(packed_lora1.lora_b[1],
-                               model_lora1.get_lora("up_proj").lora_b)
+                               model_lora_clone1.get_lora("up_proj").lora_b)

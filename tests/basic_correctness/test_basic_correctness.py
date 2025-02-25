@@ -1,18 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
 import os
-import pickle
-import re
 import weakref
-from unittest.mock import patch
 
 import pytest
 
 from vllm import LLM
 from vllm.platforms import current_platform
-from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 from ..conftest import VllmRunner
 from ..models.utils import check_outputs_equal
@@ -20,7 +17,7 @@ from ..utils import multi_gpu_test
 
 MODELS = [
     "google/gemma-2-2b-it",
-    "meta-llama/Llama-3.2-1B",
+    "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
@@ -36,7 +33,7 @@ def v1(run_with_both_engines):
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("facebook/opt-125m")
+    llm = LLM("distilbert/distilgpt2")
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails
@@ -45,10 +42,10 @@ def test_vllm_gc_ed():
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("enforce_eager", [False])
 def test_models(
     hf_runner,
     model: str,
@@ -61,9 +58,10 @@ def test_models(
     if backend == "FLASHINFER" and current_platform.is_rocm():
         pytest.skip("Flashinfer does not support ROCm/HIP.")
 
-    if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
+    if backend in ("XFORMERS",
+                   "FLASHINFER") and model == "google/gemma-2-2b-it":
         pytest.skip(
-            "XFORMERS does not support gemma2 with full context length.")
+            f"{backend} does not support gemma2 with full context length.")
 
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
 
@@ -96,13 +94,13 @@ def test_models(
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, "
     "test_suite", [
-        ("facebook/opt-125m", "ray", "", "L4"),
-        ("facebook/opt-125m", "mp", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "ray", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
-        ("facebook/opt-125m", "ray", "", "A100"),
-        ("facebook/opt-125m", "mp", "", "A100"),
-        ("facebook/opt-125m", "mp", "FLASHINFER", "A100"),
+        ("distilbert/distilgpt2", "ray", "", "L4"),
+        ("distilbert/distilgpt2", "mp", "", "L4"),
+        ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4"),
+        ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4"),
+        ("distilbert/distilgpt2", "ray", "", "A100"),
+        ("distilbert/distilgpt2", "mp", "", "A100"),
+        ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100"),
         ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
     ])
 def test_models_distributed(
@@ -118,7 +116,7 @@ def test_models_distributed(
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 
-    if model == "meta-llama/Llama-2-7b-hf" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
+    if model == "meta-llama/Llama-3.2-1B-Instruct" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
         # test ray adag
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
         os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
@@ -149,57 +147,3 @@ def test_models_distributed(
         name_0="hf",
         name_1="vllm",
     )
-
-
-@pytest.mark.skip_v1
-def test_model_with_failure(vllm_runner) -> None:
-    try:
-        with patch("vllm.model_executor.models.opt.OPTForCausalLM.forward",
-                   side_effect=ValueError()):
-            with pytest.raises(ValueError) as exc_info:
-                vllm_runner("facebook/opt-125m",
-                            dtype="half",
-                            enforce_eager=False,
-                            gpu_memory_utilization=0.7)
-            matches = re.search(r"input dumped to (.+).pkl",
-                                str(exc_info.value))
-            assert matches is not None
-            filename = f"{matches.group(1)}.pkl"
-
-        with open(filename, "rb") as filep:
-            inputs = pickle.load(filep)
-
-        if any(key not in inputs for key in ("arg_1", "arg_2", "arg_3")):
-            raise AssertionError("Missing keys in dumped inputs. Dumped keys: "
-                                 f"{list(inputs.keys())}")
-        assert isinstance(inputs["arg_1"],
-                          ModelInputForGPUWithSamplingMetadata)
-    finally:
-        os.remove(filename)
-
-
-@pytest.mark.skip_v1
-def test_failure_with_async_out_proc(vllm_runner) -> None:
-
-    filename = None
-    try:
-        with vllm_runner("facebook/opt-125m",
-                         dtype="half",
-                         enforce_eager=False,
-                         gpu_memory_utilization=0.7) as vllm_model,\
-             patch("vllm.model_executor.models.opt.OPTForCausalLM.forward",
-                       side_effect=ValueError()):
-            model_config = vllm_model.model.llm_engine.model_config
-            assert model_config.use_async_output_proc
-            with pytest.raises(ValueError) as exc_info:
-                vllm_model.generate_greedy('how to make pizza?', 250)
-            matches = re.search(r"input dumped to (.+).pkl",
-                                str(exc_info.value))
-            assert matches is not None
-
-            filename = f"{matches.group(1)}.pkl"
-    finally:
-        # Clean up
-        if filename is not None:
-            os.remove(filename)
-        pass

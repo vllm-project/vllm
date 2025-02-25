@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A GPU worker class."""
 import gc
 import os
@@ -67,10 +68,10 @@ class Worker(LocalOrDistributedWorkerBase):
         speculative_config = self.speculative_config
         model_config = self.model_config
         speculative_args = {} if speculative_config is None \
-            or (speculative_config.draft_model_config.model ==
-                model_config.model) \
+            or (speculative_config.draft_model_config.hf_config.model_type ==
+                model_config.hf_config.model_type) \
             or (speculative_config.draft_model_config.hf_config.model_type
-                not in ["medusa", "mlp_speculator", "eagle"]) \
+                not in ("medusa", "mlp_speculator", "eagle", "deepseek_mtp")) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
@@ -264,10 +265,7 @@ class Worker(LocalOrDistributedWorkerBase):
                f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
 
         logger.info(msg)
-
         # Final cleanup
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
         gc.collect()
 
         return num_gpu_blocks, num_cpu_blocks
@@ -323,6 +321,18 @@ class Worker(LocalOrDistributedWorkerBase):
                       self.gpu_cache)
 
     def _warm_up_model(self) -> None:
+        # warm up sizes that are not in cudagraph capture sizes,
+        # but users still want to compile for better performance,
+        # e.g. for the max-num-batched token size in chunked prefill.
+        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+        if not self.model_config.enforce_eager:
+            warmup_sizes = [
+                x for x in warmup_sizes if x not in
+                self.vllm_config.compilation_config.cudagraph_capture_sizes
+            ]
+        for size in sorted(warmup_sizes, reverse=True):
+            logger.info("Compile and warming up model for size %d", size)
+            self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by
@@ -515,7 +525,7 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the"
+                "You can use float16 instead by explicitly setting the "
                 "`dtype` flag in CLI, for example: --dtype=half.")
 
 
@@ -523,7 +533,7 @@ def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
                                 max_model_len) -> None:
     if is_attention_free and num_gpu_blocks != 0:
         raise ValueError("No memory should be allocated for the cache blocks "
-                         f"for an attention-free model, but {num_gpu_blocks}"
+                         f"for an attention-free model, but {num_gpu_blocks} "
                          "blocks are allocated.")
     if not is_attention_free and num_gpu_blocks <= 0:
         raise ValueError("No available memory for the cache blocks. "

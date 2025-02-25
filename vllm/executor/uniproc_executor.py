@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -26,6 +28,11 @@ class UniProcExecutor(ExecutorBase):
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
         local_rank = 0
+        # set local rank as the device index if specified
+        device_info = self.vllm_config.device_config.device.__str__().split(
+            ":")
+        if len(device_info) > 1:
+            local_rank = int(device_info[1])
         rank = 0
         kwargs = dict(
             vllm_config=self.vllm_config,
@@ -86,9 +93,10 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             ("ExecutorWithExternalLauncher needs deterministic "
             "execution, so it"
             "does not support delay_factor in scheduling")
-        assert not envs.VLLM_USE_V1, \
-            ("V1 architecture cannot guarantee deterministic execution, "
-            "so it is not supported in ExecutorWithExternalLauncher.")
+        if envs.VLLM_USE_V1:
+            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, \
+            ("To get deterministic execution in V1, "
+            "please set VLLM_ENABLE_V1_MULTIPROCESSING=0")
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
                                                rpc_rank=0)
         # engines are launched in torchrun-compatible launchers
@@ -99,7 +107,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         # - MASTER_PORT
         distributed_init_method = "env://"
         rank = int(os.environ["RANK"])
-        local_rank = rank
+        local_rank = int(os.environ["LOCAL_RANK"])
         is_driver_worker = True
         kwargs = dict(
             vllm_config=self.vllm_config,

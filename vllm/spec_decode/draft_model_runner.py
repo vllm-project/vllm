@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional
 
 import torch
@@ -14,7 +16,7 @@ try:
             ROCmFlashAttentionMetadata as FlashAttentionMetadata)
 except (ModuleNotFoundError, ImportError) as err:
     raise RuntimeError(
-        "Draft model speculative decoding currently only supports"
+        "Draft model speculative decoding currently only supports "
         "CUDA and ROCm flash attention backend.") from err
 
 from vllm.logger import init_logger
@@ -151,7 +153,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 return False
 
         # TODO: Add support for other attn backends
-        if self.attn_backend.get_name() != "FLASH_ATTN":
+        if self.attn_backend.get_name() not in ("FLASH_ATTN", "TRITON_MLA"):
             return False
 
         # TODO: Add support for LORA
@@ -173,6 +175,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs,
     ) -> Optional[List[SamplerOutput]]:
         """Executes num_steps forward passes with advacement of input tensors 
         on the GPU. Look at supports_gpu_multi_step(..) for pre-conditions.
@@ -269,27 +272,34 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
-            kwargs = {"previous_hidden_states": hidden_states} \
+            model_execute_kwargs = {"previous_hidden_states": hidden_states} \
                 if previous_hidden_states is not None else {}
 
+            compute_logits_kwargs = {}
             # Run model
+            if hasattr(self.model.config, "num_nextn_predict_layers"):
+                # for DeepSeek MTP only to use the corresponding layer for
+                # each step
+                spec_step_idx = kwargs.get("spec_step_idx", step)
+                model_execute_kwargs["spec_step_idx"] = spec_step_idx
+                compute_logits_kwargs["spec_step_idx"] = spec_step_idx
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config):
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
-                    kv_caches=kv_caches,
-                    attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
-                    **kwargs,
+                    **model_execute_kwargs,
                 )
 
             # Compute the logits.
             logits = self.model.compute_logits(hidden_states,
-                                               model_input.sampling_metadata)
-
+                                               model_input.sampling_metadata,
+                                               **compute_logits_kwargs)
+            if not self.is_driver_worker:
+                return []
             # Sample the next token.
             output = self.model.sample(
                 logits=logits,

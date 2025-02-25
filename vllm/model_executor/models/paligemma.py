@@ -1,11 +1,12 @@
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
 import torch
 from torch import nn
 from transformers import PaliGemmaConfig
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
@@ -14,8 +15,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
-from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
@@ -86,7 +87,7 @@ def input_processor_for_paligemma(ctx: InputContext,
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
 
-    tokenizer = cached_get_tokenizer(model_config.tokenizer)
+    tokenizer = cached_tokenizer_from_config(model_config)
     image_feature_size = hf_config.text_config.num_image_tokens
     image_token_str = tokenizer.decode(hf_config.image_token_index)
     bos_token = tokenizer.decode(hf_config.bos_token_id)
@@ -286,8 +287,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs: object) -> Union[SamplerOutput, IntermediateTensors]:
@@ -304,8 +303,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 

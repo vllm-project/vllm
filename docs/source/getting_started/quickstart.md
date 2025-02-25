@@ -32,15 +32,15 @@ conda activate myenv
 pip install vllm
 ```
 
-```{note}
+:::{note}
 For non-CUDA platforms, please refer [here](#installation-index) for specific instructions on how to install vLLM.
-```
+:::
 
 (quickstart-offline)=
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference/basic.py>
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference/basic/basic.py>
 
 The first line of this example imports the classes {class}`~vllm.LLM` and {class}`~vllm.SamplingParams`:
 
@@ -69,9 +69,9 @@ The {class}`~vllm.LLM` class initializes vLLM's engine and the [OPT-125M model](
 llm = LLM(model="facebook/opt-125m")
 ```
 
-```{note}
+:::{note}
 By default, vLLM downloads models from [HuggingFace](https://huggingface.co/). If you would like to use models from [ModelScope](https://www.modelscope.cn), set the environment variable `VLLM_USE_MODELSCOPE` before initializing the engine.
-```
+:::
 
 Now, the fun part! The outputs are generated using `llm.generate`. It adds the input prompts to the vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of `RequestOutput` objects, which include all of the output tokens.
 
@@ -97,10 +97,10 @@ Run the following command to start the vLLM server with the [Qwen2.5-1.5B-Instru
 vllm serve Qwen/Qwen2.5-1.5B-Instruct
 ```
 
-```{note}
+:::{note}
 By default, the server uses a predefined chat template stored in the tokenizer.
 You can learn about overriding it [here](#chat-template).
-```
+:::
 
 This server can be queried in the same format as OpenAI API. For example, to list the models:
 
@@ -183,4 +183,14 @@ chat_response = client.chat.completions.create(
     ]
 )
 print("Chat response:", chat_response)
+```
+
+## On Attention Backends
+
+Currently, vLLM supports multiple backends for efficient Attention computation across different platforms and accelerator architectures. It automatically selects the most performant backend compatible with your system and model specifications.
+
+If desired, you can also manually set the backend of your choice by configuring the environment variable `VLLM_ATTENTION_BACKEND` to one of the following options: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
+
+```{attention}
+There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [Dockerfile](https://github.com/vllm-project/vllm/blob/main/Dockerfile) for instructions on how to install it.
 ```

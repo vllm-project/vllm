@@ -1,4 +1,6 @@
-from typing import Dict
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -53,13 +55,11 @@ class TopKTopPSampler(nn.Module):
         self,
         logits: torch.Tensor,
         generators: Dict[int, torch.Generator],
-        no_top_k: bool,
-        k: torch.Tensor,
-        no_top_p: bool,
-        p: torch.Tensor,
+        k: Optional[torch.Tensor],
+        p: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """PyTorch-native implementation of top-k and top-p sampling."""
-        logits = apply_top_k_top_p(logits, no_top_k, k, no_top_p, p)
+        logits = apply_top_k_top_p(logits, k, p)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators)
 
@@ -67,37 +67,33 @@ class TopKTopPSampler(nn.Module):
         self,
         logits: torch.Tensor,
         generators: Dict[int, torch.Generator],
-        no_top_k: bool,
-        k: torch.Tensor,
-        no_top_p: bool,
-        p: torch.Tensor,
+        k: Optional[torch.Tensor],
+        p: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """More optimized implementation for top-k and top-p sampling."""
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        if no_top_k and no_top_p:
+        if k is None and p is None:
             # We prefer `random_sample` over `flashinfer_sample` when sorting is
             # not needed. This is because `random_sample` does not require
             # CPU-GPU synchronization while `flashinfer_sample` does.
             return random_sample(probs, generators)
-        return flashinfer_sample(probs, no_top_k, k, no_top_p, p, generators)
+        return flashinfer_sample(probs, k, p, generators)
 
 
 def apply_top_k_top_p(
     logits: torch.Tensor,
-    no_top_k: bool,
-    k: torch.Tensor,
-    no_top_p: bool,
-    p: torch.Tensor,
+    k: Optional[torch.Tensor],
+    p: Optional[torch.Tensor],
 ) -> torch.Tensor:
     """Apply top-k and top-p masks to the logits.
 
     This function sorts the logits tensor, which can be slow for large batches.
     """
-    if no_top_k and no_top_p:
+    if k is None and p is None:
         return logits
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
-    if not no_top_k:
+    if k is not None:
         # Apply top-k.
         top_k_mask = logits_sort.size(1) - k.to(torch.long)
         # Get all the top_k values.
@@ -105,7 +101,7 @@ def apply_top_k_top_p(
         top_k_mask = logits_sort < top_k_mask
         logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
-    if not no_top_p:
+    if p is not None:
         # Apply top-p.
         probs_sort = logits_sort.softmax(dim=-1)
         probs_sum = probs_sort.cumsum(dim=-1)
@@ -145,10 +141,8 @@ def random_sample(
 
 def flashinfer_sample(
     probs: torch.Tensor,
-    no_top_k: bool,
-    k: torch.Tensor,
-    no_top_p: bool,
-    p: torch.Tensor,
+    k: Optional[torch.Tensor],
+    p: Optional[torch.Tensor],
     generators: Dict[int, torch.Generator],
 ) -> torch.Tensor:
     """Sample from the probabilities using FlashInfer.
@@ -165,7 +159,7 @@ def flashinfer_sample(
     does not. Call this function at the end of the forward pass to minimize
     the synchronization overhead.
     """
-    assert not (no_top_k and no_top_p)
+    assert not (k is None and p is None)
     max_top_k_round = 32
     batch_size = probs.shape[0]
     uniform_samples = torch.empty((max_top_k_round, batch_size),
@@ -176,11 +170,11 @@ def flashinfer_sample(
         for i, generator in generators.items():
             uniform_samples[:, i].uniform_(generator=generator)
 
-    if no_top_k:
+    if k is None:
         # Top-p only.
         next_token_ids, success = flashinfer.sampling.top_p_sampling_from_probs(
             probs, uniform_samples, p, deterministic=True)
-    elif no_top_p:
+    elif p is None:
         # Top-k only.
         next_token_ids, success = flashinfer.sampling.top_k_sampling_from_probs(
             probs, uniform_samples, k, deterministic=True)
@@ -192,9 +186,9 @@ def flashinfer_sample(
 
     # NOTE: CPU-GPU synchronization happens here.
     if not success.all():
-        if not no_top_k:
+        if k is not None:
             probs = flashinfer.sampling.top_k_renorm_prob(probs, k)
-        if not no_top_p:
+        if p is not None:
             probs = flashinfer.sampling.top_p_renorm_prob(probs, p)
         next_token_ids = flashinfer.sampling.sampling_from_probs(
             probs, uniform_samples[0], deterministic=True)

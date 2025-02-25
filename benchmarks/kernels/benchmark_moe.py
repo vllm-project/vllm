@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import time
 from datetime import datetime
@@ -343,9 +345,13 @@ class BenchmarkWorker:
         op_config = get_moe_configs(num_experts, shard_intermediate_size // 2,
                                     dtype_str)
         if op_config is None:
-            config = get_default_config(num_tokens, num_experts,
-                                        shard_intermediate_size, hidden_size,
-                                        topk, dtype_str)
+            config = get_default_config(num_tokens,
+                                        num_experts,
+                                        shard_intermediate_size,
+                                        hidden_size,
+                                        topk,
+                                        dtype_str,
+                                        is_marlin=False)
         else:
             config = op_config[min(op_config.keys(),
                                    key=lambda x: abs(x - num_tokens))]
@@ -450,7 +456,8 @@ def save_configs(configs: Dict[int, BenchmarkConfig], num_experts: int,
 def main(args: argparse.Namespace):
     print(args)
 
-    config = AutoConfig.from_pretrained(args.model)
+    config = AutoConfig.from_pretrained(
+        args.model, trust_remote_code=args.trust_remote_code)
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
@@ -460,6 +467,12 @@ def main(args: argparse.Namespace):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+    elif (config.architectures[0] == "DeepseekV3ForCausalLM"
+          or config.architectures[0] == "DeepseekV2ForCausalLM"):
+        E = config.n_routed_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Default: Mixtral.
@@ -530,7 +543,11 @@ if __name__ == "__main__":
     parser.add_argument("--model",
                         type=str,
                         default="mistralai/Mixtral-8x7B-Instruct-v0.1")
-    parser.add_argument("--tp-size", "-tp", type=int, default=2)
+    parser.add_argument("--tp-size",
+                        "-tp",
+                        "--tensor-parallel-size",
+                        type=int,
+                        default=2)
     parser.add_argument("--dtype",
                         type=str,
                         choices=["auto", "fp8_w8a8", "int8_w8a16"],
@@ -538,6 +555,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, required=False)
     parser.add_argument("--tune", action="store_true")
+    parser.add_argument("--trust-remote-code", action="store_true")
     args = parser.parse_args()
 
     main(args)

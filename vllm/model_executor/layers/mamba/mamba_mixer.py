@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
@@ -5,6 +7,7 @@ from torch.nn.parameter import Parameter
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -128,13 +131,13 @@ class MambaMixer(CustomOp):
         ) if use_rms_norm else None
 
     def forward_native(self, hidden_states: torch.Tensor,
-                       attn_metadata: AttentionMetadata,
                        conv_state: torch.Tensor, ssm_state: torch.Tensor):
         pass
 
     def forward_cuda(self, hidden_states: torch.Tensor,
-                     attn_metadata: AttentionMetadata,
                      mamba_cache_params: MambaCacheParams):
+
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)

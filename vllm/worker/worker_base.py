@@ -1,14 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import os
 import time
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import cloudpickle
 import torch
 import torch.nn as nn
 
-from vllm.config import ObservabilityConfig, VllmConfig
+from vllm.config import (ObservabilityConfig, VllmConfig,
+                         set_current_vllm_config)
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -16,7 +19,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
-                        update_environment_variables)
+                        update_environment_variables,
+                        warn_for_unimplemented_methods)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
@@ -24,7 +28,8 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 logger = init_logger(__name__)
 
 
-class WorkerBase(ABC):
+@warn_for_unimplemented_methods
+class WorkerBase:
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
@@ -50,33 +55,29 @@ class WorkerBase(ABC):
         from vllm.platforms import current_platform
         self.current_platform = current_platform
 
-    @abstractmethod
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Determine the number of available blocks for the GPU KV cache and
-        swappable CPU KV cache.
-
-        The implementation may run profiling or other heuristics to determine
-        the size of caches.
-
-        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
-        are blocks that are "active" on the device and can be appended to.
-        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
-        appended to.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Initialize the KV cache with the given size in blocks.
         """
+        raise NotImplementedError
+
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
+
+    def load_model(self) -> None:
+        """Load model onto target device."""
+        raise NotImplementedError
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
     def start_worker_execution_loop(self) -> None:
@@ -91,39 +92,42 @@ class WorkerBase(ABC):
                 if output is None:
                     return None
 
-    @abstractmethod
-    def get_model(self) -> nn.Module:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        """Determine the number of available blocks for the GPU KV cache and
+        swappable CPU KV cache.
+
+        The implementation may run profiling or other heuristics to determine
+        the size of caches.
+
+        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        are blocks that are "active" on the device and can be appended to.
+        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
+        appended to.
+        """
         raise NotImplementedError
 
-    @abstractmethod
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
-        raise NotImplementedError
-
-    @abstractmethod
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
         """
         raise NotImplementedError
 
-    @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def list_loras(self) -> Set[int]:
         raise NotImplementedError
+
+    @property
+    def vocab_size(self) -> int:
+        """Get vocabulary size from model configuration."""
+        return self.model_config.get_vocab_size()
 
 
 class DelegateWorkerBase(WorkerBase):
@@ -152,6 +156,10 @@ class DelegateWorkerBase(WorkerBase):
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def load_model(self) -> None:
+        """Load model onto target device."""
+        self.worker.load_model()
 
     def get_model(self) -> nn.Module:
         return self.worker.get_model()
@@ -389,6 +397,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
+        if (execute_model_req is not None and execute_model_req.spec_step_idx):
+            kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
 
@@ -498,8 +508,11 @@ class WorkerWrapperBase:
         group.
         """
         self.rpc_rank = rpc_rank
-        self.vllm_config = vllm_config
         self.worker: Optional[WorkerBase] = None
+        # do not store this `vllm_config`, `init_worker` will set the final
+        # one. TODO: investigate if we can remove this field in
+        # `WorkerWrapperBase`, `init_cached_hf_modules` should be
+        # unnecessary now.
         if vllm_config.model_config is not None:
             # it can be None in tests
             trust_remote_code = vllm_config.model_config.trust_remote_code
@@ -533,6 +546,9 @@ class WorkerWrapperBase:
         Arguments are passed to the worker class constructor.
         """
         kwargs = all_kwargs[self.rpc_rank]
+        self.vllm_config = kwargs.get("vllm_config", None)
+        assert self.vllm_config is not None, (
+            "vllm_config is required to initialize the worker")
         enable_trace_function_call_for_thread(self.vllm_config)
 
         from vllm.plugins import load_general_plugins
@@ -546,13 +562,27 @@ class WorkerWrapperBase:
                               bytes)
             worker_class = cloudpickle.loads(
                 self.vllm_config.parallel_config.worker_cls)
-        self.worker = worker_class(**kwargs)
-        assert self.worker is not None
+        with set_current_vllm_config(self.vllm_config):
+            # To make vLLM config available during worker initialization
+            self.worker = worker_class(**kwargs)
+            assert self.worker is not None
+
+    def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
+        kv_cache_config = kv_cache_configs[self.rpc_rank]
+        self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+
+    def init_device(self):
+        with set_current_vllm_config(self.vllm_config):
+            # To make vLLM config available during device initialization
+            self.worker.init_device()  # type: ignore
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
-            target = self if self.worker is None else self.worker
-            return run_method(target, method, args, kwargs)
+            # method resolution order:
+            # if a method is defined in this class, it will be called directly.
+            # otherwise, since we define `__getattr__` and redirect attribute
+            # query to `self.worker`, the method will be called on the worker.
+            return run_method(self, method, args, kwargs)
         except Exception as e:
             # if the driver worker also execute methods,
             # exceptions in the rest worker may cause deadlock in rpc like ray

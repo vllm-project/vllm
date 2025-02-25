@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Callable, Dict, Optional
 
 import torch
@@ -53,31 +55,33 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         if not (weight_qscheme == "per_tensor"
                 and input_qscheme == "per_tensor"):
             raise ValueError(
-                "For FP8 Fused MoE layers, only per-tensor scales"
+                "For FP8 Fused MoE layers, only per-tensor scales "
                 "for weights and activations are supported. Found "
                 f"{weight_qscheme}, {input_qscheme}")  # noqa E501
 
         self.static_input_scales = not self.input_quant.get("is_dynamic")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
         params_dtype = torch.float8_e4m3fn
 
         # WEIGHTS
-        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    2 * intermediate_size,
-                                                    hidden_size,
-                                                    dtype=params_dtype),
+        w13_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size,
+            dtype=params_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                   hidden_size,
-                                                   intermediate_size,
-                                                   dtype=params_dtype),
+        w2_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            dtype=params_dtype),
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
@@ -170,7 +174,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         assert layer.w13_weight_scale is not None
         shard_size = layer.intermediate_size_per_partition
         max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-        for expert_id in range(layer.num_experts):
+        for expert_id in range(layer.local_num_experts):
             start = 0
             for shard_id in range(2):
                 dq_weight = per_tensor_dequantize(
@@ -194,6 +198,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
@@ -219,6 +225,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                              topk_ids=topk_ids,
                              inplace=True,
                              use_fp8_w8a8=True,
+                             global_num_experts=global_num_experts,
+                             expert_map=expert_map,
                              w1_scale=layer.w13_weight_scale,
                              w2_scale=layer.w2_weight_scale,
                              a1_scale=layer.w13_input_scale,

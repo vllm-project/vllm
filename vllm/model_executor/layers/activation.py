@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Custom activation functions."""
 import math
 from typing import Optional
@@ -87,6 +88,13 @@ class SiluAndMul(CustomOp):
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x)
         return out
+
+    def forward_neuron(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        x_reshaped = x.view(-1, x.shape[-1])
+        s = x_reshaped[:, :d] * F.sigmoid(x_reshaped[:, :d])
+        result = s * x_reshaped[:, d:]
+        return result.view(*x.shape[:-1], d)
 
 
 @CustomOp.register("mul_and_silu")

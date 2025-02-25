@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass, field
 from typing import AbstractSet, Any, Literal, Mapping, Optional
 
@@ -100,8 +102,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
                                          trust_remote_code=True),
+    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B"),
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloomz-1b1"),
-    # ChatGLMModel supports multimodal
+    "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
+                                    trust_remote_code=True),
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",
                                          trust_remote_code=True),
     "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501
@@ -135,11 +139,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "InternLM3ForCausalLM": _HfExamplesInfo("internlm/internlm3-8b-instruct",
                                             trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
-    "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini"),
-    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Meta-Llama-3-8B"),
+    "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
+                                        extras={"tiny": "ai21labs/Jamba-tiny-dev"}),  # noqa: E501
+    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct"),
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
+    "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1",
+                                         is_available_online=False),
     "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),  # noqa: E501
     "MiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-2B-sft-bf16",
                                          trust_remote_code=True),
@@ -164,8 +171,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
-    # QWenLMHeadModel supports multimodal
-    "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct"),
+    "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
+                                       trust_remote_code=True),
+    "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-7B-Instruct",
+                                        extras={"2.5": "Qwen/Qwen2.5-7B-Instruct"}), # noqa: E501
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b",
                                      is_available_online=False),
@@ -211,6 +220,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
+    # The model on Huggingface is currently being updated,
+    # hence I temporarily mark it as not available online
+    "PrithviGeoSpatialMAE": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",  # noqa: E501
+                                            is_available_online=False),
 }
 
 _CROSS_ENCODER_EXAMPLE_MODELS = {
@@ -222,22 +235,22 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
 
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
-    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria",
-                                                    min_transformers_version="4.48"),
+    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b"),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
-    "ChatGLMModel": _HfExamplesInfo("THUDM/glm-4v-9b",
-                                    extras={"text_only": "THUDM/chatglm3-6b"},
-                                    trust_remote_code=True),
-    "ChatGLMForConditionalGeneration": _HfExamplesInfo("chatglm2-6b",
-                                                       is_available_online=False),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
-    "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m"),
+    "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
+                                        trust_remote_code=True,
+                                        hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
+    "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
+                                      extras={"2b": "h2oai/h2ovl-mississippi-2b"}),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
+                                         extras={"2B": "OpenGVLab/InternVL2-2B"},  # noqa: E501
                                          trust_remote_code=True),
-    "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3"),  # noqa: E501
+    "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
+                                                        {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
                                                      extras={"mistral": "mistral-community/pixtral-12b"}),  # noqa: E501
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-v1.6-mistral-7b-hf"),  # noqa: E501
@@ -245,23 +258,31 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
     "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3",  # noqa: E501
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
+    "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
+                                trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
+                                extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
+                                        extras={"olmo": "allenai/Molmo-7B-O-0924"},  # noqa: E501
                                         trust_remote_code=True),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B",
                               trust_remote_code=True),
-    "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-pt-224"),  # noqa: E501
+    "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-mix-224",  # noqa: E501
+                                                         extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
                                                        tokenizer_mode="mistral"),
-    "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-VL-Chat",
-                                       extras={"text_only": "Qwen/Qwen-7B-Chat"},  # noqa: E501
-                                       trust_remote_code=True),
+    "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",
+                                                      extras={"chat": "Qwen/Qwen-VL-Chat"},  # noqa: E501
+                                                      trust_remote_code=True,
+                                                      hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]}),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
-    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_3",
+    "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct",  # noqa: E501
+                                                          min_transformers_version="4.49"),  # noqa: E501
+    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",
                                      trust_remote_code=True),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
@@ -274,7 +295,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "MedusaModel": _HfExamplesInfo("JackFram/llama-68m",
                                    speculative_model="abhigoyal/vllm-medusa-llama-68m-random"),  # noqa: E501
     "MLPSpeculatorPreTrainedModel": _HfExamplesInfo("JackFram/llama-160m",
-                                                    speculative_model="ibm-fms/llama-160m-accelerator"),  # noqa: E501
+                                                    speculative_model="ibm-ai-platform/llama-160m-accelerator"),  # noqa: E501
+    "DeepSeekMTPModel": _HfExamplesInfo("luccafong/deepseek_mtp_main_random",
+                                        speculative_model="luccafong/deepseek_mtp_draft_random",  # noqa: E501
+                                        trust_remote_code=True),
+}
+
+_FALLBACK_MODEL = {
+    "TransformersModel": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
 }
 
 _EXAMPLE_MODELS = {
@@ -283,6 +311,7 @@ _EXAMPLE_MODELS = {
     **_CROSS_ENCODER_EXAMPLE_MODELS,
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
+    **_FALLBACK_MODEL,
 }
 
 

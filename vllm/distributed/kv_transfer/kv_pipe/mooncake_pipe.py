@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import os
 import pickle
@@ -135,7 +137,7 @@ class MooncakeTransferEngine:
             if metadata_backend not in supported_backend:
                 raise ValueError(
                     "Mooncake Configuration error. `metadata_backend`"
-                    f"should be one of {supported_backend}.")
+                    f" should be one of {supported_backend}.")
 
             self.engine.initializeExt(local_hostname, metadata_server,
                                       protocol, device_name, metadata_backend)

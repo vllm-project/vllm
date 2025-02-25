@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pickle as pkl
 import time
 from dataclasses import dataclass

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
@@ -146,7 +147,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                                               dtype=torch.long,
                                               device=device)
 
-        # 5 is the number of indicies tensors.
+        # 5 is the number of indices tensors.
         # base_indices, sampler_indices, sampler_indices_padded,
         # embeddings_indices,long_lora_indices
         self.indices_len: List[Optional[int]] = [None] * 5

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import time
 from collections import defaultdict
@@ -5,10 +7,10 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
+import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -33,7 +35,7 @@ try:
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
-        lazliy initialized after Ray sets CUDA_VISIBLE_DEVICES."""
+        lazily initialized after Ray sets CUDA_VISIBLE_DEVICES."""
 
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
@@ -52,10 +54,10 @@ try:
 
         def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
             node_id = ray.get_runtime_context().get_node_id()
-            device_key = current_platform.ray_device_key
+            device_key = vllm.platforms.current_platform.ray_device_key
             if not device_key:
                 raise RuntimeError("current platform %s does not support ray.",
-                                   current_platform.device_name)
+                                   vllm.platforms.current_platform.device_name)
             gpu_ids = ray.get_runtime_context().get_accelerator_ids(
             )[device_key]
             return node_id, gpu_ids
@@ -110,13 +112,25 @@ try:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-        def execute_model(
+        def execute_model_ray(
             self,
-            scheduler_output: "SchedulerOutput",
-        ) -> "ModelRunnerOutput":
+            scheduler_output: Union["SchedulerOutput",
+                                    Tuple["SchedulerOutput",
+                                          "IntermediateTensors"]],
+        ) -> Union["ModelRunnerOutput", Tuple["SchedulerOutput",
+                                              "IntermediateTensors"]]:
+            # this method is used to compile ray CG,
+            # and it needs a special logic of self.setup_device_if_necessary()
             self.setup_device_if_necessary()
             assert self.worker is not None, "Worker is not initialized"
-            output = self.worker.model_runner.execute_model(scheduler_output)
+            if isinstance(scheduler_output, tuple):
+                scheduler_output, intermediate_tensors = scheduler_output
+            else:
+                scheduler_output, intermediate_tensors = scheduler_output, None
+            output = self.worker.model_runner.execute_model(
+                scheduler_output, intermediate_tensors)
+            if isinstance(output, IntermediateTensors):
+                output = scheduler_output, output
             return output
 
         def override_env_vars(self, vars: Dict[str, str]):
@@ -212,7 +226,10 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
         logger.info(
             "Waiting for creating a placement group of specs for "
             "%d seconds. specs=%s. Check "
-            "`ray status` to see if you have enough resources.",
+            "`ray status` to see if you have enough resources,"
+            " and make sure the IP addresses used by ray cluster"
+            " are the same as VLLM_HOST_IP environment variable"
+            " specified in each node if you are running on a multi-node.",
             int(time.time() - s), placement_group_specs)
 
     try:
@@ -303,7 +320,7 @@ def initialize_ray_cluster(
         if parallel_config.world_size > device_bundles:
             raise ValueError(
                 f"The number of required {device_str}s exceeds the total "
-                f"number of available {device_str}s in the placement group."
+                f"number of available {device_str}s in the placement group. "
                 f"Required number of devices: {parallel_config.world_size}. "
                 f"Total number of devices: {device_bundles}.")
     else:

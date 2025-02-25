@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Utilities for downloading and initializing model weights."""
 import fnmatch
 import glob
@@ -5,9 +6,9 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from collections import defaultdict
-from typing import (Any, Callable, Dict, Generator, Iterable, List, Optional,
-                    Tuple, Union)
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import filelock
 import gguf
@@ -23,7 +24,6 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
-from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
 
@@ -95,7 +95,7 @@ def convert_bin_to_safetensor_file(
     pt_filename: str,
     sf_filename: str,
 ) -> None:
-    loaded = torch.load(pt_filename, map_location="cpu")
+    loaded = torch.load(pt_filename, map_location="cpu", weights_only=True)
     if "state_dict" in loaded:
         loaded = loaded["state_dict"]
     shared = _shared_pointers(loaded)
@@ -238,7 +238,8 @@ def download_weights_from_hf(
     Returns:
         str: The path to the downloaded model weights.
     """
-    if not huggingface_hub.constants.HF_HUB_OFFLINE:
+    local_only = huggingface_hub.constants.HF_HUB_OFFLINE
+    if not local_only:
         # Before we download we look at that is available:
         fs = HfFileSystem()
         file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
@@ -254,6 +255,7 @@ def download_weights_from_hf(
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
+        start_time = time.perf_counter()
         hf_folder = snapshot_download(
             model_name_or_path,
             allow_patterns=allow_patterns,
@@ -261,8 +263,12 @@ def download_weights_from_hf(
             cache_dir=cache_dir,
             tqdm_class=DisabledTqdm,
             revision=revision,
-            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            local_files_only=local_only,
         )
+        time_taken = time.perf_counter() - start_time
+        if time_taken > 0.5:
+            logger.info("Time spent downloading weights for %s: %.6f seconds",
+                        model_name_or_path, time_taken)
     return hf_folder
 
 
@@ -383,7 +389,9 @@ def np_cache_weights_iterator(
                     disable=not enable_tqdm,
                     bar_format=_BAR_FORMAT,
             ):
-                state = torch.load(bin_file, map_location="cpu")
+                state = torch.load(bin_file,
+                                   map_location="cpu",
+                                   weights_only=True)
                 for name, param in state.items():
                     param_path = os.path.join(np_folder, name)
                     with open(param_path, "wb") as f:
@@ -449,10 +457,9 @@ def pt_weights_iterator(
             disable=not enable_tqdm,
             bar_format=_BAR_FORMAT,
     ):
-        state = torch.load(bin_file, map_location="cpu")
+        state = torch.load(bin_file, map_location="cpu", weights_only=True)
         yield from state.items()
         del state
-        torch.cuda.empty_cache()
 
 
 def get_gguf_extra_tensor_names(
@@ -494,47 +501,6 @@ def gguf_quant_weights_iterator(
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
             yield name, param
-
-
-def kv_cache_scales_loader(
-        filename: str, tp_rank: int, tp_size: int, num_hidden_layers: int,
-        model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
-    """
-    A simple utility to read in KV cache scaling factors that have been
-    previously serialized to disk. Used by the model to populate the appropriate
-    KV cache scaling factors. The serialization should represent a dictionary
-    whose keys are the TP ranks and values are another dictionary mapping layers
-    to their KV cache scaling factors.
-    Keep this function in sync with the output of
-    examples/other/fp8/extract_scales.py
-    """
-    try:
-        with open(filename) as f:
-            context = {
-                "model_type": model_type,
-                "num_hidden_layers": num_hidden_layers,
-                "tp_rank": tp_rank,
-                "tp_size": tp_size,
-            }
-            schema_dct = json.load(f)
-            schema = QuantParamSchema.model_validate(schema_dct,
-                                                     context=context)
-            layer_scales_map = schema.kv_cache.scaling_factor[tp_rank]
-            return layer_scales_map.items()
-
-    except FileNotFoundError:
-        logger.error("File or directory '%s' not found.", filename)
-    except json.JSONDecodeError:
-        logger.error("Error decoding JSON in file '%s'.", filename)
-    except Exception:
-        logger.exception("An error occurred while reading '%s'.", filename)
-    # This section is reached if and only if any of the excepts are hit
-    # Return an empty iterable (list) => no KV cache scales are loaded
-    # which ultimately defaults to 1.0 scales
-    logger.warning(
-        "Defaulting to KV cache scaling factors = 1.0 for all "
-        "layers in TP rank %d as an error occurred during loading.", tp_rank)
-    return []
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
@@ -693,9 +659,18 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
         return remapped_name
 
     possible_scale_names = [".k_scale", ".v_scale"]
+    modelopt_scale_names = [
+        ".self_attn.k_proj.k_scale", ".self_attn.v_proj.v_scale"
+    ]
     for scale_name in possible_scale_names:
         if name.endswith(scale_name):
-            remapped_name = name.replace(scale_name, f".attn{scale_name}")
+            if any(mo_scale_name in name
+                   for mo_scale_name in modelopt_scale_names):
+                remapped_name = name.replace(
+                    f".self_attn.{scale_name[1]}_proj{scale_name}",
+                    f".self_attn.attn{scale_name}")
+            else:
+                remapped_name = name.replace(scale_name, f".attn{scale_name}")
             if remapped_name not in params_dict:
                 logger.warning_once(
                     f"Found {scale_name} in the checkpoint (e.g. {name}), "

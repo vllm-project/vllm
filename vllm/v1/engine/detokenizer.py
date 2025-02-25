@@ -1,23 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Optional
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
-from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class DetokenizerOutput:
-    output_text: str
-    token_ids: List[int]
-    finished: bool
-    finish_reason: Optional[str] = None
-    stop_reason: Union[int, str, None] = None
 
 
 @dataclass
@@ -40,7 +32,6 @@ class IncrementalDetokenizer:
     # Parameters for detokenization
     skip_special_tokens: bool
     spaces_between_special_tokens: bool
-    output_kind: RequestOutputKind
 
     # Tokenizer for this request
     tokenizer: AnyTokenizer
@@ -88,25 +79,19 @@ class IncrementalDetokenizer:
             skip_special_tokens=request.sampling_params.skip_special_tokens,
             spaces_between_special_tokens=request.sampling_params.
             spaces_between_special_tokens,
-            output_kind=request.sampling_params.output_kind,
             prompt_len=len(request.prompt_token_ids),
             tokenizer=tokenizer,
             stop_buffer_length=stop_buffer_length,
         )
 
-    def update_from_output(
-        self,
-        output: EngineCoreOutput,
-    ) -> Optional[DetokenizerOutput]:
+    def update(self, new_token_ids: List[int]) -> Optional[str]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
-            2) Update the RequestOutput with the new text.
-        """
+            2) Evaluate stop criteria.
 
-        new_token_ids = output.new_token_ids
-        finish_reason = output.finish_reason
-        stop_reason = output.stop_reason
+        Return matched stop string or None.
+        """
 
         # 1) Detokenize the new token ids incrementally.
         # TODO(woosuk): This method becomes very inefficient when the number of
@@ -129,11 +114,13 @@ class IncrementalDetokenizer:
             self.tokens.extend(new_tokens)
             self.prefix_offset = prefix_offset
             self.read_offset = read_offset
-            self.output_text += new_decoded_token_text
 
             decoded_text += new_decoded_token_text
 
+        self.output_text += decoded_text
+
         # 2) Evaluate stop criteria.
+        stop_string = None
         if self.stop:
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,
@@ -142,28 +129,13 @@ class IncrementalDetokenizer:
                 include_in_output=self.include_stop_str_in_output,
             )
             if stop is not None:
-                stop_str, truncate_to = stop
+                stop_string, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
-                finish_reason = "stop"  # TODO: use constant
-                stop_reason = stop_str
 
-        # TODO: handle stop_token_ids here too?
+        return stop_string
 
-        # 3) Update the RequestOutput object with the new text.
-        finished = bool(finish_reason)
-        if self.output_kind == RequestOutputKind.FINAL_ONLY \
-            and not finished:
-            return None
-
-        delta = self.output_kind == RequestOutputKind.DELTA
-        output_text = self._get_next_output_text(finished, delta)
-        token_ids = new_token_ids if delta else self.output_token_ids
-
-        return DetokenizerOutput(output_text, token_ids, finished,
-                                 finish_reason, stop_reason)
-
-    def _get_next_output_text(self, finished: bool, delta: bool) -> str:
+    def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
         this method is returned"""
 

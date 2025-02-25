@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 import warnings
 from contextlib import contextmanager
@@ -22,6 +24,8 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
+from vllm.entrypoints.score_utils import (_cosine_similarity,
+                                          _validate_score_input_lens)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -418,7 +422,7 @@ class LLM:
             instead pass them via the ``inputs`` parameter.
         """
         runner_type = self.llm_engine.model_config.runner_type
-        if runner_type != "generate":
+        if runner_type not in ["generate", "transcription"]:
             messages = [
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).",
@@ -996,6 +1000,92 @@ class LLM:
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
 
+    def _embedding_score(
+        self,
+        tokenizer: AnyTokenizer,
+        text_1: List[Union[str, TextPrompt, TokensPrompt]],
+        text_2: List[Union[str, TextPrompt, TokensPrompt]],
+        truncate_prompt_tokens: Optional[int] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> List[ScoringRequestOutput]:
+
+        encoded_output: List[PoolingRequestOutput] = self.encode(
+            text_1 + text_2,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request)
+
+        encoded_output_1: List[PoolingRequestOutput] = encoded_output[
+            0:len(text_1)]
+        encoded_output_2: List[PoolingRequestOutput] = encoded_output[
+            len(text_1):]
+
+        if len(encoded_output_1) == 1:
+            encoded_output_1 = encoded_output_1 * len(encoded_output_2)
+
+        scores: List[PoolingRequestOutput] = []
+
+        scores = _cosine_similarity(tokenizer=tokenizer,
+                                    embed_1=encoded_output_1,
+                                    embed_2=encoded_output_2)
+
+        items = self.engine_class.validate_outputs(scores,
+                                                   PoolingRequestOutput)
+        return [ScoringRequestOutput.from_base(item) for item in items]
+
+    def _cross_encoding_score(
+        self,
+        tokenizer: AnyTokenizer,
+        text_1: List[str],
+        text_2: List[str],
+        truncate_prompt_tokens: Optional[int] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> List[ScoringRequestOutput]:
+
+        if isinstance(tokenizer, MistralTokenizer):
+            raise ValueError(
+                "Score API is only enabled for `--task embed or score`")
+
+        if len(text_1) == 1:
+            text_1 = text_1 * len(text_2)
+
+        input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
+
+        pooling_params = PoolingParams()
+
+        tokenization_kwargs: Dict[str, Any] = {}
+        if truncate_prompt_tokens is not None:
+            tokenization_kwargs["truncation"] = True
+            tokenization_kwargs["max_length"] = truncate_prompt_tokens
+
+        parsed_prompts = []
+
+        for q, t in input_pairs:
+            prompt_inputs = tokenizer(text=q,
+                                      text_pair=t,
+                                      **tokenization_kwargs)
+            engine_prompt = TokensPrompt(
+                prompt_token_ids=prompt_inputs["input_ids"],
+                token_type_ids=prompt_inputs.get("token_type_ids"))
+            parsed_prompts.append(engine_prompt)
+
+        self._validate_and_add_requests(
+            prompts=parsed_prompts,
+            params=pooling_params,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+        )
+
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        items = self.engine_class.validate_outputs(outputs,
+                                                   PoolingRequestOutput)
+
+        return [ScoringRequestOutput.from_base(item) for item in items]
+
     def score(
         self,
         text_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
@@ -1047,25 +1137,20 @@ class LLM:
 
             raise ValueError(" ".join(messages))
 
-        if not self.llm_engine.model_config.is_cross_encoder:
-            raise ValueError("Your model does not support cross encoding")
-        if self.llm_engine.model_config.task != "score":
-            raise ValueError("Score API is only enabled for `--task score`")
-
-        tokenizer = self.llm_engine.get_tokenizer()
-
-        if isinstance(tokenizer, MistralTokenizer):
+        if self.llm_engine.model_config.task not in ("embed", "score"):
             raise ValueError(
-                "MistralTokenizer not supported for cross-encoding")
+                "Score API is only enabled for `--task embed or --task score`")
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
         # lists of tokens to the `text` and `text_pair` kwargs
+        tokenizer = self.llm_engine.get_tokenizer()
+
         def ensure_str(prompt: SingletonPrompt):
             if isinstance(prompt, dict):
                 if "multi_modal_data" in prompt:
                     raise ValueError("Multi-modal prompt is not "
-                                     "supported for cross encoding")
+                                     "supported for scoring")
                 elif "prompt_token_ids" in prompt:
                     prompt = tokenizer.decode(
                         cast(TokensPrompt, prompt)["prompt_token_ids"])
@@ -1077,54 +1162,30 @@ class LLM:
         if isinstance(text_1, (str, dict)):
             # Convert a single prompt to a list.
             text_1 = [text_1]
-        text_1 = [ensure_str(t) for t in text_1]
+        input_text_1: List[str] = [ensure_str(t) for t in text_1]
 
         if isinstance(text_2, (str, dict)):
             # Convert a single prompt to a list.
             text_2 = [text_2]
-        text_2 = [ensure_str(t) for t in text_2]
+        input_text_2: List[str] = [ensure_str(t) for t in text_2]
 
-        if len(text_1) > 1 and len(text_1) != len(text_2):
-            raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
-        if len(text_1) == 0:
-            raise ValueError("At least one text element must be given")
-        if len(text_2) == 0:
-            raise ValueError("At least one text_pair element must be given")
+        _validate_score_input_lens(input_text_1, input_text_2)
 
-        if len(text_1) == 1:
-            text_1 = text_1 * len(text_2)
-
-        input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
-        pooling_params = PoolingParams()
-
-        tokenization_kwargs: Dict[str, Any] = {}
-        if truncate_prompt_tokens is not None:
-            tokenization_kwargs["truncation"] = True
-            tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
-        parsed_prompts = []
-
-        for q, t in input_pairs:
-            prompt_inputs = tokenizer(text=q,
-                                      text_pair=t,
-                                      **tokenization_kwargs)
-            engine_prompt = TokensPrompt(
-                prompt_token_ids=prompt_inputs["input_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"))
-            parsed_prompts.append(engine_prompt)
-
-        self._validate_and_add_requests(
-            prompts=parsed_prompts,
-            params=pooling_params,
-            lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
-        )
-
-        outputs = self._run_engine(use_tqdm=use_tqdm)
-        items = self.engine_class.validate_outputs(outputs,
-                                                   PoolingRequestOutput)
-
-        return [ScoringRequestOutput.from_base(item) for item in items]
+        if self.llm_engine.model_config.is_cross_encoder:
+            return self._cross_encoding_score(tokenizer, input_text_1,
+                                              input_text_2,
+                                              truncate_prompt_tokens, use_tqdm,
+                                              lora_request,
+                                              prompt_adapter_request)
+        else:
+            return self._embedding_score(
+                tokenizer,
+                input_text_1,  # type: ignore[arg-type]
+                input_text_2,  # type: ignore[arg-type]
+                truncate_prompt_tokens,
+                use_tqdm,
+                lora_request,
+                prompt_adapter_request)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
@@ -1157,6 +1218,9 @@ class LLM:
         self.llm_engine.sleep(level=level)
 
     def wake_up(self):
+        """
+        Wake up the engine from sleep mode. See the :meth:`sleep` method
+        for more details."""
         self.llm_engine.wake_up()
 
     # LEGACY
@@ -1278,7 +1342,7 @@ class LLM:
             return params
 
         if params.guided_decoding is not None:
-            raise ValueError("Cannot set both guided_options_request and"
+            raise ValueError("Cannot set both guided_options_request and "
                              "params.guided_decoding.")
 
         params.guided_decoding = GuidedDecodingParams(

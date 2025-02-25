@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import codecs
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
-from functools import lru_cache, partial
+from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, List,
                     Literal, Optional, Tuple, TypeVar, Union, cast)
@@ -377,7 +379,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self._model_config.allowed_local_media_path
 
     @staticmethod
-    @lru_cache(maxsize=None)
+    @cache
     def _cached_token_str(tokenizer: AnyTokenizer, token_index: int) -> str:
         return tokenizer.decode(token_index)
 
@@ -392,7 +394,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type == "phi3_v":
                 # Workaround since this token is not defined in the tokenizer
                 return f"<|image_{current_count}|>"
-            if model_type == "minicpmv":
+            if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
             if model_type in ("blip-2", "chatglm", "fuyu", "paligemma",
                               "pixtral"):
@@ -408,7 +410,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
-            if model_type == "qwen2_vl":
+            if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
@@ -424,10 +426,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type == "qwen2_audio":
                 return (f"Audio {current_count}: "
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
+            if model_type == "minicpmo":
+                return "(<audio>./</audio>)"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
-            if model_type == "qwen2_vl":
+            if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
+            if model_type in ("minicpmo", "minicpmv"):
+                return "(<video>./</video>)"
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.video_token_index)
@@ -817,7 +823,7 @@ def _parse_chat_message_content_part(
     # content is empty, log a warning and skip
     if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
         logger.warning(
-            "Skipping multimodal part (type: '%s')"
+            "Skipping multimodal part (type: '%s') "
             "with empty / unparsable content.", part_type)
         return None
 

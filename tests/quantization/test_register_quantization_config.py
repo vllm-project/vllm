@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests register custom quantization config.
 
 See https://github.com/vllm-project/vllm/issues/11926 for more details.
@@ -98,7 +99,7 @@ def test_register_quantization_config():
 
 @pytest.mark.parametrize(argnames="model",
                          argvalues=[
-                             "meta-llama/Meta-Llama-3-8B-Instruct",
+                             "meta-llama/Llama-3.2-1B-Instruct",
                          ])
 def test_custom_quant(vllm_runner, model):
     """Test infer with the custom quantization method."""

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import copy
 import time
@@ -1184,6 +1186,12 @@ class AsyncLLMEngine(EngineClient):
 
     async def reset_prefix_cache(self) -> None:
         self.engine.reset_prefix_cache()
+
+    async def sleep(self, level: int = 1) -> None:
+        self.engine.sleep(level)
+
+    async def wake_up(self) -> None:
+        self.engine.wake_up()
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine.add_lora(lora_request)

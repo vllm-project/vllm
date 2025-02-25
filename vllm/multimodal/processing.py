@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import re
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -18,10 +20,11 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
 from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
 from .hasher import MultiModalHasher
-from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                     MultiModalInputs, MultiModalKwargs, MultiModalKwargsItem,
-                     PlaceholderRange)
-from .parse import MultiModalDataItems, MultiModalDataParser
+from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
+                     MultiModalFieldConfig, MultiModalInputs, MultiModalKwargs,
+                     MultiModalKwargsItem, PlaceholderRange)
+from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
+                    MultiModalDataParser)
 
 if TYPE_CHECKING:
     from .profiling import BaseDummyInputsBuilder
@@ -678,7 +681,11 @@ class BaseProcessingInfo:
         raise NotImplementedError
 
     @abstractmethod
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         """
         Get the maximum possible number of tokens per data item
         for each modality.
@@ -824,15 +831,34 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_kwargs,
         )
 
+    def _hf_processor_applies_repl(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        """
+        Return whether the HF processor applies prompt replacements.
+
+        For most HF processors, this should be :code:`True` when multi-modal
+        data items are passed, but :code:`False` when multi-modal embeddings
+        are passed.
+        """
+        return not any(
+            isinstance(items, (EmbeddingItems, DictEmbeddingItems))
+            for items in mm_items.values())
+
     def _apply_hf_processor_text_mm(
         self,
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], MultiModalKwargs]:
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
         """
         Apply the HF processor on the prompt text and multi-modal data
         together.
+
+        In addition, return whether prompt replacements have been applied.
         """
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
@@ -850,7 +876,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
         )
 
-        return prompt_ids, mm_kwargs
+        is_repl_applied = self._hf_processor_applies_repl(
+            prompt_text=prompt_text,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return prompt_ids, mm_kwargs, is_repl_applied
 
     def _apply_hf_processor_text_only(self, prompt_text: str) -> list[int]:
         """
@@ -860,7 +892,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         correspond to each other, we create dummy multi-modal items
         to go along with the text.
         """
-        prompt_ids, _ = self._apply_hf_processor_text_mm(
+        prompt_ids, _, _ = self._apply_hf_processor_text_mm(
             prompt_text=prompt_text,
             mm_items=MultiModalDataItems({}),
             hf_processor_mm_kwargs={},
@@ -902,7 +934,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_counts,
         )
 
-        _, mm_kwargs = self._apply_hf_processor_text_mm(
+        _, mm_kwargs, _ = self._apply_hf_processor_text_mm(
             prompt_text=dummy_inputs.prompt_text,
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
@@ -917,13 +949,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         *,
         enable_hf_prompt_replacement: bool,
-    ) -> tuple[list[int], MultiModalKwargs]:
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
         """
         Apply the HF processor on the prompt text and multi-modal data.
 
+        In addition, return whether prompt replacements have been applied
+        (for most HF processors, this should be :code:`True`).
+
         Note:
-            If :code:`enable_hf_prompt_replacement=False`, the prompt should
-            correspond to the multi-modal items.
+            If :code:`enable_hf_prompt_replacement=False`, we use HF processor
+            to perform prompt replacement if available; HF processor requires
+            that the prompt corresponds to multi-modal items.
         """
         if isinstance(prompt, str):
             if enable_hf_prompt_replacement:
@@ -937,19 +973,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         else:
             prompt_ids = self._apply_hf_processor_tokens_only(prompt)
 
-        mm_missing_kwargs = self._apply_hf_processor_mm_only(
+        mm_kwargs = self._apply_hf_processor_mm_only(
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )
 
-        return prompt_ids, mm_missing_kwargs
+        return prompt_ids, mm_kwargs, False
 
     def _cached_apply_hf_processor(
         self,
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], MultiModalKwargs]:
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
         """
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
@@ -986,8 +1022,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_data_items = self._to_mm_items(mm_missing_data)
 
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
-        # so we need to pass `enable_hf_prompt_replacement=False`
-        prompt_ids, mm_missing_kwargs = self._apply_hf_processor_main(
+        # so we can't apply prompt replacements until the new multimodal
+        # items are combined with the cached multimodal items
+        (
+            prompt_ids,
+            mm_missing_kwargs,
+            is_repl_applied,
+        ) = self._apply_hf_processor_main(
             prompt=prompt,
             mm_items=mm_missing_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
@@ -1030,7 +1071,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         mm_kwargs = MultiModalKwargs.from_items(merged_kw_items)
 
-        return prompt_ids, mm_kwargs
+        return prompt_ids, mm_kwargs, is_repl_applied
 
     def _bind_and_group_repls(
         self,
@@ -1040,18 +1081,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         it = (prompt_repl.bind(tokenizer) for prompt_repl in prompt_repls)
         return dict(full_groupby_modality(it))
-
-    def _always_apply_prompt_replacements(self) -> bool:
-        """
-        A flag which can be overridden so that
-        :meth:`_apply_prompt_replacements` is always called even if we
-        detect that HF has performed processing via
-        :meth:`_find_placeholders_by_modality`.
-
-        This is useful in cases where :meth:`_find_placeholders_by_modality`
-        cannot be reliably used to detect whether HF has performed processing.
-        """
-        return False
 
     def _apply_prompt_replacements(
         self,
@@ -1149,28 +1178,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
         mm_item_counts: Mapping[str, int],
-        *,
-        allow_missing: bool = False,
-    ) -> Mapping[str, int]:
-        missing_repl_counts = dict[str, int]()
-
+    ) -> None:
         for modality, item_count in mm_item_counts.items():
             placeholders = mm_placeholders.get(modality, [])
 
-            if len(placeholders) != item_count and not allow_missing:
+            if len(placeholders) != item_count:
                 raise RuntimeError(
                     f"Expected there to be {item_count} prompt replacements "
-                    f"corresponding to {item_count} {modality} items, but only "
-                    f"found {len(placeholders)} prompt replacements! Either "
-                    "the prompt text has missing/incorrect tokens for "
+                    f"corresponding to {item_count} {modality} items, but "
+                    f"instead found {len(placeholders)} prompt replacements! "
+                    "Either the prompt text has missing/incorrect tokens for "
                     "multi-modal inputs, or there is a problem with your "
                     "implementation of merged multi-modal processor for this "
                     "model (usually arising from an inconsistency between "
                     "`_call_hf_processor` and `_get_prompt_replacements`).")
-
-            missing_repl_counts[modality] = item_count - len(placeholders)
-
-        return missing_repl_counts
 
     def apply(
         self,
@@ -1211,7 +1232,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         else:
             mm_hashes = None
 
-        prompt_ids, mm_kwargs = self._cached_apply_hf_processor(
+        (
+            prompt_ids,
+            mm_kwargs,
+            is_repl_applied,
+        ) = self._cached_apply_hf_processor(
             prompt,
             mm_items,
             hf_processor_mm_kwargs,
@@ -1227,52 +1252,27 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
-        hf_mm_placeholders = self._find_mm_placeholders(
-            mm_prompt_repls,
-            prompt_ids,
-            mm_item_counts,
-        )
-
-        if self._always_apply_prompt_replacements():
-            mm_missing_repl_counts = mm_item_counts
-            mm_missing_repls = dict(mm_prompt_repls)
-        else:
-            mm_missing_repl_counts = self._validate_mm_placeholders(
-                hf_mm_placeholders,
+        if is_repl_applied:
+            mm_placeholders = self._find_mm_placeholders(
+                mm_prompt_repls,
+                prompt_ids,
                 mm_item_counts,
-                allow_missing=True,
             )
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
-            mm_missing_repls = dict[str, list[BoundPromptReplacement]]()
-            for modality, missing_repl_count in mm_missing_repl_counts.items():
-                if missing_repl_count == 0:
-                    mm_missing_repls[modality] = []
-                elif missing_repl_count == mm_item_counts.get(modality, 0):
-                    mm_missing_repls[modality] = mm_prompt_repls[modality]
-                else:
-                    raise ValueError("Partial prompt replacement within "
-                                     f"{modality=} is not supported")
-
-        # If HF processor already inserts placeholder tokens,
-        # there is no need for us to insert them
-        if all(len(repls) == 0 for repls in mm_missing_repls.values()):
             tokenizer = self.info.get_tokenizer()
             prompt = decode_tokens(tokenizer, prompt_ids)
-            mm_placeholders = hf_mm_placeholders
         else:
             (
                 prompt_ids,
                 prompt,
-                missing_mm_placeholders,
+                mm_placeholders,
             ) = self._apply_prompt_replacements(
                 prompt_ids,
-                mm_missing_repls,
-                mm_missing_repl_counts,
+                mm_prompt_repls,
+                mm_item_counts,
             )
-
-            mm_placeholders = {**hf_mm_placeholders, **missing_mm_placeholders}
-
-        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         mm_placeholder_ranges = {
             modality: [item.to_range() for item in placeholders]
@@ -1287,3 +1287,60 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
+
+
+class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
+
+    @abstractmethod
+    def create_encoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        """
+        Create input prompt for the encoder. HF processor will be applied on 
+        this prompt during profiling and generation.
+        """
+        raise NotImplementedError
+
+    def apply(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalEncDecInputs:
+        """
+        Process multi-modal inputs to be used in vLLM.
+        The main processing steps are modified to fit encoder-decoder model:
+        1. Create encoder prompt from input prompt text.
+        2. Apply the HF processor on encoder prompt.
+        3. Copy the input prompt text as decoder prompt inputs.
+        """
+        encoder_prompt = self.create_encoder_prompt(prompt, mm_data)
+        encoder_inputs = super().apply(
+            encoder_prompt,
+            mm_data,
+            hf_processor_mm_kwargs,
+        )
+
+        # We assumed the decoder prompt text is copied from
+        # the original encoder prompt without extra process
+        tokenizer = self.info.get_tokenizer()
+        if isinstance(prompt, str):
+            decoder_prompt = prompt
+            decoder_prompt_ids = encode_tokens(tokenizer,
+                                               prompt,
+                                               add_special_tokens=False)
+        else:
+            decoder_prompt = decode_tokens(tokenizer, prompt)
+            decoder_prompt_ids = prompt
+
+        mm_inputs = MultiModalEncDecInputs(
+            encoder_prompt=encoder_inputs["prompt"],
+            encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
+            **encoder_inputs)
+        mm_inputs.update({
+            "prompt": decoder_prompt,
+            "prompt_token_ids": decoder_prompt_ids
+        })
+        return mm_inputs

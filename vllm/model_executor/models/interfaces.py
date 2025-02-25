@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
                     Protocol, Type, Union, overload, runtime_checkable)
 
@@ -5,6 +7,8 @@ import torch
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.utils import supports_kw
 
 from .interfaces_base import is_pooling_model
@@ -114,11 +118,11 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-
-    packed_modules_mapping: ClassVar[Dict[str, List[str]]]
-    supported_lora_modules: ClassVar[List[str]]
-    embedding_modules: ClassVar[Dict[str, str]]
-    embedding_padding_modules: ClassVar[List[str]]
+    # The `embedding_module` and `embedding_padding_modules`
+    # are empty by default.
+    embedding_modules: ClassVar[Dict[str, str]] = {}
+    embedding_padding_modules: ClassVar[List[str]] = []
+    packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -128,7 +132,6 @@ class _SupportsLoRAType(Protocol):
     supports_lora: Literal[True]
 
     packed_modules_mapping: Dict[str, List[str]]
-    supported_lora_modules: List[str]
     embedding_modules: Dict[str, str]
     embedding_padding_modules: List[str]
 
@@ -151,7 +154,6 @@ def supports_lora(
     if not result:
         lora_attrs = (
             "packed_modules_mapping",
-            "supported_lora_modules",
             "embedding_modules",
             "embedding_padding_modules",
         )
@@ -439,3 +441,60 @@ def supports_cross_encoding(
     model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
+
+
+class SupportsQuant:
+    """The interface required for all models that support quantization."""
+
+    packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
+    quant_config: Optional[QuantizationConfig] = None
+
+    def __new__(cls, *args, **kwargs) -> "SupportsQuant":
+        instance = super().__new__(cls)
+        quant_config = cls._find_quant_config(*args, **kwargs)
+        if quant_config is not None:
+            instance.quant_config = quant_config
+            instance.quant_config.packed_modules_mapping.update(
+                cls.packed_modules_mapping)
+        return instance
+
+    @staticmethod
+    def _find_quant_config(*args, **kwargs) -> Optional[QuantizationConfig]:
+        from vllm.config import VllmConfig  # avoid circular import
+
+        args_values = list(args) + list(kwargs.values())
+        for arg in args_values:
+            if isinstance(arg, VllmConfig):
+                return arg.quant_config
+
+            if isinstance(arg, QuantizationConfig):
+                return arg
+
+        return None
+
+
+@runtime_checkable
+class SupportsTranscription(Protocol):
+    """The interface required for all models that support transcription."""
+
+    supports_transcription: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_transcription(
+        model: Type[object]) -> TypeIs[Type[SupportsTranscription]]:
+    ...
+
+
+@overload
+def supports_transcription(model: object) -> TypeIs[SupportsTranscription]:
+    ...
+
+
+def supports_transcription(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsTranscription]], TypeIs[SupportsTranscription]]:
+    if isinstance(model, type):
+        return isinstance(model, SupportsTranscription)
+
+    return isinstance(model, SupportsTranscription)

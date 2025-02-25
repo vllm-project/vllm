@@ -1,206 +1,136 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for InternVL's multimodal preprocessing kwargs."""
-from typing import Callable, Optional
+from typing import Mapping, Optional
 
 import pytest
-from transformers import AutoTokenizer
+from PIL import Image
+from transformers import PretrainedConfig
 
-from vllm.inputs import InputContext, token_inputs
-from vllm.multimodal import MultiModalRegistry
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import rescale_image_size
+from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ....conftest import _ImageAssets
 from ...utils import build_model_context
 
-models = ["OpenGVLab/InternVL2-2B"]
 
-
-# Wrap lazy imports to avoid initializing CUDA during test collection
-@pytest.fixture()
-def input_processor_for_internvl():
-    from vllm.model_executor.models.internvl import InternVLInputPipeline
-
-    pipeline = InternVLInputPipeline('<img>', '</img>', '<IMG_CONTEXT>')
-    return pipeline.input_processor
-
-
-@pytest.fixture()
-def dummy_data_for_internvl():
-    from vllm.model_executor.models.internvl import InternVLInputPipeline
-
-    pipeline = InternVLInputPipeline('<img>', '</img>', '<IMG_CONTEXT>')
-    return pipeline.dummy_data
-
-
-@pytest.fixture()
-def get_max_internvl_image_tokens():
+def _get_expected_num_patches(
+    config: PretrainedConfig,
+    image: Image.Image,
+    num_imgs: int,
+    min_num: int,
+    max_num: int,
+):
     from vllm.model_executor.models.internvl import (
-        get_max_internvl_image_tokens)
-    return get_max_internvl_image_tokens
+        calculate_internvl_targets, get_internvl_target_ratios)
+
+    width, height = image.size
+
+    blocks, _, _ = calculate_internvl_targets(
+        orig_width=width,
+        orig_height=height,
+        target_ratios=get_internvl_target_ratios(
+            min_num,
+            max_num,
+        ),
+        image_size=config.vision_config.image_size,
+        use_thumbnail=False,
+    )
+    expected_num_patches = blocks
+
+    if config.use_thumbnail and expected_num_patches > 1:
+        expected_num_patches += 1
+
+    return expected_num_patches
 
 
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("max_dynamic_patch", [1, 4])
-@pytest.mark.parametrize("dynamic_image_size", [True, False, None])
-def test_input_mapper_override(
-    model: str,
-    image_assets: _ImageAssets,
-    max_dynamic_patch: int,
-    dynamic_image_size: Optional[bool],
+def _run_check(
+    processor: BaseMultiModalProcessor,
+    images: list[Image.Image],
+    min_num: int,
+    max_num: int,
+    mm_processor_kwargs: Mapping[str, object],
 ):
-    mm_processor_kwargs = {
-        "max_dynamic_patch": max_dynamic_patch,
-    }
-    if dynamic_image_size is not None:
-        mm_processor_kwargs["dynamic_image_size"] = dynamic_image_size
+    tokenizer = processor.info.get_tokenizer()
+    config = processor.info.get_hf_config()
 
-    expected_num_patches = max_dynamic_patch + 1 if max_dynamic_patch > 1 else 1
-    if dynamic_image_size is False:
-        expected_num_patches = 1
+    mm_data = {"image": images}
 
-    ctx = build_model_context(
-        model_name=model,
-        tokenizer_name=model,
-        trust_remote_code=True,
-        mm_processor_kwargs=mm_processor_kwargs,
-    )
+    total_expected_num_patches = sum(
+        _get_expected_num_patches(config, image, len(images), min_num, max_num)
+        for image in images)
 
-    mm_registry = MultiModalRegistry()
-    mm_registry.init_mm_limits_per_prompt(ctx.model_config)
-
-    image = image_assets[0].pil_image.resize((448 * 2, 448 * 2))
-    vllm_result = mm_registry.map_input(
-        ctx.model_config,
-        {"image": image},
-    )
-    assert vllm_result["pixel_values"].size(1) == expected_num_patches
-
-
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("max_dynamic_patch", [1, 4, None])
-@pytest.mark.parametrize("dynamic_image_size", [True, False, None])
-def test_max_tokens_override(
-    get_max_internvl_image_tokens: Callable,
-    model: str,
-    max_dynamic_patch: Optional[int],
-    dynamic_image_size: Optional[bool],
-):
-    """Ensure get_max_internvl_image_tokens handles mm_processor_kwargs."""
-    ctx = build_model_context(
-        model_name=model,
-        tokenizer_name=model,
-        trust_remote_code=True,
-        mm_processor_kwargs=None,
-    )
-
-    if max_dynamic_patch is None:
-        max_dynamic_patch = ctx.get_hf_config().max_dynamic_patch
-    expected_num_patches = max_dynamic_patch + 1 if max_dynamic_patch > 1 else 1
-    if dynamic_image_size is False:
-        expected_num_patches = 1
-    expected_max_tokens = 256 * expected_num_patches
-
-    actual_max_tokens = get_max_internvl_image_tokens(
-        ctx=InputContext(ctx.model_config),
-        max_dynamic_patch=max_dynamic_patch,
-        dynamic_image_size=dynamic_image_size,
-    )
-    assert expected_max_tokens == actual_max_tokens
-
-
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("num_imgs", [1, 2])
-@pytest.mark.parametrize("max_dynamic_patch", [1, 4, None])
-@pytest.mark.parametrize("dynamic_image_size", [True, False, None])
-def test_dummy_data_override(
-    dummy_data_for_internvl: Callable,
-    model: str,
-    num_imgs: int,
-    max_dynamic_patch: Optional[int],
-    dynamic_image_size: Optional[bool],
-):
-    """Ensure dummy_data_for_internvl handles kwargs properly."""
-    # Same as the previous test - don't initialize mm_processor_kwargs
-    # in this test and assume that the kwargs will be correctly expanded by
-    # the partial when calling the dummy data func.
-    ctx = build_model_context(
-        model_name=model,
-        tokenizer_name=model,
-        trust_remote_code=True,
-        mm_processor_kwargs=None,
-    )
-
-    if max_dynamic_patch is None:
-        max_dynamic_patch = ctx.get_hf_config().max_dynamic_patch
-    expected_num_patches = max_dynamic_patch + 1 if max_dynamic_patch > 1 else 1
-    if dynamic_image_size is False:
-        expected_num_patches = 1
-    expected_max_tokens = 256 * expected_num_patches
-
-    dummy_data = dummy_data_for_internvl(
-        ctx=ctx,
-        seq_len=8192,  # Should be bigger than num_imgs * toks_per_img
-        mm_counts={"image": num_imgs},
-        max_dynamic_patch=max_dynamic_patch,
-        dynamic_image_size=dynamic_image_size,
-    )
-    sequence_data = dummy_data.seq_data
-
-    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    image_token_id = tokenizer.encode('<IMG_CONTEXT>',
-                                      add_special_tokens=False)[0]
-
-    # Ensure we have the right number of placeholders per size
-    img_tok_count = sequence_data.get_token_ids().count(image_token_id)
-    assert img_tok_count == expected_max_tokens * num_imgs
-
-
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("max_dynamic_patch", [1, 4])
-@pytest.mark.parametrize("dynamic_image_size", [True, False, None])
-@pytest.mark.parametrize("num_imgs", [1, 2])
-def test_input_processor_override(
-    input_processor_for_internvl: Callable,
-    image_assets: _ImageAssets,
-    model: str,
-    num_imgs: int,
-    max_dynamic_patch: int,
-    dynamic_image_size: Optional[bool],
-):
-    """Ensure input_processor_for_internvl handles kwargs properly."""
-    # Same as the previous test - don't initialize mm_processor_kwargs
-    # in this test and assume that the kwargs will be correctly expanded by
-    # the partial when calling the custom input processor.
-    expected_num_patches = max_dynamic_patch + 1 if max_dynamic_patch > 1 else 1
-    if dynamic_image_size is False:
-        expected_num_patches = 1
-
-    ctx = build_model_context(
-        model_name=model,
-        tokenizer_name=model,
-        trust_remote_code=True,
-        mm_processor_kwargs=None,
-    )
-    expected_toks_per_img = 256 * expected_num_patches
-
-    # Build the image str / prompt based on the number of images we pass
-    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    placeholders = "<image>" if num_imgs == 1 else "\n".join(
-        f"Image-{i}: <image>\n" for i in range(1, num_imgs + 1))
-    prompt = placeholders
-    images = [image_assets[0].pil_image.resize((448 * 2, 448 * 2))] * num_imgs
-
-    inputs = token_inputs(prompt_token_ids=tokenizer.encode(prompt),
-                          prompt=prompt,
-                          multi_modal_data={"image": images})
-
-    processed_inputs = input_processor_for_internvl(
-        ctx,
-        inputs,
-        max_dynamic_patch=max_dynamic_patch,
-        dynamic_image_size=dynamic_image_size,
-    )
+    processed_inputs = processor.apply("<image>" * len(images), mm_data,
+                                       mm_processor_kwargs)
 
     # Ensure we have the right number of placeholders per num_crops size
-    image_token_id = tokenizer.encode('<IMG_CONTEXT>',
-                                      add_special_tokens=False)[0]
+    image_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    assert img_tok_count == expected_toks_per_img * num_imgs
+    pixel_shape = processed_inputs["mm_kwargs"]["pixel_values_flat"].shape
+
+    assert img_tok_count == 256 * total_expected_num_patches
+    assert pixel_shape[0] == total_expected_num_patches
+
+
+@pytest.mark.parametrize("model_id", ["OpenGVLab/InternVL2-2B"])
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # Single-scale
+        [1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
+        [4.0, 2.0, 1.0],
+    ],
+)
+@pytest.mark.parametrize(
+    ("min_dynamic_patch", "max_dynamic_patch"),
+    [(1, 1), (1, 2), (1, 4), (1, 8), (2, 4), (4, 8)],
+)
+@pytest.mark.parametrize("dynamic_image_size", [True, False])
+@pytest.mark.parametrize("kwargs_on_init", [True, False])
+def test_processor_override(
+    model_id: str,
+    image_assets: _ImageAssets,
+    size_factors: list[int],
+    min_dynamic_patch: int,
+    max_dynamic_patch: int,
+    dynamic_image_size: Optional[bool],
+    kwargs_on_init: bool,
+):
+    mm_processor_kwargs = {
+        "min_dynamic_patch": min_dynamic_patch,
+        "max_dynamic_patch": max_dynamic_patch,
+        "dynamic_image_size": dynamic_image_size,
+    }
+
+    ctx = build_model_context(
+        model_name=model_id,
+        tokenizer_name=model_id,
+        trust_remote_code=True,
+        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
+        limit_mm_per_prompt={"image": len(size_factors)},
+    )
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=tokenizer,
+    )
+    hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
+
+    min_num = min_dynamic_patch if dynamic_image_size else 1
+    max_num = max_dynamic_patch if dynamic_image_size else 1
+
+    _run_check(
+        processor,
+        [
+            rescale_image_size(image_assets[0].pil_image, f)
+            for f in size_factors
+        ],
+        min_num,
+        max_num,
+        hf_processor_mm_kwargs,
+    )

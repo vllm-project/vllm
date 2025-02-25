@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import multiprocessing
 import os
 import weakref
@@ -186,3 +188,16 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
+               length: int) -> torch.Tensor:
+    """
+    Copy the first length elements of a tensor into another tensor in a
+    non-blocking manner.
+
+    Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
+
+    Returns the sliced target tensor.
+    """
+    return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,24 @@ from transformers import AutoTokenizer
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+
+@pytest.fixture(scope="module", params=[True, False])
+def use_v1(request):
+    # Module-scoped variant of run_with_both_engines
+    #
+    # Use this fixture to run a test with both v0 and v1, and
+    # also to conditionalize the test logic e.g.
+    #
+    # def test_metrics_exist(use_v1, server, client):
+    #     ...
+    #     expected = EXPECTED_V1_METRICS if use_v1 else EXPECTED_METRICS
+    #     for metric in expected:
+    #         assert metric in response.text
+    #
+    # @skip_v1 wouldn't work here because this is a module-level
+    # fixture - per-function decorators would have no effect
+    yield request.param
 
 
 @pytest.fixture(scope="module")
@@ -36,10 +56,12 @@ def default_server_args():
                     "--enable-chunked-prefill",
                     "--disable-frontend-multiprocessing",
                 ])
-def server(default_server_args, request):
+def server(use_v1, default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+    env_dict = dict(VLLM_USE_V1='1' if use_v1 else '0')
+    with RemoteOpenAIServer(MODEL_NAME, default_server_args,
+                            env_dict=env_dict) as remote_server:
         yield remote_server
 
 
@@ -63,6 +85,10 @@ EXPECTED_VALUES = {
     "vllm:time_per_output_token_seconds":
     [("_count", _NUM_REQUESTS * (_NUM_GENERATION_TOKENS_PER_REQUEST - 1))],
     "vllm:e2e_request_latency_seconds": [("_count", _NUM_REQUESTS)],
+    "vllm:request_queue_time_seconds": [("_count", _NUM_REQUESTS)],
+    "vllm:request_inference_time_seconds": [("_count", _NUM_REQUESTS)],
+    "vllm:request_prefill_time_seconds": [("_count", _NUM_REQUESTS)],
+    "vllm:request_decode_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_prompt_tokens":
     [("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
      ("_count", _NUM_REQUESTS)],
@@ -70,9 +96,14 @@ EXPECTED_VALUES = {
     [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
      ("_count", _NUM_REQUESTS)],
     "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
-    "vllm:request_params_max_tokens":
-    [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-     ("_count", _NUM_REQUESTS)],
+    "vllm:request_params_max_tokens": [
+        ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+        ("_count", _NUM_REQUESTS)
+    ],
+    "vllm:iteration_tokens_total":
+    [("_sum", _NUM_REQUESTS *
+      (_NUM_PROMPT_TOKENS_PER_REQUEST + _NUM_GENERATION_TOKENS_PER_REQUEST)),
+     ("_count", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST)],
     "vllm:prompt_tokens": [("_total",
                             _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
     "vllm:generation_tokens": [
@@ -84,7 +115,7 @@ EXPECTED_VALUES = {
 
 @pytest.mark.asyncio
 async def test_metrics_counts(server: RemoteOpenAIServer,
-                              client: openai.AsyncClient):
+                              client: openai.AsyncClient, use_v1: bool):
     for _ in range(_NUM_REQUESTS):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
@@ -98,6 +129,9 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
 
     # Loop over all expected metric_families
     for metric_family, suffix_values_list in EXPECTED_VALUES.items():
+        if use_v1 and metric_family not in EXPECTED_METRICS_V1:
+            continue
+
         found_metric = False
 
         # Check to see if the metric_family is found in the prom endpoint.
@@ -144,6 +178,18 @@ EXPECTED_METRICS = [
     "vllm:e2e_request_latency_seconds_sum",
     "vllm:e2e_request_latency_seconds_bucket",
     "vllm:e2e_request_latency_seconds_count",
+    "vllm:request_queue_time_seconds_sum",
+    "vllm:request_queue_time_seconds_bucket",
+    "vllm:request_queue_time_seconds_count",
+    "vllm:request_inference_time_seconds_sum",
+    "vllm:request_inference_time_seconds_bucket",
+    "vllm:request_inference_time_seconds_count",
+    "vllm:request_prefill_time_seconds_sum",
+    "vllm:request_prefill_time_seconds_bucket",
+    "vllm:request_prefill_time_seconds_count",
+    "vllm:request_decode_time_seconds_sum",
+    "vllm:request_decode_time_seconds_bucket",
+    "vllm:request_decode_time_seconds_count",
     "vllm:request_prompt_tokens_sum",
     "vllm:request_prompt_tokens_bucket",
     "vllm:request_prompt_tokens_count",
@@ -156,6 +202,7 @@ EXPECTED_METRICS = [
     "vllm:request_params_max_tokens_sum",
     "vllm:request_params_max_tokens_bucket",
     "vllm:request_params_max_tokens_count",
+    "vllm:iteration_tokens_total",
     "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
@@ -174,10 +221,50 @@ EXPECTED_METRICS = [
     "swap_space_bytes",
 ]
 
+EXPECTED_METRICS_V1 = [
+    "vllm:num_requests_running",
+    "vllm:num_requests_waiting",
+    "vllm:gpu_cache_usage_perc",
+    "vllm:gpu_prefix_cache_queries",
+    "vllm:gpu_prefix_cache_hits",
+    "vllm:prompt_tokens_total",
+    "vllm:generation_tokens_total",
+    "vllm:iteration_tokens_total",
+    "vllm:cache_config_info",
+    "vllm:request_success_total",
+    "vllm:request_prompt_tokens_sum",
+    "vllm:request_prompt_tokens_bucket",
+    "vllm:request_prompt_tokens_count",
+    "vllm:request_generation_tokens_sum",
+    "vllm:request_generation_tokens_bucket",
+    "vllm:request_generation_tokens_count",
+    "vllm:time_to_first_token_seconds_sum",
+    "vllm:time_to_first_token_seconds_bucket",
+    "vllm:time_to_first_token_seconds_count",
+    "vllm:time_per_output_token_seconds_sum",
+    "vllm:time_per_output_token_seconds_bucket",
+    "vllm:time_per_output_token_seconds_count",
+    "vllm:e2e_request_latency_seconds_sum",
+    "vllm:e2e_request_latency_seconds_bucket",
+    "vllm:e2e_request_latency_seconds_count",
+    "vllm:request_queue_time_seconds_sum",
+    "vllm:request_queue_time_seconds_bucket",
+    "vllm:request_queue_time_seconds_count",
+    "vllm:request_inference_time_seconds_sum",
+    "vllm:request_inference_time_seconds_bucket",
+    "vllm:request_inference_time_seconds_count",
+    "vllm:request_prefill_time_seconds_sum",
+    "vllm:request_prefill_time_seconds_bucket",
+    "vllm:request_prefill_time_seconds_count",
+    "vllm:request_decode_time_seconds_sum",
+    "vllm:request_decode_time_seconds_bucket",
+    "vllm:request_decode_time_seconds_count",
+]
+
 
 @pytest.mark.asyncio
 async def test_metrics_exist(server: RemoteOpenAIServer,
-                             client: openai.AsyncClient):
+                             client: openai.AsyncClient, use_v1: bool):
     # sending a request triggers the metrics to be logged.
     await client.completions.create(model=MODEL_NAME,
                                     prompt="Hello, my name is",
@@ -187,11 +274,13 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
-    for metric in EXPECTED_METRICS:
+    for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
         assert metric in response.text
 
 
-def test_metrics_exist_run_batch():
+def test_metrics_exist_run_batch(use_v1: bool):
+    if use_v1:
+        pytest.skip("Skipping test on vllm V1")
     input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}"""  # noqa: E501
 
     base_url = "0.0.0.0"

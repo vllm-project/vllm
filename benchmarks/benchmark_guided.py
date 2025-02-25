@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Benchmark guided decoding throughput."""
 import argparse
 import dataclasses
@@ -45,6 +46,12 @@ def run_vllm(requests: List[SampleRequest],
              warmup: bool = False) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**vars(engine_args))
+    assert all(
+        llm.llm_engine.model_config.max_model_len >= (
+            request.prompt_len + request.expected_output_len)
+        for request in requests), (
+            "Please ensure that max_model_len is greater than the sum of"
+            " prompt_len and expected_output_len for all requests.")
 
     # Add the requests to the engine.
     prompts: List[str] = []
@@ -113,6 +120,13 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:
+
+        assert all(
+            llm.model_config.max_model_len >= (request.prompt_len +
+                                               request.expected_output_len)
+            for request in requests), (
+                "Please ensure that max_model_len is greater than the sum of"
+                " prompt_len and expected_output_len for all requests.")
 
         # Add the requests to the engine.
         prompts: List[str] = []

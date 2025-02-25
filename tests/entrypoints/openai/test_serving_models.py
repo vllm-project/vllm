@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from http import HTTPStatus
 from unittest.mock import MagicMock
 
@@ -12,7 +14,7 @@ from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.lora.request import LoRARequest
 
-MODEL_NAME = "meta-llama/Llama-2-7b"
+MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 LORA_LOADING_SUCCESS_MESSAGE = (
     "Success: LoRA adapter '{lora_name}' added successfully.")

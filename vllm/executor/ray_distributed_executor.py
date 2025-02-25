@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import os
 from collections import defaultdict
@@ -99,6 +101,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 self.driver_worker.execute_method)
 
     def shutdown(self) -> None:
+        logger.info(
+            "Shutting down Ray distributed executor. If you see error log "
+            "from logging.cc regarding SIGTERM received, please ignore because "
+            "this is the expected termination process in Ray.")
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
@@ -127,13 +133,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        if (self.parallel_config.tensor_parallel_size == 1
-                and self.parallel_config.pipeline_parallel_size == 1):
-            # For single GPU case, we use a ray worker with constrained memory.
-            num_gpus = self.cache_config.gpu_memory_utilization
-        else:
-            # Otherwise, the ray workers are allocated with a full GPU.
-            num_gpus = 1
+        num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
@@ -153,12 +153,29 @@ class RayDistributedExecutor(DistributedExecutorBase):
         logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
 
         # Create the workers.
-        driver_ip = get_ip()
-        rank = 0
+        bundle_indices: List[int]
+        if envs.VLLM_RAY_BUNDLE_INDICES:
+            # Use the bundle indices specified by the user.
+            bundle_indices = list(
+                map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(",")))
+            assert len(bundle_indices) == self.parallel_config.world_size, \
+            ("VLLM_RAY_BUNDLE_INDICES must have the same size"
+            f" as the world size, but got {bundle_indices=} "
+            f"and {self.parallel_config.world_size=}")
+            assert len(set(bundle_indices)) == len(bundle_indices), \
+            ("VLLM_RAY_BUNDLE_INDICES cannot have duplicate values,"
+            f" but got {bundle_indices=}")
+        else:
+            # use the first N bundles that have GPU resources.
+            bundle_indices = []
+            for bundle_id, bundle in enumerate(placement_group.bundle_specs):
+                if bundle.get(current_platform.ray_device_key, 0):
+                    bundle_indices.append(bundle_id)
+            bundle_indices = bundle_indices[:self.parallel_config.world_size]
+
         worker_metadata: List[RayWorkerMetaData] = []
-        for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-            if not bundle.get(current_platform.ray_device_key, 0):
-                continue
+        driver_ip = get_ip()
+        for rank, bundle_id in enumerate(bundle_indices):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
                 placement_group_capture_child_tasks=True,
@@ -185,7 +202,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
                                            rpc_rank=rank)
             worker_metadata.append(
                 RayWorkerMetaData(worker=worker, created_rank=rank))
-            rank += 1
 
         worker_ips = ray.get([
             each.worker.get_node_ip.remote()  # type: ignore[attr-defined]
@@ -497,7 +513,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
             raise ValueError(
                 "cupy is not installed but required since "
-                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set."
+                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set. "
                 "Run `pip install ray[adag]` and check cupy installation.")
 
     def _compiled_ray_dag(self, enable_asyncio: bool):
@@ -512,10 +528,18 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
-            # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
-            #                         -> 1 -> (ExecuteModelReq, IntermediateOutput) -> 5 -> SamplerOutput   # noqa: E501
-            #                         -> 2 -> (ExecuteModelReq, IntermediateOutput) -> 6 -> SamplerOutput   # noqa: E501
-            #                         -> 3 -> (ExecuteModelReq, IntermediateOutput) -> 7 -> SamplerOutput   # noqa: E501
+            #
+            # For V0:
+            # ExecuteModelRequest -> 0 -> (ExecuteModelReq, IntermediateTensors) -> 4 -> SamplerOutput   # noqa: E501
+            # ExecuteModelRequest -> 1 -> (ExecuteModelReq, IntermediateTensors) -> 5 -> SamplerOutput   # noqa: E501
+            # ExecuteModelRequest -> 2 -> (ExecuteModelReq, IntermediateTensors) -> 6 -> SamplerOutput   # noqa: E501
+            # ExecuteModelRequest -> 3 -> (ExecuteModelReq, IntermediateTensors) -> 7 -> SamplerOutput   # noqa: E501
+            #
+            # For V1:
+            # SchedulerOutput -> 0 -> (SchedulerOutput, IntermediateTensors) -> 4 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 1 -> (SchedulerOutput, IntermediateTensors) -> 5 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 2 -> (SchedulerOutput, IntermediateTensors) -> 6 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 3 -> (SchedulerOutput, IntermediateTensors) -> 7 -> ModelRunnerOutput   # noqa: E501
 
             # All workers in the first TP group will take in the
             # ExecuteModelRequest as input.
@@ -525,7 +549,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 # and the TP group executes in SPMD fashion.
                 if self.use_v1:
                     outputs = [
-                        worker.execute_model.
+                        worker.execute_model_ray.
                         bind(  # type: ignore[attr-defined]
                             outputs[i]) for i, worker in enumerate(tp_group)
                     ]

@@ -1,16 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
-import triton
-import triton.language as tl
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import get_flash_attn_version
+from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+if current_platform.is_cuda():
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+logger = init_logger(__name__)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -63,7 +70,7 @@ class FlashAttentionMetadata:
     max_query_len: int
     query_start_loc: torch.Tensor
     max_seq_len: int
-    seq_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
@@ -71,8 +78,8 @@ class FlashAttentionMetadata:
     use_cascade: bool
     common_prefix_len: int
     cu_prefix_query_lens: Optional[torch.Tensor]
-    cu_prefix_kv_lens: Optional[torch.Tensor]
-    cu_suffix_kv_lens: Optional[torch.Tensor]
+    prefix_kv_lens: Optional[torch.Tensor]
+    suffix_kv_lens: Optional[torch.Tensor]
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -127,6 +134,7 @@ class FlashAttentionImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "FlashAttentionImpl")
+        self.vllm_flash_attn_version = get_flash_attn_version()
 
     def forward(
         self,
@@ -149,10 +157,6 @@ class FlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert layer._k_scale == 1.0 and layer._v_scale == 1.0, (
-            "key/v_scale is not supported in FlashAttention.")
-
         assert output is not None, "Output tensor must be provided."
 
         if attn_metadata is None:
@@ -196,7 +200,7 @@ class FlashAttentionImpl(AttentionImpl):
                 out=output[:num_actual_tokens],
                 cu_seqlens_q=attn_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.max_query_len,
-                cu_seqlens_k=attn_metadata.seq_start_loc,
+                seqused_k=attn_metadata.seq_lens,
                 max_seqlen_k=attn_metadata.max_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
@@ -204,6 +208,7 @@ class FlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 block_table=attn_metadata.block_table,
                 softcap=self.logits_soft_cap,
+                fa_version=self.vllm_flash_attn_version,
             )
             return output
 
@@ -216,8 +221,8 @@ class FlashAttentionImpl(AttentionImpl):
             cu_query_lens=attn_metadata.query_start_loc,
             max_query_len=attn_metadata.max_query_len,
             cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
-            cu_prefix_kv_lens=attn_metadata.cu_prefix_kv_lens,
-            cu_suffix_kv_lens=attn_metadata.cu_suffix_kv_lens,
+            prefix_kv_lens=attn_metadata.prefix_kv_lens,
+            suffix_kv_lens=attn_metadata.suffix_kv_lens,
             max_kv_len=attn_metadata.max_seq_len,
             softmax_scale=self.scale,
             alibi_slopes=self.alibi_slopes,
@@ -225,6 +230,7 @@ class FlashAttentionImpl(AttentionImpl):
             logits_soft_cap=self.logits_soft_cap,
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
+            fa_version=self.vllm_flash_attn_version,
         )
         return output
 
@@ -305,8 +311,8 @@ def cascade_attention(
     cu_query_lens: torch.Tensor,
     max_query_len: int,
     cu_prefix_query_lens: torch.Tensor,
-    cu_prefix_kv_lens: torch.Tensor,
-    cu_suffix_kv_lens: torch.Tensor,
+    prefix_kv_lens: torch.Tensor,
+    suffix_kv_lens: torch.Tensor,
     max_kv_len: int,
     softmax_scale: float,
     alibi_slopes: Optional[torch.Tensor],
@@ -314,6 +320,7 @@ def cascade_attention(
     logits_soft_cap: float,
     block_table: torch.Tensor,
     common_prefix_len: int,
+    fa_version: int,
 ) -> torch.Tensor:
     assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
     # TODO: Support sliding window.
@@ -332,7 +339,7 @@ def cascade_attention(
         k=key_cache,
         v=value_cache,
         cu_seqlens_q=cu_prefix_query_lens,
-        cu_seqlens_k=cu_prefix_kv_lens,
+        seqused_k=prefix_kv_lens,
         max_seqlen_q=num_tokens,
         max_seqlen_k=common_prefix_len,
         softmax_scale=softmax_scale,
@@ -341,6 +348,7 @@ def cascade_attention(
         block_table=block_table[:1],
         softcap=logits_soft_cap,
         return_softmax_lse=True,
+        fa_version=fa_version,
     )
 
     # Process suffix per query.
@@ -349,7 +357,7 @@ def cascade_attention(
         k=key_cache,
         v=value_cache,
         cu_seqlens_q=cu_query_lens,
-        cu_seqlens_k=cu_suffix_kv_lens,
+        seqused_k=suffix_kv_lens,
         max_seqlen_q=max_query_len,
         max_seqlen_k=max_kv_len - common_prefix_len,
         softmax_scale=softmax_scale,
@@ -358,74 +366,9 @@ def cascade_attention(
         block_table=block_table[:, num_common_kv_blocks:],
         softcap=logits_soft_cap,
         return_softmax_lse=True,
+        fa_version=fa_version,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
                       suffix_lse)
-
-
-def merge_attn_states(
-    output: torch.Tensor,
-    prefix_output: torch.Tensor,
-    prefix_lse: torch.Tensor,
-    suffix_output: torch.Tensor,
-    suffix_lse: torch.Tensor,
-) -> None:
-    num_tokens = output.shape[0]
-    num_query_heads = output.shape[1]
-    head_size = output.shape[2]
-    padded_head_size = triton.next_power_of_2(head_size)
-
-    # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
-    merge_attn_states_kernel[(num_tokens, num_query_heads)](
-        output,
-        prefix_output,
-        prefix_lse,
-        suffix_output,
-        suffix_lse,
-        head_size,
-        padded_head_size,
-    )
-
-
-@triton.jit
-def merge_attn_states_kernel(
-    output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    prefix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    prefix_lse,  # [NUM_HEADS, NUM_TOKENS]
-    suffix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    suffix_lse,  # [NUM_HEADS, NUM_TOKENS]
-    HEAD_SIZE: tl.constexpr,
-    PADDED_HEAD_SIZE: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    num_tokens = tl.num_programs(0)
-    head_idx = tl.program_id(1)
-    num_heads = tl.num_programs(1)
-
-    p_lse = tl.load(prefix_lse + head_idx * num_tokens + token_idx)
-    s_lse = tl.load(suffix_lse + head_idx * num_tokens + token_idx)
-    max_lse = tl.maximum(p_lse, s_lse)
-    p_lse = p_lse - max_lse
-    s_lse = s_lse - max_lse
-
-    head_arange = tl.arange(0, PADDED_HEAD_SIZE)
-    head_mask = head_arange < HEAD_SIZE
-    p_out = tl.load(prefix_output + token_idx * num_heads * HEAD_SIZE +
-                    head_idx * HEAD_SIZE + head_arange,
-                    mask=head_mask)
-    s_out = tl.load(suffix_output + token_idx * num_heads * HEAD_SIZE +
-                    head_idx * HEAD_SIZE + head_arange,
-                    mask=head_mask)
-
-    # NOTE(woosuk): Be careful with the numerical stability.
-    # We should compute the scale first, and then multiply it with the output.
-    # Do not multiply the output with tl.exp(p_lse) or tl.exp(s_lse) directly.
-    p_scale = tl.exp(p_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
-    s_scale = tl.exp(s_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
-    out = p_out * p_scale + s_out * s_scale
-    tl.store(output + token_idx * num_heads * HEAD_SIZE +
-             head_idx * HEAD_SIZE + head_arange,
-             out,
-             mask=head_mask)
