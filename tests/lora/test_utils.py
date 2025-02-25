@@ -48,7 +48,7 @@ def test_parse_fine_tuned_lora_name_valid():
         ),
         (
             "base_model.model.lm_head.lora_magnitude_vector",
-            "lm_head",
+            "model.lm_head",
             False,
             False,
             True,

@@ -143,17 +143,19 @@ def parse_fine_tuned_lora_name(
     if parts[-1] == "weight" and (parts[-2] == "lora_A"
                                   or parts[-2] == "lora_B"):
         new_name = ".".join(parts[2:-2])
-        return new_name, parts[-2] == "lora_A", False
+        return new_name, parts[-2] == "lora_A", False, False
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         new_name = ".".join(parts[2:-1])
-        return new_name, parts[-1] == "lora_embedding_A", False
+        return new_name, parts[-1] == "lora_embedding_A", False, False
 
     if parts[-1] == "bias":
         new_name = ".".join(parts[2:-2])
-        return new_name, False, True
+        return new_name, False, True, False
 
-    if parts[-1] == "magnitude_vector":
+    if parts[-1] == "lora_magnitude_vector":
+        new_name = ".".join(parts[2:-1])
+        return new_name, False, False, True
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 
