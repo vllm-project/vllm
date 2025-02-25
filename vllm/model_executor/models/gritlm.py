@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from array import array
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
-from vllm.attention import AttentionMetadata
 from vllm.attention.backends.xformers import XFormersImpl
 from vllm.config import ModelConfig, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import PoolerHead
 from vllm.model_executor.models.llama import LlamaForCausalLM
@@ -217,13 +217,12 @@ class GritLM(LlamaForCausalLM):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
 
         # Change attention to non-causal for pooling tasks.
         if self.runner_type == "pooling":
+            attn_metadata = get_forward_context().attn_metadata
             assert attn_metadata.prefill_metadata.attn_bias is None
             attn_metadata.prefill_metadata.attn_bias = [
                 BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens)
@@ -232,8 +231,6 @@ class GritLM(LlamaForCausalLM):
         return super().forward(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             **kwargs,
         )
 

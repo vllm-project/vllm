@@ -4,7 +4,7 @@
 # https://github.com/THUDM/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
-from typing import List, Literal, Mapping, Optional, TypedDict, Union
+from typing import Literal, Mapping, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -15,7 +15,6 @@ from transformers import PreTrainedTokenizer, TensorType
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention import AttentionMetadata
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -628,8 +627,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -645,8 +642,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors,
-                                         inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
 
         return hidden_states
