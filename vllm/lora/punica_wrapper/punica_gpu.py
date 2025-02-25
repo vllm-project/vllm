@@ -203,6 +203,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_b_stacked: torch.Tensor,
         add_inputs: bool = True,
+        magnitudes: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
         """
@@ -216,6 +217,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
+            magnitudes (Optional[torch.Tensor]): Default to None.
         """
 
         if self.is_prefill:
@@ -230,7 +232,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         else:
             bgmv_expand(x, lora_b_stacked, y, self.token_lora_indices,
                         add_inputs)
-        # TODO: not sure how to pass and apply lora magnitudes here
+        if magnitudes is not None:
+            # Normalize y column-wise and multiply by magnitudes
+            y_norm = torch.norm(y, p=2, dim=0, keepdim=True)
+            y_norm = torch.clamp(y_norm, min=1e-6)  # Avoid division by zero
+            y.div_(y_norm)
+            y.mul_(magnitudes.view(1, -1))
 
     def add_lora_linear(
         self,
