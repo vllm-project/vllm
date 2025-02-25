@@ -71,7 +71,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         if not (self.weight_quant.strategy == QuantizationStrategy.TENSOR
                 and self.input_quant.strategy == QuantizationStrategy.TENSOR):
             raise ValueError(
-                "For FP8 Fused MoE layers, only per-tensor scales"
+                "For FP8 Fused MoE layers, only per-tensor scales "
                 "for weights and activations are supported. Found "
                 f"{self.weight_quant}, {self.input_quant}")
 
@@ -190,7 +190,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert layer.w13_weight_scale is not None
         shard_size = layer.intermediate_size_per_partition
         max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-        for expert_id in range(layer.num_experts):
+        for expert_id in range(layer.local_num_experts):
             start = 0
             for shard_id in range(2):
                 dq_weight = per_tensor_dequantize(
@@ -214,6 +214,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
@@ -239,6 +241,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                              topk_ids=topk_ids,
                              inplace=True,
                              use_fp8_w8a8=True,
+                             global_num_experts=global_num_experts,
+                             expert_map=expert_map,
                              w1_scale=layer.w13_weight_scale,
                              w2_scale=layer.w2_weight_scale,
                              a1_scale=layer.w13_input_scale,
@@ -523,7 +527,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         replace_tensor("w13_weight_scale", marlin_w13_scales)
         marlin_w2_scales = marlin_moe_permute_scales(
             layer.w2_weight_scale,
-            layer.w2_weight_scale.shape[1] * self.packed_factor,
+            layer.w2_weight_scale.shape[1] *
+            (self.group_size if self.group_size != -1 else self.packed_factor),
             size_k2,
             self.group_size,
             self.num_bits,
@@ -540,10 +545,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if expert_map is not None:
+            raise NotImplementedError(
+                "Expert Parallelism is not supported for "
+                "fused Marlin MoE method.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
