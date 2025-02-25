@@ -49,6 +49,40 @@ def test_guided_json_completion(monkeypatch, sample_json_schema,
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+def test_guided_json_object(monkeypatch, guided_decoding_backend: str):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    llm = LLM(model=MODEL_NAME, max_model_len=1024)
+    sampling_params = SamplingParams(temperature=1.0,
+                                     max_tokens=100,
+                                     n=2,
+                                     guided_decoding=GuidedDecodingParams(
+                                         json_object=True,
+                                         backend=guided_decoding_backend))
+
+    outputs = llm.generate(
+        prompts=("Generate a JSON object with curly braces for a person with "
+                 "name and age fields for John Smith who is 31 years old."),
+        sampling_params=sampling_params,
+        use_tqdm=True)
+
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+
+        for i in range(2):
+            generated_text = output.outputs[i].text
+            print(generated_text)
+            assert generated_text is not None
+
+            # Parse to verify it is valid JSON
+            parsed_json = json.loads(generated_text)
+            assert isinstance(parsed_json, dict)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend",
+                         GUIDED_DECODING_BACKENDS_V1)
 def test_guided_json_unsupported_schema(monkeypatch, unsupported_json_schema,
                                         guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
