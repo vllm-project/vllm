@@ -751,8 +751,7 @@ class EngineArgs:
             '--speculative-token-tree',
             type=nullable_str,
             default=EngineArgs.speculative_token_tree,
-            help='The token tree definition used with speculation.'
-        )
+            help='The token tree definition used with speculation.')
         parser.add_argument(
             '--speculative-draft-tensor-parallel-size',
             '-spec-draft-tp',

@@ -11,8 +11,8 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, \
-    SpeculativeConfig
+from vllm.config import (ModelConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -60,10 +60,10 @@ class NeuronCausalLM(nn.Module):
         self.model: nn.Module
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            input_block_ids: torch.Tensor,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_block_ids: torch.Tensor,
     ) -> torch.Tensor:
         logits = self.model(input_ids,
                             cache_ids=positions,
@@ -76,9 +76,9 @@ class NeuronCausalLM(nn.Module):
         return logits
 
     def sample(
-            self,
-            logits: torch.Tensor,
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
 
         if self.on_device_sampling_disabled:
@@ -121,23 +121,20 @@ class NeuronSpeculationCausalLM(nn.Module):
 
     SPECULATION_TERMINATION_ID = -1
 
-    def __init__(
-            self,
-            speculation_model
-    ) -> None:
+    def __init__(self, speculation_model) -> None:
         super().__init__()
         self.model = speculation_model
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            input_block_ids: torch.Tensor,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_block_ids: torch.Tensor,
     ) -> torch.Tensor:
         tokens, counts = self.model.speculative_iteration(
             input_ids, positions, input_block_ids)
 
-        # Mark the end of accepted specualtive tokens for each sequence with the
+        # Mark the end of accepted speculative tokens for each sequence with the
         # speculation termination id.
         batch_size, steps = tokens.shape
         mask = torch.arange(steps).expand(batch_size, -1) >= counts
@@ -146,13 +143,15 @@ class NeuronSpeculationCausalLM(nn.Module):
         return tokens
 
     def sample(
-            self,
-            logits: torch.Tensor,
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[List[SamplerOutput]]:
         batch_size, num_steps = logits.shape
-        seq_ids = [seq_id for sg in sampling_metadata.seq_groups for seq_id in
-                   sg.seq_ids]
+        seq_ids = [
+            seq_id for sg in sampling_metadata.seq_groups
+            for seq_id in sg.seq_ids
+        ]
         # Organize input tensors by step instead of by sequence.
         accepted_token_ids_by_step = logits.transpose(0, 1)
         accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
@@ -166,12 +165,13 @@ class NeuronSpeculationCausalLM(nn.Module):
             for sequence_index in range(batch_size):
                 token_id = accepted_token_ids_by_step[step_index][
                     sequence_index]
-                step_output_token_ids.append(CompletionSequenceGroupOutput(
-                    samples=[
+                step_output_token_ids.append(
+                    CompletionSequenceGroupOutput(samples=[
                         SequenceOutput(parent_seq_id=seq_ids[sequence_index],
                                        output_token=token_id,
-                                       logprobs={token_id: Logprob(token_id)})],
-                    prompt_logprobs=None))
+                                       logprobs={token_id: Logprob(token_id)})
+                    ],
+                                                  prompt_logprobs=None))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
         return sampler_output_list
@@ -228,10 +228,8 @@ def _get_default_neuron_config(model_config: ModelConfig,
 
 
 def _get_default_neuron_config_for_speculation(
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig
-):
+        model_config: ModelConfig, parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig):
     """Generate a neuron config for speculative decoding based on
     vllm config args."""
     from transformers_neuronx.config import ContinuousBatchingConfig
@@ -240,14 +238,13 @@ def _get_default_neuron_config_for_speculation(
     continuous_batching_config = ContinuousBatchingConfig(
         batch_size_for_shared_caches=scheduler_config.max_num_seqs)
 
-    default_neuron_args = dict(
-        collectives_layout=LAYOUT_BSH,
-        attention_layout=LAYOUT_BSH,
-        fuse_qkv=True,
-        on_device_embedding=True,
-        continuous_batching=continuous_batching_config,
-        on_device_generation=copy.deepcopy(model_config.neuron_sampling_params)
-    )
+    default_neuron_args = dict(collectives_layout=LAYOUT_BSH,
+                               attention_layout=LAYOUT_BSH,
+                               fuse_qkv=True,
+                               on_device_embedding=True,
+                               continuous_batching=continuous_batching_config,
+                               on_device_generation=copy.deepcopy(
+                                   model_config.neuron_sampling_params))
     return default_neuron_args
 
 
@@ -302,11 +299,9 @@ def get_neuron_model(model_config: ModelConfig,
 
 
 def get_neuron_speculation_model(
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
+        model_config: ModelConfig, parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        speculation_config: SpeculativeConfig
-) -> None:
+        speculation_config: SpeculativeConfig) -> None:
     """Initializes a neuron-optimized speculation model for inference.
     
     This method is only applicable for speculation with a standalone draft model
@@ -350,9 +345,8 @@ def get_neuron_speculation_model(
 
     default_draft_neuron_config_args = (
         _get_default_neuron_config_for_speculation(
-        speculation_config.draft_model_config,
-        parallel_config,
-        scheduler_config))
+            speculation_config.draft_model_config, parallel_config,
+            scheduler_config))
     if is_eagle:
         default_draft_neuron_config_args['is_eagle_draft'] = True
         default_draft_neuron_config_args['has_pre_attention_norm'] = False
@@ -361,19 +355,19 @@ def get_neuron_speculation_model(
         default_draft_neuron_config_args,
         speculation_config.draft_model_config.override_neuron_config)
 
-    draft_model.load_weights(
-        speculation_config.draft_model_config.model,
-        tp_degree=speculation_config.draft_parallel_config.tensor_parallel_size,
-        amp=TORCH_DTYPE_TO_NEURON_AMP[
-            speculation_config.draft_model_config.dtype],
-        neuron_config=draft_neuron_config,
-        context_length_estimate=context_length_estimates,
-        n_positions=n_positions,
-        batch_size=scheduler_config.max_num_seqs)
+    draft_model.load_weights(speculation_config.draft_model_config.model,
+                             tp_degree=speculation_config.
+                             draft_parallel_config.tensor_parallel_size,
+                             amp=TORCH_DTYPE_TO_NEURON_AMP[
+                                 speculation_config.draft_model_config.dtype],
+                             neuron_config=draft_neuron_config,
+                             context_length_estimate=context_length_estimates,
+                             n_positions=n_positions,
+                             batch_size=scheduler_config.max_num_seqs)
 
     draft_model.eval()
 
-    num_speculative_tokens= speculation_config.num_speculative_tokens
+    num_speculative_tokens = speculation_config.num_speculative_tokens
     # Create speculation model instance.
     speculation_model = FusedSpeculativeDecoder(draft_model.model,
                                                 target_model.model,
@@ -421,23 +415,23 @@ def get_neuron_eagle_speculation_model(model_config: ModelConfig,
 
     default_draft_neuron_config_args = (
         _get_default_neuron_config_for_speculation(
-        speculation_config.draft_model_config, parallel_config,
-        scheduler_config))
+            speculation_config.draft_model_config, parallel_config,
+            scheduler_config))
     default_draft_neuron_config_args['is_eagle_draft'] = True
     default_draft_neuron_config_args['has_pre_attention_norm'] = False
     draft_neuron_config = _get_neuron_config_after_override(
         default_draft_neuron_config_args,
         speculation_config.draft_model_config.override_neuron_config)
 
-    draft_model.load_weights(
-        speculation_config.draft_model_config.model,
-        tp_degree=speculation_config.draft_parallel_config.tensor_parallel_size,
-        amp=TORCH_DTYPE_TO_NEURON_AMP[
-            speculation_config.draft_model_config.dtype],
-        neuron_config=draft_neuron_config,
-        context_length_estimate=context_length_estimates,
-        n_positions=n_positions,
-        batch_size=scheduler_config.max_num_seqs)
+    draft_model.load_weights(speculation_config.draft_model_config.model,
+                             tp_degree=speculation_config.
+                             draft_parallel_config.tensor_parallel_size,
+                             amp=TORCH_DTYPE_TO_NEURON_AMP[
+                                 speculation_config.draft_model_config.dtype],
+                             neuron_config=draft_neuron_config,
+                             context_length_estimate=context_length_estimates,
+                             n_positions=n_positions,
+                             batch_size=scheduler_config.max_num_seqs)
 
     draft_model.eval()
 

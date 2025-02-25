@@ -1,13 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
 import os
 from unittest.mock import MagicMock
+
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import NeuronModelRunner
-from vllm.worker.neuron_worker import use_transformers_neuronx, NeuronFramework
+from vllm.worker.neuron_worker import NeuronFramework, use_transformers_neuronx
 
-os.environ['VLLM_NEURON_FRAMEWORK'] = NeuronFramework.TRANSFORMERS_NEURONX.value
+os.environ[
+    'VLLM_NEURON_FRAMEWORK'] = NeuronFramework.TRANSFORMERS_NEURONX.value
 
 
 def _create_neuron_model_runner(model: str, *args,
@@ -20,9 +23,7 @@ def _create_neuron_model_runner(model: str, *args,
         scheduler_config=engine_config.scheduler_config,
         device_config=engine_config.device_config,
     )
-    neuron_model_runner = NeuronModelRunner(
-        vllm_config=vllm_config
-    )
+    neuron_model_runner = NeuronModelRunner(vllm_config=vllm_config)
     return neuron_model_runner
 
 
@@ -36,7 +37,7 @@ def test_update_neuron_sampling_params_not_full_batch():
     )
     assert not model_runner._on_device_sampling_disabled
     # Test sampling param updating only when TNx is framework
-    # NxDI handles sampling paramter updating inside model
+    # NxDI handles sampling parameter updating inside model
     if use_transformers_neuronx():
         model_mock = MagicMock()
         model_runner.model = model_mock
@@ -46,7 +47,8 @@ def test_update_neuron_sampling_params_not_full_batch():
                 request_id="test_0",
                 is_prompt=True,
                 seq_data={0: SequenceData.from_seqs([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0.5, top_k=1,
+                sampling_params=SamplingParams(temperature=0.5,
+                                               top_k=1,
                                                top_p=0.5),
                 block_tables={0: [1]},
             )
@@ -81,7 +83,7 @@ def test_update_neuron_sampling_params_full_batch():
     assert not model_runner._on_device_sampling_disabled
 
     # Test sampling param updating only when TNx is framework
-    # NxDI handles sampling paramter updating inside model
+    # NxDI handles sampling parameter updating inside model
     if use_transformers_neuronx():
         model_mock = MagicMock()
         model_runner.model = model_mock
@@ -91,7 +93,8 @@ def test_update_neuron_sampling_params_full_batch():
                 request_id="test_0",
                 is_prompt=True,
                 seq_data={0: SequenceData.from_seqs([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0.5, top_k=1,
+                sampling_params=SamplingParams(temperature=0.5,
+                                               top_k=1,
                                                top_p=0.5),
                 block_tables={0: [1]},
             ),
@@ -99,7 +102,8 @@ def test_update_neuron_sampling_params_full_batch():
                 request_id="test_0",
                 is_prompt=True,
                 seq_data={1: SequenceData.from_seqs([4, 5, 6])},
-                sampling_params=SamplingParams(temperature=0.2, top_k=2,
+                sampling_params=SamplingParams(temperature=0.2,
+                                               top_k=2,
                                                top_p=0.2),
                 block_tables={1: [0]},
             )

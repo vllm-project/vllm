@@ -8,16 +8,16 @@ from typing import List, Optional, Tuple
 import torch
 import torch.distributed
 
-from vllm.logger import init_logger
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
+from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -49,13 +49,11 @@ def get_neuron_framework_to_use():
     specified_framework = os.environ.get("VLLM_NEURON_FRAMEWORK")
     tnx_framework = NeuronFramework.TRANSFORMERS_NEURONX.value
     nxd_framework = NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE.value
-    if (specified_framework == tnx_framework and
-            tnx_installed):
+    if (specified_framework == tnx_framework and tnx_installed):
         return NeuronFramework.TRANSFORMERS_NEURONX
 
-    if ((specified_framework == nxd_framework and
-         nxd_installed) or
-            (specified_framework is None and nxd_installed)):
+    if ((specified_framework == nxd_framework and nxd_installed)
+            or (specified_framework is None and nxd_installed)):
         return NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
 
     if specified_framework is None and tnx_installed:
@@ -84,35 +82,35 @@ def use_transformers_neuronx():
     select the Neuron model framework and framework-specific configuration to
     apply during model compilation.
     """
-    return get_neuron_framework_to_use() == NeuronFramework.TRANSFORMERS_NEURONX
+    return get_neuron_framework_to_use(
+    ) == NeuronFramework.TRANSFORMERS_NEURONX
 
 
 class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
     """
 
-    def __init__(
-            self,
-            vllm_config: VllmConfig,
-            local_rank: int,
-            rank: int,
-            distributed_init_method: str,
-            is_driver_worker: bool = False
-    ) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 local_rank: int,
+                 rank: int,
+                 distributed_init_method: str,
+                 is_driver_worker: bool = False) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
 
-        self.enable_neuron_multi_node = (
-                os.getenv("ENABLE_NEURON_MULTI_NODE",
-                          DEFAULT_ENABLE_NEURON_MULTI_NODE).lower() == "true")
+        self.enable_neuron_multi_node = (os.getenv(
+            "ENABLE_NEURON_MULTI_NODE",
+            DEFAULT_ENABLE_NEURON_MULTI_NODE).lower() == "true")
 
         self.world_size = int(os.getenv("WORLD_SIZE", DEFAULT_WORLD_SIZE))
 
         if self.enable_neuron_multi_node:
-            self.rank = int(os.getenv("NEURON_RANK_ID", DEFAULT_NEURON_RANK_ID))
+            self.rank = int(os.getenv("NEURON_RANK_ID",
+                                      DEFAULT_NEURON_RANK_ID))
             self.distributed_init_method = "env://"
             self.is_driver_worker = self.rank == 0
 
@@ -120,7 +118,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                         extra={
                             "Rank": self.rank,
                             "distributed_init_method":
-                                self.distributed_init_method,
+                            self.distributed_init_method,
                             "is_driver_worker": self.is_driver_worker
                         })
 
@@ -144,27 +142,24 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                 "[transformers-neuronx, neuronx-distributed-inference]")
 
     def get_tnx_model_runner(self, vllm_config):
+        from vllm.worker.multi_step_neuron_model_runner import (
+            MultiStepNeuronModelRunner)
         from vllm.worker.neuron_model_runner import NeuronModelRunner
-        from vllm.worker.multi_step_neuron_model_runner import \
-            MultiStepNeuronModelRunner
         if self.speculative_config is not None:
-            return MultiStepNeuronModelRunner(
-                vllm_config=vllm_config)
+            return MultiStepNeuronModelRunner(vllm_config=vllm_config)
         else:
-            return NeuronModelRunner(
-                vllm_config=vllm_config)
+            return NeuronModelRunner(vllm_config=vllm_config)
 
     def get_neuronx_distributed_model_runner(self, vllm_config):
-        from vllm.worker.neuronx_distributed_model_runner import \
-            NeuronxDistributedModelRunner
-        from vllm.worker.multi_step_neuronx_distributed_model_runner import \
-            MultiStepNeuronxDistributedModelRunner
+        from vllm.worker.multi_step_neuronx_distributed_model_runner import (
+            MultiStepNeuronxDistributedModelRunner)
+        from vllm.worker.neuronx_distributed_model_runner import (
+            NeuronxDistributedModelRunner)
         if self.speculative_config is not None:
             return MultiStepNeuronxDistributedModelRunner(
                 vllm_config=vllm_config)
         else:
-            return NeuronxDistributedModelRunner(
-                vllm_config=vllm_config)
+            return NeuronxDistributedModelRunner(vllm_config=vllm_config)
 
     def init_device(self) -> None:
         self.init_distributed_environment()
