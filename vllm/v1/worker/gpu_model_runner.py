@@ -680,8 +680,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
         num_reqs = self.input_batch.num_reqs
-        precomp_src_slices = []
-        precomp_dst_slices = []
         comp_dst_slices = []
         comp_data = []
 
@@ -707,38 +705,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert num_scheduled_tokens == prompt_part_len + completion_part_len
 
             if prompt_part_len > 0:
+                assert req.mrope_positions is not None
                 dst_start = mrope_pos_ptr
+                dst_end = dst_start + prompt_part_len
                 src_start = num_computed_tokens
-                precomp_src_slices.append(
-                    (src_start, src_start + prompt_part_len))
-                precomp_dst_slices.append(
-                    (dst_start, dst_start + prompt_part_len))
+                src_end = src_start + prompt_part_len
+                self.mrope_positions_cpu[:, dst_start:dst_end] =\
+                    req.mrope_positions[:, src_start:src_end]
                 mrope_pos_ptr += prompt_part_len
 
             if completion_part_len > 0:
                 dst_start = mrope_pos_ptr
                 context_len = num_computed_tokens + prompt_part_len
                 seq_len = context_len + completion_part_len
-
                 comp_dst_slices.append(
                     (dst_start, dst_start + completion_part_len))
                 comp_data.append((req.mrope_position_delta + context_len,
                                   req.mrope_position_delta + seq_len))
                 mrope_pos_ptr += completion_part_len
 
-        # NOTE (Kevin C): loading everything back-to-back, most likely
-        # improve cache hit rate, but only by a small margin.
-        # The biggest immprovement came from premaking the calculated mrope
+        # NOTE (Kevin C): mmprovement came from premaking the calculated mrope
         # positions, the copying over the slices
-        for src_slice, dst_slice in zip(precomp_src_slices,
-                                        precomp_dst_slices):
-            src_start, src_end = src_slice
-            dst_start, dst_end = dst_slice
-
-            assert req.mrope_positions is not None
-
-            self.mrope_positions_cpu[:, dst_start:dst_end] =\
-                    req.mrope_positions[:, src_start:src_end]
 
         # Process computed positions
         if comp_data:
@@ -747,7 +734,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # make sure that this premade tensor covers all possible range
             base_arange = MRotaryEmbedding.get_next_input_positions_tensor(
-                req.mrope_position_delta,
+                0,
                 context_len=mrope_min,
                 seq_len=mrope_max + 1,
             )
