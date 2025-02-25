@@ -54,7 +54,6 @@ def test_fused_moe(
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
-    torch_output = torch_moe(a, w1, w2, score, topk)
 
     # Pad the input if use padding
     if envs.VLLM_MOE_PADDING:
