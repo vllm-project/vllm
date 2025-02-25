@@ -83,6 +83,44 @@ def test_guided_json_object(monkeypatch, guided_decoding_backend: str):
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+def test_guided_grammar_ebnf(monkeypatch, sample_sql_ebnf,
+                             guided_decoding_backend: str):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    llm = LLM(model=MODEL_NAME, max_model_len=1024)
+    sampling_params = SamplingParams(temperature=0.8,
+                                     top_p=0.95,
+                                     max_tokens=1000,
+                                     guided_decoding=GuidedDecodingParams(
+                                         grammar=sample_sql_ebnf,
+                                         backend=guided_decoding_backend))
+    outputs = llm.generate(
+        prompts=("Generate a sql statement that selects col_1 from "
+                 "table_1 where it is equal to 1"),
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
+
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+
+        # remove spaces for comparison b/c we removed them in the grammar
+        ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(
+            " ", "")
+
+        assert generated_text.strip() == ground_truth
+
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend",
+                         GUIDED_DECODING_BACKENDS_V1)
 def test_guided_json_unsupported_schema(monkeypatch, unsupported_json_schema,
                                         guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
