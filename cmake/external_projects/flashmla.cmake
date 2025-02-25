@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/deepseek-ai/FlashMLA
-        GIT_TAG 414a2f3eedeb5ad3c4a6e89d8641e059519cacc9
+        GIT_TAG 4edea86f9e85eea6ea41dd14b2798fc6a0e2d80c
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
