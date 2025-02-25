@@ -35,10 +35,11 @@ endif()
 FetchContent_MakeAvailable(flashmla)
 message(STATUS "FlashMLA is available at ${flashmla_SOURCE_DIR}")
 
-# The machete kernels only work on hopper and require CUDA 12.0 or later.
-# Only build Machete kernels if we are building for something compatible with sm90a
+# The FlashMLA kernels only work on hopper and require CUDA 12.3 or later.
+# Only build FlashMLA kernels if we are building for something compatible with 
+# sm90a
 cuda_archs_loose_intersection(FLASH_MLA_ARCHS "9.0a" "${CUDA_ARCHS}")
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND FLASH_MLA_ARCHS)
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.3 AND FLASH_MLA_ARCHS)
     set(FlashMLA_SOURCES
         ${flashmla_SOURCE_DIR}/csrc/flash_api.cpp
         ${flashmla_SOURCE_DIR}/csrc/flash_fwd_mla_bf16_sm90.cu)
@@ -63,7 +64,7 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND FLASH_MLA_ARCHS)
         USE_SABI 3
         WITH_SOABI)
 else()
-    # Create an empty target for setup.py
+    # Create an empty target for setup.py when not targeting sm90a systems
     add_custom_target(_flashmla_C)
 endif()
 
