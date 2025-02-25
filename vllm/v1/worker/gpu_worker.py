@@ -2,7 +2,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, Optional, Set
+from typing import TYPE_CHECKING, Dict, Optional, Set
 
 import torch
 import torch.distributed

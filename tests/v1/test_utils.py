@@ -23,7 +23,7 @@ def test_bind_kv_cache():
         'layers.3.self_attn': torch.zeros((1, )),
     }
     runner_kv_caches: List[torch.Tensor] = []
-    bind_kv_cache(kv_cache, ctx, runner_kv_caches)
+    bind_kv_cache(kv_cache, runner_kv_caches, ctx)
     assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[
         'layers.0.self_attn']
     assert ctx['layers.1.self_attn'].kv_cache[0] is kv_cache[
@@ -53,7 +53,7 @@ def test_bind_kv_cache_non_attention():
     }
 
     runner_kv_caches: List[torch.Tensor] = []
-    bind_kv_cache(kv_cache, ctx, runner_kv_caches)
+    bind_kv_cache(kv_cache, runner_kv_caches, ctx)
 
     assert ctx['model.layers.20.attn'].kv_cache[0] is kv_cache[
         'model.layers.20.attn']

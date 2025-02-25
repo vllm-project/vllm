@@ -1391,9 +1391,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         bind_kv_cache(
             kv_caches,
-            cpu_kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            cpu_kv_caches,
             self.cpu_kv_caches,
         )
 
