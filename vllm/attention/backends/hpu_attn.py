@@ -227,7 +227,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                      block_offsets)
             value_cache = self.v_cache(value, value_cache, block_indices,
                                        block_offsets)
-
+                
         if attn_metadata.is_prompt:
             # Prompt run.
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)

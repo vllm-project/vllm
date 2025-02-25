@@ -16,6 +16,7 @@ import habana_frameworks.torch.internal.bridge_config as bc
 import numpy as np
 import torch
 import torch.distributed
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 import vllm_hpu_extension.environment as environment
 from vllm_hpu_extension.bucketing import HPUBucketingContext
 from vllm_hpu_extension.flags import enabled_flags
@@ -195,7 +196,6 @@ def ensure_decodes_first(b: InputBatch):
 
         # Swap
         swap_positions(b, first_prompt_index, last_decode_index)
-
 
 def get_target_layer_suffix_list(model_type) -> list[str]:
     # This sets the suffix for the hidden layer name, which is controlled by
@@ -448,6 +448,7 @@ class HpuModelAdapter:
                 a 'prepare_cos_sin' method.")
 
     def forward(self, *args, **kwargs):
+        # TODO(kzawora): something goes VERY WRONG when operating on kwargs['attn_metadata'].slot_mapping, compared to untrimmed metadata
         kwargs = kwargs.copy()
         #        selected_token_indices = kwargs.pop('selected_token_indices')
         if 'warmup_mode' in kwargs:
@@ -484,9 +485,7 @@ class HpuModelAdapter:
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
-    return htorch.hpu.wrap_in_hpu_graph(
-        HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
-    ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(*args, **kwargs)
+    return HpuModelAdapter(*args, **kwargs)
 
 
 def subtuple(obj: object,
@@ -553,17 +552,6 @@ def pad_list(list, k, v):
     target_len = round_up(len(list), k)
     padding = target_len - len(list)
     return list + [v] * padding
-
-
-def precompute_indices_and_offsets(block_size, slot_mapping, is_prompt):
-    slot_mapping = slot_mapping.flatten()
-    indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
-    if is_prompt:
-        indices = indices.unflatten(0, (-1, block_size))[:, 0]
-        offsets = None
-    else:
-        offsets = torch.fmod(slot_mapping, block_size)
-    return indices, offsets
 
 
 class HPUModelRunner:
@@ -649,7 +637,7 @@ class HPUModelRunner:
         ).to(torch.int32).reshape(1, -1)
 
         self.max_num_seqs = self.scheduler_config.max_num_seqs
-        self.max_prefill_batch_size = 16  # TODO(kzawora): add knob for that
+        self.max_prefill_batch_size = 1  # TODO(kzawora): add knob for that
         self.padding_aware_scheduling = True  # TODO(kzawora): add knob for that
         self.padding_ratio_threshold = 0.9  # TODO(kzawora): add knob for that
         os.environ[
@@ -669,6 +657,11 @@ class HPUModelRunner:
             logger.info("Bucketing is OFF.")
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
                                           'false').lower() == 'true'
+        self._tokenizer = init_tokenizer_from_configs(
+            model_config=vllm_config.model_config,
+            scheduler_config=vllm_config.scheduler_config,
+            parallel_config=vllm_config.parallel_config,
+            lora_config=vllm_config.lora_config).tokenizer
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
@@ -775,12 +768,10 @@ class HPUModelRunner:
             )
 
             req_ids_to_add.append(req_id)
-
         # Update the states of the running/resumed requests.
         for req_data in scheduler_output.scheduled_cached_reqs:
             req_id = req_data.req_id
             req_state = self.requests[req_id]
-
             # Update the cached states.
             req_state.num_computed_tokens = req_data.num_computed_tokens
             if not req_data.resumed_from_preemption:
@@ -806,6 +797,9 @@ class HPUModelRunner:
                 req_data.new_block_ids)
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
+            #if self.input_batch.num_computed_tokens_cpu[req_index] < self.input_batch.num_prompt_tokens[req_index]:
+            #    import pdb; pdb.set_trace()
+            #    assert len(self.requests[req_id].output_token_ids) == 0
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -823,10 +817,9 @@ class HPUModelRunner:
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
-        return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+        return (len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+                or len(scheduler_output.finished_req_ids) > 0)
 
-    def swap_step(self):
-        self.cur_swap_id = (self.cur_swap_id + 1) % self.num_swaps
 
     def get_model(self) -> torch.nn.Module:
         assert self.model is not None
@@ -874,6 +867,7 @@ class HPUModelRunner:
 
             # Must be prompt
             assert num_computed_tokens < num_prompt_tokens
+            assert len(self.requests[req_id].output_token_ids) == 0
 
             prompt_req_ids.append(req_id)
             prompt_scheduled_tokens.append(num_scheduled_tokens)
@@ -881,58 +875,10 @@ class HPUModelRunner:
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids,
                                 prompt_scheduled_tokens)
 
-    def _prepare_sampling_old(self,
-                          scheduler_output: "SchedulerOutput",
-                          start_idx: Optional[int] = None,
-                          end_idx: Optional[int] = None,
+    def _prepare_sampling(self,
+                          batch_changed: bool,
+                          request_ids: Union[None, List[str]] = None,
                           pad_to: Optional[int] = None) -> SamplingMetadata:
-        skip_copy = True
-        if start_idx is None and end_idx is None:
-            if (scheduler_output.finished_req_ids
-                    or scheduler_output.preempted_req_ids):
-                skip_copy = False
-            if (scheduler_output.scheduled_new_reqs
-                    or scheduler_output.scheduled_resumed_reqs):
-                skip_copy = False
-        else:
-            #TODO(kzawora): something smells... kinda fishy in here
-            req_ids = self.input_batch.req_ids[start_idx:end_idx]
-            finished_req_ids = any([
-                req_id in scheduler_output.finished_req_ids
-                for req_id in req_ids
-            ])
-            preempted_req_ids = any([
-                req_id in scheduler_output.preempted_req_ids
-                for req_id in req_ids
-            ])
-            scheduled_new_reqs = any([
-                req_id in scheduler_output.scheduled_new_reqs
-                for req_id in req_ids
-            ])
-            scheduled_resumed_reqs = any([
-                req_id in scheduler_output.scheduled_resumed_reqs
-                for req_id in req_ids
-            ])
-
-            if (finished_req_ids or preempted_req_ids):
-                skip_copy = False
-            if (scheduled_new_reqs or scheduled_resumed_reqs):
-                skip_copy = False
-
-        # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(
-            skip_copy=skip_copy,
-            start_idx=start_idx,
-            end_idx=end_idx,
-            pad_to=pad_to)
-        return sampling_metadata
-
-    def _prepare_sampling(
-        self,
-        batch_changed: bool,
-        request_ids: Union[None, List[str]] = None,
-        pad_to: Optional[int]=None
-    ) -> SamplingMetadata:
         # Create the sampling metadata.
         req_id_output_token_ids: Dict[str, List[int]] = \
             {req_id: req.output_token_ids \
@@ -948,7 +894,7 @@ class HPUModelRunner:
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(
             req_id_output_token_ids, skip_copy=not batch_changed)
         return sampling_metadata
-    
+
     def get_habana_paged_attn_buffers(self,
                                       block_tables,
                                       slot_mapping,
@@ -1003,7 +949,6 @@ class HPUModelRunner:
         block_usage = torch.tensor(block_usage,
                                    dtype=self.model_config.dtype,
                                    device='cpu')
-
         return block_list, block_groups, block_usage
 
     def _get_padded_prefill_dims(self, num_prefills, max_prompt_len,
@@ -1086,13 +1031,14 @@ class HPUModelRunner:
                 if not self.padding_aware_scheduling or can_schedule:
                     break
 
-            context_lens = self.input_batch.num_computed_tokens_cpu[batch_idx:batch_idx + num_prefills]
+            context_lens = self.input_batch.num_computed_tokens_cpu[
+                batch_idx:batch_idx + num_prefills]
             use_prefix_caching = enable_prefix_caching and any(context_lens)
-            if use_prefix_caching:
-                # TODO(kzawora): this is an ugly hack for prefix caching, remove
-                # that once batch padding works properly (idk why it doesn't)
-                padded_batch_size = num_prefills
-    
+#            if use_prefix_caching:
+#                # TODO(kzawora): this is an ugly hack for prefix caching, remove
+#                # that once batch padding works properly (idk why it doesn't)
+#                padded_batch_size = num_prefills
+
             padded_prompt_lens = [
                 padded_prompt_len for _ in range(padded_batch_size)
             ]
@@ -1224,7 +1170,6 @@ class HPUModelRunner:
                     num_prefill_tokens=sum(prompt_lens),
                     slot_mapping=slot_mapping_device,
                 )
-            #import pdb; pdb.set_trace()
             # ATTN_METADATA.
             prefill_attn_metadata.append(attn_metadata)
             batch_idx += num_prefills
@@ -1290,7 +1235,7 @@ class HPUModelRunner:
                                                          self.block_size))
         # NOTE(kzawora): the "-1" is what causes this entire thing to work
         # properly and have good accuracy - why? beats me...
-        block_offsets = (padded_index - 1) % self.block_size
+        block_offsets = padded_index % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
         # Set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
@@ -1558,7 +1503,10 @@ class HPUModelRunner:
                 decode_data.attn_metadata, decode_data.logits_indices,
                 self.kv_caches)
             htorch.core.mark_step()
-            sampling_metadata = self._prepare_sampling(batch_changed, pd_info.decode_req_ids, pad_to=logits_device.shape[0])
+            sampling_metadata = self._prepare_sampling(
+                batch_changed,
+                pd_info.decode_req_ids,
+                pad_to=logits_device.shape[0])
             sampler_output = self.model.sample(
                 logits=logits_device, sampling_metadata=sampling_metadata)
             decode_output_device = sampler_output.sampled_token_ids
@@ -1576,7 +1524,8 @@ class HPUModelRunner:
                     token_ids, position_ids, attn_metadata, logits_indices,
                     self.kv_caches)
                 htorch.core.mark_step()
-                sampling_metadata = self._prepare_sampling(batch_changed, req_id, pad_to=logits_device.shape[0])
+                sampling_metadata = self._prepare_sampling(
+                    batch_changed, req_id, pad_to=logits_device.shape[0])
                 sampler_output = self.model.sample(
                     logits=logits_device, sampling_metadata=sampling_metadata)
                 sampled_token_ids_device = sampler_output.sampled_token_ids
@@ -1614,15 +1563,25 @@ class HPUModelRunner:
                     else prefill_output_cpu[:num_prefills]
 
         sampled_token_ids_list = sampled_token_ids_cpu.tolist()
+
         ######### UPDATE REQUEST STATE WITH GENERATED TOKENS #########
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             req_state = self.requests[req_id]
 
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
-            token_id = sampled_token_ids_list[i]
-            self.input_batch.token_ids_cpu[i, seq_len] = token_id
-            req_state.output_token_ids.append(token_id)
+            # NOTE(kzawora): this is crucial!!! scheduler can send us partial 
+            # prefills to do, e.g. if we have token budget of 2048 tokens and 3 
+            # prefills with 768 tokens, we'd process 2 full prefills and first 
+            # 512 tokens of the last one - but the token that's emitted is 
+            # obviously garbage and we should not include it in the state 
+            if seq_len >= len(req_state.prompt_token_ids):
+                token_id = sampled_token_ids_list[i]
+                self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                self.input_batch.num_tokens[i] += 1
+                req_state.output_token_ids.append(token_id)
+            else:
+                sampled_token_ids_list[i] = 0
 
         ################## RETURN ##################
         # Create output.
@@ -1630,32 +1589,40 @@ class HPUModelRunner:
         prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]] = {}
         for req_id in all_req_ids:
             prompt_logprobs_dict[req_id] = None
-        #import pdb; pdb.set_trace()
+        all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
         model_runner_output = ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_ids=all_req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids_list,
             logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
 
-        if False:
+        if True:
             for req_id in self.input_batch.req_ids[:num_reqs]:
                 req_idx = self.input_batch.req_id_to_index[req_id]
+                if self.input_batch.token_ids_cpu[req_idx, -1] not in [0]: #[self._tokenizer.eos_token_id, 0]:
+                    continue
                 token_ids = self.input_batch.token_ids_cpu[req_idx]
                 #prompt = self._tokenizer.decode(
                 #    token_ids[:self.input_batch.
                 #              num_prompt_tokens_cpu[req_idx]])
-
                 seq_len = (req_state.num_computed_tokens +
                            scheduler_output.num_scheduled_tokens[req_id])
                 req_state = self.requests[req_id]
+                prompt = self._tokenizer.decode(req_state.prompt_token_ids)
                 generated = self._tokenizer.decode(req_state.output_token_ids)
-                phase = 'prefill' if req_idx >= decode_data.num_decodes \
+                
+                phase = 'prefill' if req_idx >= num_decodes \
                     else 'decode'
-                logger.info(
-                    f'[ENGINE_ITER {self._ENGINE_ITER}] REQ:{req_id} IDX:{req_idx} {phase} generated token: {self._tokenizer.decode(sampled_token_ids_cpu[req_idx])!r}, all generated so far: {generated!r}'  # noqa
-                )
+#                logger.info(
+#                    f'[ENGINE_ITER {self._ENGINE_ITER}] REQ:{req_id} IDX:{req_idx} {phase} generated token: {self._tokenizer.decode(sampled_token_ids_cpu[req_idx])!r}, all generated so far: {generated!r}'  # noqa
+#                )
+                if 'The final answer is' not in generated:
+                    logger.info(
+                        f'[ENGINE_ITER {self._ENGINE_ITER}] REQ:{req_id} IDX:{req_idx} finished: {generated!r}'  # noqa
+                    )
+
         self._ENGINE_ITER += 1
         #import pdb; pdb.set_trace()
         return model_runner_output

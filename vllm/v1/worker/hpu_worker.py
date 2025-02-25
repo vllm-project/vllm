@@ -141,7 +141,6 @@ class HPUWorker:
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
-
         if is_fake_hpu():
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             return fake_hpu_cache_alloc
