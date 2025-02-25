@@ -72,8 +72,8 @@ if triton.__version__ >= "3.2.0":
             IN_PRECISION: tl.constexpr,
             BLOCK_M: tl.constexpr,
             BLOCK_DMODEL: tl.constexpr,  # head size
-            # head size padded to a power of 2
-            BLOCK_DMODEL_PADDED: tl.constexpr,
+            # head size padded to a power of 2,
+        BLOCK_DMODEL_PADDED: tl.constexpr,
             BLOCK_SIZE: tl.constexpr,
             BLOCK_N: tl.constexpr,
             SLIDING_WINDOW: tl.constexpr,
