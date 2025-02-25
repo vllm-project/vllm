@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 """
 This example shows how to run offline inference with a speculative 
 decoding model on neuron.

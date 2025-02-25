@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from functools import lru_cache
 from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum
-from functools import lru_cache
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

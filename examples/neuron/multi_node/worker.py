@@ -1,11 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 import argparse
 import os
 
-from vllm.logger import init_logger
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-
 
 logger = init_logger("vllm.neuron.multi-node.worker")
 
@@ -20,6 +20,7 @@ def initialize_worker():
         engine_args, usage_context=UsageContext.API_SERVER)
     return args, engine
 
+
 def start_worker():
     rank_id = int(os.getenv("NEURON_RANK_ID"))
     if rank_id == 0:
@@ -29,12 +30,14 @@ def start_worker():
     while True:
         worker.execute_model()
 
+
 def main():
     try:
         start_worker()
     except Exception as e:
         logger.error("Failed starting worker", extra={"error": e})
         exit(1)
+
 
 if __name__ == "__main__":
     main()

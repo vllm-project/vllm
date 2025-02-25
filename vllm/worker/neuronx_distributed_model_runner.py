@@ -1,17 +1,19 @@
-import torch
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional
+
+import torch
+from neuronx_distributed_inference.modules.generation.sampling import (
+    prepare_sampling_params)
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.neuronx_distributed import \
-    get_neuron_model, _get_model_architecture
-from vllm.worker.neuron_model_runner import NeuronModelRunner, \
-    ModelInputForNeuron
-from vllm.sequence import IntermediateTensors
 from vllm.model_executor.layers.sampler import SamplerOutput
-
-from neuronx_distributed_inference.modules.generation.sampling import \
-    prepare_sampling_params
+from vllm.model_executor.model_loader.neuronx_distributed import (
+    _get_model_architecture, get_neuron_model)
+from vllm.sequence import IntermediateTensors
+from vllm.worker.neuron_model_runner import (ModelInputForNeuron,
+                                             NeuronModelRunner)
 
 # FIXME(Neuron): need to restore multi-modal support
 # from vllm.multimodal.neuron_multimodal_image_utils import \
@@ -22,22 +24,20 @@ logger = init_logger(__name__)
 class NeuronxDistributedModelRunner(NeuronModelRunner):
 
     def __init__(
-            self,
-            vllm_config: VllmConfig,
+        self,
+        vllm_config: VllmConfig,
     ):
         super().__init__(vllm_config)
 
     def load_model(self) -> None:
-        self.model = get_neuron_model(
-            self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config)
+        self.model = get_neuron_model(self.model_config,
+                                      parallel_config=self.parallel_config,
+                                      scheduler_config=self.scheduler_config)
 
     def get_nxd_sampling_params(self, sampling_metadata):
         if self.model.config.neuron_config.on_device_sampling_config:
-            max_topk = (
-                self.model.config.neuron_config.on_device_sampling_config
-                       .global_topk)
+            max_topk = (self.model.config.neuron_config.
+                        on_device_sampling_config.global_topk)
         else:
             max_topk = self.model.config.vocab_size
 
@@ -47,17 +47,18 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
 
         for index, sequenceGroupToSample in enumerate(
                 sampling_metadata.seq_groups):
-            top_k[index] = (
-                sequenceGroupToSample.sampling_params.top_k
-                if sequenceGroupToSample.sampling_params.top_k > 0
-                else max_topk)
+            top_k[index] = (sequenceGroupToSample.sampling_params.top_k
+                            if sequenceGroupToSample.sampling_params.top_k > 0
+                            else max_topk)
             top_p[index] = sequenceGroupToSample.sampling_params.top_p
             temperature[index] = (
                 sequenceGroupToSample.sampling_params.temperature)
 
         sampling_params = prepare_sampling_params(
             batch_size=self.scheduler_config.max_num_seqs,
-            top_k=top_k, top_p=top_p, temperature=temperature)
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature)
         return sampling_params
 
     def get_multi_modal_data_neuron(self, input_images):
@@ -66,11 +67,11 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
 
     @torch.inference_mode()
     def execute_model(
-            self,
-            model_input: ModelInputForNeuron,
-            kv_caches: Optional[List[torch.Tensor]] = None,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            num_steps: int = 1,
+        self,
+        model_input: ModelInputForNeuron,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
@@ -117,8 +118,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             empty_pixel_values = torch.zeros([1, 1, 4, 3, 560, 560],
                                              dtype=torch.bfloat16)
             empty_aspect_ratios = torch.ones([1, 1, 2], dtype=torch.int64)
-            num_chunks = torch.tensor(
-                [[1]])  # dummy num_chunks, will not be used
+            num_chunks = torch.tensor([[1]
+                                       ])  # dummy num_chunks, will not be used
             has_image = torch.tensor([0])
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,

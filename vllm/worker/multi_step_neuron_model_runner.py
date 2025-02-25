@@ -1,12 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from importlib.util import find_spec
-import torch
 from typing import List, Optional
+
+import torch
+
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors
-from vllm.worker.neuron_model_runner import NeuronModelRunner, \
-    ModelInputForNeuron
+from vllm.worker.neuron_model_runner import (ModelInputForNeuron,
+                                             NeuronModelRunner)
 
 
 class MultiStepNeuronModelRunner(NeuronModelRunner):
@@ -14,8 +18,8 @@ class MultiStepNeuronModelRunner(NeuronModelRunner):
     framework"""
 
     def __init__(
-            self,
-            vllm_config: VllmConfig,
+        self,
+        vllm_config: VllmConfig,
     ):
         super().__init__(vllm_config)
         self.speculation_config = self.speculative_config
@@ -35,15 +39,15 @@ class MultiStepNeuronModelRunner(NeuronModelRunner):
 
     def load_model(self) -> None:
         if find_spec("transformers_neuronx") is not None:
-            from vllm.model_executor.model_loader.neuron import \
-                get_neuron_speculation_model, get_neuron_eagle_speculation_model
+            from vllm.model_executor.model_loader.neuron import (
+                get_neuron_eagle_speculation_model,
+                get_neuron_speculation_model)
             if self.speculation_config.speculative_token_tree is not None:
                 self.model = get_neuron_eagle_speculation_model(
                     self.model_config,
                     parallel_config=self.parallel_config,
                     scheduler_config=self.scheduler_config,
-                    speculation_config=self.speculation_config
-                )
+                    speculation_config=self.speculation_config)
             else:
                 self.model = get_neuron_speculation_model(
                     self.model_config,
@@ -56,11 +60,11 @@ class MultiStepNeuronModelRunner(NeuronModelRunner):
 
     @torch.inference_mode()
     def execute_model(
-            self,
-            model_input: ModelInputForNeuron,
-            kv_caches: Optional[List[torch.Tensor]] = None,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            num_steps: int = 1,
+        self,
+        model_input: ModelInputForNeuron,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         logits = self.model(
             input_ids=model_input.input_tokens,

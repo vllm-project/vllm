@@ -1,11 +1,15 @@
-import torch
+# SPDX-License-Identifier: Apache-2.0
 from typing import List, Optional
+
+import torch
+
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors
-from vllm.worker.neuronx_distributed_model_runner \
-    import NeuronxDistributedModelRunner
+from vllm.worker.neuronx_distributed_model_runner import (
+    NeuronxDistributedModelRunner)
+
 
 class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
     """A model runner for multi-step decoding using the
@@ -18,8 +22,8 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
         super().__init__(vllm_config)
 
     def load_model(self) -> None:
-        from vllm.model_executor.model_loader.neuronx_distributed \
-            import get_neuron_speculation_model
+        from vllm.model_executor.model_loader.neuronx_distributed import (
+            get_neuron_speculation_model)
         self.model = get_neuron_speculation_model(
             self.model_config,
             parallel_config=self.parallel_config,
@@ -46,7 +50,7 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
             input_block_ids=model_input.input_block_ids,
             sampling_params=sampling_params,
             **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
-                                        device=self.device),
+                                         device=self.device),
         )
 
         output = self.model.sample(
@@ -54,4 +58,3 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
             sampling_metadata=model_input.sampling_metadata,
         )
         return output
-
