@@ -28,17 +28,12 @@ def llm(request):
 
     def get_llm_kwargs(mode: str):
         if mode == "autoregressive":
-            llm_kwargs = {}
-        elif mode == "speculative":
-            llm_kwargs = {
-                # the model with fixed vocabulary size
-                "speculative_model": "tugstugi/Qwen2.5-Coder-0.5B-QwQ-draft",
-                "num_speculative_tokens": 3,
-            }
-        else:
-            raise ValueError(f"Unsupported LLM mode: {mode}")
-
-        return llm_kwargs
+            return {}
+        return {
+            # the model with fixed vocabulary size
+            "speculative_model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "num_speculative_tokens": 3,
+        }
 
     test_llm_kwargs = get_llm_kwargs(request.param)
     # pytest caches the fixture so we use weakref.proxy to
