@@ -315,6 +315,7 @@ class Grok1Model(nn.Module):
             self.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
+            quant_config=quant_config,
         )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -381,19 +382,6 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ],
     }
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "embed_tokens",
-        "lm_head",
-    ]
-    embedding_modules = {
-        "embed_tokens": "input_embeddings",
-        "lm_head": "output_embeddings",
-    }
-    embedding_padding_modules = ["lm_head"]
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -420,6 +408,7 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             # We need bigger padding if using lora for kernel compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
 
         if self.config.tie_word_embeddings:
