@@ -1,0 +1,11 @@
+# Common dependencies
+-r requirements-common.txt
+
+-r requirements-torch-cuda-aarch64.txt
+
+# aarch64 deps
+--pre
+--extra-index-url=https://download.pytorch.org/whl/nightly/cu126
+torchvision==0.22.0.dev20250121 torchaudio==2.6.0.dev20250121+cu126; platform_system == "Linux" and platform_machine == "aarch64"
+
+ray[adag] == 2.40.0 # Required for pipeline parallelism in V1.

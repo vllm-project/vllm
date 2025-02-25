@@ -26,8 +26,29 @@ VLLM_USE_PRECOMPILED = envs.VLLM_USE_PRECOMPILED
 
 
 def _read_requirements(file: str):
+    """ Reads requirements.txt files recursively descending into files included with -r
+
+    - ignores comments
+    - ignores empty lines
+    """
+    requirements: list[str] = []
+
     with open(file) as fh:
-        return [line.strip() for line in fh.readlines()]
+        for line in fh.readlines():
+            line = (
+                line.strip()  # remove newlines
+                .split("#")[0]  # remove comments
+            )
+            if not line:
+                continue
+
+            if line.startswith("-r "):  # resolve other requirements.txt files
+                requirements += _read_requirements(line.split()[1])
+                continue
+
+            requirements.append(line)
+
+    return requirements
 
 
 def _get_requires_for_build_extensions() -> list[str]:
@@ -108,18 +129,23 @@ def get_requires_for_build_wheel(config_settings=None) -> list[str]:
     requirements_extras: list[str] = []
 
     if VLLM_TARGET_DEVICE == "cpu" or VLLM_TARGET_DEVICE == "openvino":
-        from platform import machine as _machine
+        from platform import machine
 
-        machine = _machine()
-        if machine == "ppc64le":
+        if machine() == "ppc64le":
             requirements_extras.extend(
                 _read_requirements("requirements-torch-ppc64le.txt"))
         else:
             requirements_extras.extend(
                 _read_requirements("requirements-torch-cpu.txt"))
     elif VLLM_TARGET_DEVICE == "cuda":
-        requirements_extras.extend(
-            _read_requirements("requirements-torch-cuda.txt"))
+        from platform import machine, system
+
+        if machine() == "aarch64" and system() == "Linux":
+            requirements_extras.extend(
+                _read_requirements("requirements-torch-cuda-aarch64.txt"))
+        else:
+            requirements_extras.extend(
+                _read_requirements("requirements-torch-cuda.txt"))
     elif VLLM_TARGET_DEVICE == "rocm":
         requirements_extras.extend(
             _read_requirements("requirements-torch-rocm.txt"))
@@ -141,10 +167,14 @@ def get_requires_for_build_wheel(config_settings=None) -> list[str]:
             f"Unknown runtime environment {VLLM_TARGET_DEVICE=}")
 
     has_uv = which("uv")
-    if has_uv and "--extra-index-url" in requirements_extras:
+    if has_uv and any("--extra-index-url" in req
+                      for req in requirements_extras):
         _check_for_env_var("UV_INDEX_STRATEGY",
                            "unsafe-best-match",
                            strict=True)
+
+    if has_uv and any("--pre" in req for req in requirements_extras):
+        _check_for_env_var("UV_PRERELEASE", "allow", strict=True)
 
     return [
         *_get_requires_for_build_extensions(),

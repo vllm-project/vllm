@@ -579,7 +579,12 @@ def get_requirements() -> List[str]:
     if _no_device():
         requirements = _read_requirements("requirements-common.txt")
     elif _is_cuda():
-        requirements = _read_requirements("requirements-cuda.txt")
+        from platform import machine, system
+
+        if machine() == "aarch64" and system() == "Linux":
+            requirements = _read_requirements("requirements-cuda-aarch64.txt")
+        else:
+            requirements = _read_requirements("requirements-cuda.txt")
     elif _is_hip():
         requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
@@ -591,10 +596,9 @@ def get_requirements() -> List[str]:
     elif _is_tpu():
         requirements = _read_requirements("requirements-tpu.txt")
     elif _is_cpu():
-        from platform import machine as _machine
+        from platform import machine
 
-        machine = _machine()
-        if machine == "ppc64le":
+        if machine() == "ppc64le":
             requirements = _read_requirements("requirements-ppcle64.txt")
         else:
             requirements = _read_requirements("requirements-cpu.txt")
