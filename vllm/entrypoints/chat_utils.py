@@ -823,7 +823,7 @@ def _parse_chat_message_content_part(
     # content is empty, log a warning and skip
     if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
         logger.warning(
-            "Skipping multimodal part (type: '%s')"
+            "Skipping multimodal part (type: '%s') "
             "with empty / unparsable content.", part_type)
         return None
 

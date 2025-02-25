@@ -153,8 +153,8 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
             vllm_config.model_config.hf_config.to_dict()["pretrained_cfg"])
         if self.model is None:
             raise ValueError(
-                "Unsupported task."
-                "Only SemanticSegmentationTask is supported for now"
+                "Unsupported task. "
+                "Only SemanticSegmentationTask is supported for now "
                 "by PrithviGeospatialMAE.")
 
     def _parse_and_validate_multimodal_data(

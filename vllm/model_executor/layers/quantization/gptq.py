@@ -74,7 +74,7 @@ class GPTQConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"GPTQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act}),"
+                f"desc_act={self.desc_act}), "
                 f"lm_head_quantized={self.lm_head_quantized}), "
                 f"dynamic={self.dynamic}")
 

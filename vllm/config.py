@@ -924,8 +924,8 @@ class ModelConfig:
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
             if layers_block_type_value is None:
-                raise ValueError("The model is an hybrid without a"
-                                 "layers_block_type in the hf_config,"
+                raise ValueError("The model is an hybrid without a "
+                                 "layers_block_type in the hf_config, "
                                  "cannot determine the num of "
                                  f"{block_type.value} layers")
 
@@ -2516,7 +2516,7 @@ def _get_and_verify_dtype(
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
-                    "For HPU, we cast models to bfloat16 instead of"
+                    "For HPU, we cast models to bfloat16 instead of "
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
                 torch_dtype = torch.bfloat16
@@ -2732,7 +2732,7 @@ class DecodingConfig:
             backend=self.guided_decoding_backend).backend_name
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
-                             f"must be one of {valid_guided_backends}")
+                             f" must be one of {valid_guided_backends}")
 
 
 @dataclass
@@ -3008,7 +3008,7 @@ class CompilationConfig(BaseModel):
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_reshape and self.enable_fusion:
                 logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled."
+                    "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + quant (fp8) fusion might not work")
 
     pass_config: PassConfig = Field(default_factory=PassConfig)
@@ -3563,7 +3563,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
             logger.warning(
                 "`torch.compile` is turned on, but the model %s"
                 " does not support it. Please open an issue on GitHub"
-                "if you want it to be supported.",
+                " if you want it to be supported.",
                 vllm_config.model_config.model)
         _current_vllm_config = old_vllm_config
 
