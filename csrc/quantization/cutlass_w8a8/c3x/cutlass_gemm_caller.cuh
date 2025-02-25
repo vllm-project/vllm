@@ -16,6 +16,7 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
+#include "cutlass/util/packed_stride.hpp"
 
 #include "core/math.hpp"
 #include "cutlass_extensions/common.hpp"
@@ -73,11 +74,13 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 
   using StrideA = cute::Stride<int64_t, cute::Int<1>, int64_t>;
   using StrideB = cute::Stride<int64_t, cute::Int<1>, int64_t>;
-  using StrideC = typename Gemm::StrideC;
+  using StrideC = typename Gemm::GemmKernel::StrideC;
 
   StrideA a_stride{lda, cute::Int<1>{}, 0};
   StrideB b_stride{ldb, cute::Int<1>{}, 0};
-  StrideC c_stride{ldc, cute::Int<1>{}, cute::Int<0>{}};
+  // StrideC c_stride{ldc, cute::Int<1>{}, cute::Int<0>{}};
+  StrideC c_stride =
+      cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(ldc, 1, 0));
 
   typename GemmKernel::ProblemShape prob_shape = get_problem_shape(a, b);
 
