@@ -6,6 +6,7 @@ import itertools
 import pytest
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -179,10 +180,11 @@ def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
 
 
 @pytest.mark.parametrize(
-    "M,N,K,block_size,out_dtype,seed",
-    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
+    "M,N,K,block_size,out_dtype,seed,matmul_fn",
+    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS, 
+                      [w8a8_block_fp8_matmul, ops.gen_w8a8_block_fp8_matmul]))
 @torch.inference_mode()
-def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
+def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed, matmul_fn):
     torch.manual_seed(seed)
     factor_for_scale = 1e-2
     fp8_info = torch.finfo(torch.float8_e4m3fn)
@@ -201,9 +203,8 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     As = torch.rand(M, k_tiles, dtype=torch.float32) * factor_for_scale
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
 
-    ref_out = native_w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size,
-                                           out_dtype)
-    out = w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
+    ref_out = native_w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
+    out = matmul_fn(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
 
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /

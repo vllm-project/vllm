@@ -241,7 +241,12 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
+  "csrc/gen_kernels/gemm_runner.cpp"
+  "csrc/gen_kernels/gemm_launcher.cu"  
   "csrc/torch_bindings.cpp")
+
+file(GLOB TRTGEMM_CUBIN_CPP_SOURCES "csrc/gen_kernels/cubin/*.cubin.cpp")
+list(APPEND VLLM_EXT_SRC ${TRTGEMM_CUBIN_CPP_SOURCES})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
@@ -276,6 +281,24 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     )
   endif()
   FetchContent_MakeAvailable(cutlass)
+
+  if(VLLM_JSON_SRC_DIR)
+    if(NOT IS_ABSOLUTE VLLM_JSON_SRC_DIR)
+      get_filename_component(VLLM_JSON_SRC_DIR "${VLLM_JSON_SRC_DIR}" ABSOLUTE)
+    endif()
+    message(STATUS "The VLLM_JSON_SRC_DIR is set, using ${VLLM_JSON_SRC_DIR} for compilation")
+    FetchContent_Declare(json SOURCE_DIR ${VLLM_JSON_SRC_DIR})
+  else()
+    FetchContent_Declare(
+        json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.2
+        GIT_PROGRESS TRUE
+
+        GIT_SHALLOW TRUE
+    )
+  endif()
+  FetchContent_MakeAvailable(json)
 
   list(APPEND VLLM_EXT_SRC
     "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
@@ -497,7 +520,7 @@ define_gpu_extension_target(
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${json_SOURCE_DIR}/include
   USE_SABI 3
   WITH_SOABI)
 

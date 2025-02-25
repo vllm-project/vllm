@@ -36,6 +36,57 @@ else:
         from torch.library import impl_abstract as register_fake
 
 
+def gen_w8a8_block_fp8_matmul(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    block_size: List[int],
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """This function performs matrix multiplication with block-wise
+    quantization.
+    It takes two input tensors `A` and `B` with scales `As` and `Bs`.
+    The output is returned in the specified `output_dtype`.
+    Args:
+        A: The input tensor, e.g., activation.
+        B: The input tensor, e.g., weight.
+        As: The per-token-group quantization scale for `A`.
+        Bs: The per-block quantization scale for `B`.
+        block_size: The block size for per-block quantization. It should
+        be 2-dim, e.g., [128, 128].
+    """
+    assert len(block_size) == 2
+    block_n, block_k = block_size[0], block_size[1]
+    assert A.shape[-1] == B.shape[-1]
+    assert output_dtype in (torch.bfloat16, torch.float16, torch.float32)
+    assert As.dtype == torch.float32 and Bs.dtype == torch.float32
+
+
+    M = A.numel() // A.shape[-1]
+
+    assert B.ndim == 2 and Bs.ndim == 2
+    N, K = B.shape
+    assert (N + block_n - 1) // block_n == Bs.shape[0]
+
+    assert (K + block_k - 1) // block_k == Bs.shape[1]
+
+    out_shape = A.shape[:-1] + (N, )
+    out = A.new_empty(out_shape, dtype=output_dtype)
+    # The gen_w8a8_block_fp8_matmul kernel expects As to have the shape
+
+    # [K / block_k, M], requiring a transpose for compatibility.
+    torch.ops._C.gen_w8a8_block_fp8_matmul(
+        out,
+        A.reshape(-1, K),
+        B,
+        As.permute(-1, *range(As.ndim - 1)).contiguous(),
+        Bs,
+        block_n,
+        block_k
+    )
+    return out
+
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,

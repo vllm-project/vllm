@@ -29,6 +29,13 @@ torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
   return new_tensor;
 }
 
+void gen_w8a8_block_fp8_matmul(torch::Tensor& out,
+		               torch::Tensor const& a,
+                               torch::Tensor const& b,
+			       torch::Tensor const& As,
+			       torch::Tensor const& Bs,
+	                       int64_t block_n, int64_t block_k);
+
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
