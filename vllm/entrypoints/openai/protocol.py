@@ -1456,7 +1456,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm.
     """
 
-    model: str
+    model: Optional[str] = None
     """ID of the model to use.
     """
 
