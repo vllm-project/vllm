@@ -345,6 +345,7 @@ def test_contexted_kv_attention(
 
     torch.manual_seed(0)
     torch.set_printoptions(sci_mode=False)
+    torch.set_default_device("cpu")
     dtype = torch.float32
 
     min_ctx_len = 32
@@ -438,9 +439,9 @@ def test_contexted_kv_attention(
 
     # transform block table
     active_block_table = get_active_block_tables(
-        block_table,
-        torch.tensor(query_lens),
-        torch.tensor(seq_lens),
+        block_table.cpu(),
+        torch.tensor(query_lens).cpu(),
+        torch.tensor(seq_lens).cpu(),
         block_size,
         num_active_blocks,
     )
