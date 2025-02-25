@@ -143,7 +143,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     cross_attn_bias: Optional[torch.Tensor] = None
     
 
-class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata]):
+class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
     def __init__(
             self,
