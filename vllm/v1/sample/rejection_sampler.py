@@ -88,22 +88,24 @@ class RejectionSampler(nn.Module):
             target_token_ids = pad_sequence(target_token_ids,
                                             batch_first=True,
                                             padding_value=INVALID_TOKEN_ID)
+
+            vocab_size = target_probs.size(-1)
+            # NOTE: CPU <-> GPU synchronization happens here.
+            draft_token_ids_tensor = draft_token_ids_tensor.to(
+                target_probs.device)
+            draft_probs = _create_greedy_token_probs(draft_token_ids_tensor,
+                                                     vocab_size,
+                                                     target_probs.device)
+            target_probs = _create_greedy_token_probs(target_token_ids,
+                                                      vocab_size,
+                                                      target_probs.device)
+            uniform_samples = torch.zeros(draft_token_ids_tensor.size(0),
+                                          draft_token_ids_tensor.size(1) + 1,
+                                          device=target_probs.device)
         else:
             raise NotImplementedError(
                 "Currently, only greedy sampling is supported by "
                 "rejection sampler.")
-
-        vocab_size = target_probs.size(-1)
-        # NOTE: CPU <-> GPU synchronization happens here.
-        draft_token_ids_tensor = draft_token_ids_tensor.to(target_probs.device)
-        draft_probs = _create_greedy_token_probs(draft_token_ids_tensor,
-                                                 vocab_size,
-                                                 target_probs.device)
-        target_probs = _create_greedy_token_probs(target_token_ids, vocab_size,
-                                                  target_probs.device)
-        uniform_samples = torch.zeros(draft_token_ids_tensor.size(0),
-                                      draft_token_ids_tensor.size(1) + 1,
-                                      device=target_probs.device)
 
         sampled_token_ids, _, _ = fs.chain_speculative_sampling(
             draft_probs,
