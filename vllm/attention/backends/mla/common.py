@@ -1375,8 +1375,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         if has_context:
             if not current_platform.is_cuda():
                 raise NotImplementedError(
-                    "Chunked Prefill for MLA is not currently supported on ROCm"
-                )
+                    "Chunked Prefill for MLA is not currently supported on"
+                    "non-cuda platforms")
             output = self.flash_attn_varlen_func(
                 q=q,
                 k=k,

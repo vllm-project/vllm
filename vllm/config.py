@@ -3403,8 +3403,8 @@ class VllmConfig:
         if self.model_config and self.model_config.use_mla and \
             not current_platform.is_cuda():
             logger.info(
-                "MLA is enabled on ROCm; forcing chunked prefill and prefix "
-                "caching to be disabled.")
+                "MLA is enabled on a non-cuda platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
             self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.max_num_batched_tokens = max(
