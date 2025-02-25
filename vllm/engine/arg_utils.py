@@ -382,7 +382,7 @@ class EngineArgs:
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
             ' parameter.\n'
-            'Backend-sepcific options can be supplied in a comma-separated '
+            'Backend-specific options can be supplied in a comma-separated '
             'list following a colon after the backend name. Valid backends and '
             'all available options are: [xgrammar:no-fallback, '
             'outlines:no-fallback, lm-format-enforcer:no-fallback]')
