@@ -58,7 +58,7 @@ def test_guided_regex(monkeypatch, sample_regex, guided_decoding_backend: str):
                                          regex=sample_regex,
                                          backend=guided_decoding_backend))
     with pytest.raises(ValueError,
-                       match="grammar is not of valid supported types"):
+                       match="Regex guided decoding is not supported."):
         llm.generate(prompts=[
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2,

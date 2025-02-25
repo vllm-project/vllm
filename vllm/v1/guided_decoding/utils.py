@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
+from vllm.sampling_params import SamplingParams
+
 
 def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
@@ -56,3 +60,27 @@ def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
         return False
 
     return check_object(schema)
+
+
+def validate_guided_decoding_request(sampling_params: SamplingParams) -> None:
+    """Validate that the request is supported by guided decoding.
+
+    Raises ValueError if the request is not supported.
+    """
+    if sampling_params.guided_decoding is None:
+        return
+
+    gd_params = sampling_params.guided_decoding
+    if gd_params.regex:
+        raise ValueError("Regex guided decoding is not supported.")
+    if gd_params.choice:
+        raise ValueError("Choice guided decoding is not supported.")
+    if isinstance(gd_params.json, str):
+        try:
+            schema = json.loads(gd_params.json)
+        except json.JSONDecodeError as e:
+            raise ValueError("Invalid JSON grammar specification.") from e
+
+        if has_xgrammar_unsupported_json_features(schema):
+            raise ValueError("The provided JSON schema contains features not "
+                             "supported by xgrammar.")

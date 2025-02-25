@@ -12,13 +12,9 @@ import xgrammar as xgr
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.v1.guided_decoding.utils import (
-    has_xgrammar_unsupported_json_features)
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
-
-import json
 
 logger = init_logger(__name__)
 
@@ -124,7 +120,6 @@ class GuidedDecodingManager:
         return False
 
     def cache(self, request: Request):
-        self._validate_grammar_is_supported(request.guided_decoding_key)
         return self.executor.submit(self._executor_loop, request)
 
     def _executor_loop(self, request: Request) -> Grammar:
@@ -137,25 +132,11 @@ class GuidedDecodingManager:
         self.request_key_to_grammar[key] = self.initialize_grammar(key)
         return self.request_key_to_grammar[key]
 
-    def _validate_grammar_is_supported(self, key: GuidedDecodingKey):
-        request_type, grammar_spec = key
-        if request_type == GuidedDecodingOptions.json:
-            try:
-                schema = json.loads(grammar_spec)
-            except json.JSONDecodeError as e:
-                raise ValueError("Invalid JSON grammar specification.") from e
-
-            if has_xgrammar_unsupported_json_features(schema):
-                raise ValueError(
-                    "The provided JSON schema contains features not "
-                    "supported by xgrammar.")
-            return
-        elif request_type == GuidedDecodingOptions.grammar:
-            return
-        raise ValueError(
-            f"grammar is not of valid supported types. ({request_type!s})")
-
     def initialize_grammar(self, key: GuidedDecodingKey) -> Grammar:
+        # Note that the request was validated in the engine core client,
+        # so at this point we know it is a supported type of request.
+        #
+        # TODO: we still need to handle xgrammar compilation failures
         request_type, grammar_spec = key
 
         if request_type == GuidedDecodingOptions.json:
