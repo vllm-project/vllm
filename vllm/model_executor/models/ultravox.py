@@ -43,7 +43,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|reserved_special_token_0|>"
 _AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
-_MAX_AUDIO_CHUNKS = 10
+_MAX_AUDIO_CHUNKS = 1
 
 
 class UltravoxAudioFeatureInputs(TypedDict):
