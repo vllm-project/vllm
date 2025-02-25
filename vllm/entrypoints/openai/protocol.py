@@ -1468,7 +1468,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     will improve accuracy and latency.
     """
 
-    prompt: Optional[str] = Field(default="")
+    prompt: str = Field(default="")
     """An optional text to guide the model's style or continue a previous audio
     segment.
 
@@ -1476,14 +1476,14 @@ class TranscriptionRequest(OpenAIBaseModel):
     should match the audio language.
     """
 
-    response_format: Optional[AudioResponseFormat] = Field(default="json")
+    response_format: AudioResponseFormat = Field(default="json")
     """
     The format of the output, in one of these options: `json`, `text`, `srt`,
     `verbose_json`, or `vtt`.
     """
 
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
-    temperature: Optional[float] = Field(default=0.0)
+    temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
     Higher values like 0.8 will make the output more random, while lower values
@@ -1492,9 +1492,8 @@ class TranscriptionRequest(OpenAIBaseModel):
     to automatically increase the temperature until certain thresholds are hit.
     """
 
-    timestamp_granularities: Optional[List[Literal[
-        "word", "segment"]]] = Field(alias="timestamp_granularities[]",
-                                     default=["segment"])
+    timestamp_granularities: List[Literal["word", "segment"]] = Field(
+        alias="timestamp_granularities[]", default=[])
     """The timestamp granularities to populate for this transcription.
 
     `response_format` must be set `verbose_json` to use timestamp granularities.
