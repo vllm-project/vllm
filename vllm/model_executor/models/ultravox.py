@@ -116,7 +116,7 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         max_audio_tokens = math.ceil(feature_extractor.chunk_length *
                                      _AUDIO_TOKENS_PER_SECOND)
 
-        return {"audio": max_audio_tokens}
+        return {"audio": max_audio_tokens * 20}
 
 
 class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo]
