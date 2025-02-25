@@ -25,7 +25,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, ProcessingCache,
+                                        PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
@@ -214,6 +215,30 @@ class DeepseekVL2DummyInputsBuilder(
 
 class DeepseekVL2MultiModalProcessor(
         BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]):
+
+    def __init__(
+            self,
+            info: DeepseekVL2ProcessingInfo,
+            dummy_inputs: "BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]",
+            *,
+            cache: Optional[ProcessingCache] = None,
+            enable_sanity_checks: bool = True) -> None:
+        super().__init__(
+            info,
+            dummy_inputs,
+            cache=cache,
+            enable_sanity_checks=enable_sanity_checks,
+        )
+
+        mm_limit = self.info.ctx.model_config.multimodal_config.limit_per_prompt
+        if self.cache is not None and mm_limit["image"] > 2:
+            # The processor output depends on the number of images passed,
+            # making it incompatible with processing cache which is supposed
+            # to be invariant of how many images are passed per prompt
+            self.cache = None
+            logger.warning_once(
+                f"{type(self).__name__} does not support processing cache with "
+                "image limit larger than 2.")
 
     def _call_hf_processor(
         self,
