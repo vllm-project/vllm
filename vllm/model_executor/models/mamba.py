@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """PyTorch MAMBA model."""
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
 from transformers import MambaConfig
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
@@ -64,7 +63,6 @@ class MambaDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
         **kwargs,
@@ -75,8 +73,7 @@ class MambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, attn_metadata,
-                                   mamba_cache_params)
+        hidden_states = self.mixer(hidden_states, mamba_cache_params)
         return hidden_states, residual
 
 
@@ -125,7 +122,6 @@ class MambaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -146,7 +142,6 @@ class MambaModel(nn.Module):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
-                attn_metadata=attn_metadata,
                 residual=residual,
                 mamba_cache_params=mamba_cache_params.at_layer_idx(
                     i - self.start_layer))
@@ -208,8 +203,6 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[KVCache],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
@@ -222,9 +215,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
 
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
-        hidden_states = self.backbone(input_ids, positions, attn_metadata,
-                                      mamba_cache_params, intermediate_tensors,
-                                      inputs_embeds)
+        hidden_states = self.backbone(input_ids, positions, mamba_cache_params,
+                                      intermediate_tensors, inputs_embeds)
 
         return hidden_states
 

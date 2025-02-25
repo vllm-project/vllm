@@ -710,8 +710,6 @@ class ModelConfig:
             return
 
         if parallel_config.pipeline_parallel_size > 1:
-            logger.warning("Async output processing can not be enabled "
-                           "with pipeline parallel")
             self.use_async_output_proc = False
             return
 
@@ -719,15 +717,10 @@ class ModelConfig:
         # If the feature combo become valid
         from vllm.platforms import current_platform
         if not current_platform.is_async_output_supported(self.enforce_eager):
-            logger.warning(
-                "Async output processing is not supported on the "
-                "current platform type %s.", current_platform.device_type)
             self.use_async_output_proc = False
             return
 
         if envs.VLLM_USE_RAY_SPMD_WORKER:
-            logger.warning(
-                "Async output processing can not be enabled with ray spmd")
             self.use_async_output_proc = False
             return
 
@@ -739,8 +732,6 @@ class ModelConfig:
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if speculative_config:
-            logger.warning("Async output processing is not supported with"
-                           " speculative decoding currently.")
             self.use_async_output_proc = False
 
     def verify_with_parallel_config(
@@ -768,8 +759,6 @@ class ModelConfig:
                     "Supported models implement the `SupportsPP` interface.")
 
             if self.use_async_output_proc:
-                logger.warning("Async output processor is not supported with "
-                               "pipeline parallelism currently. Disabling it.")
                 self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(
@@ -935,8 +924,8 @@ class ModelConfig:
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
             if layers_block_type_value is None:
-                raise ValueError("The model is an hybrid without a"
-                                 "layers_block_type in the hf_config,"
+                raise ValueError("The model is an hybrid without a "
+                                 "layers_block_type in the hf_config, "
                                  "cannot determine the num of "
                                  f"{block_type.value} layers")
 
@@ -1124,6 +1113,10 @@ class CacheConfig:
         return {key: str(value) for key, value in self.__dict__.items()}
 
     def _verify_args(self) -> None:
+        if self.cpu_offload_gb < 0:
+            raise ValueError("CPU offload space must be non-negative"
+                             f", but got {self.cpu_offload_gb}")
+
         if self.gpu_memory_utilization > 1.0:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
@@ -2521,7 +2514,7 @@ def _get_and_verify_dtype(
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
-                    "For HPU, we cast models to bfloat16 instead of"
+                    "For HPU, we cast models to bfloat16 instead of "
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
                 torch_dtype = torch.bfloat16
@@ -2737,7 +2730,7 @@ class DecodingConfig:
             backend=self.guided_decoding_backend).backend_name
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
-                             f"must be one of {valid_guided_backends}")
+                             f" must be one of {valid_guided_backends}")
 
 
 @dataclass
@@ -3013,7 +3006,7 @@ class CompilationConfig(BaseModel):
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_reshape and self.enable_fusion:
                 logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled."
+                    "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + quant (fp8) fusion might not work")
 
     pass_config: PassConfig = Field(default_factory=PassConfig)
@@ -3568,7 +3561,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
             logger.warning(
                 "`torch.compile` is turned on, but the model %s"
                 " does not support it. Please open an issue on GitHub"
-                "if you want it to be supported.",
+                " if you want it to be supported.",
                 vllm_config.model_config.model)
         _current_vllm_config = old_vllm_config
 

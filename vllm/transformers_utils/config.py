@@ -253,14 +253,28 @@ def get_config(
         model = Path(model).parent
 
     if config_format == ConfigFormat.AUTO:
-        if is_gguf or file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision):
-            config_format = ConfigFormat.HF
-        elif file_or_path_exists(model, MISTRAL_CONFIG_NAME,
-                                 revision=revision):
-            config_format = ConfigFormat.MISTRAL
-        else:
-            raise ValueError(f"No supported config format found in {model}.")
+        try:
+            if is_gguf or file_or_path_exists(
+                    model, HF_CONFIG_NAME, revision=revision):
+                config_format = ConfigFormat.HF
+            elif file_or_path_exists(model,
+                                     MISTRAL_CONFIG_NAME,
+                                     revision=revision):
+                config_format = ConfigFormat.MISTRAL
+
+        except Exception as e:
+            error_message = (
+                "Invalid repository ID or local directory specified:"
+                " '{model}'.\nPlease verify the following requirements:\n"
+                "1. Provide a valid Hugging Face repository ID.\n"
+                "2. Specify a local directory that contains a recognized "
+                "configuration file.\n"
+                "   - For Hugging Face models: ensure the presence of a "
+                "'config.json'.\n"
+                "   - For Mistral models: ensure the presence of a "
+                "'params.json'.\n").format(model=model)
+
+            raise ValueError(error_message) from e
 
     if config_format == ConfigFormat.HF:
         config_dict, _ = PretrainedConfig.get_config_dict(
