@@ -316,6 +316,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         scale,
         *,
         buffer: Optional[torch.Tensor] = None,
+        magnitudes: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
         """
@@ -350,5 +351,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                     y,
                     self.sampler_indices,
                     add_inputs=True)
+        if magnitudes is not None:
+            # Normalize y column-wise and multiply by magnitudes
+            y_norm = torch.norm(y, p=2, dim=0, keepdim=True)
+            y_norm = torch.clamp(y_norm, min=1e-6)  # Avoid division by zero
+            y.div_(y_norm)
+            y.mul_(magnitudes.view(1, -1))
         y = y.view_as(y_org)
-        # TODO: not sure if and how to add DoRA magnitude scaling here
