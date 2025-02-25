@@ -477,13 +477,15 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
             enable_sanity_checks=enable_sanity_checks,
         )
 
-        if self.cache is not None:
+        mm_limit = self.info.ctx.model_config.multimodal_config.limit_per_prompt
+        if self.cache is not None and mm_limit["image"] >= 2:
             # The processor output depends on the number of images passed,
             # making it incompatible with processing cache which is supposed
             # to be invariant of how many images are passed per prompt
             self.cache = None
             logger.warning_once(
-                f"{type(self).__name__} does not support processing cache.")
+                f"{type(self).__name__} does not support processing cache with "
+                "multi-image support enabled.")
 
     def _get_prompt_replacements(
         self,
