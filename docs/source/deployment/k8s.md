@@ -2,10 +2,13 @@
 
 # Using Kubernetes
 
-Using Kubernetes to deploy vLLM is a scalable and efficient way to serve machine learning models. 
-This guide will walk you through the process of deploying vLLM with [production-stack](https://github.com/vllm-project/production-stack) and native Kubernetes.
+Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using the [vLLM production stack](https://github.com/vllm-project/production-stack) and native Kubernetes. The [vLLM production stack](https://github.com/vllm-project/production-stack) is an officially released, production-optimized codebase under the [vLLM project](https://github.com/vllm-project), designed for LLM deployment with:
 
-Note that though it is doable to deploy vLLM using native Kubernetes, [production-stack](https://github.com/vllm-project/production-stack) allows you to serve LLM models on multi-node Kubernetes cluster, while including a wide range of usability, observability and performance-related features.
+* **Upstream vLLM compatibility** – It wraps around upstream vLLM without modifying its code.
+* **Ease of use** – Simplified deployment via Helm charts and observability through Grafana dashboards.
+* **High performance** – Optimized for LLM workloads with features like multi-model support, model-aware and prefix-aware routing, fast vLLM bootstrapping, and KV cache offloading with [LMCache](https://github.com/LMCache/LMCache), among others.
+
+
 
 
 ## Prerequisites
@@ -16,52 +19,20 @@ Before you begin, ensure that you have the following:
 - NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
 - Available GPU resources in your cluster
 
-If you just start using Kubernetes, don't worry: we provide step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and [video](https://www.youtube.com/watch?v=EsTJbQtzj0g) in vLLM production stack [repo](https://github.com/vllm-project/production-stack) to help you get started!
+If you are new to Kubernetes, don't worry: we provide a step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and [video](https://www.youtube.com/watch?v=EsTJbQtzj0g) in [vLLM production-stack] (https://github.com/vllm-project/production-stack) to help you get started!
 
 
 ## Deployment using helm chart
 
-Helm chart hides Kubernetes complications from you so that yoiu can focus on configurations that really matters for your vLLM cluster. This [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) helps you install helm.
+The standard vLLM production-stack install uses a Helm chart. If Helm is not installed on your local desktop, you can run this [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) to install Helm.
 
-Here is an minimal helm chart example:
-```
-servingEngineSpec:
-  runtimeClassName: ""
-  modelSpec:
-  - name: "opt125m"
-    repository: "vllm/vllm-openai"
-    tag: "latest"
-    modelURL: "facebook/opt-125m"
 
-    replicaCount: 1
-
-    requestCPU: 6
-    requestMemory: "16Gi"
-    requestGPU: 1
-
-    pvcStorage: "10Gi"
-```
-In this helm chart:
-- **`modelSpec`** includes:
-  - `name`: A nickname that you prefer to call the model.
-  - `repository`: Docker repository of vLLM.
-  - `tag`: Docker image tag.
-  - `modelURL`: the LLM model that you want to use.
-- **`replicaCount`**: Number of replicas.
-- **`requestCPU` and `requestMemory`**: Specifies the CPU and memory resource requests for the pod.
-- **`requestGPU`**: Specifies the number of GPUs required.
-- **`pvcStorage`**: Allocates persistent storage for the model.
-
-**NOTE:** If you intend to set up two or multiple vllm pods, please refer to this [yaml file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
-
-**NOTE:** Feel free to check more [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and vLLM production stack [repo](https://github.com/vllm-project/production-stack)!
-
-To run this helm chart, execute the following command:
+To install the vLLM production-stack, run the following commands on your desktop:
 ```bash
 sudo helm repo add vllm https://vllm-project.github.io/production-stack
 sudo helm install vllm vllm/vllm-stack -f tutorials/assets/values-01-minimal-example.yaml
 ```
-where `tutorials/assets/values-01-minimal-example.yaml` is the helm chart shown in previous example.
+This will install vLLM production-stack running with the Facebook opt-125M model.
 
 
 ### Validate Installation
@@ -75,12 +46,12 @@ sudo kubectl get pods
 And you will see that pods for the `vllm` deployment should transition to `Ready` and the `Running` state.
 
 ```
-NAME                                               READY   STATUS    RESTARTS   AGE
+NAME                                           READY   STATUS    RESTARTS   AGE
 vllm-deployment-router-859d8fb668-2x2b7        1/1     Running   0          2m38s
 vllm-opt125m-deployment-vllm-84dfc9bd7-vb9bs   1/1     Running   0          2m38s
 ```
 
-**NOTE:**: It may take some time for the containers to download the Docker images and LLM weights.
+**NOTE**: It may take some time for the containers to download the Docker images and LLM weights.
 
 ### Send a Query to the Stack
 
@@ -146,6 +117,8 @@ Expected output:
 
 This demonstrates the model generating a continuation for the provided prompt.
 
+
+
 ### Uninstall
 
 To remove the deployment, run:
@@ -153,6 +126,48 @@ To remove the deployment, run:
 ```bash
 sudo helm uninstall vllm
 ```
+
+------
+
+
+### (Advanced) Configuring vLLM production-stack
+
+The core vLLM production stack configuration is managed with YAML. Here is the example configuration used in the installation above:
+
+```yaml
+servingEngineSpec:
+  runtimeClassName: ""
+  modelSpec:
+  - name: "opt125m"
+    repository: "vllm/vllm-openai"
+    tag: "latest"
+    modelURL: "facebook/opt-125m"
+
+    replicaCount: 1
+
+    requestCPU: 6
+    requestMemory: "16Gi"
+    requestGPU: 1
+
+    pvcStorage: "10Gi"
+```
+
+In this YAML configuration:
+- **`modelSpec`** includes:
+  - `name`: A nickname that you prefer to call the model.
+  - `repository`: Docker repository of vLLM.
+  - `tag`: Docker image tag.
+  - `modelURL`: the LLM model that you want to use.
+- **`replicaCount`**: Number of replicas.
+- **`requestCPU` and `requestMemory`**: Specifies the CPU and memory resource requests for the pod.
+- **`requestGPU`**: Specifies the number of GPUs required.
+- **`pvcStorage`**: Allocates persistent storage for the model.
+
+**NOTE:** If you intend to set up two pods, please refer to this [YAML file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
+
+**NOTE:** vLLM production stack offers much more features (*e.g.* CPU offloading and a wide range of routing algorithms). Please check out these [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and our [repo](https://github.com/vllm-project/production-stack) for more details!
+
+------
 
 ## Deployment using native k8s 
 
