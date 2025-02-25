@@ -710,8 +710,6 @@ class ModelConfig:
             return
 
         if parallel_config.pipeline_parallel_size > 1:
-            logger.warning("Async output processing can not be enabled "
-                           "with pipeline parallel")
             self.use_async_output_proc = False
             return
 
@@ -719,15 +717,10 @@ class ModelConfig:
         # If the feature combo become valid
         from vllm.platforms import current_platform
         if not current_platform.is_async_output_supported(self.enforce_eager):
-            logger.warning(
-                "Async output processing is not supported on the "
-                "current platform type %s.", current_platform.device_type)
             self.use_async_output_proc = False
             return
 
         if envs.VLLM_USE_RAY_SPMD_WORKER:
-            logger.warning(
-                "Async output processing can not be enabled with ray spmd")
             self.use_async_output_proc = False
             return
 
@@ -739,8 +732,6 @@ class ModelConfig:
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if speculative_config:
-            logger.warning("Async output processing is not supported with"
-                           " speculative decoding currently.")
             self.use_async_output_proc = False
 
     def verify_with_parallel_config(
@@ -768,8 +759,6 @@ class ModelConfig:
                     "Supported models implement the `SupportsPP` interface.")
 
             if self.use_async_output_proc:
-                logger.warning("Async output processor is not supported with "
-                               "pipeline parallelism currently. Disabling it.")
                 self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(
