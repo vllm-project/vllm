@@ -254,6 +254,82 @@ class RotaryEmbedding(CustomOp):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
+    def forward_neuron(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        def _apply_rotary_emb_neuron(
+            x: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
+            is_neox_style: bool,
+        ) -> torch.Tensor:
+            cos = cos.unsqueeze(-2).to(x.dtype)
+            sin = sin.unsqueeze(-2).to(x.dtype)
+            if is_neox_style:
+                x1, x2 = torch.chunk(x, 2, dim=-1)
+            else:
+                # x1 = x[..., ::2]
+
+                # x2 = x[..., 1::2]
+                d = x.shape[-1] // 2
+                x_reshaped = x.view(-1, x.shape[-1])
+                x1 = x_reshaped[:, ::2].view(*x.shape[:-1], d)
+                x2 = x_reshaped[:, 1::2].view(*x.shape[:-1], d)
+            o1 = x1 * cos - x2 * sin
+            o2 = x2 * cos + x1 * sin
+            if is_neox_style:
+                return torch.cat((o1, o2), dim=-1)
+            else:
+                return torch.stack((o1, o2), dim=-1).flatten(-2)
+
+        if offsets is not None:
+            positions = positions + offsets
+
+        self.cos_sin_cache = self.cos_sin_cache.to(query.device,
+                                                   dtype=query.dtype)
+
+        positions = positions.flatten()
+        num_tokens = positions.shape[0]
+        cos_sin = self.cos_sin_cache.index_select(0, positions)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.head_size)
+        key_shape = key.shape
+        key = key.view(num_tokens, -1, self.head_size)
+
+        if self.rotary_dim == self.head_size:
+            query = _apply_rotary_emb(query, cos, sin, self.is_neox_style)
+            query = query.reshape(query_shape)
+            key = _apply_rotary_emb(key, cos, sin, self.is_neox_style)
+            key = key.reshape(key_shape)
+        else:
+            head_size = query.shape[-1]
+            query_reshaped = query.view(-1, head_size)
+            query_pass = query_reshaped[:, self.rotary_dim:].view(
+                *query.shape[:-1], head_size - self.rotary_dim)
+            query_rot = query_reshaped[:, :self.rotary_dim].view(
+                *query.shape[:-1], self.rotary_dim)
+            query_rot = _apply_rotary_emb_neuron(query_rot, cos, sin,
+                                                 self.is_neox_style)
+            query = torch.cat((query_rot, query_pass),
+                              dim=-1).reshape(query_shape)
+
+            key_reshaped = key.view(-1, head_size)
+            key_pass = key_reshaped[:, self.rotary_dim:].view(
+                *key.shape[:-1], head_size - self.rotary_dim)
+            key_rot = key_reshaped[:, :self.rotary_dim].view(
+                *key.shape[:-1], self.rotary_dim)
+            key_rot = _apply_rotary_emb_neuron(key_rot, cos, sin,
+                                               self.is_neox_style)
+            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
         s += f", max_position_embeddings={self.max_position_embeddings}"
