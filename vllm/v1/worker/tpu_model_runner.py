@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import enum
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
@@ -71,19 +71,19 @@ class DecodeData:
     attn_metadata: Optional[PallasMetadata] = None
 
 # TODO refactor to utils
-def get_default_sampling_params(device: torch.device)->SamplingMetadata:
+def get_default_sampling_params(batch_size: int, device: torch.device)->SamplingMetadata:
     # SamplingMetadata for tracing all available sampling options
-    temp = torch.tensor([0.1], device=device)
-    topp = torch.tensor([0.6], device=device) # some value just for tracing
-    topk = torch.tensor([10], dtype=torch.long, device=device)
-    minp = torch.tensor([0.1], device=device) 
+    temp = torch.tensor([0.1]*batch_size, device=device)
+    topp = torch.tensor([0.6]*batch_size, device=device) # some value just for tracing
+    topk = torch.tensor([10]*batch_size, dtype=torch.long, device=device)
+    minp = torch.tensor([0.1]*batch_size, device=device) 
     # unsupported, you need to return an extra tensor of static size BxV
     max_num_logprobs = None  
     # NOTE prompt sequences must be padded to a shape we compile for
     prompt_ids = None
-    freq_penalty = torch.tensor([0.1], device=device) 
-    pres_penalty = torch.tensor([0.1], device=device) 
-    rep_penalty = torch.tensor([0.1], device=device) 
+    freq_penalty = torch.tensor([0.1]*batch_size, device=device) 
+    pres_penalty = torch.tensor([0.1]*batch_size, device=device) 
+    rep_penalty = torch.tensor([0.1]*batch_size, device=device) 
     out_tokens = [] # This is a list, use a tensor to have proper support
     min_tokens = None # impl is not vectorized
     logit_bias = []
@@ -311,7 +311,10 @@ class TPUModelRunner:
                 req_data.new_block_ids)
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
-
+        # Check if the batch has changed. If not, we can skip copying the
+        # sampling metadata from CPU to GPU.
+        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
+            
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
@@ -328,6 +331,9 @@ class TPUModelRunner:
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
+        
+        if batch_changed:
+            self.input_batch.refresh_sampling_metadata()
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     def swap_step(self):
@@ -624,6 +630,9 @@ class TPUModelRunner:
         num_decodes = len(pd_info.decode_req_ids)
         decode_data = None
         sampled_token_ids = [0] * self.input_batch.num_reqs
+        sampling_metadata = self.input_batch.get_sampling_metadata(scheduler_output.scheduled_spec_decode_tokens)
+        print("SAMPLING", sampling_metadata)
+        print("PROMPTS DECODES", num_prompts, num_decodes)
 
         # Run each prompt individually
         is_first = True
@@ -644,7 +653,6 @@ class TPUModelRunner:
                 is_first = False
 
             # Run forward pass
-            sampling_metadata = self.input_batch.get_sampling_metadata(scheduler_output.scheduled_spec_decode_tokens)
             with set_forward_context(prompt_data.attn_metadata,
                                      self.vllm_config):
                 assert self.model is not None
@@ -687,7 +695,8 @@ class TPUModelRunner:
                 assert self.model is not None
                 selected_token_ids = self.model(decode_data.input_tokens,
                                                 decode_data.input_positions,
-                                                self.kv_caches)
+                                                self.kv_caches, 
+                                                sampling_metadata)
 
             # Transfer sampled tokens from TPU to CPU
             decode_token_ids_cpu = selected_token_ids.cpu()
@@ -865,7 +874,7 @@ class TPUModelRunner:
             torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
 
         # To allow sampling, trace the forward with all supported sampling args
-        sampling_meta = get_default_sampling_params(self.device)
+        sampling_meta = get_default_sampling_params(num_tokens, self.device)
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
             self.model(token_ids, position_ids, kv_caches, sampling_meta)
@@ -989,16 +998,25 @@ class ModelWrapperV1(nn.Module):
         self.model = model
         self.sampler = Sampler()
     
-    def _validate_sampling_metadata(sampling_metadata: SamplingMetadata)->SamplingMetadata:
+    def _validate_sampling_metadata(self, sampling_metadata: SamplingMetadata, logits: torch.Tensor)->SamplingMetadata:
         # As sampling happens on a single traced function, we need to disable
         # unused options by setting their arg value to an operation 
         # functionally identical to the Identity.
         # TODO
+        # Also, we need to adjust sampling params to match sequence padding, as
+        # every element in the batch can have different ones.
+        for field in fields(sampling_metadata):
+            val = getattr(sampling_metadata, field.name)
+            if isinstance(val, torch.Tensor) and val.numel()>1 and val.numel() != logits.shape[0]:
+                # TODO not efficient, manage a tensor of compiled size B
+                padded_param = torch.zeros(logits.shape[0], device=val.device)
+                padded_param[:val.shape[0]] = val
+                setattr(sampling_metadata, field.name, padded_param)
         return sampling_metadata
 
     def sample(self, logits: torch.Tensor,
                sampling_metadata: SamplingMetadata) -> SamplerOutput:
-        sampling_metadata = self._validate_sampling_metadata(sampling_metadata)
+        sampling_metadata = self._validate_sampling_metadata(sampling_metadata, logits)
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
@@ -1050,7 +1068,7 @@ class ModelWrapperV1(nn.Module):
         logits = self.model.compute_logits(hidden_states, None)
 
         # Sample with traced function.
-        sampler_output = self.sampler(logits, sampling_metadata)
+        sampler_output = self.sample(logits, sampling_metadata)
         # TODO support logprobs here
         sampled_token_ids = sampler_output.sampled_token_ids
         return sampled_token_ids
