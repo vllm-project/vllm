@@ -55,7 +55,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         if not (weight_qscheme == "per_tensor"
                 and input_qscheme == "per_tensor"):
             raise ValueError(
-                "For FP8 Fused MoE layers, only per-tensor scales"
+                "For FP8 Fused MoE layers, only per-tensor scales "
                 "for weights and activations are supported. Found "
                 f"{weight_qscheme}, {input_qscheme}")  # noqa E501
 

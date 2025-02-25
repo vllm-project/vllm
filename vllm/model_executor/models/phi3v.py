@@ -639,7 +639,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                 # 3D tensor
                 return list(torch.unbind(image_data, dim=0))
             raise ValueError(
-                "We expect batched 2D tensors;"
+                "We expect batched 2D tensors; "
                 "this can be either a list of 2D tensors or a single 3D tensor."
             )
 
