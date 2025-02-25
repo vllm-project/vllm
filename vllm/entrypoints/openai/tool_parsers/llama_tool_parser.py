@@ -86,7 +86,8 @@ class Llama3JsonToolParser(ToolParser):
                         # function call args are JSON but as a string
                         arguments=json.dumps(raw_function_call["arguments"] \
                                 if "arguments" in raw_function_call \
-                                else raw_function_call["parameters"], ensure_ascii=False)))
+                                else raw_function_call["parameters"],
+                                                        ensure_ascii=False)))
                 for raw_function_call in function_call_arr
             ]
 
@@ -172,7 +173,8 @@ class Llama3JsonToolParser(ToolParser):
                 if self.current_tool_id >= 0:
                     cur_arguments = current_tool_call.get("arguments")
                     if cur_arguments:
-                        cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
+                        cur_args_json = json.dumps(cur_arguments,
+                                                   ensure_ascii=False)
                         sent = len(
                             self.streamed_args_for_tool[self.current_tool_id])
                         argument_diff = cur_args_json[sent:]
@@ -224,7 +226,8 @@ class Llama3JsonToolParser(ToolParser):
                 if cur_arguments:
                     sent = len(
                         self.streamed_args_for_tool[self.current_tool_id])
-                    cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
+                    cur_args_json = json.dumps(cur_arguments,
+                                               ensure_ascii=False)
                     prev_arguments = self.prev_tool_call_arr[
                         self.current_tool_id].get("arguments")
 
@@ -232,7 +235,8 @@ class Llama3JsonToolParser(ToolParser):
                     if is_complete[self.current_tool_id]:
                         argument_diff = cur_args_json[sent:]
                     elif prev_arguments:
-                        prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
+                        prev_args_json = json.dumps(prev_arguments,
+                                                    ensure_ascii=False)
                         if cur_args_json != prev_args_json:
 
                             prefix = find_common_prefix(
