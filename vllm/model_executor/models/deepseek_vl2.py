@@ -138,18 +138,24 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_num_image_tokens(self, *, image_width: int,
-                             image_height: int) -> int:
+    def get_num_image_tokens(self,
+                             *,
+                             image_width: int,
+                             image_height: int,
+                             cropping: bool = True) -> int:
         hf_processor = self.get_hf_processor()
         image_size = hf_processor.image_size
         patch_size = hf_processor.patch_size
         downsample_ratio = hf_processor.downsample_ratio
 
-        best_width, best_height = hf_processor.select_best_resolution(
-            (image_width, image_height))
+        if cropping:
+            best_width, best_height = hf_processor.select_best_resolution(
+                (image_width, image_height))
+            num_width_tiles, num_height_tiles = (best_width // image_size,
+                                                 best_height // image_size)
+        else:
+            num_width_tiles = num_height_tiles = 1
 
-        num_width_tiles, num_height_tiles = (best_width // image_size,
-                                             best_height // image_size)
         h = w = math.ceil((image_size // patch_size) / downsample_ratio)
 
         global_views_tokens = h * (w + 1)
@@ -169,10 +175,12 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
+        num_images = mm_counts.get("image", 0)
         max_image_size = self.get_image_size_with_most_features()
         max_image_tokens = self.get_num_image_tokens(
             image_height=max_image_size.height,
-            image_width=max_image_size.width)
+            image_width=max_image_size.width,
+            cropping=num_images <= 2)
 
         return {"image": max_image_tokens}
 
@@ -271,6 +279,7 @@ class DeepseekVL2MultiModalProcessor(
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
+                    cropping=len(images) <= 2,
                 )
             return [image_token_id] * num_image_tokens
 
