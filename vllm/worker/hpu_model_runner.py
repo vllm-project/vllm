@@ -713,19 +713,26 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.is_pooler = False
 
     def _set_gc_threshold(self) -> None:
-        # Read https://docs.python.org/3/library/gc.html#gc.set_threshold
-        # for comprehensive description of gc generations.
-        # We can either use VLLM_GC_THR_GEN[0-2] (this has higher priority)
-        # to set particular generation threshold or use simpler
-        # VLLM_GC_THR_MULTIPLIER to multiply default values.
-        default_gc_thrs = list(gc.get_threshold())
+        """
+        Read https://docs.python.org/3/library/gc.html#gc.set_threshold
+        for comprehensive description of gc generations.
+        We can either use VLLM_GC_THR_GEN[0-2] (this has higher priority)
+        to set particular generation threshold or use simpler
+        VLLM_GC_THR_MULTIPLIER to multiply default values.
+        """
+
+        # gc.get_threshold default, avoiding potential overflow due to
+        # multiplier and set later (get->mult->set->repeat->...->overflow)
+        default_gc_thrs = [700, 10, 10]
+
         requested_gc_thrs = [0] * len(default_gc_thrs)
         for i in range(len(default_gc_thrs)):
             requested_gc_thrs[i] = int(
                 os.environ.get(f'VLLM_GC_THR_GEN{i}', default_gc_thrs[i]))
         if requested_gc_thrs == default_gc_thrs:
-            gc_thr_multiplier = int(os.environ.get('VLLM_GC_THR_MULTIPLIER',
-                                                   2))
+            # 16*threshold is rare enough for gc to not cause perf issues
+            gc_thr_multiplier = int(
+                os.environ.get('VLLM_GC_THR_MULTIPLIER', 16))
             requested_gc_thrs = [
                 t * gc_thr_multiplier for t in default_gc_thrs
             ]
