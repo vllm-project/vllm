@@ -211,9 +211,13 @@ class LoraNotSupportedWorkerBase(WorkerBase):
 class ModelExecutionError(RuntimeError):
     model_input: BroadcastableModelInput
 
-    def __init__(self, *args, model_input):
+    def __init__(self, *args, model_input=None):
         super().__init__(*args)
         self.model_input = model_input
+
+    def __reduce__(self):
+        # To avoid pickle errors
+        return (self.__class__, (self.args[0], ))
 
 
 @dataclasses.dataclass(frozen=True)

@@ -40,9 +40,13 @@ POLLING_TIMEOUT_S = 2.5
 class ModelExecutionV1Error(RuntimeError):
     scheduler_output: SchedulerOutput
 
-    def __init__(self, *args, scheduler_output):
+    def __init__(self, *args, scheduler_output=None):
         super().__init__(*args)
         self.scheduler_output = scheduler_output
+
+    def __reduce__(self):
+        # To avoid pickle errors
+        return (self.__class__, (self.args[0], ))
 
 
 class EngineCore:
