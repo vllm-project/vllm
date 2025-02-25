@@ -1370,7 +1370,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download model if necessary"""
-        self._prepare_weights(model_config.model, model_config.revision)
+        model_weights = model_config.model
+        if hasattr(model_config, "model_weights"):
+            model_weights = model_config.model_weights
+        self._prepare_weights(model_weights, model_config.revision)
 
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
         """Perform streaming of the model to destination"""
