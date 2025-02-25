@@ -20,7 +20,7 @@ MIN_CAPABILITY = os.environ.get("MIN_CAPABILITY", "80")
     reason="Current system does not have minimum capability.")
 def test_weight_loading(vllm_runner):
     """
-    Test parameter weight loading with tp>1.
+    Test parameter weight loading with tp=2.
     """
     with vllm_runner(
             model_name=MODEL_NAME,
