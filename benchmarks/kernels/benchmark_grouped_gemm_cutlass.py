@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Tuple
 
 import torch
@@ -15,11 +17,10 @@ DEFAULT_MODELS = [
     "nm-testing/Mixtral-8x7B-Instruct-v0.1", "nm-testing/deepseekv2-lite",
     "ibm-granite/granite-3.0-1b-a400m", "ibm-granite/granite-3.0-3b-a800m"
 ]
-DEFAULT_BATCH_SIZES = [16, 32, 64, 128, 256, 512]
+DEFAULT_BATCH_SIZES = [1, 4, 8, 16, 32, 64, 128, 256, 512]
 
 PER_ACT_TOKEN_OPTS = [False]  #[False, True]
 PER_OUT_CH_OPTS = [False]  #[False, True]
-TOPKS = [2, 6]
 
 
 def to_fp8(tensor: torch.Tensor):
@@ -33,9 +34,10 @@ def bench_run(results: List[benchmark.Measurement], model: str,
               per_out_ch: bool, mkn: Tuple[int, int, int]):
     label = "Quant Matmul"
 
-    sub_label = ("{}, num_experts={}, per_act_token={} per_out_ch={}, "
-                 "MKN=({})".format(model, num_experts, per_act_token,
-                                   per_out_ch, mkn))
+    sub_label = (
+        "{}, num_experts={}, topk={}, per_act_token={} per_out_ch={}, "
+        "MKN=({})".format(model, num_experts, topk, per_act_token, per_out_ch,
+                          mkn))
 
     print(f"Testing: {sub_label}")
 
@@ -61,6 +63,23 @@ def bench_run(results: List[benchmark.Measurement], model: str,
     w2_scale = torch.empty((num_experts, 1, 1),
                            device="cuda",
                            dtype=torch.float32)
+
+    ab_strides1 = torch.full((num_experts, ),
+                             k,
+                             device="cuda",
+                             dtype=torch.int64)
+    c_strides1 = torch.full((num_experts, ),
+                            2 * n,
+                            device="cuda",
+                            dtype=torch.int64)
+    ab_strides2 = torch.full((num_experts, ),
+                             n,
+                             device="cuda",
+                             dtype=torch.int64)
+    c_strides2 = torch.full((num_experts, ),
+                            k,
+                            device="cuda",
+                            dtype=torch.int64)
 
     for expert in range(num_experts):
         w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(w1[expert])
@@ -94,36 +113,69 @@ def bench_run(results: List[benchmark.Measurement], model: str,
                         w1_scale: torch.Tensor, w2_scale: torch.Tensor,
                         topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                         m: int, n: int, k: int, num_experts: int,
+                        ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
+                        ab_strides2: torch.Tensor, c_strides2: torch.Tensor,
                         num_repeats: int):
         for _ in range(num_repeats):
             cutlass_moe(a, a_scale, w1, w2, w1_scale, w2_scale, topk_weights,
-                        topk_ids, m, n, k, num_experts)
+                        topk_ids, m, n, k, num_experts, ab_strides1,
+                        c_strides1, ab_strides2, c_strides2)
 
-    def run_from_graph(a_q: torch.Tensor, a_scale: torch.Tensor,
-                       w1_q: torch.Tensor, w2_q: torch.Tensor,
-                       w1_scale: torch.Tensor, w2_scale: torch.Tensor,
-                       topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                       m: int, n: int, k: int, e: int):
+    def run_cutlass_from_graph(
+            a_q: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
+            w2_q: torch.Tensor, w1_scale: torch.Tensor, w2_scale: torch.Tensor,
+            topk_weights: torch.Tensor, topk_ids: torch.Tensor, m: int, n: int,
+            k: int, e: int, ab_strides1: torch.Tensor,
+            c_strides1: torch.Tensor, ab_strides2: torch.Tensor,
+            c_strides2: torch.Tensor):
         with set_current_vllm_config(
                 VllmConfig(parallel_config=ParallelConfig(
                     pipeline_parallel_size=1))):
             return cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
-                               topk_weights, topk_ids, m, n, k, e)
+                               topk_weights, topk_ids, m, n, k, e, ab_strides1,
+                               c_strides1, ab_strides2, c_strides2)
+
+    def run_triton_from_graph(a: torch.Tensor, w1: torch.Tensor,
+                              w2: torch.Tensor, topk_weights: torch.Tensor,
+                              topk_ids: torch.Tensor, w1_scale: torch.Tensor,
+                              w2_scale: torch.Tensor, a_scale: torch.Tensor):
+        with set_current_vllm_config(
+                VllmConfig(parallel_config=ParallelConfig(
+                    pipeline_parallel_size=1))):
+            return fused_experts(a,
+                                 w1,
+                                 w2,
+                                 topk_weights,
+                                 topk_ids,
+                                 use_fp8_w8a8=True,
+                                 w1_scale=w1_scale,
+                                 w2_scale=w2_scale,
+                                 a1_scale=a_scale)
 
     def replay_graph(graph, num_repeats):
         for _ in range(num_repeats):
             graph.replay()
         torch.cuda.synchronize()
 
-    stream = torch.cuda.Stream()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
-        run_from_graph(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
-                       topk_weights, topk_ids, m, n, k, num_experts)
+    cutlass_stream = torch.cuda.Stream()
+    cutlass_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cutlass_graph, stream=cutlass_stream):
+        run_cutlass_from_graph(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
+                               topk_weights, topk_ids, m, n, k, num_experts,
+                               ab_strides1, c_strides1, ab_strides2,
+                               c_strides2)
+    torch.cuda.synchronize()
+
+    triton_stream = torch.cuda.Stream()
+    triton_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(triton_graph, stream=triton_stream):
+        run_triton_from_graph(a, w1_q_notransp, w2_q_notransp, topk_weights,
+                              topk_ids, w1_scale, w2_scale, a_scale)
     torch.cuda.synchronize()
 
     min_run_time = 5
     num_warmup = 5
+    num_runs = 25
 
     globals = {
         # Baseline params
@@ -145,11 +197,17 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         "n": n,
         "k": k,
         "num_experts": num_experts,
-        # Cutlass cuda graph params
-        "graph": graph,
+        "ab_strides1": ab_strides1,
+        "c_strides1": c_strides1,
+        "ab_strides2": ab_strides2,
+        "c_strides2": c_strides2,
+        # cuda graph params
+        "cutlass_graph": cutlass_graph,
+        "triton_graph": triton_graph,
         # Gen params
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
+        "num_runs": num_runs,
         # Kernels
         "run_triton_moe": run_triton_moe,
         "run_cutlass_moe": run_cutlass_moe,
@@ -163,7 +221,7 @@ def bench_run(results: List[benchmark.Measurement], model: str,
     results.append(
         benchmark.Timer(
             stmt=
-            "run_triton_moe(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids, w1_scale, w2_scale, a_scale, 1)",  # noqa: E501
+            "run_triton_moe(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids, w1_scale, w2_scale, a_scale, num_runs)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -171,13 +229,26 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         ).blocked_autorange(min_run_time=min_run_time))
 
     # Warmup
+    replay_graph(triton_graph, num_warmup)
+
+    results.append(
+        benchmark.Timer(
+            stmt="replay_graph(triton_graph, num_runs)",
+            globals=globals,
+            label=label,
+            sub_label=sub_label,
+            description="triton_moe_cuda_graphs",
+        ).blocked_autorange(min_run_time=min_run_time))
+
+    # Warmup
     run_cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights,
-                    topk_ids, m, n, k, num_experts, num_warmup)
+                    topk_ids, m, n, k, num_experts, ab_strides1, c_strides1,
+                    ab_strides2, c_strides2, num_warmup)
 
     results.append(
         benchmark.Timer(
             stmt=
-            "run_cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights, topk_ids, m, n, k, num_experts, 1)",  # noqa: E501
+            "run_cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights, topk_ids, m, n, k, num_experts, ab_strides1, c_strides1, ab_strides2, c_strides2, num_runs)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -185,11 +256,11 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         ).blocked_autorange(min_run_time=min_run_time))
 
     # Warmup
-    replay_graph(graph, num_warmup)
+    replay_graph(cutlass_graph, num_warmup)
 
     results.append(
         benchmark.Timer(
-            stmt="replay_graph(graph, 1)",
+            stmt="replay_graph(cutlass_graph, num_runs)",
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -207,8 +278,9 @@ def main(args):
     for model in args.models:
         for layer in WEIGHT_SHAPES_MOE[model]:
             num_experts = layer[0]
-            size_k = layer[1]
-            size_n = layer[2]
+            topk = layer[1]
+            size_k = layer[2]
+            size_n = layer[3]
 
             if len(args.limit_k) > 0 and size_k not in args.limit_k:
                 continue
@@ -218,11 +290,10 @@ def main(args):
 
             for per_act_token in PER_ACT_TOKEN_OPTS:
                 for per_out_ch in PER_OUT_CH_OPTS:
-                    for topk in TOPKS:
-                        for size_m in DEFAULT_BATCH_SIZES:
-                            mkn = (size_m, size_k, size_n)
-                            bench_run(results, model, num_experts, topk,
-                                      per_act_token, per_out_ch, mkn)
+                    for size_m in DEFAULT_BATCH_SIZES:
+                        mkn = (size_m, size_k, size_n)
+                        bench_run(results, model, num_experts, topk,
+                                  per_act_token, per_out_ch, mkn)
 
     compare = benchmark.Compare(results)
     compare.print()
