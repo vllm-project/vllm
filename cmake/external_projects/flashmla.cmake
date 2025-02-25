@@ -18,16 +18,11 @@ if(FLASH_MLA_SRC_DIR)
 else()
   FetchContent_Declare(
         flashmla
-        GIT_REPOSITORY https://github.com/deepseek-ai/FlashMLA
-        GIT_TAG 4edea86f9e85eea6ea41dd14b2798fc6a0e2d80c
+        GIT_REPOSITORY https://github.com/vllm-project/FlashMLA.git
+        GIT_TAG 575f7724b9762f265bbee5889df9c7d630801845
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
-        PATCH_COMMAND git apply --ignore-whitespace
-            "${CMAKE_CURRENT_LIST_DIR}/flashmla.patch"
-        # For incremental builds to prevent the patch from being reapplied, 
-        #  https://stackoverflow.com/a/73725257
-        UPDATE_DISCONNECTED TRUE
   )
 endif()
 
