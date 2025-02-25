@@ -102,25 +102,6 @@ def _check_for_env_var(key: str, expected_value: str, strict: bool = False):
     )
 
 
-def _check_for_extra_index_url(expected_value: str, strict: bool = False):
-    """Print a warning when the env var's value doesn't match the expected value.
-
-    When strict is set to True, raises SetupError instead of warning.
-    """
-    has_uv = which("uv")
-    if has_uv:
-        _check_for_env_var("UV_EXTRA_INDEX_URL", expected_value, strict=strict)
-        # need to match pip's index behaviour,
-        # see https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes
-        _check_for_env_var("UV_INDEX_STRATEGY",
-                           "unsafe-best-match",
-                           strict=strict)
-    else:
-        _check_for_env_var("PIP_EXTRA_INDEX_URL",
-                           expected_value,
-                           strict=strict)
-
-
 def get_requires_for_build_wheel(config_settings=None) -> list[str]:
     """ Dynamically computes the wheel build requirements based on VLLM_TARGET_DEVICE
 
