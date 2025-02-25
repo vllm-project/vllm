@@ -2,6 +2,8 @@
 
 import json
 
+import xgrammar
+
 from vllm.sampling_params import SamplingParams
 
 
@@ -90,3 +92,11 @@ def validate_guided_decoding_request(sampling_params: SamplingParams) -> None:
         if has_xgrammar_unsupported_json_features(schema):
             raise ValueError("The provided JSON schema contains features not "
                              "supported by xgrammar.")
+
+    if gd_params.grammar:
+        # EBNF style grammars only right now
+        try:
+            # parse the grammar, but we aren't compiling it.
+            xgrammar.Grammar.from_ebnf(gd_params.grammar)
+        except Exception as e:
+            raise ValueError("Invalid grammar specification.") from e
