@@ -22,7 +22,7 @@ Before you begin, ensure that you have the following:
 If you are new to Kubernetes, don't worry: we provide a step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and [video](https://www.youtube.com/watch?v=EsTJbQtzj0g) in [vLLM production-stack] (https://github.com/vllm-project/production-stack) to help you get started!
 
 
-## Deployment using helm chart
+## Deployment using vLLM production-stack
 
 The standard vLLM production-stack install uses a Helm chart. If Helm is not installed on your local desktop, you can run this [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) to install Helm.
 
