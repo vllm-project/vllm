@@ -44,19 +44,18 @@ __global__ void get_group_gemm_starts(
     int64_t* out_offsets, int64_t* a_scales_offsets, int64_t* b_scales_offsets,
     const int64_t a_base_as_int, const int64_t b_base_as_int,
     const int64_t out_base_as_int, const int64_t a_scales_base_as_int,
-    const int64_t b_scales_base_as_int, int n, int k, bool per_act_token,
-    bool per_out_ch, int64_t ab_size, int64_t c_size, int64_t acc_size) {
+    const int64_t b_scales_base_as_int, int64_t n, int64_t k,
+    bool per_act_token, bool per_out_ch, int64_t ab_size, int64_t c_size,
+    int64_t acc_size) {
   int expert_id = threadIdx.x;
-  // int num_experts = blockDim.x;
 
-  int expert_offset = expert_offsets[expert_id];
+  int64_t expert_offset = expert_offsets[expert_id];
 
   a_offsets[expert_id] = a_base_as_int + expert_offset * k * ab_size;
   b_offsets[expert_id] = b_base_as_int + expert_id * k * n * ab_size;
   out_offsets[expert_id] = out_base_as_int + expert_offset * n * c_size;
   a_scales_offsets[expert_id] =
-      a_scales_base_as_int +
-      (per_act_token ? expert_offset : /*expert_id*/ 0) * acc_size;
+      a_scales_base_as_int + (per_act_token ? expert_offset : 0) * acc_size;
   b_scales_offsets[expert_id] =
       b_scales_base_as_int +
       (per_out_ch ? n * expert_id : expert_id) * acc_size;

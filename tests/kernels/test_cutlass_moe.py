@@ -27,7 +27,7 @@ def run(a_q: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
                            c_strides1, ab_strides2, c_strides2)
 
 
-@pytest.mark.parametrize("m", [2, 16, 32, 64, 224])
+@pytest.mark.parametrize("m", [2, 16, 32, 64, 224, 163840])
 @pytest.mark.parametrize("n", [128, 2048])
 @pytest.mark.parametrize("k", [128, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
@@ -115,7 +115,7 @@ def test_cutlass_moe_no_graph(
                                    rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [2, 16, 32, 64, 224])
+@pytest.mark.parametrize("m", [2, 16, 32, 64, 224, 163840])
 @pytest.mark.parametrize("n", [128, 2048])
 @pytest.mark.parametrize("k", [128, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)

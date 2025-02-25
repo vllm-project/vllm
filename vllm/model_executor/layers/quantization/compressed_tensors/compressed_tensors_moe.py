@@ -263,9 +263,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         # TODO
         x_q, x_scale = ops.scaled_fp8_quant(x, use_per_token_if_dynamic=False)
-        # print(x_q.shape, x_scale.shape,
-        #       layer.w13_weight.shape, layer.w2_weight.shape,
-        #       layer.w13_weight_scale.shape, layer.w2_weight_scale.shape)
         return cutlass_moe(
             x_q,
             x_scale,
@@ -284,18 +281,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.ab_strides2,
             layer.c_strides2,
         ).bfloat16()
-
-        # return fused_experts(x,
-        #                      layer.w13_weight,
-        #                      layer.w2_weight,
-        #                      topk_weights=topk_weights,
-        #                      topk_ids=topk_ids,
-        #                      inplace=True,
-        #                      use_fp8_w8a8=True,
-        #                      w1_scale=layer.w13_weight_scale,
-        #                      w2_scale=layer.w2_weight_scale,
-        #                      a1_scale=layer.w13_input_scale,
-        #                      a2_scale=layer.w2_input_scale)
 
 
 class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
