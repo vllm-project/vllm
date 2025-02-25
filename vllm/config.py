@@ -9,6 +9,7 @@ import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
                     Final, List, Literal, Mapping, Optional, Protocol, Set,
@@ -16,6 +17,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
+from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -25,6 +27,7 @@ from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import CpuArchEnum
+from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -51,6 +54,9 @@ else:
 
 logger = init_logger(__name__)
 
+# This value is chosen to have a balance between ITL and TTFT. Note it is
+# not optimized for throughput.
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
@@ -82,6 +88,12 @@ HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
 class SupportsHash(Protocol):
 
     def compute_hash(self) -> str:
+        ...
+
+
+class SupportsMetricsInfo(Protocol):
+
+    def metrics_info(self) -> Dict[str, str]:
         ...
 
 
@@ -284,6 +296,14 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
 
+        if (backend := envs.VLLM_ATTENTION_BACKEND
+            ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
+            raise ValueError(
+                "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
+                "module was not found."
+                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile"
+                "for instructions on how to install it.")
+
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -410,7 +430,8 @@ class ModelConfig:
         if is_s3(model) or is_s3(tokenizer):
             if is_s3(model):
                 s3_model = S3Model()
-                s3_model.pull_files(model, allow_pattern=["*config.json"])
+                s3_model.pull_files(
+                    model, allow_pattern=["*.model", "*.py", "*.json"])
                 self.model_weights = self.model
                 self.model = s3_model.dir
 
@@ -668,6 +689,23 @@ class ModelConfig:
                 "fallback to the eager mode.")
             self.enforce_eager = True
 
+    def _verify_with_expert_parallelism(self) -> None:
+        num_expert_names = [
+            "moe_num_experts",  # Dbrx
+            "num_experts",  # Jamba
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+        num_experts = 0
+        for name in num_expert_names:
+            num_experts = getattr(self.hf_text_config, name, 0)
+            if num_experts > 0:
+                break
+        if num_experts < 1:
+            raise ValueError(
+                "Number of experts in the model must be greater than 0 "
+                "when expert parallelism is enabled.")
+
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
         if not self.use_async_output_proc:
@@ -675,8 +713,6 @@ class ModelConfig:
             return
 
         if parallel_config.pipeline_parallel_size > 1:
-            logger.warning("Async output processing can not be enabled "
-                           "with pipeline parallel")
             self.use_async_output_proc = False
             return
 
@@ -684,15 +720,10 @@ class ModelConfig:
         # If the feature combo become valid
         from vllm.platforms import current_platform
         if not current_platform.is_async_output_supported(self.enforce_eager):
-            logger.warning(
-                "Async output processing is not supported on the "
-                "current platform type %s.", current_platform.device_type)
             self.use_async_output_proc = False
             return
 
         if envs.VLLM_USE_RAY_SPMD_WORKER:
-            logger.warning(
-                "Async output processing can not be enabled with ray spmd")
             self.use_async_output_proc = False
             return
 
@@ -704,8 +735,6 @@ class ModelConfig:
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if speculative_config:
-            logger.warning("Async output processing is not supported with"
-                           " speculative decoding currently.")
             self.use_async_output_proc = False
 
     def verify_with_parallel_config(
@@ -721,6 +750,9 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
+        if envs.VLLM_TEST_ENABLE_EP:
+            self._verify_with_expert_parallelism()
+
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
             architectures = getattr(self.hf_config, "architectures", [])
@@ -730,8 +762,6 @@ class ModelConfig:
                     "Supported models implement the `SupportsPP` interface.")
 
             if self.use_async_output_proc:
-                logger.warning("Async output processor is not supported with "
-                               "pipeline parallelism currently. Disabling it.")
                 self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(
@@ -765,7 +795,7 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return (hasattr(self.hf_text_config, "model_type")) \
                 and (self.hf_text_config.model_type in \
-                    ('deepseek_v2', 'deepseek_v3'))\
+                    ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'))\
                 and (self.hf_text_config.kv_lora_rank is not None)
 
     def get_head_size(self) -> int:
@@ -858,8 +888,12 @@ class ModelConfig:
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
-        total_num_hidden_layers = getattr(self.hf_text_config,
-                                          "num_hidden_layers", 0)
+        if self.hf_text_config.model_type == "deepseek_mtp":
+            total_num_hidden_layers = getattr(self.hf_text_config,
+                                              "num_nextn_predict_layers", 0)
+        else:
+            total_num_hidden_layers = getattr(self.hf_text_config,
+                                              "num_hidden_layers", 0)
         pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
@@ -893,8 +927,8 @@ class ModelConfig:
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
             if layers_block_type_value is None:
-                raise ValueError("The model is an hybrid without a"
-                                 "layers_block_type in the hf_config,"
+                raise ValueError("The model is an hybrid without a "
+                                 "layers_block_type in the hf_config, "
                                  "cannot determine the num of "
                                  f"{block_type.value} layers")
 
@@ -1082,6 +1116,10 @@ class CacheConfig:
         return {key: str(value) for key, value in self.__dict__.items()}
 
     def _verify_args(self) -> None:
+        if self.cpu_offload_gb < 0:
+            raise ValueError("CPU offload space must be non-negative"
+                             f", but got {self.cpu_offload_gb}")
+
         if self.gpu_memory_utilization > 1.0:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
@@ -1284,6 +1322,11 @@ class ParallelConfig:
 
     pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
+    data_parallel_size: int = 1  # Number of data parallel groups.
+    data_parallel_rank: int = 0  # Rank of the data parallel group.
+    # IP of the data parallel master.
+    data_parallel_master_ip: str = "127.0.0.1"
+    data_parallel_master_port: int = 29500  # Port of the data parallel master.
 
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
@@ -1317,9 +1360,54 @@ class ParallelConfig:
     worker_cls: str = "auto"
     sd_worker_cls: str = "auto"
 
+    # world_size is TPxPP, it affects the number of workers we create.
     world_size: int = field(init=False)
+    # world_size_across_dp is TPxPPxDP, it is the size of the world
+    # including data parallelism.
+    world_size_across_dp: int = field(init=False)
 
     rank: int = 0
+
+    def get_next_dp_init_port(self) -> int:
+        """
+        We might need to initialize process groups in multiple
+        processes that is related to data parallelism,
+        e.g. both in the worker and in the engine, which
+        can live in different processes. To avoid port conflicts, we
+        increment the port number each time we need to initialize a
+        new process group related to data parallelism.
+        """
+        answer = self.data_parallel_master_port
+        self.data_parallel_master_port += 1
+        return answer
+
+    def stateless_init_dp_group(self) -> "ProcessGroup":
+        from vllm.distributed.utils import (
+            stateless_init_torch_distributed_process_group)
+
+        # use gloo since the engine process might not have cuda device
+        dp_group = stateless_init_torch_distributed_process_group(
+            self.data_parallel_master_ip,
+            self.get_next_dp_init_port(),
+            self.data_parallel_rank,
+            self.data_parallel_size,
+            backend="gloo")
+
+        return dp_group
+
+    @staticmethod
+    def has_unfinished_dp(dp_group: "ProcessGroup",
+                          has_unfinished: bool) -> bool:
+        tensor = torch.tensor([has_unfinished],
+                              dtype=torch.int32,
+                              device="cpu")
+        # dp rank 0: has_unfinished_seqs=True
+        # dp rank 1: has_unfinished_seqs=False
+        # aggregated: has_unfinished_seqs=True
+        # so this is an OR operation, i.e. MAX in integers
+        torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
+        aggregated_has_unfinished = bool(tensor.item())
+        return aggregated_has_unfinished
 
     def compute_hash(self):
         """
@@ -1337,6 +1425,17 @@ class ParallelConfig:
     def __post_init__(self) -> None:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
+
+        self.data_parallel_size = envs.VLLM_DP_SIZE
+        self.data_parallel_rank = envs.VLLM_DP_RANK
+        self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
+        self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+        self.world_size_across_dp = self.world_size * self.data_parallel_size
+
+        if self.distributed_executor_backend == "external_launcher":
+            import os
+            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+            logger.info("Disabling V1 multiprocessing for external launcher.")
 
         ray_only_devices = ["tpu"]
         from vllm.platforms import current_platform
@@ -1517,6 +1616,10 @@ class SchedulerConfig:
 
     chunked_prefill_enabled: bool = field(init=False)
 
+    # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
+    # or "mod.custom_class".
+    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -1543,15 +1646,17 @@ class SchedulerConfig:
                     # for now. Have max_num_batched_tokens set to max_model_len
                     # so we don't reject sequences on account of a short
                     # max_num_batched_tokens.
-                    self.max_num_batched_tokens = max(self.max_model_len, 2048)
+                    self.max_num_batched_tokens = max(
+                        self.max_model_len, _DEFAULT_MAX_NUM_BATCHED_TOKENS)
                 else:
-                    # This value is chosen to have a balance between ITL
-                    # and TTFT. Note it is not optimized for throughput.
-                    self.max_num_batched_tokens = 2048
+                    self.max_num_batched_tokens = (
+                        _DEFAULT_MAX_NUM_BATCHED_TOKENS)
             else:
-                # If max_model_len is too short, use 2048 as the default value
+                # If max_model_len is too short, use
+                # _DEFAULT_MAX_NUM_BATCHED_TOKENS as the default value
                 # for higher throughput.
-                self.max_num_batched_tokens = max(self.max_model_len, 2048)
+                self.max_num_batched_tokens = max(
+                    self.max_model_len, _DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.runner_type == "pooling":
                 # Choose specific value for higher throughput
@@ -1716,6 +1821,18 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
+    def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+        if hf_config.model_type == "deepseek_v3":
+            hf_config.model_type = "deepseek_mtp"
+        if hf_config.model_type == "deepseek_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["DeepSeekMTPModel"]
+            })
+        return hf_config
+
+    @staticmethod
     def maybe_create_spec_config(
         target_model_config: ModelConfig,
         target_parallel_config: ParallelConfig,
@@ -1797,12 +1914,18 @@ class SpeculativeConfig:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
         """
-
         if speculative_model is None:
             if num_speculative_tokens is not None:
-                raise ValueError("num_speculative_tokens was provided without "
-                                 "speculative_model.")
-            return None
+                if target_model_config.hf_text_config.model_type \
+                        == "deepseek_v3":
+                    # use the draft model from the same model:
+                    speculative_model = target_model_config.model
+                else:
+                    raise ValueError(
+                        "num_speculative_tokens was provided without "
+                        "speculative_model.")
+            else:
+                return None
 
         if (speculative_disable_by_batch_size is not None
                 and speculative_disable_by_batch_size < 2):
@@ -1856,6 +1979,7 @@ class SpeculativeConfig:
                 max_seq_len_to_capture=target_model_config.
                 max_seq_len_to_capture,
                 max_logprobs=target_model_config.max_logprobs,
+                hf_overrides=SpeculativeConfig.hf_config_override,
             )
 
             draft_hf_config = draft_model_config.hf_config
@@ -1872,7 +1996,6 @@ class SpeculativeConfig:
             if (num_speculative_tokens is not None
                     and hasattr(draft_hf_config, "num_lookahead_tokens")):
                 draft_hf_config.num_lookahead_tokens = num_speculative_tokens
-
             n_predict = getattr(draft_hf_config, "n_predict", None)
             if n_predict is not None:
                 if num_speculative_tokens is None:
@@ -1986,8 +2109,9 @@ class SpeculativeConfig:
                 speculative_draft_tensor_parallel_size = 1
                 if target_parallel_config.tensor_parallel_size > 1:
                     logger.warning(
-                        "MLPSpeculator cannot currently be run with tp>1; "
-                        "setting speculative_draft_tensor_parallel_size=1")
+                        "%s cannot currently be run with tp>1; "
+                        "setting speculative_draft_tensor_parallel_size=1",
+                        draft_hf_config.model_type)
             else:
                 speculative_draft_tensor_parallel_size = \
                     target_parallel_config.tensor_parallel_size
@@ -2419,7 +2543,7 @@ def _get_and_verify_dtype(
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
-                    "For HPU, we cast models to bfloat16 instead of"
+                    "For HPU, we cast models to bfloat16 instead of "
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
                 torch_dtype = torch.bfloat16
@@ -2630,15 +2754,19 @@ class DecodingConfig:
 
     def __post_init__(self):
         valid_guided_backends = ['outlines', 'lm-format-enforcer', 'xgrammar']
-        backend = self.guided_decoding_backend
+
+        backend = GuidedDecodingParams(
+            backend=self.guided_decoding_backend).backend_name
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
-                             f"must be one of {valid_guided_backends}")
+                             f" must be one of {valid_guided_backends}")
 
 
 @dataclass
 class ObservabilityConfig:
-    """Configuration for observability."""
+    """Configuration for observability - metrics and tracing."""
+    show_hidden_metrics: bool = False
+
     otlp_traces_endpoint: Optional[str] = None
 
     # Collecting detailed timing information for each request can be expensive.
@@ -2907,7 +3035,7 @@ class CompilationConfig(BaseModel):
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_reshape and self.enable_fusion:
                 logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled."
+                    "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + quant (fp8) fusion might not work")
 
     pass_config: PassConfig = Field(default_factory=PassConfig)
@@ -3321,17 +3449,21 @@ class VllmConfig:
                            "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        current_platform.check_and_update_config(self)
-
-        # If MLA is enabled, force disable chunked prefill and prefix caching
-        if self.model_config and self.model_config.use_mla:
-            logger.info("MLA is enabled; forcing chunked prefill and prefix "
-                        "caching to be disabled.")
+        if self.model_config and self.model_config.use_mla and \
+            not current_platform.is_cuda():
+            logger.info(
+                "MLA is enabled on a non-cuda platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
             self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.max_num_batched_tokens = max(
+                self.scheduler_config.max_model_len,
+                _DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
+
+        current_platform.check_and_update_config(self)
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
@@ -3472,7 +3604,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
             logger.warning(
                 "`torch.compile` is turned on, but the model %s"
                 " does not support it. Please open an issue on GitHub"
-                "if you want it to be supported.",
+                " if you want it to be supported.",
                 vllm_config.model_config.model)
         _current_vllm_config = old_vllm_config
 

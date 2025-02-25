@@ -581,7 +581,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     prefill_meta.block_tables,
                     prefill_meta.query_start_loc,
                     prefill_meta.seq_lens_tensor,
-                    prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window,
@@ -675,7 +674,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
                     # Cross-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
-                        attn_metadata.seq_lens, attn_metadata.encoder_seq_lens)
+                        attn_metadata.seq_lens,
+                        attn_metadata.encoder_seq_lens,
+                        device=query.device)
 
                 # Encoder branch of encoder-decoder model uses
                 # attn_metadata.encoder_seq_lens
@@ -685,7 +686,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
                     # Encoder self-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
-                        attn_metadata.encoder_seq_lens)
+                        attn_metadata.encoder_seq_lens, device=query.device)
 
                 # Self-attention block of encoder-only model just
                 # uses the seq_lens directly.
@@ -694,7 +695,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
                     # Encoder self-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
-                        attn_metadata.seq_lens)
+                        attn_metadata.seq_lens, device=query.device)
 
                 # Self-attention block of decoder branch just
                 # uses the seq_lens directly
@@ -703,7 +704,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
                     # Decoder self-attention mask is causal
                     attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                        attn_metadata.seq_lens)
+                        attn_metadata.seq_lens, device=query.device)
                 else:
                     raise ValueError("Unknown AttentionType: %s", attn_type)
 

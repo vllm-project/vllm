@@ -23,7 +23,6 @@ import torch.nn as nn
 from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
                           ProcessorMixin)
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -313,11 +312,12 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         self,
         *,
         num_crops: Optional[int] = None,
+        **kwargs: object,
     ) -> ProcessorMixin:
         if num_crops is not None:
-            return self.ctx.get_hf_processor(num_crops=num_crops)
+            kwargs["num_crops"] = num_crops
 
-        return self.ctx.get_hf_processor()
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -639,7 +639,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                 # 3D tensor
                 return list(torch.unbind(image_data, dim=0))
             raise ValueError(
-                "We expect batched 2D tensors;"
+                "We expect batched 2D tensors; "
                 "this can be either a list of 2D tensors or a single 3D tensor."
             )
 
@@ -671,8 +671,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs: object):
@@ -690,8 +688,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
