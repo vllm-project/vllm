@@ -30,6 +30,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -251,6 +252,82 @@ class RotaryEmbedding(CustomOp):
         key_pass = key[..., self.rotary_dim:]
         key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0, rope_mode)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
+    def forward_neuron(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        def _apply_rotary_emb_neuron(
+            x: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
+            is_neox_style: bool,
+        ) -> torch.Tensor:
+            cos = cos.unsqueeze(-2).to(x.dtype)
+            sin = sin.unsqueeze(-2).to(x.dtype)
+            if is_neox_style:
+                x1, x2 = torch.chunk(x, 2, dim=-1)
+            else:
+                # x1 = x[..., ::2]
+
+                # x2 = x[..., 1::2]
+                d = x.shape[-1] // 2
+                x_reshaped = x.view(-1, x.shape[-1])
+                x1 = x_reshaped[:, ::2].view(*x.shape[:-1], d)
+                x2 = x_reshaped[:, 1::2].view(*x.shape[:-1], d)
+            o1 = x1 * cos - x2 * sin
+            o2 = x2 * cos + x1 * sin
+            if is_neox_style:
+                return torch.cat((o1, o2), dim=-1)
+            else:
+                return torch.stack((o1, o2), dim=-1).flatten(-2)
+
+        if offsets is not None:
+            positions = positions + offsets
+
+        self.cos_sin_cache = self.cos_sin_cache.to(query.device,
+                                                   dtype=query.dtype)
+
+        positions = positions.flatten()
+        num_tokens = positions.shape[0]
+        cos_sin = self.cos_sin_cache.index_select(0, positions)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.head_size)
+        key_shape = key.shape
+        key = key.view(num_tokens, -1, self.head_size)
+
+        if self.rotary_dim == self.head_size:
+            query = _apply_rotary_emb(query, cos, sin, self.is_neox_style)
+            query = query.reshape(query_shape)
+            key = _apply_rotary_emb(key, cos, sin, self.is_neox_style)
+            key = key.reshape(key_shape)
+        else:
+            head_size = query.shape[-1]
+            query_reshaped = query.view(-1, head_size)
+            query_pass = query_reshaped[:, self.rotary_dim:].view(
+                *query.shape[:-1], head_size - self.rotary_dim)
+            query_rot = query_reshaped[:, :self.rotary_dim].view(
+                *query.shape[:-1], self.rotary_dim)
+            query_rot = _apply_rotary_emb_neuron(query_rot, cos, sin,
+                                                 self.is_neox_style)
+            query = torch.cat((query_rot, query_pass),
+                              dim=-1).reshape(query_shape)
+
+            key_reshaped = key.view(-1, head_size)
+            key_pass = key_reshaped[:, self.rotary_dim:].view(
+                *key.shape[:-1], head_size - self.rotary_dim)
+            key_rot = key_reshaped[:, :self.rotary_dim].view(
+                *key.shape[:-1], self.rotary_dim)
+            key_rot = _apply_rotary_emb_neuron(key_rot, cos, sin,
+                                               self.is_neox_style)
+            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
     def extra_repr(self) -> str:
@@ -650,9 +727,13 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
                          is_neox_style, dtype)
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
-        pos_freqs = self.base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float, device="cuda") /
-                                self.rotary_dim)
+        pos_freqs = self.base**(
+            torch.arange(0,
+                         self.rotary_dim,
+                         2,
+                         dtype=torch.float,
+                         device=current_platform.device_type) /
+            self.rotary_dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
 
@@ -670,7 +751,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(self.max_position_embeddings * self.scaling_factor,
-                         device="cuda",
+                         device=current_platform.device_type,
                          dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = (freqs.cos() * self.mscale)
