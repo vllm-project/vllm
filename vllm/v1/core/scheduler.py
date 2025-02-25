@@ -60,7 +60,11 @@ class Scheduler:
 
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
-        # Priority queues for requests.
+        # NOTE: Priority queues for requests.
+        # With list, we can safely pop the index
+        # of a request that are yet to be ready (in this case,
+        # the one that uses guided decoding) while still maintaining
+        # the order of all requests in existing waiting queue.
         self.waiting: List[Request] = []
         self.running: List[Request] = []
         # The requests that have been scheduled and are being executed
@@ -114,6 +118,13 @@ class Scheduler:
         scheduled_resumed_reqs: List[Request] = []
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
+
+        # NOTE: guided_decoding_request_ids maps
+        # guided request's (request that use structured decoding)
+        # request_id to the running request index.
+        # This will helps us determine to slice the grammar bitmask
+        # and only applies valid mask for requests that
+        # uses structured decoding.
         guided_decoding_request_ids: Dict[str, int] = {}
 
         req_to_new_block_ids: Dict[str, List[int]] = {}
@@ -225,6 +236,9 @@ class Scheduler:
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
+            # NOTE: We uses num_to_skip to determine
+            # which guided request within the waiting queue to skip
+            # over if the FSM of said request are yet to be ready.
             num_to_skip: int = 0
             while num_to_skip < len(self.waiting) and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
@@ -584,24 +598,31 @@ class Scheduler:
             # Handle guided decoding FSM advancement if applicable
             # NOTE: For all requests that uses guided decoding, the grammar
             # should be ready at this point.
+            # PERF: This is currently expensive given that FSM is being
+            # advanced here.
             if request.use_guided_decoding:
+                grammar = request.grammar
+                assert grammar is not None
                 index = model_runner_output.req_id_to_index.get(req_id)
                 if index is not None:
-                    token_ids = sampled_token_ids[index]
-                    if len(token_ids) > 1:
-                        logger.error(
-                            "Structured output does not currently support "
-                            "more than one token at a time. Only the first "
-                            "token will be used.")
-                    token_id = token_ids[0]
-                    assert request.grammar is not None
                     # accept_token advances the FSM
-                    accepted = request.grammar.accept_token(
-                        token_id)  # type: ignore[union-attr]
+                    has_accept_tokens = [
+                        grammar.accept_token(token_id)
+                        for token_id in generated_token_ids
+                    ]
+                    accepted = any(has_accept_tokens)
                     if not accepted:
+                        grammar.rollback(len(has_accept_tokens))
                         logger.error(
                             "Failed to advance FSM for request %s "
-                            "with token %d", req_id, token_id)
+                            "for all draft "
+                            "tokens %s", req_id, generated_token_ids)
+                        stopped = True
+                    else:
+                        grammar.rollback(len(has_accept_tokens) - 1)
+                if stopped:
+                    self._free_request(request)
+                    continue
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:

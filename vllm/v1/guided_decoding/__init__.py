@@ -4,6 +4,7 @@ from __future__ import annotations
 import enum
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import torch
@@ -28,6 +29,7 @@ class GuidedDecodingOptions(enum.Enum):
 
 
 GuidedDecodingKey = Tuple[GuidedDecodingOptions, str]
+MAX_ROLLBACK_TOKENS = 100
 
 
 def apply_bitmask(logits: torch.Tensor, vocab_mask: torch.Tensor,
@@ -35,6 +37,7 @@ def apply_bitmask(logits: torch.Tensor, vocab_mask: torch.Tensor,
     xgr.apply_token_bitmask_inplace(logits, vocab_mask, indices=indices)
 
 
+@dataclass(slots=True, unsafe_hash=True)
 class Grammar:
     # NOTE: This would be a generic-enough class for
     # supporting different backends, in the future.
@@ -44,35 +47,47 @@ class Grammar:
     # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
     # for jump-forward decoding
 
-    def __init__(
-        self,
-        matcher: xgr.GrammarMatcher,
-        vocab_size: int,
-        ctx: xgr.CompiledGrammar,
-    ) -> None:
-        self.matcher = matcher
-        self.vocab_size = vocab_size
-        self.ctx = ctx
+    vocab_size: int
+    matcher: xgr.GrammarMatcher = field(hash=False)
+    ctx: xgr.CompiledGrammar = field(hash=False)
+    max_rollback_tokens: int = field(default=MAX_ROLLBACK_TOKENS, kw_only=True)
+    num_processed_tokens: int = field(
+        default_factory=lambda: 0,
+        repr=False,
+        hash=False,
+        init=False,
+    )
+    _accept_lock: threading.Lock = field(
+        default_factory=lambda: threading.Lock(),
+        repr=False,
+        init=False,
+        hash=False,
+    )
 
     def accept_token(self, token: int) -> bool:
         # NOTE: accept_token will determines whether we accept this token
         # and will also update the machine state
-        return self.matcher.accept_token(token)
+        with self._accept_lock:
+            self.num_processed_tokens += 1
+            return self.matcher.accept_token(token)
 
     # this should be ran in parallel with model decoding
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> bool:
         return self.matcher.fill_next_token_bitmask(bitmask, idx)
 
+    def rollback(self, num_tokens: int):
+        self.num_processed_tokens -= num_tokens
+        self.matcher.rollback(num_tokens)
+
     def reset(self):
+        self.num_processed_tokens = 0
         self.matcher.reset()
 
-    def copy(self):
+    def __copy__(self):
         return Grammar(matcher=xgr.GrammarMatcher(self.ctx),
                        vocab_size=self.vocab_size,
-                       ctx=self.ctx)
-
-    def __copy__(self):
-        return self.copy()
+                       ctx=self.ctx,
+                       max_rollback_tokens=self.max_rollback_tokens)
 
 
 class GuidedDecodingManager:
@@ -82,7 +97,7 @@ class GuidedDecodingManager:
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config)
+            lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
         tokenizer_group.ping()
         self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.vllm_config = vllm_config
@@ -97,7 +112,7 @@ class GuidedDecodingManager:
         self.executor = ThreadPoolExecutor()
         self.requests: Set[Request] = set()
         self._requests_lock = threading.Lock()
-        self.grammar_bitmask: torch.Tensor = xgr.allocate_token_bitmask(
+        self.grammar_bitmask = xgr.allocate_token_bitmask(
             self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
 
     def __getitem__(self, key: GuidedDecodingKey) -> Optional[Grammar]:
@@ -159,7 +174,9 @@ class GuidedDecodingManager:
             matcher=xgr.GrammarMatcher(ctx),
             vocab_size=self.vocab_size,
             ctx=ctx,
-        )
+            max_rollback_tokens=self.vllm_config.speculative_config.
+            num_lookahead_slots
+            if self.vllm_config.speculative_config else MAX_ROLLBACK_TOKENS)
 
     def setup_grammars(self):
         with self._requests_lock:

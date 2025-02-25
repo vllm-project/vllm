@@ -954,9 +954,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply guided decoding bitmasks if present
         grammar_bitmask = scheduler_output.grammar_bitmask
         if grammar_bitmask is not None:
+            # NOTE: A non-blocking copy causes incorrect behaviour
+            # in speculative decoding (and we should use blocking copy
+            # for speculative decoding use-case)
+            #
+            # TODO: performance with both structured + speculative
             apply_bitmask(
-                logits, grammar_bitmask.to(self.device, non_blocking=True),
-                list(scheduler_output.guided_decoding_request_ids.values()))
+                logits,
+                grammar_bitmask.to(self.device,
+                                   non_blocking=not self.use_spec_decode),
+                list(scheduler_output.guided_decoding_request_ids.values()),
+            )
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.get_sampling_metadata(
