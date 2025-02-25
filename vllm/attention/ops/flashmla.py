@@ -9,7 +9,7 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-if not current_platform.is_cuda():
+if current_platform.is_cuda():
     try:
         import vllm._flashmla_C  # noqa: F401
         _flashmla_C_AVAILABLE = True
