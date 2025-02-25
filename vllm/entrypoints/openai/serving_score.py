@@ -229,12 +229,7 @@ class ServingScores(OpenAIServing):
         request_id: str,
         raw_request: Optional[Request] = None,
         truncate_prompt_tokens: Optional[int] = None,
-    ) -> list[PoolingRequestOutput]:
-
-        tokenization_kwargs: dict[str, Any] = {}
-        if truncate_prompt_tokens is not None:
-            tokenization_kwargs["truncation"] = True
-            tokenization_kwargs["max_length"] = truncate_prompt_tokens
+    ) -> List[PoolingRequestOutput]:
 
         (
             lora_request,
@@ -248,11 +243,20 @@ class ServingScores(OpenAIServing):
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
         if truncate_prompt_tokens is not None and \
+                                truncate_prompt_tokens == -1:
+            truncate_prompt_tokens = self.max_model_len
+
+        if truncate_prompt_tokens is not None and \
                 truncate_prompt_tokens > self.max_model_len:
             raise ValueError(
                 f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
                 f"is greater than max_model_len ({self.max_model_len})."
                 f" Please, select a smaller truncation size.")
+
+        tokenization_kwargs: Dict[str, Any] = {}
+        if truncate_prompt_tokens is not None:
+            tokenization_kwargs["truncation"] = True
+            tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
         trace_headers = (None if raw_request is None else await
                          self._get_trace_headers(raw_request.headers))

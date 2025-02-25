@@ -86,6 +86,10 @@ class OpenAIServingPooling(OpenAIServing):
 
         truncate_prompt_tokens = None
 
+        if request.truncate_prompt_tokens is not None and \
+                                request.truncate_prompt_tokens == -1:
+            truncate_prompt_tokens = self.max_model_len
+
         if request.truncate_prompt_tokens is not None:
             if request.truncate_prompt_tokens <= self.max_model_len:
                 truncate_prompt_tokens = request.truncate_prompt_tokens
