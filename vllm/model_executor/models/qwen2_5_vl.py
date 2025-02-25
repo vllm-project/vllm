@@ -689,7 +689,7 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
         size: Optional[dict[str, int]] = None,
-        fps: Optional[float] = None,
+        fps: Optional[Union[float, List[float]]] = None,
         **kwargs: object,
     ) -> Qwen2_5_VLProcessor:
         if fps is not None:
@@ -734,27 +734,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # language model
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",  # Same name with vision encoder
-        # vision tower
-        "qkv",
-        "gate_proj",
-        "up_proj",
-        "attn.proj",  # Distinguish patch_embed.proj
-        "fc1",
-        "fc2",
-        # projector
-        "mlp.0",
-        "mlp.2"
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={

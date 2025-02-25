@@ -110,7 +110,7 @@ class EngineCore:
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution
-        self.model_executor.initialize(kv_cache_configs)
+        self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
@@ -218,6 +218,9 @@ class EngineCore:
 
     def wake_up(self):
         self.model_executor.wake_up()
+
+    def execute_dummy_batch(self):
+        self.model_executor.collective_rpc("execute_dummy_batch")
 
     def add_lora(self, lora_request: LoRARequest) -> None:
         self.model_executor.add_lora(lora_request)
