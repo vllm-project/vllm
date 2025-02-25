@@ -10,6 +10,7 @@ import torch
 import xgrammar as xgr
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.guided_decoding.utils import (
     has_xgrammar_unsupported_json_features)
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 import json
+
+logger = init_logger(__name__)
 
 
 class GuidedDecodingOptions(enum.Enum):
@@ -129,6 +132,7 @@ class GuidedDecodingManager:
         return False
 
     def cache(self, request: Request):
+        self._validate_grammer_is_supported(request.guided_decoding_key)
         return self.executor.submit(self._executor_loop, request)
 
     def _executor_loop(self, request: Request) -> Grammar:
@@ -141,6 +145,24 @@ class GuidedDecodingManager:
         self.request_key_to_grammar[key] = self.initialize_grammar(key)
         return self.request_key_to_grammar[key]
 
+    def _validate_grammer_is_supported(self, key: GuidedDecodingKey):
+        request_type, grammar_spec = key
+        if request_type == GuidedDecodingOptions.json:
+            try:
+                schema = json.loads(grammar_spec)
+            except json.JSONDecodeError as e:
+                raise ValueError("Invalid JSON grammar specification.") from e
+
+            if has_xgrammar_unsupported_json_features(schema):
+                raise ValueError(
+                    "The provided JSON schema contains features not "
+                    "supported by xgrammar.")
+            return
+        elif request_type == GuidedDecodingOptions.grammar:
+            return
+        raise ValueError(
+            f"grammar is not of valid supported types. ({request_type!s})")
+
     def initialize_grammar(self, key: GuidedDecodingKey) -> Grammar:
         request_type, grammar_spec = key
 
@@ -148,29 +170,17 @@ class GuidedDecodingManager:
             if not isinstance(grammar_spec, str):
                 ctx = self.compiler.compile_builtin_json_grammar()
             else:
-                try:
-                    schema = json.loads(grammar_spec)
-                except json.JSONDecodeError as e:
-                    raise ValueError(
-                        "Invalid JSON grammar specification.") from e
-
-                if has_xgrammar_unsupported_json_features(schema):
-                    raise ValueError(
-                        "The provided JSON schema contains features not "
-                        "supported by xgrammar.")
-
                 # TODO -- allow any_whitespace to be configurable
                 # pending merge of https://github.com/vllm-project/vllm/pull/12744
                 ctx = self.compiler.compile_json_schema(grammar_spec,
                                                         any_whitespace=False)
         elif request_type == GuidedDecodingOptions.grammar:
             ctx = self.compiler.compile_grammar(grammar_spec)
-        # elif request_type == GuidedDecodingOptions.regex:
-        #     ctx = self.compiler.compile_regex(grammar_spec)
         else:
+            logger.error("Validation should have already occurred. "
+                         "Please file an issue.")
             raise ValueError(
-                f"`grammar` is not of valid supported types. ({request_type!s})"
-            )
+                f"grammar is not of valid supported types. ({request_type!s})")
 
         return Grammar(
             matcher=xgr.GrammarMatcher(ctx),
