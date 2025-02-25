@@ -1448,7 +1448,7 @@ AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json",
 
 class TranscriptionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
-    #https://platform.openai.com/docs/api-reference/audio/createTranscription
+    # https://platform.openai.com/docs/api-reference/audio/createTranscription
 
     file: UploadFile
     """
