@@ -4,7 +4,7 @@
 # https://github.com/THUDM/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
-from typing import List, Literal, Mapping, Optional, TypedDict, Union
+from typing import Literal, Mapping, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -15,7 +15,6 @@ from transformers import PreTrainedTokenizer, TensorType
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention import AttentionMetadata
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -441,18 +440,15 @@ class GLM4VProcessor:
 
 class GLM4VProcessingInfo(BaseProcessingInfo):
 
-    def get_tokenizer(self):
-        tokenizer = self.ctx.tokenizer
-        assert isinstance(tokenizer, PreTrainedTokenizer)
-        return tokenizer
-
     def get_hf_config(self):
         return self.ctx.get_hf_config(ChatGLMConfig)
 
-    def get_hf_processor(self) -> GLM4VProcessor:
-        return GLM4VProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
+    def get_hf_processor(self, **kwargs: object) -> GLM4VProcessor:
+        return self.ctx.init_processor(
+            GLM4VProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -562,21 +558,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         "dense_h_to_4h": ["dense_h_to_4h"],
         "merged_proj": ["gate_proj", "dense_h_to_4h"]
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "query_key_value",
-        "dense",
-        "dense_h_to_4h",
-        "dense_4h_to_h",
-        # vision
-        "fc1",
-        "fc2",
-        "merged_proj",
-        "linear_proj"
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -671,8 +652,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -688,8 +667,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors,
-                                         inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
 
         return hidden_states

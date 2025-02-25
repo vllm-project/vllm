@@ -84,7 +84,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
     VLLM_MOE_PADDING: bool = False
-    VLLM_FP8_PADDING: bool = True
+    VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -97,10 +97,16 @@ if TYPE_CHECKING:
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
+    VLLM_TEST_ENABLE_EP: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
+    VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
+    VLLM_DP_RANK: int = 0
+    VLLM_DP_SIZE: int = 1
+    VLLM_DP_MASTER_IP: str = ""
+    VLLM_DP_MASTER_PORT: int = 0
 
 
 def get_default_cache_root():
@@ -407,8 +413,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Enables weights compression during model export via HF Optimum
     # default is False
     "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
-    lambda: bool(os.getenv("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", False)),
-
+    lambda:
+    (os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", "0").lower() in
+     ("on", "true", "1")),
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
@@ -561,13 +568,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 
+    # Pad the fp8 weights to 256 bytes for ROCm
+    "VLLM_ROCM_FP8_PADDING":
+    lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+
     # Pad the weight for moe kernel or not
     "VLLM_MOE_PADDING":
     lambda: bool(int(os.getenv("VLLM_MOE_PADDING", "0"))),
-
-    # Pad the weight for moe kernel or not
-    "VLLM_FP8_PADDING":
-    lambda: bool(int(os.getenv("VLLM_FP8_PADDING", "1"))),
 
     # Divisor for dynamic query scale factor calculation for FP8 attention
     "Q_SCALE_CONSTANT":
@@ -633,6 +640,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
 
+    # If set, vLLM will use the experimental expert parallel implementation on
+    # the FusedMoE layer, using tensor parallelism size as expert parallelism
+    # size.
+    "VLLM_TEST_ENABLE_EP":
+    lambda: bool(int(os.getenv("VLLM_TEST_ENABLE_EP", "0"))),
+
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
     # so that users can colocate other actors on the same GPUs as vLLM.
@@ -658,6 +671,33 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
+
+    # Contiguous cache fetching to avoid using costly gather operation on
+    # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
+    # contiguous cache fetch will be used.
+    "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
+    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
+    ("1", "true"),
+
+    # Rank of the process in the data parallel setting
+    "VLLM_DP_RANK":
+    lambda: int(os.getenv("VLLM_DP_RANK", "0")),
+
+    # World size of the data parallel setting
+    "VLLM_DP_SIZE":
+    lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
+
+    # IP address of the master node in the data parallel setting
+    "VLLM_DP_MASTER_IP":
+    lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
+
+    # Port of the master node in the data parallel setting
+    "VLLM_DP_MASTER_PORT":
+    lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
+
+    # Whether to use S3 path for model loading in CI via RunAI Streamer
+    "VLLM_CI_USE_S3":
+    lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
 }
 
 # end-env-vars-definition

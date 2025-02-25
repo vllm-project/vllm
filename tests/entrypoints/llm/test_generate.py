@@ -8,7 +8,7 @@ import pytest
 from vllm import LLM, RequestOutput, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME = "distilbert/distilgpt2"
 
 PROMPTS = [
     "Hello, my name is",

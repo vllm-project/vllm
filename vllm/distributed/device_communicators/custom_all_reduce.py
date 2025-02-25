@@ -90,6 +90,7 @@ class CustomAllreduce:
             return
 
         rank = dist.get_rank(group=self.group)
+        self.rank = rank
         world_size = dist.get_world_size(group=self.group)
         if world_size == 1:
             # No need to initialize custom allreduce for single GPU case.
