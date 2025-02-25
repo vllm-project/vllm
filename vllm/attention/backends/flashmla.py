@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
@@ -73,7 +73,7 @@ class FlashMLAMetadata(MLACommonMetadata["FlashMLAMetadata"]):
             "advance_step is not implemented for FlashMLA")
 
 
-class FlashMLAMetadataBuilder(MLACommonMetadataBuilder):
+class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -83,24 +83,18 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder):
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
-        common_metadata = super().build(seq_lens, query_lens,
-                                        cuda_graph_pad_size, batch_size)
+        m = super().build(seq_lens, query_lens, cuda_graph_pad_size,
+                          batch_size)
 
-        decode_tile_scheduler_metadata, decode_num_splits = None, None
-        if common_metadata.num_decode_tokens > 0:
-            decode_tile_scheduler_metadata, decode_num_splits = \
+        if m.num_decode_tokens > 0:
+            m.decode_tile_scheduler_metadata, m.decode_num_splits = \
                 get_mla_metadata(
-                common_metadata.seq_lens_tensor[common_metadata.num_prefills:],
+                m.seq_lens_tensor[m.num_prefills:],
                 self.num_q_heads,
                 1, # MQA for the decode path
             )
 
-        return FlashMLAMetadata(
-            # TODO: not on hotpath but can this be faster?
-            **asdict(common_metadata),
-            decode_tile_scheduler_metadata=decode_tile_scheduler_metadata,
-            decode_num_splits=decode_num_splits,
-        )
+        return m
 
 
 class FlashMLAState(MLACommonState[FlashMLAMetadata]):

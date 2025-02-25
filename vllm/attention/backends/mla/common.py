@@ -511,8 +511,8 @@ class MLACommonMetadata(AttentionMetadata, Generic[T]):
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor] = None
 
-    _cached_prefill_metadata: Optional["MLACommonMetadata"] = None
-    _cached_decode_metadata: Optional["MLACommonMetadata"] = None
+    _cached_prefill_metadata: Optional[T] = None
+    _cached_decode_metadata: Optional[T] = None
 
     num_prefill_tokens: int
 
@@ -727,7 +727,7 @@ class MLACommonMetadata(AttentionMetadata, Generic[T]):
                                    block_tables=self.block_tables)
 
 
-class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
+class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     """
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
@@ -960,7 +960,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
             assert max(context_chunk_seq_tot) <= \
                 self.chunked_prefill_workspace_size
 
-        return MLACommonMetadata(
+        return self.runner.attn_backend.make_metadata(
             # Required by ModelRunner
             use_cuda_graph=use_captured_graph,  # Not Attention Related
             # Required by Attention Metadata
