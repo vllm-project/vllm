@@ -260,7 +260,7 @@ class FusedMoE(torch.nn.Module):
 
     def __init__(
         self,
-        num_experts: int,
+        num_experts: int,  # Global number of experts
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
@@ -291,7 +291,8 @@ class FusedMoE(torch.nn.Module):
         else:
             self.ep_size = 1
         self.top_k = top_k
-        self.num_experts = num_experts  # Global number of experts
+        self.global_num_experts = num_experts
+        self.local_num_experts = self.global_num_experts // self.ep_size
         assert intermediate_size % self.tp_size == 0
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
@@ -308,27 +309,29 @@ class FusedMoE(torch.nn.Module):
 
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1
-            self.expert_map = torch.full((self.num_experts, ),
+            self.expert_map = torch.full((self.global_num_experts, ),
                                          -1,
                                          dtype=torch.int32)
             # Create a expert map for the local experts
-            local_num_experts = num_experts // self.ep_size
             ep_rank = get_tensor_model_parallel_rank()
             if ep_rank < (self.ep_size - 1):
                 # Each non-last rank gets local_num_experts experts.
-                self.expert_map[ep_rank * local_num_experts:
-                                (ep_rank + 1) * local_num_experts] = \
-                    torch.arange(0, local_num_experts, dtype=torch.int32)
+                self.expert_map[ep_rank * self.local_num_experts:
+                                (ep_rank + 1) * self.local_num_experts] = \
+                    torch.arange(0, self.local_num_experts, dtype=torch.int32)
             else:
                 # All remaining experts are assigned to the last rank.
-                local_num_experts = num_experts - ep_rank * local_num_experts
-                self.expert_map[-local_num_experts:] = \
-                    torch.arange(0, local_num_experts, dtype=torch.int32)
+                self.local_num_experts = (self.global_num_experts -
+                                          ep_rank * self.local_num_experts)
+                self.expert_map[-self.local_num_experts:] = \
+                    torch.arange(0, self.local_num_experts, dtype=torch.int32)
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
 
+        # Note: get_quant_method will look at the layer's local_num_experts
+        # for heuristic purposes, so it must be initialized first.
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
                 UnquantizedFusedMoEMethod())
@@ -336,11 +339,8 @@ class FusedMoE(torch.nn.Module):
             self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None
 
-        local_num_experts = torch.sum(self.expert_map != -1) \
-            if self.expert_map is not None else num_experts
-
         moe_quant_params = {
-            "num_experts": local_num_experts,
+            "num_experts": self.local_num_experts,
             "hidden_size": hidden_size,
             "intermediate_size_per_partition":
             self.intermediate_size_per_partition,
@@ -647,7 +647,7 @@ class FusedMoE(torch.nn.Module):
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.num_experts,
+            global_num_experts=self.global_num_experts,
             expert_map=self.expert_map,
             topk_group=self.topk_group,
             num_expert_group=self.num_expert_group,
