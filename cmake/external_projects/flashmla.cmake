@@ -37,7 +37,8 @@ cuda_archs_loose_intersection(FLASH_MLA_ARCHS "9.0a" "${CUDA_ARCHS}")
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.3 AND FLASH_MLA_ARCHS)
     set(FlashMLA_SOURCES
         ${flashmla_SOURCE_DIR}/csrc/flash_api.cpp
-        ${flashmla_SOURCE_DIR}/csrc/flash_fwd_mla_bf16_sm90.cu)
+        ${flashmla_SOURCE_DIR}/csrc/flash_fwd_mla_bf16_sm90.cu
+        ${flashmla_SOURCE_DIR}/csrc/flash_fwd_mla_fp16_sm90.cu)
 
     set(FlashMLA_INCLUDES
         ${flashmla_SOURCE_DIR}/csrc/cutlass/include
