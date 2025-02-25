@@ -8,12 +8,9 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 * **Ease of use** – Simplified deployment via Helm charts and observability through Grafana dashboards.
 * **High performance** – Optimized for LLM workloads with features like multi-model support, model-aware and prefix-aware routing, fast vLLM bootstrapping, and KV cache offloading with [LMCache](https://github.com/LMCache/LMCache), among others.
 
-
 ## Before getting started
 
 If you are new to Kubernetes, don't worry: in vLLM production stack [repo](https://github.com/vllm-project/production-stack), we provide a step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and a [short video](https://www.youtube.com/watch?v=EsTJbQtzj0g) to set up everything and get started in **4 minutes**!
-
-
 
 ## Pre-requisite
 
@@ -23,14 +20,14 @@ Ensure that you have a running Kubernetes environment with GPU (you can follow [
 
 The standard vLLM production stack install uses a Helm chart. You can run this [bash script](https://github.com/vllm-project/production-stack/blob/main/tutorials/install-helm.sh) to install Helm on your GPU server.
 
-
 To install the vLLM production stack, run the following commands on your desktop:
+
 ```bash
 sudo helm repo add vllm https://vllm-project.github.io/production-stack
 sudo helm install vllm vllm/vllm-stack -f tutorials/assets/values-01-minimal-example.yaml
 ```
-This will instantiate a vLLM-production-stack-based deployment named `vllm` that runs a small LLM (Facebook opt-125M model).
 
+This will instantiate a vLLM-production-stack-based deployment named `vllm` that runs a small LLM (Facebook opt-125M model).
 
 ### Validate Installation
 
@@ -42,7 +39,7 @@ sudo kubectl get pods
 
 And you will see that pods for the `vllm` deployment will transit to `Running` state.
 
-```
+```text
 NAME                                           READY   STATUS    RESTARTS   AGE
 vllm-deployment-router-859d8fb668-2x2b7        1/1     Running   0          2m38s
 vllm-opt125m-deployment-vllm-84dfc9bd7-vb9bs   1/1     Running   0          2m38s
@@ -81,7 +78,6 @@ Expected output:
 }
 ```
 
-
 To send an actual chatting request, you can issue a curl request to the OpenAI `/completion` endpoint:
 
 ```bash
@@ -112,8 +108,6 @@ Expected output:
 }
 ```
 
-
-
 ### Uninstall
 
 To remove the deployment, run:
@@ -123,7 +117,6 @@ sudo helm uninstall vllm
 ```
 
 ------
-
 
 ### (Advanced) Configuring vLLM production stack
 
@@ -148,15 +141,15 @@ servingEngineSpec:
 ```
 
 In this YAML configuration:
-- **`modelSpec`** includes:
-  - `name`: A nickname that you prefer to call the model.
-  - `repository`: Docker repository of vLLM.
-  - `tag`: Docker image tag.
-  - `modelURL`: the LLM model that you want to use.
-- **`replicaCount`**: Number of replicas.
-- **`requestCPU` and `requestMemory`**: Specifies the CPU and memory resource requests for the pod.
-- **`requestGPU`**: Specifies the number of GPUs required.
-- **`pvcStorage`**: Allocates persistent storage for the model.
+* **`modelSpec`** includes:
+  * `name`: A nickname that you prefer to call the model.
+  * `repository`: Docker repository of vLLM.
+  * `tag`: Docker image tag.
+  * `modelURL`: the LLM model that you want to use.
+* **`replicaCount`**: Number of replicas.
+* **`requestCPU` and `requestMemory`**: Specifies the CPU and memory resource requests for the pod.
+* **`requestGPU`**: Specifies the number of GPUs required.
+* **`pvcStorage`**: Allocates persistent storage for the model.
 
 **NOTE:** If you intend to set up two pods, please refer to this [YAML file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
 
@@ -164,15 +157,13 @@ In this YAML configuration:
 
 ------
 
-## Deployment using native k8s 
-
+## Deployment using native k8s
 
 Ensure that you have the following:
 
-- A running Kubernetes cluster (use this to set up K8S from scrath)
-- NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
-- Available GPU resources in your cluster
-
+* A running Kubernetes cluster (use this to set up K8S from scrath)
+* NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
+* Available GPU resources in your cluster
 
 1. Create a PVC, Secret and Deployment for vLLM
 
