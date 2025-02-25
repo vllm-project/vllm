@@ -29,7 +29,7 @@ from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
                                      StatLoggerBase)
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats, SystemStats
 
 logger = init_logger(__name__)
 
@@ -55,6 +55,7 @@ class AsyncLLM(EngineClient):
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers: List[StatLoggerBase] = []
+        self.system_stats = SystemStats()
         if self.log_stats:
             self.stat_loggers.extend([
                 LoggingStatLogger(),
@@ -156,7 +157,7 @@ class AsyncLLM(EngineClient):
                                                 priority)
 
         # 3) Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, queue)
+        self.output_processor.add_request(request, queue, self.system_stats)
 
         # 4) Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
@@ -188,8 +189,8 @@ class AsyncLLM(EngineClient):
             * 3) Adding the Request to the Detokenizer.
             * 4) Adding the Request to the EngineCore (separate process).
 
-        A separate output_handler loop runs in a background AsyncIO task, 
-        pulling outputs from EngineCore and putting them into the 
+        A separate output_handler loop runs in a background AsyncIO task,
+        pulling outputs from EngineCore and putting them into the
         per-request AsyncStream.
 
         The caller of generate() iterates the returned AsyncGenerator,
@@ -290,7 +291,8 @@ class AsyncLLM(EngineClient):
                 for i, outputs_slice in enumerate(slices):
                     # 2) Process EngineCoreOutputs.
                     processed_outputs = self.output_processor.process_outputs(
-                        outputs_slice, outputs.timestamp, iteration_stats)
+                        outputs_slice, outputs.timestamp, iteration_stats,
+                        self.system_stats)
                     # NOTE: RequestOutputs are pushed to their queues.
                     assert not processed_outputs.request_outputs
 
@@ -305,10 +307,9 @@ class AsyncLLM(EngineClient):
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
-                self._log_stats(
-                    scheduler_stats=outputs.scheduler_stats,
-                    iteration_stats=iteration_stats,
-                )
+                self._log_stats(scheduler_stats=outputs.scheduler_stats,
+                                iteration_stats=iteration_stats,
+                                system_stats=self.system_stats)
 
         except Exception as e:
             logger.exception("EngineCore output handler hit an error: %s", e)
@@ -328,15 +329,18 @@ class AsyncLLM(EngineClient):
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
+        system_stats: Optional[SystemStats],
     ):
         if not self.log_stats:
             return
 
         assert scheduler_stats is not None
         assert iteration_stats is not None
+        assert system_stats is not None
         for logger in self.stat_loggers:
             logger.log(scheduler_stats=scheduler_stats,
-                       iteration_stats=iteration_stats)
+                       iteration_stats=iteration_stats,
+                       system_stats=system_stats)
 
     def encode(
         self,

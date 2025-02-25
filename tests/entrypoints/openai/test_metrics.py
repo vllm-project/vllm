@@ -166,6 +166,7 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
 EXPECTED_METRICS = [
     "vllm:num_requests_running",
     "vllm:num_requests_swapped",
+    "vllm:num_concurrency_requests",
     "vllm:num_requests_waiting",
     "vllm:gpu_cache_usage_perc",
     "vllm:cpu_cache_usage_perc",
@@ -223,6 +224,7 @@ EXPECTED_METRICS = [
 
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
+    "vllm:num_concurrency_requests",
     "vllm:num_requests_waiting",
     "vllm:gpu_cache_usage_perc",
     "vllm:gpu_prefix_cache_queries",

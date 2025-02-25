@@ -12,7 +12,7 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
-                                   RequestStateStats)
+                                   RequestStateStats, SystemStats)
 
 
 @dataclass
@@ -115,6 +115,7 @@ class OutputProcessor:
         self,
         request: EngineCoreRequest,
         queue: Optional[asyncio.Queue[RequestOutput]] = None,
+        system_stats: Optional[SystemStats] = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
@@ -128,33 +129,37 @@ class OutputProcessor:
         self.request_states[request_id] = req_state
         self.lora_states.add_request(req_state)
 
+        assert system_stats is not None
+        system_stats.concurrent_requests += 1
+
     def process_outputs(
         self,
         engine_core_outputs: List[EngineCoreOutput],
         engine_core_timestamp: Optional[float] = None,
         iteration_stats: Optional[IterationStats] = None,
+        system_stats: Optional[SystemStats] = None,
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
         1) Compute stats for logging
         2) Detokenize
         3) Create and handle RequestOutput objects:
-            * If there is a queue (for usage with AsyncLLM), 
+            * If there is a queue (for usage with AsyncLLM),
               put the RequestOutput objects into the queue for
               handling by the per-request generate() tasks.
 
-            * If there is no queue (for usage with LLMEngine), 
+            * If there is no queue (for usage with LLMEngine),
               return a list of RequestOutput objects.
 
         ****************** NOTE FOR DEVELOPERS ******************
 
         VLLM V1 minimizes the number of python loops over the full
-        batch to ensure system overheads are minimized. This is the 
+        batch to ensure system overheads are minimized. This is the
         only function that should loop over EngineCoreOutputs.
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-        
+
         **********************************************************
         """
 
@@ -222,7 +227,8 @@ class OutputProcessor:
                     # Track per-request stats
                     self._update_stats_from_finished(req_state, request_output,
                                                      finish_reason,
-                                                     iteration_stats)
+                                                     iteration_stats,
+                                                     system_stats)
 
         self.lora_states.update_iteration_stats(iteration_stats)
 
@@ -251,7 +257,8 @@ class OutputProcessor:
     def _update_stats_from_finished(self, req_state: RequestState,
                                     request_output: RequestOutput,
                                     finish_reason: Optional[FinishReason],
-                                    iteration_stats: Optional[IterationStats]):
+                                    iteration_stats: Optional[IterationStats],
+                                    system_stats: Optional[SystemStats]):
         if iteration_stats is None:
             return
 
@@ -261,6 +268,9 @@ class OutputProcessor:
                                                      request_output,
                                                      req_state.stats)
         self.lora_states.finish_request(req_state)
+
+        assert system_stats is not None
+        system_stats.concurrent_requests -= 1
 
     @staticmethod
     def _make_request_output(

@@ -11,7 +11,7 @@ from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats, SystemStats
 
 logger = init_logger(__name__)
 
@@ -22,7 +22,7 @@ class StatLoggerBase(ABC):
 
     @abstractmethod
     def log(self, scheduler_stats: SchedulerStats,
-            iteration_stats: IterationStats):
+            iteration_stats: IterationStats, system_stats: SystemStats):
         ...
 
 
@@ -37,6 +37,7 @@ class LoggingStatLogger(StatLoggerBase):
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: List[int] = []
         self.num_generation_tokens: List[int] = []
+        self.num_concurrency_requests: List[int] = []
 
         # Prefix cache metrics. TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
@@ -52,15 +53,21 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens.append(
             iteration_stats.num_generation_tokens)
 
+    def _track_system_stats(self, system_stats: SystemStats):
+        # Save tracked stats for token counters.
+        self.num_concurrency_requests.append(system_stats.concurrent_requests)
+
     def _get_throughput(self, tracked_stats: List[int], now: float) -> float:
         # Compute summary metrics for tracked stats
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
     def log(self, scheduler_stats: SchedulerStats,
-            iteration_stats: IterationStats):
+            iteration_stats: IterationStats, system_stats: SystemStats):
         """Log Stats to standard output."""
 
         self._track_iteration_stats(iteration_stats)
+
+        self._track_system_stats(system_stats)
 
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
@@ -113,6 +120,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_waiting = prometheus_client.Gauge(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.gauge_system_concurrency = prometheus_client.Gauge(
+            name="vllm:num_concurrency_requests",
+            documentation="Number of requests running or waiting.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.gauge_gpu_cache_usage = prometheus_client.Gauge(
@@ -270,12 +282,14 @@ class PrometheusStatLogger(StatLoggerBase):
         info_gauge.set(1)
 
     def log(self, scheduler_stats: SchedulerStats,
-            iteration_stats: IterationStats):
+            iteration_stats: IterationStats, system_stats: SystemStats):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
         self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+
+        self.gauge_system_concurrency.set(system_stats.concurrent_requests)
 
         self.counter_gpu_prefix_cache_queries.inc(
             scheduler_stats.prefix_cache_stats.queries)

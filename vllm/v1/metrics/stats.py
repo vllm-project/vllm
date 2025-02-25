@@ -218,3 +218,8 @@ class LoRARequestStates:
             if stats.running_requests:
                 iteration_stats.running_lora_adapters[lora_name] = \
                     len(stats.running_requests)
+
+
+@dataclass
+class SystemStats:
+    concurrent_requests: int = 0
