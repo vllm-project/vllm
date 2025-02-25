@@ -290,7 +290,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 expected_expr = str(expected_dims)
                 raise ValueError(
                     "The expected shape of pixel values per image per batch "
-                    f" per patch is {expected_expr}. "
+                    f"per patch is {expected_expr}. "
                     f"You supplied {tuple(d.shape)}.")
 
         for d in data:
