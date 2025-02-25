@@ -40,7 +40,6 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.3 AND FLASH_MLA_ARCHS)
         ${flashmla_SOURCE_DIR}/csrc/flash_fwd_mla_bf16_sm90.cu)
 
     set(FlashMLA_INCLUDES
-        ${PROJECT_SOURCE_DIR}/csrc
         ${flashmla_SOURCE_DIR}/csrc/cutlass/include
         ${flashmla_SOURCE_DIR}/csrc/include)
 
