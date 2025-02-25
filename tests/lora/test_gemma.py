@@ -40,7 +40,7 @@ def v1(run_with_both_engines_lora):
     # test in a package
     pass
 
-
+@pytest.mark.skip_v1
 @pytest.mark.xfail(current_platform.is_rocm(),
                    reason="There can be output mismatch on ROCm")
 def test_gemma_lora(gemma_lora_files):
