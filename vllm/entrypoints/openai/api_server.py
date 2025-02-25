@@ -19,7 +19,7 @@ from http import HTTPStatus
 from typing import Annotated, AsyncIterator, Dict, Optional, Set, Tuple, Union
 
 import uvloop
-from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -530,9 +530,10 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/audio/transcriptions")
 @with_cancellation
-async def create_transcriptions(request: Annotated[TranscriptionRequest,
-                                                   Form()],
-                                raw_request: Request):
+async def create_transcriptions(
+        request: Annotated[TranscriptionRequest,
+                           Depends(TranscriptionRequest.from_form_data)],
+        raw_request: Request):
 
     handler = transcription(raw_request)
     if handler is None:

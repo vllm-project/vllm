@@ -8,7 +8,7 @@ from argparse import Namespace
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
 
 import torch
-from fastapi import UploadFile
+from fastapi import Form, UploadFile
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import Annotated, TypeAlias
@@ -1448,7 +1448,7 @@ AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json",
 
 class TranscriptionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
-    #https://platform.openai.com/docs/api-reference/audio/createTranscription
+    # https://platform.openai.com/docs/api-reference/audio/createTranscription
 
     file: UploadFile
     """
@@ -1506,6 +1506,29 @@ class TranscriptionRequest(OpenAIBaseModel):
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "temperature": 0,
     }
+
+    @classmethod
+    def from_form_data(
+        cls,
+        file: UploadFile,
+        model: Annotated[Optional[str], Form()] = None,
+        language: Annotated[Optional[str], Form()] = None,
+        prompt: Annotated[str, Form()] = "",
+        response_format: Annotated[AudioResponseFormat,
+                                   Form()] = "json",
+        temperature: Annotated[float, Form()] = 0.0,
+        timestamp_granularities: Annotated[List[Literal["word", "segment"]],
+                                           Form()] = None
+    ) -> "TranscriptionRequest":
+        if timestamp_granularities is None:
+            timestamp_granularities = []
+        return cls(file=file,
+                   model=model,
+                   language=language,
+                   prompt=prompt,
+                   response_format=response_format,
+                   temperature=temperature,
+                   timestamp_granularities=timestamp_granularities)
 
     def to_sampling_params(
             self,
