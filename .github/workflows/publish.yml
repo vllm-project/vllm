@@ -16,7 +16,16 @@ jobs:
   release:
     # Retrieve tag and create release
     name: Create Release
-    runs-on: ubuntu-latest
+    matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        arch: [x86_64, aarch64]
+        exclude:
+          - os: windows-latest
+            arch: aarch64
+          - os: ubuntu-latest
+            arch: aarch64
+          - os: ubuntu-24.04-arm 
+            arch: x86_64
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
