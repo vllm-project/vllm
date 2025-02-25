@@ -369,8 +369,8 @@ class XGrammarLogitsProcessor:
             self._ensure_ctx()
 
         if len(self.matchers) == 0:
-            max_rollback_tokens = (self.config.num_lookahead_slots +
-                                   1 if self.config.num_lookahead_slots else 0)
+            max_rollback_tokens = (self.config.num_lookahead_slots
+                                   if self.config.num_lookahead_slots else 0)
             self.matchers = [
                 xgr.GrammarMatcher(self.ctx,
                                    max_rollback_tokens=max_rollback_tokens)
