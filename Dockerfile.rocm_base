@@ -1,6 +1,6 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.3.1-complete
 ARG HIPBLASLT_BRANCH="4d40e36"
-ARG HIPBLAS_COMMON_BRANCH="7c1566b"
+ARG HIPBLAS_COMMON_BRANCH="db8e93b4"
 ARG LEGACY_HIPBLASLT_OPTION=
 ARG RCCL_BRANCH="648a58d"
 ARG RCCL_REPO="https://github.com/ROCm/rccl"
@@ -150,6 +150,7 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     pip install /install/*.whl
 
 ARG BASE_IMAGE
+ARG HIPBLAS_COMMON_BRANCH
 ARG HIPBLASLT_BRANCH
 ARG LEGACY_HIPBLASLT_OPTION
 ARG RCCL_BRANCH
@@ -162,6 +163,8 @@ ARG PYTORCH_REPO
 ARG PYTORCH_VISION_REPO
 ARG FA_BRANCH
 ARG FA_REPO
+ARG AITER_BRANCH
+ARG AITER_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "HIPBLAS_COMMON_BRANCH: ${HIPBLAS_COMMON_BRANCH}" >> /app/versions.txt \
     && echo "HIPBLASLT_BRANCH: ${HIPBLASLT_BRANCH}" >> /app/versions.txt \
