@@ -57,8 +57,8 @@ _PAD_BLOCK_ID = 0
 
 
 class PhaseType(Enum):
-    UNCACHED_PREFILL = 'uncached_prefill'
-    CACHED_PREFILL = 'cached_prefill'
+    PREFILL = 'prefill'
+    PREFIX_PREFILL = 'prefix_prefill'
     DECODE = 'decode'
 
 
@@ -485,8 +485,10 @@ class HpuModelAdapter:
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
-    return HpuModelAdapter(*args, **kwargs)
-
+        return htorch.hpu.wrap_in_hpu_graph(
+            HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
+        ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(
+            *args, **kwargs)
 
 def subtuple(obj: object,
              typename: str,
@@ -969,7 +971,7 @@ class HPUModelRunner:
         return padded_batch_size, padded_prompt_len
 
     def _prepare_prefill_inputs(self,
-                                num_prefills,
+                                total_num_prefills,
                                 num_decodes,
                                 num_scheduled_tokens: List[int],
                                 bucketing=True) -> PrefillInputData:
@@ -987,7 +989,7 @@ class HPUModelRunner:
 
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
-        num_reqs = num_prefills + num_decodes
+        num_reqs = total_num_prefills + num_decodes
         # NOTE(kzawora): This loop was initially implemented as
         # for batch_idx in range(num_decodes, num_reqs, max_prefill_batch_size)
         # but was changed to accommodate variable loop step size for
@@ -1033,6 +1035,8 @@ class HPUModelRunner:
 
             context_lens = self.input_batch.num_computed_tokens_cpu[
                 batch_idx:batch_idx + num_prefills]
+            batch_num_scheduled_tokens = num_scheduled_tokens[
+                batch_idx:batch_idx + num_prefills]
             use_prefix_caching = enable_prefix_caching and any(context_lens)
 #            if use_prefix_caching:
 #                # TODO(kzawora): this is an ugly hack for prefix caching, remove
@@ -1060,39 +1064,40 @@ class HPUModelRunner:
                                        device='cpu')
             slot_mapping.fill_(_PAD_SLOT_ID)
 
-            for i, (prompt_len,
-                    context_len) in enumerate(zip(prompt_lens, context_lens)):
+            # NOTE(kzawora): this has no right to work on prefix prefills
+            iterable = zip(prompt_lens, [0] * len(prompt_lens)) if not use_prefix_caching else zip(batch_num_scheduled_tokens, context_lens) 
+            for i, (scheduled_prompt_len, context_len) in enumerate(iterable):
                 # Prepare and sanitize token ids (cpu)
                 batch_offset = batch_idx + i
-                token_ids[i, :prompt_len] = torch.from_numpy(
+                token_ids[i, :scheduled_prompt_len] = torch.from_numpy(
                     self.input_batch.token_ids_cpu[batch_offset,
                                                    context_len:context_len +
-                                                   prompt_len])
+                                                   scheduled_prompt_len])
                 #token_ids[i, prompt_len:] = 0 # no need to sanitize - buffer
                 # is pre-filled with 0s
 
                 # Prepare and sanitize positions ids (cpu)
                 positions[
-                    i, :prompt_len] = self.prefill_positions[:, context_len:
+                    i, :scheduled_prompt_len] = self.prefill_positions[:, context_len:
                                                              context_len +
-                                                             prompt_len]
+                                                             scheduled_prompt_len]
                 #positions[i, prompt_len:] = 0 # no need to sanitize - buffer
                 # is pre-filled with 0s
 
                 # Prepare and sanitize slot_mapping (cpu)
-                flat_prefill_positions = positions[i, :prompt_len].flatten()
+                flat_prefill_positions = positions[i, :scheduled_prompt_len].flatten()
                 block_numbers = block_table_cpu_tensor[
                     batch_offset, flat_prefill_positions // self.block_size]
                 block_offsets = flat_prefill_positions % self.block_size
                 slot_mapping[
                     i, :
-                    prompt_len] = block_numbers * self.block_size + \
+                    scheduled_prompt_len] = block_numbers * self.block_size + \
                         block_offsets
                 #slot_mapping[i, prompt_len:] = _PAD_SLOT_ID # no need to
                 # sanitize - buffer is pre-filled with _PAD_SLOT_IDs
             slot_mapping = slot_mapping.long()
             #import pdb; pdb.set_trace()
-
+            #import pdb; pdb.set_trace()
             logits_indices = torch.zeros(padded_batch_size,
                                          dtype=torch.int32,
                                          device='cpu')
@@ -1235,7 +1240,7 @@ class HPUModelRunner:
                                                          self.block_size))
         # NOTE(kzawora): the "-1" is what causes this entire thing to work
         # properly and have good accuracy - why? beats me...
-        block_offsets = padded_index % self.block_size
+        block_offsets = (padded_index - 1) % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
         # Set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
@@ -1323,7 +1328,8 @@ class HPUModelRunner:
             # NOTE: assert that all the decodes are "decodes".
             if idx < num_decodes:
                 assert seq_num_scheduled_tokens == 1
-        prefill_num_tokens = num_scheduled_tokens if self.cache_config.enable_prefix_caching else num_prompt_tokens
+        prefill_num_tokens = num_scheduled_tokens \
+            if self.cache_config.enable_prefix_caching else num_prompt_tokens
         return (
             self._prepare_prefill_inputs(num_prefills, num_decodes,
                                          prefill_num_tokens, bucketing),
@@ -1344,9 +1350,9 @@ class HPUModelRunner:
         is_prompt = attn_metadata.is_prompt
         is_prefix_cached = is_prompt and attn_metadata.block_list is not None
         if is_prompt and is_prefix_cached:
-            phase_type = PhaseType.CACHED_PREFILL
+            phase_type = PhaseType.PREFIX_PREFILL
         elif is_prompt and not is_prefix_cached:
-            phase_type = PhaseType.UNCACHED_PREFILL
+            phase_type = PhaseType.PREFILL
         elif not is_prompt:
             phase_type = PhaseType.DECODE
         else:
@@ -1598,10 +1604,10 @@ class HPUModelRunner:
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
 
-        if True:
+        if False:
             for req_id in self.input_batch.req_ids[:num_reqs]:
                 req_idx = self.input_batch.req_id_to_index[req_id]
-                if self.input_batch.token_ids_cpu[req_idx, -1] not in [0]: #[self._tokenizer.eos_token_id, 0]:
+                if self.input_batch.token_ids_cpu[req_idx, self.input_batch.num_tokens[req_idx] - 1] not in [0, self._tokenizer.eos_token_id, 0]:
                     continue
                 token_ids = self.input_batch.token_ids_cpu[req_idx]
                 #prompt = self._tokenizer.decode(
