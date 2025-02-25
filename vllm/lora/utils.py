@@ -153,7 +153,7 @@ def parse_fine_tuned_lora_name(
         new_name = ".".join(parts[2:-2])
         return new_name, False, True
 
-    # TODO: parse name for dora magnitude
+    if parts[-1] == "magnitude_vector":
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 
