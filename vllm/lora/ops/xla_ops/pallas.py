@@ -91,7 +91,7 @@ XLA_LIB.define(
 def bgmv_xla(inputs, loras, idxs):
     jax_import_guard()
     kernel = make_kernel_from_pallas(_bgmv, bgmv_shape_function)
-    
+
     return kernel(idxs, inputs, loras)
 
 @impl(XLA_LIB, "bgmv", "CompositeExplicitAutograd")

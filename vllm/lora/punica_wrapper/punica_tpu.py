@@ -69,11 +69,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                    x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
                    scale: float, **kwargs) -> Optional[torch.Tensor]:
         """
-        Performs GEMM  for multiple slices of lora_a.
-        When `is_prefill is` true, it indicates that it is currently the
-        prefill stage, and the `_shrink_prefill` function should be called.
-        Otherwise, it is the decode stage, and the _shrink_decode function
-        should be called.
+        Performs GEMM for multiple slices of lora_a.
             
         Semantics:
         for i in range(len(lora_a_stacked)):
