@@ -285,13 +285,16 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 device=x.device,
             )
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
-        self.add_expand(y,
-                        buffer,
-                        lora_b_stacked,
-                        None,
-                        output_slices,
-                        add_inputs=True,
-                        **kwargs)
+        self.add_expand(
+            y,
+            buffer,
+            lora_b_stacked,
+            None,
+            None,
+            output_slices,
+            add_inputs=True,
+            **kwargs,
+        )
         if lora_magnitudes_stacked is not None:
             assert len(lora_magnitudes_stacked) == len(output_slices)
             self._apply_magnitude(self.token_lora_indices, y, output_slices,
