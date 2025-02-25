@@ -43,7 +43,7 @@ Monitor the deployment status using:
 sudo kubectl get pods
 ```
 
-And you will see that pods for the `vllm` deployment should transition to `Ready` and the `Running` state.
+And you will see that pods for the `vllm` deployment will transit to `Running` state.
 
 ```
 NAME                                           READY   STATUS    RESTARTS   AGE
