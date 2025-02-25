@@ -71,15 +71,21 @@ def validate_guided_decoding_request(sampling_params: SamplingParams) -> None:
         return
 
     gd_params = sampling_params.guided_decoding
+
     if gd_params.regex:
         raise ValueError("Regex guided decoding is not supported.")
+
     if gd_params.choice:
         raise ValueError("Choice guided decoding is not supported.")
-    if isinstance(gd_params.json, str):
-        try:
-            schema = json.loads(gd_params.json)
-        except json.JSONDecodeError as e:
-            raise ValueError("Invalid JSON grammar specification.") from e
+
+    if gd_params.json:
+        if isinstance(gd_params.json, str):
+            try:
+                schema = json.loads(gd_params.json)
+            except json.JSONDecodeError as e:
+                raise ValueError("Invalid JSON grammar specification.") from e
+        else:
+            schema = gd_params.json
 
         if has_xgrammar_unsupported_json_features(schema):
             raise ValueError("The provided JSON schema contains features not "
