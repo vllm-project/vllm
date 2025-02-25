@@ -120,10 +120,12 @@ def dump_engine_exception(err: BaseException,
     if execute_model_req is not None:
         batch = execute_model_req.seq_group_metadata_list
         requests_count = len(batch)
-        requests_prompt_token_ids_lenghts = ', '.join([
-            str(len(r.seq_data[idx].prompt_token_ids))
-            for idx, r in enumerate(batch)
-        ])
+
+        requests_prompt_token_ids_lenghts = [{
+            k: len(v.prompt_token_ids)
+            for (k, v) in r.seq_data.items()
+        } for r in batch]
+
         requests_ids = ', '.join([str(r.request_id) for r in batch])
         logger.error(
             "Batch info: requests_count=%s, "
