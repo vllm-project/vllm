@@ -160,11 +160,13 @@ class Request:
         params = self.sampling_params.guided_decoding
         assert params is not None, "params can't be None."
         if params.json is not None:
-            if params.json_object or not isinstance(params.json, str):
+            if not isinstance(params.json, str):
                 json_str = json.dumps(params.json)
             else:
                 json_str = params.json
             return (GuidedDecodingOptions.json, json_str)
+        elif params.json_object:
+            return (GuidedDecodingOptions.json_object, "")
         elif params.regex is not None:
             return (GuidedDecodingOptions.regex, params.regex)
         elif params.choice is not None:

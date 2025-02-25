@@ -21,6 +21,7 @@ logger = init_logger(__name__)
 
 class GuidedDecodingOptions(enum.Enum):
     json = enum.auto()
+    json_object = enum.auto()
     regex = enum.auto()
     grammar = enum.auto()
     choice = enum.auto()
@@ -140,13 +141,12 @@ class GuidedDecodingManager:
         request_type, grammar_spec = key
 
         if request_type == GuidedDecodingOptions.json:
-            if not isinstance(grammar_spec, str):
-                ctx = self.compiler.compile_builtin_json_grammar()
-            else:
-                # TODO -- allow any_whitespace to be configurable
-                # pending merge of https://github.com/vllm-project/vllm/pull/12744
-                ctx = self.compiler.compile_json_schema(grammar_spec,
-                                                        any_whitespace=False)
+            # TODO -- allow any_whitespace to be configurable
+            # pending merge of https://github.com/vllm-project/vllm/pull/12744
+            ctx = self.compiler.compile_json_schema(grammar_spec,
+                                                    any_whitespace=False)
+        elif request_type == GuidedDecodingOptions.json_object:
+            ctx = self.compiler.compile_builtin_json_grammar()
         elif request_type == GuidedDecodingOptions.grammar:
             ctx = self.compiler.compile_grammar(grammar_spec)
         else:
