@@ -15,7 +15,7 @@ import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import VllmConfig
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -334,8 +334,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             torch._dynamo.mark_dynamic(p, 0)
         # Dummy run.
         with set_forward_context(attn_metadata, self.vllm_config, 0):
-            self.model(token_ids, position_ids, attn_metadata, input_lens, t,
-                       p, num_samples, kv_caches)
+            self.model(token_ids, position_ids, input_lens, t, p, num_samples,
+                       kv_caches)
 
     def warmup_model(
         self,
@@ -814,8 +814,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                          self.vllm_config,
                                          model_input.virtual_engine):
                     output_token_ids = self.model(token_ids, position_ids,
-                                                  attn_metadata, input_lens, t,
-                                                  p, model_input.num_samples,
+                                                  input_lens, t, p,
+                                                  model_input.num_samples,
                                                   kv_caches)
                 next_token_ids.append(output_token_ids[0])
                 start_idx = end_idx
@@ -871,8 +871,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                          self.vllm_config,
                                          model_input.virtual_engine):
                     output_token_ids = self.model(token_ids, position_ids,
-                                                  attn_metadata, input_lens, t,
-                                                  p, model_input.num_samples,
+                                                  input_lens, t, p,
+                                                  model_input.num_samples,
                                                   kv_caches)
                 self.cached_step_outputs.append(output_token_ids)
 
@@ -949,7 +949,6 @@ class ModelWrapper(nn.Module):
         self,
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         input_lens: torch.Tensor,
         t: torch.Tensor,
         p: torch.Tensor,
@@ -961,7 +960,6 @@ class ModelWrapper(nn.Module):
         Args:
             token_ids: The input token IDs of shape [batch_size, seq_len].
             position_ids: The input position IDs of shape [batch_size, seq_len].
-            attn_metadata: The Pallas attention metadata.
             input_lens: The actual input lengths of shape [batch_size].
             t: The sampling temperature of shape [batch_size].
             p: The top-p probability of shape [batch_size].
@@ -974,6 +972,7 @@ class ModelWrapper(nn.Module):
         start_indicies = torch.arange(
             batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
         logits_indices = start_indicies + input_lens - 1
+        attn_metadata = get_forward_context().attn_metadata
 
         # FIXME(woosuk): This is a temporary hack to avoid using the existing
         # sampler and sampling metadata.
@@ -1005,12 +1004,7 @@ class ModelWrapper(nn.Module):
             slot_mapping = slot_mapping.flatten()
             attn_metadata.slot_mapping = slot_mapping
 
-        hidden_states = self.model(
-            token_ids,
-            position_ids,
-            kv_caches,
-            attn_metadata,
-        )
+        hidden_states = self.model(token_ids, position_ids)
         hidden_states = hidden_states.flatten(0, 1)
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
