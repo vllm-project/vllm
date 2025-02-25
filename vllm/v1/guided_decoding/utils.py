@@ -2,6 +2,7 @@
 
 import json
 import re
+from typing import List
 
 import xgrammar
 
@@ -222,6 +223,18 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
     return '\n'.join(output_lines)
 
 
+def choice_as_grammar(choice: List[str]) -> str:
+
+    def escape_ebnf_string(s: str) -> str:
+        """Escape special characters in a EBNF string."""
+        # Escape double quotes and backslashes
+        return re.sub(r'(["\\])', r'\\\1', s)
+
+    escaped_choices = (escape_ebnf_string(c) for c in choice)
+    grammar = ('root ::= ' + ' | '.join(f'"{c}"' for c in escaped_choices))
+    return grammar
+
+
 def validate_guided_decoding_request(sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by guided decoding.
 
@@ -236,7 +249,15 @@ def validate_guided_decoding_request(sampling_params: SamplingParams) -> None:
         raise ValueError("Regex guided decoding is not supported.")
 
     if gd_params.choice:
-        raise ValueError("Choice guided decoding is not supported.")
+        choice_grammar = choice_as_grammar(gd_params.choice)
+        try:
+            xgrammar.Grammar.from_ebnf(choice_grammar)
+        except Exception as err:
+            raise ValueError("Failed to transform choices into a grammar: "
+                             "{err}") from err
+        gd_params.choice = None
+        gd_params.grammar = choice_grammar
+        return
 
     if gd_params.json:
         if isinstance(gd_params.json, str):
@@ -250,6 +271,7 @@ def validate_guided_decoding_request(sampling_params: SamplingParams) -> None:
         if has_xgrammar_unsupported_json_features(schema):
             raise ValueError("The provided JSON schema contains features not "
                              "supported by xgrammar.")
+        return
 
     if gd_params.grammar:
         if grammar_is_likely_lark(gd_params.grammar):

@@ -250,21 +250,18 @@ def test_guided_choice_completion(monkeypatch, sample_guided_choice,
                                      guided_decoding=GuidedDecodingParams(
                                          choice=sample_guided_choice,
                                          backend=guided_decoding_backend))
-    with pytest.raises(ValueError,
-                       match="Choice guided decoding is not supported."):
-        llm.generate(
-            prompts="The best language for type-safe systems programming is ",
-            sampling_params=sampling_params,
-            use_tqdm=True)
+    outputs = llm.generate(
+        prompts="The best language for type-safe systems programming is ",
+        sampling_params=sampling_params,
+        use_tqdm=True)
 
-    # Once choice is supported --
-    #assert outputs is not None
-    #for output in outputs:
-    #    assert output is not None
-    #    assert isinstance(output, RequestOutput)
-    #    prompt = output.prompt
-    #    generated_text = output.outputs[0].text
-    #    print(generated_text)
-    #    assert generated_text is not None
-    #    assert generated_text in sample_guided_choice
-    #    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(generated_text)
+        assert generated_text is not None
+        assert generated_text in sample_guided_choice
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
