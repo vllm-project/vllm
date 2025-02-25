@@ -101,6 +101,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 self.driver_worker.execute_method)
 
     def shutdown(self) -> None:
+        logger.info(
+            "Shutting down Ray distributed executor. If you see error log "
+            "from logging.cc regarding SIGTERM received, please ignore because "
+            "this is the expected termination process in Ray.")
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
@@ -509,7 +513,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
             raise ValueError(
                 "cupy is not installed but required since "
-                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set."
+                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set. "
                 "Run `pip install ray[adag]` and check cupy installation.")
 
     def _compiled_ray_dag(self, enable_asyncio: bool):
@@ -524,10 +528,18 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
-            # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
-            #                         -> 1 -> (ExecuteModelReq, IntermediateOutput) -> 5 -> SamplerOutput   # noqa: E501
-            #                         -> 2 -> (ExecuteModelReq, IntermediateOutput) -> 6 -> SamplerOutput   # noqa: E501
-            #                         -> 3 -> (ExecuteModelReq, IntermediateOutput) -> 7 -> SamplerOutput   # noqa: E501
+            #
+            # For V0:
+            # ExecuteModelRequest -> 0 -> (ExecuteModelReq, IntermediateTensors) -> 4 -> SamplerOutput   # noqa: E501
+            # ExecuteModelRequest -> 1 -> (ExecuteModelReq, IntermediateTensors) -> 5 -> SamplerOutput   # noqa: E501
+            # ExecuteModelRequest -> 2 -> (ExecuteModelReq, IntermediateTensors) -> 6 -> SamplerOutput   # noqa: E501
+            # ExecuteModelRequest -> 3 -> (ExecuteModelReq, IntermediateTensors) -> 7 -> SamplerOutput   # noqa: E501
+            #
+            # For V1:
+            # SchedulerOutput -> 0 -> (SchedulerOutput, IntermediateTensors) -> 4 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 1 -> (SchedulerOutput, IntermediateTensors) -> 5 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 2 -> (SchedulerOutput, IntermediateTensors) -> 6 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 3 -> (SchedulerOutput, IntermediateTensors) -> 7 -> ModelRunnerOutput   # noqa: E501
 
             # All workers in the first TP group will take in the
             # ExecuteModelRequest as input.
@@ -537,7 +549,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 # and the TP group executes in SPMD fashion.
                 if self.use_v1:
                     outputs = [
-                        worker.execute_model.
+                        worker.execute_model_ray.
                         bind(  # type: ignore[attr-defined]
                             outputs[i]) for i, worker in enumerate(tp_group)
                     ]

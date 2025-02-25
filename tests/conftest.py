@@ -46,6 +46,7 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 _SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
+
 _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]

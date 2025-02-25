@@ -3,6 +3,7 @@
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -24,8 +25,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, convert_to_channelwise,
     cutlass_block_fp8_supported, cutlass_fp8_supported,
-    normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize,
-    requantize_with_max_scale)
+    maybe_create_device_identity, normalize_e4m3fn_to_e4m3fnuz,
+    per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
@@ -47,6 +48,7 @@ class Fp8Config(QuantizationConfig):
         ignored_layers: Optional[List[str]] = None,
         weight_block_size: Optional[List[int]] = None,
     ) -> None:
+        super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
             logger.warning("Detected fp8 checkpoint. Please note that the "
@@ -161,6 +163,8 @@ class Fp8LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        maybe_create_device_identity()
+
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
@@ -248,6 +252,17 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.register_parameter("input_scale", None)
 
+    def add_padding_to_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        # Pad the weight tensor. This is an optimization on ROCm platform, which
+        # can benefit from tensors located far enough from one another in memory
+        if (envs.VLLM_ROCM_FP8_PADDING and current_platform.is_rocm()
+                and weight.stride(-1) == 1
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0):
+            num_pad = 256 // weight.element_size()
+            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+            torch.cuda.empty_cache()
+        return weight
+
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
@@ -260,6 +275,8 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 weight = layer.weight.data
                 weight_scale_inv = layer.weight_scale_inv.data
+
+            weight = self.add_padding_to_weight(weight)
 
             # Torch.compile cannot use Parameter subclasses.
             layer.weight = Parameter(weight, requires_grad=False)
@@ -324,6 +341,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     logical_widths=layer.logical_widths,
                 )
 
+            weight = self.add_padding_to_weight(weight)
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -555,11 +573,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Re-initialize w13_scale because we directly quantize
             # merged w13 weights and generate a single scaling factor.
             layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
-                layer.num_experts,
+                layer.local_num_experts,
                 dtype=torch.float32,
                 device=w13_weight.device),
                                                         requires_grad=False)
-            for expert in range(layer.num_experts):
+            for expert in range(layer.local_num_experts):
                 w13_weight[expert, :, :], layer.w13_weight_scale[
                     expert] = ops.scaled_fp8_quant(
                         layer.w13_weight.data[expert, :, :])
@@ -626,7 +644,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.num_experts):
+            for expert_id in range(layer.local_num_experts):
                 start = 0
                 for shard_id in range(2):
                     dq_weight = per_tensor_dequantize(
@@ -652,6 +670,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
@@ -679,6 +699,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             use_fp8_w8a8=True,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             w1_scale=(layer.w13_weight_scale_inv
                       if self.block_quant else layer.w13_weight_scale),
             w2_scale=(layer.w2_weight_scale_inv

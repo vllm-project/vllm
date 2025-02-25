@@ -121,6 +121,8 @@ if [[ $commands == *"--shard-id="* ]]; then
         --rm \
         -e HIP_VISIBLE_DEVICES="${GPU}" \
         -e HF_TOKEN \
+        -e AWS_ACCESS_KEY_ID \
+        -e AWS_SECRET_ACCESS_KEY \
         -v "${HF_CACHE}:${HF_MOUNT}" \
         -e "HF_HOME=${HF_MOUNT}" \
         --name "${container_name}_${GPU}" \
@@ -148,6 +150,8 @@ else
           --rm \
           -e HIP_VISIBLE_DEVICES=0 \
           -e HF_TOKEN \
+          -e AWS_ACCESS_KEY_ID \
+          -e AWS_SECRET_ACCESS_KEY \
           -v "${HF_CACHE}:${HF_MOUNT}" \
           -e "HF_HOME=${HF_MOUNT}" \
           --name "${container_name}" \
