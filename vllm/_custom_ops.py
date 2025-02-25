@@ -1164,6 +1164,7 @@ def register_graph_buffers(fa: int, handles: List[List[int]],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
+
 def get_flash_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_heads_per_head_k: int,
@@ -1179,7 +1180,9 @@ def get_flash_mla_metadata(
         tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), dtype torch.int32.
         num_splits: (batch_size + 1), dtype torch.int32.
     """
-    return torch.ops._C.get_flash_mla_metadata(cache_seqlens, num_heads_per_head_k, num_heads_k)
+    return torch.ops._C.get_flash_mla_metadata(cache_seqlens,
+                                               num_heads_per_head_k,
+                                               num_heads_k)
 
 
 def flash_mla_with_kvcache(
@@ -1210,7 +1213,7 @@ def flash_mla_with_kvcache(
         softmax_lse: (batch_size, num_heads_q, seq_len_q), torch.float32.
     """
     if softmax_scale is None:
-        softmax_scale = q.shape[-1] ** (-0.5)
+        softmax_scale = q.shape[-1]**(-0.5)
     out, softmax_lse = torch.ops._C.flash_mla_fwd_kvcache(
         q,
         k_cache,
