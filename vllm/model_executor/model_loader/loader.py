@@ -1088,7 +1088,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self.model_type = type(model).__name__
 
         logger.info("Loading weights with BitsAndBytes quantization. "
-                    " May take a while ...")
+                    "May take a while ...")
 
         quant_config = getattr(model_config.hf_config, "quantization_config",
                                None)
