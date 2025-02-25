@@ -48,16 +48,16 @@ _AUDIO_TOKENS_PER_SECOND = 6.25
 class UltravoxAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: NestedTensors
-    """Shape: `(batch_size, num_audios, 80, M)`"""
+    """Shape: `(batch_size, num_chunks, 80, M)`"""
     lens: NestedTensors
     """
     Length of the audio frames. Used for attention mask in WhisperEncoder.
-    Shape: `(batch_size)`
+    Shape: `(batch_size, num_chunks)`
     """
     token_len: NestedTensors
     """
     Length of the audio tokens. Used for flattening the audio features.
-    Shape: `(batch_size)`
+    Shape: `(batch_size, num_chunks)`
     """
 
 
@@ -86,9 +86,10 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         # placeholder that will cause confusion with the actual end of turn
         # token, thus we override placeholder with a reserved special
         # token.
-        hf_processor.audio_replacement_token_id = _AUDIO_PLACEHOLDER_TOKEN
-        hf_processor.audio_replacement = _AUDIO_PLACEHOLDER_OVERRIDE
-        # TODO: the old code currently does not work with the new processor
+        hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_OVERRIDE
+        vocab = hf_processor.tokenizer.get_vocab()
+        hf_processor.audio_replacement_token_id = vocab[
+            _AUDIO_PLACEHOLDER_OVERRIDE]
         return hf_processor
 
     def get_feature_extractor(
