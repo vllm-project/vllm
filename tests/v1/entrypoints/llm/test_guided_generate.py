@@ -83,6 +83,29 @@ def test_guided_json_object(monkeypatch, guided_decoding_backend: str):
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+def test_guided_json_unsupported_schema(monkeypatch, unsupported_json_schema,
+                                        guided_decoding_backend: str):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    llm = LLM(model=MODEL_NAME, max_model_len=1024)
+    sampling_params = SamplingParams(temperature=1.0,
+                                     max_tokens=1000,
+                                     guided_decoding=GuidedDecodingParams(
+                                         json=unsupported_json_schema,
+                                         backend=guided_decoding_backend))
+    with pytest.raises(ValueError,
+                       match="The provided JSON schema contains features "
+                       "not supported by xgrammar."):
+        llm.generate(prompts=[
+            f"Give an example JSON for an employee profile "
+            f"that fits this schema: {unsupported_json_schema}"
+        ] * 2,
+                     sampling_params=sampling_params,
+                     use_tqdm=True)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend",
+                         GUIDED_DECODING_BACKENDS_V1)
 def test_guided_grammar_ebnf(monkeypatch, sample_sql_ebnf,
                              guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
@@ -121,24 +144,23 @@ def test_guided_grammar_ebnf(monkeypatch, sample_sql_ebnf,
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
-def test_guided_json_unsupported_schema(monkeypatch, unsupported_json_schema,
-                                        guided_decoding_backend: str):
+def test_guided_grammar_ebnf_invalid(monkeypatch,
+                                     guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
-    sampling_params = SamplingParams(temperature=1.0,
+    sampling_params = SamplingParams(temperature=0.8,
+                                     top_p=0.95,
                                      max_tokens=1000,
                                      guided_decoding=GuidedDecodingParams(
-                                         json=unsupported_json_schema,
+                                         grammar="not a grammar",
                                          backend=guided_decoding_backend))
-    with pytest.raises(ValueError,
-                       match="The provided JSON schema contains features "
-                       "not supported by xgrammar."):
-        llm.generate(prompts=[
-            f"Give an example JSON for an employee profile "
-            f"that fits this schema: {unsupported_json_schema}"
-        ] * 2,
-                     sampling_params=sampling_params,
-                     use_tqdm=True)
+    with pytest.raises(ValueError, match="Invalid grammar specification."):
+        llm.generate(
+            prompts=("Generate a sql statement that selects col_1 from "
+                     "table_1 where it is equal to 1"),
+            sampling_params=sampling_params,
+            use_tqdm=True,
+        )
 
 
 @pytest.mark.skip_global_cleanup
