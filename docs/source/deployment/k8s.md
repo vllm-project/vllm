@@ -115,8 +115,6 @@ Expected output:
 }
 ```
 
-This demonstrates the model generating a continuation for the provided prompt.
-
 
 
 ### Uninstall
