@@ -18,5 +18,5 @@ ray[default]
 --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 torch==2.7.0.dev20250224+cpu
-torchvision  # Install whichever version is compatible with torch
+torchvision==0.22.0.dev20250224+cpu
 torch_xla[tpu, pallas]  # Install whichever version is compatible with torch
