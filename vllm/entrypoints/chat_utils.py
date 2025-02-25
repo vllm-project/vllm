@@ -410,7 +410,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
-            if model_type == "qwen2_vl":
+            if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
@@ -430,7 +430,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "(<audio>./</audio>)"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
-            if model_type == "qwen2_vl":
+            if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<video>./</video>)"
@@ -823,7 +823,7 @@ def _parse_chat_message_content_part(
     # content is empty, log a warning and skip
     if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
         logger.warning(
-            "Skipping multimodal part (type: '%s')"
+            "Skipping multimodal part (type: '%s') "
             "with empty / unparsable content.", part_type)
         return None
 

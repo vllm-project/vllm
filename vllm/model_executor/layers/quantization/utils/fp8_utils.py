@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     _normalize_quant_group_shape, scaled_dequantize)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear)
+    CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -38,7 +38,7 @@ def apply_w8a8_block_fp8_linear(
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    cutlass_block_fp8_supported: bool = True,
+    cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
 ) -> torch.Tensor:
     assert input_scale is None
     # View input as 2D matrix for fp8 methods
@@ -85,12 +85,14 @@ def apply_w8a8_block_fp8_linear(
 # `apply_fp8_linear`
 # NOTE(lucas): this is quite messy, we should think through this more formally
 def apply_fp8_linear_generic(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        input_group_shape: Tuple[int, int],
-        weight_group_shape: Tuple[int, int],
-        input_scale: Optional[torch.Tensor] = None,  # static scale if one
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_group_shape: Tuple[int, int],
+    weight_group_shape: Tuple[int, int],
+    input_scale: Optional[torch.Tensor] = None,  # static scale if one
+    cutlass_fp8_supported: bool = CUTLASS_FP8_SUPPORTED,
+    cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
 ) -> torch.Tensor:
     # View input as 2D matrix for fp8 methods
     input = input.view(-1, input.shape[-1])
@@ -105,14 +107,18 @@ def apply_fp8_linear_generic(
     if is_dim_blocked(0, weight.shape, weight_group_shape[0])\
      and is_dim_blocked(1, weight.shape, weight_group_shape[1]) and\
      input_group_shape == (1, weight_group_shape[1]):
-        return apply_w8a8_block_fp8_linear(input, weight,
-                                           list(weight_group_shape),
-                                           weight_scale)
+        return apply_w8a8_block_fp8_linear(
+            input,
+            weight,
+            list(weight_group_shape),
+            weight_scale,
+            cutlass_block_fp8_supported=cutlass_block_fp8_supported)
     else:
         # Despite having linear in the it doesn't conform to
         # `torch.nn.functional.linear` which is defined as `input @ weight.T`
         # so we explicitly transpose the weight matrix here
         return apply_fp8_linear(input, weight.T, weight_scale.T,
+                    cutlass_fp8_supported=cutlass_fp8_supported,
                          use_per_token_if_dynamic=\
                              (input_group_shape == (1, input.shape[1])))
 
@@ -156,6 +162,9 @@ def _per_token_group_quant_fp8(
     y_q_ptr,
     y_s_ptr,
     group_size,
+    # Num columns of y
+    y_num_columns,
+    y_row_stride,
     # Avoid to divide zero
     eps,
     # Information for float8
@@ -168,9 +177,14 @@ def _per_token_group_quant_fp8(
     quantization on a tensor.
     This function converts the tensor values into float8 values.
     """
+    groups_per_row = y_num_columns // group_size
+
     # Map the program id to the row of X and Y it should compute.
     g_id = tl.program_id(0)
-    y_ptr += g_id * group_size
+    row = g_id // groups_per_row
+    row_g_id = g_id % groups_per_row
+
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
     y_s_ptr += g_id
 
@@ -196,6 +210,7 @@ def _per_token_group_quant_fp8_colmajor(
     group_size,
     # Num columns of y
     y_num_columns,
+    y_row_stride,
     # Stride from one column to the next of y_s
     y_s_col_stride,
     # Avoid to divide zero
@@ -210,9 +225,14 @@ def _per_token_group_quant_fp8_colmajor(
     quantization on a tensor.
     This function converts the tensor values into float8 values.
     """
+    groups_per_row = y_num_columns // group_size
+
     # Map the program id to the row of X and Y it should compute.
     g_id = tl.program_id(0)
-    y_ptr += g_id * group_size
+    row = g_id // groups_per_row
+    row_g_id = g_id % groups_per_row
+
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
 
     # Convert g_id the flattened block coordinate to 2D so we can index
@@ -261,7 +281,7 @@ def per_token_group_quant_fp8(
     assert (x.shape[-1] % group_size == 0), (
         f"the last dimension of `x` {x.shape[-1]} must be divisible "
         f"by `group_size` {group_size}")
-    assert x.is_contiguous(), "`x` must be contiguous"
+    assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
     finfo = torch.finfo(dtype)
     fp8_min = finfo.min
@@ -289,6 +309,7 @@ def per_token_group_quant_fp8(
             x_s,
             group_size,
             x.shape[1],
+            x.stride(0),
             x_s.stride(1),
             eps,
             fp8_min=fp8_min,
@@ -303,6 +324,8 @@ def per_token_group_quant_fp8(
             x_q,
             x_s,
             group_size,
+            x.shape[1],
+            x.stride(0),
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
@@ -417,7 +440,7 @@ def get_w8a8_block_fp8_configs(N: int, K: int, block_n: int,
     # First look up if an optimized configuration is available in the configs
     # directory
     device_name = current_platform.get_device_name().replace(" ", "_")
-    json_file_name = f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,block_shape=[{block_n}, {block_k}].json"  # noqa: E501
+    json_file_name = f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,block_shape=[{block_n},{block_k}].json"  # noqa: E501
 
     config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
@@ -471,7 +494,7 @@ def w8a8_block_fp8_matmul(
     assert triton.cdiv(A.shape[-1], block_k) == As.shape[-1]
     M = A.numel() // A.shape[-1]
 
-    assert B.ndim == 2 and B.is_contiguous() and Bs.ndim == 2
+    assert B.ndim == 2 and Bs.ndim == 2
     N, K = B.shape
     assert triton.cdiv(N, block_n) == Bs.shape[0]
     assert triton.cdiv(K, block_k) == Bs.shape[1]
