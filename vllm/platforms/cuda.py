@@ -177,6 +177,10 @@ class CudaPlatformBase(Platform):
                         "FlashMLA backend is not supported for block size %d"
                         " (currently only supports block size 64).",
                         block_size)
+                elif dtype != torch.bfloat16:
+                    logger.warning(
+                        "FlashMLA backend is not supported for dtype %s"
+                        " (currently only supports torch.bfloat16).", dtype)
                 else:
                     logger.info("Using FlashMLA backend.")
                     return "vllm.attention.backends.flashmla.FlashMLABackend"
