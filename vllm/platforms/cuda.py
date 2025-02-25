@@ -141,6 +141,14 @@ class CudaPlatformBase(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
+        # TODO(lucas): handle this more gracefully
+        if envs.VLLM_ATTENTION_BACKEND is not None \
+           and envs.VLLM_ATTENTION_BACKEND == "FLASHMLA" \
+           and cache_config.block_size != 64:
+            cache_config.block_size = 64
+            logger.info(
+                "FlashMLA: Forcing kv cache block size to 64 since this"
+                " is currently the only block size supported by the kernel.")
 
     @classmethod
     def get_current_memory_usage(cls,
