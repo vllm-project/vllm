@@ -899,6 +899,44 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         return type(source_layer) is RowParallelLinear
 
 
+class HFCompatibleLinearWithLoRA(BaseLinearLayerWithLoRA):
+
+    def __new__(cls, base_layer: nn.Module):
+        assert base_layer.__class__.__name__ == "HFCompatibleLinear"
+        if isinstance(base_layer, ReplicatedLinear):
+            instance_cls = ReplicatedLinearWithLoRA
+        elif isinstance(base_layer, ColumnParallelLinear):
+            instance_cls = ColumnParallelLinearWithLoRA
+        elif isinstance(base_layer, RowParallelLinear):
+            instance_cls = RowParallelLinearWithLoRA
+        else:
+            raise NotImplementedError
+
+        instance_layer = instance_cls(base_layer)
+        # HACK:  Make the forward method compatible with the original forward
+        # method of the instance_layer.
+        original_forward = instance_layer.forward
+
+        def new_forward(input):
+            input = input.squeeze(0)
+            return original_forward(input)[0]
+
+        instance_layer.forward = new_forward
+
+        return instance_layer
+
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        return source_layer.__class__.__name__ == "HFCompatibleLinear"
+
+
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     """
     LoRA wrapper for LogitsProcessor, with extra logic to handle the

@@ -27,11 +27,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.logger import init_logger
-from vllm.lora.fully_sharded_layers import (
-    ColumnParallelLinearWithShardedLoRA, RowParallelLinearWithShardedLoRA)
-from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
-                              ReplicatedLinearWithLoRA,
-                              RowParallelLinearWithLoRA)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -115,45 +110,6 @@ def replace_linear_class(
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return super().forward(input)[0]
-
-        @classmethod
-        def get_lora_class(cls, fully_sharded: bool = False):
-            """
-            Get the LoRA class corresponding to the current transformer
-            linear class.
-
-            Args:
-                fully_sharded (bool): If True, select the LoRA class variant
-                that supports fully sharded LoRA. Defaults to False.
-
-            """
-
-            lora_linear_cls = {
-                ColumnParallelLinear: {
-                    True: ColumnParallelLinearWithShardedLoRA,  # fully sharded
-                    False: ColumnParallelLinearWithLoRA  # not fully sharded
-                },
-                RowParallelLinear: {
-                    True: RowParallelLinearWithShardedLoRA,
-                    False: RowParallelLinearWithLoRA
-                },
-                # ReplicatedLinear doesn't support fully sharded LoRA yet,
-                # so we use the same class for both cases.
-                ReplicatedLinear: {
-                    True: ReplicatedLinearWithLoRA,
-                    False: ReplicatedLinearWithLoRA
-                }
-            }
-
-            lora_cls = lora_linear_cls[vllm_linear_cls][fully_sharded]
-
-            class HFCompatibleLinearWithLoRA(lora_cls):
-
-                def forward(self, input: torch.Tensor) -> torch.Tensor:
-                    input = input.squeeze(0)
-                    return super().forward(input)[0]
-
-            return HFCompatibleLinearWithLoRA
 
     return HFCompatibleLinear(
         input_size=linear.in_features,
