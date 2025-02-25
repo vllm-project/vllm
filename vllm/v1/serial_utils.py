@@ -2,7 +2,7 @@
 
 import pickle
 from inspect import isclass
-from typing import Any, List, Optional, Sequence, Type, TypeAlias, Union
+from typing import Any, List, Optional, Sequence, Type, Union
 
 import numpy as np
 import torch
@@ -11,7 +11,7 @@ from msgspec import msgpack
 
 CUSTOM_TYPE_PICKLE = 1
 
-bytestr: TypeAlias = Union[bytes, bytearray, memoryview, zmq.Frame]
+bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
 
 class MsgpackEncoder:
