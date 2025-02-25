@@ -22,7 +22,7 @@ repos:
     additional_dependencies: ['tomli']
     args: ['--toml', 'pyproject.toml']
 - repo: https://github.com/PyCQA/isort
-  rev: 5.13.2
+  rev: 0a0b7a830386ba6a31c2ec8316849ae4d1b8240d # 6.0.0
   hooks:
   - id: isort
     exclude: 'vllm/third_party/.*'
@@ -44,6 +44,12 @@ repos:
   hooks:
   - id: actionlint
     exclude: 'vllm/third_party/.*'
+- repo: https://github.com/astral-sh/uv-pre-commit
+  rev: 0.6.2
+  hooks:
+    - id: pip-compile
+      args: [requirements-test.in, -o, requirements-test.txt]
+      files: ^requirements-test\.(in|txt)$
 - repo: local
   hooks:
   - id: mypy-local
