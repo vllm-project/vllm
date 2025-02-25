@@ -67,6 +67,8 @@ getting_started/quickstart
 getting_started/examples/examples_index
 getting_started/troubleshooting
 getting_started/faq
+getting_started/v1_user_guide
+
 :::
 
 % What does vLLM support?
