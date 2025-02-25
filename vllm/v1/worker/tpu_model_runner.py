@@ -570,11 +570,11 @@ class TPUModelRunner:
         model = ModelWrapperV1(model)
         self.model = model
         # TODO (Nicolo) will yield multiple fxsubgraph that trigger more
-        # recompilations xla-side..can we benchmark this before enabling?
-        # self.model = torch.compile(model,
-                                #    backend="openxla",
-                                #    fullgraph=True,
-                                #    dynamic=False)
+        # recompilations xla-side..but disabling it will break things(??)
+        self.model = torch.compile(model,
+                                   backend="openxla",
+                                   fullgraph=True,
+                                   dynamic=False)
 
     def dummy_run(
         self,
@@ -763,11 +763,10 @@ class ModelWrapperV1(nn.Module):
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
         return logits
         # Sample with traced function.
-        # sampler_output = self.sampler(logits, sampling_metadata)
+        # sampler_output = self.sample(logits, sampling_metadata)
         # # TODO support logprobs here
         # sampled_token_ids = sampler_output.sampled_token_ids
-        # return sampled_token_ids
-
+        # return sampled_token_ids.squeeze(dim=-1)
 
 def _get_padded_number(n: int, multiple: int) -> int:
     return ((n + multiple - 1) // multiple) * multiple
