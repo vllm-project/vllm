@@ -73,23 +73,6 @@ typedef struct _B8x16 {
   _B8x8 xy[2];
 } _B8x16;
 
-////// Non temporal loads ///////
-template <typename T>
-__device__ __forceinline__ T loadnt(T* addr) {
-  return __builtin_nontemporal_load(addr);
-}
-
-__device__ __forceinline__ _B16x8 load_ntmprl_16Byte(const _B16x8* addr) {
-  auto addr_alias = reinterpret_cast<const float*>(addr);
-  auto dat0 = loadnt(addr_alias);
-  auto dat1 = loadnt(addr_alias + 1);
-  auto dat2 = loadnt(addr_alias + 2);
-  auto dat3 = loadnt(addr_alias + 3);
-  auto res = make_float4(dat0, dat1, dat2, dat3);
-  return *reinterpret_cast<_B16x8*>(&res);
-}
-///////////////////////////////////
-
 template <typename T, int absz, int cbid, int blgp>
 __device__ __forceinline__ floatx4 gcn_mfma4x4x4_instr(const _B16x4& inpA,
                                                        const _B16x4& inpB,
@@ -126,23 +109,6 @@ __device__ __forceinline__ float to_float(const T& inp) {
     return (float)inp;
   } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
     return __bfloat162float(inp);
-  } else {
-    static_assert(false, "unsupported 16b dtype");
-  }
-}
-
-template <typename T>
-__device__ __forceinline__ float to_float_b16(const bit16_t& inp) {
-  union tmpcvt {
-    bit16_t u;
-    _Float16 f;
-    __hip_bfloat16 b;
-  } t16;
-  t16.u = inp;
-  if constexpr (std::is_same<T, _Float16>::value) {
-    return (float)t16.f;
-  } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
-    return __bfloat162float(t16.b);
   } else {
     static_assert(false, "unsupported 16b dtype");
   }
@@ -227,26 +193,6 @@ __device__ __forceinline__ _B16x4 addx4(const _B16x4& inp1,
   }
 }
 
-template <typename T, vllm::Fp8KVCacheDataType KV_DTYPE>
-__device__ __forceinline__ _B16x8 scaled_convert_b8x8(const _B8x8 input,
-                                                      const float scale) {
-  union alignas(16) {
-    uint4 u4;
-    _B16x8 u16x8;
-    vllm::bf16_8_t b16x8;
-  } tmp;
-  if constexpr (std::is_same<T, _Float16>::value) {
-    tmp.u4 = vllm::fp8::scaled_convert<uint4, _B8x8, KV_DTYPE>(input, scale);
-    return tmp.u16x8;
-  } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
-    tmp.b16x8 = vllm::fp8::scaled_convert<vllm::bf16_8_t, _B8x8, KV_DTYPE>(
-        input, scale);
-    return tmp.u16x8;
-  } else {
-    static_assert(false, "unsupported 16b dtype");
-  }
-}
-
 __device__ __forceinline__ floatx4 to_float_fp8x4(const _B8x4& inp) {
   // From MI300+ platforms, we have v_cvt_pk_f32_fp8 instruction
   // to convert 2 packed fp8 to 2 packed fp32 values.
@@ -311,7 +257,6 @@ __device__ __forceinline__ _B16x8 convert_b8x8_custom(const _B8x8 input) {
   return ret;
 }
 
-///////////////////////////////////////
 // grid (num_seqs, num_partitions,num_kv_heads)
 // block (256)
 // clang-format off
@@ -814,7 +759,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   }
 }
 
-/////////////////////////////////////////////////////////////
 // grid (num_seqs, num_partitions, num_kv_heads)
 // block (256 : partition size)
 // each WG handles 1 partition per sequence
