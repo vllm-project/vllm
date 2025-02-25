@@ -37,7 +37,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         device: Union[torch.device, str],
         **kwargs,
     ):
-        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
+        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
+                                   device)
 
     def _apply_shrink_prefill(
         self,
@@ -96,9 +97,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y_slice_size: Optional[int],
         add_inputs: bool,
     ):
-        bgmv_expand_slice(
-            x, w_t_all, y, self.token_lora_indices, y_offset, y_slice_size, add_inputs
-        )
+        bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
+                          y_slice_size, add_inputs)
 
     def add_shrink(
         self,
@@ -134,9 +134,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         else:
             # TODO fuse these kernels
             for slice_idx in range(len(lora_a_stacked)):
-                self._apply_shrink_decode(
-                    y[slice_idx], x, lora_a_stacked[slice_idx], scale
-                )
+                self._apply_shrink_decode(y[slice_idx], x,
+                                          lora_a_stacked[slice_idx], scale)
 
     def add_expand(
         self,
@@ -172,14 +171,15 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y_org = y
         y = y.view(-1, y.shape[-1])
         if lora_bias_stacked is not None:
-            self._apply_bias(
-                self.token_lora_indices, y, output_slices, lora_bias_stacked
-            )
+            self._apply_bias(self.token_lora_indices, y, output_slices,
+                             lora_bias_stacked)
         if self.is_prefill:
             # NOTE fused kernel
-            self._apply_expand_prefill(
-                y, x, lora_b_stacked, offset_start, add_inputs=True
-            )
+            self._apply_expand_prefill(y,
+                                       x,
+                                       lora_b_stacked,
+                                       offset_start,
+                                       add_inputs=True)
         else:
             # TODO fuse these kernels
             for slice_idx in range(len(lora_b_stacked)):
@@ -193,9 +193,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 )
                 offset_start += output_slices[slice_idx]
         if lora_magnitudes_stacked is not None:
-            self._apply_magnitude(
-                self.token_lora_indices, y, output_slices, lora_magnitudes_stacked
-            )
+            self._apply_magnitude(self.token_lora_indices, y, output_slices,
+                                  lora_magnitudes_stacked)
         y = y.view_as(y_org)
 
     def add_lora_embedding(
@@ -229,7 +228,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 add_inputs=add_inputs,
             )
         else:
-            bgmv_expand(x, lora_b_stacked, y, self.token_lora_indices, add_inputs)
+            bgmv_expand(x, lora_b_stacked, y, self.token_lora_indices,
+                        add_inputs)
         # TODO: not sure how to pass and apply lora magnitudes here
 
     def add_lora_linear(
@@ -272,9 +272,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
         if lora_bias_stacked is not None:
             assert len(lora_bias_stacked) == len(output_slices)
-            y = self._apply_bias(
-                self.token_lora_indices, y, output_slices, lora_bias_stacked
-            )
+            y = self._apply_bias(self.token_lora_indices, y, output_slices,
+                                 lora_bias_stacked)
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
@@ -286,14 +285,17 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 device=x.device,
             )
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
-        self.add_expand(
-            y, buffer, lora_b_stacked, None, output_slices, add_inputs=True, **kwargs
-        )
+        self.add_expand(y,
+                        buffer,
+                        lora_b_stacked,
+                        None,
+                        output_slices,
+                        add_inputs=True,
+                        **kwargs)
         if lora_magnitudes_stacked is not None:
             assert len(lora_magnitudes_stacked) == len(output_slices)
-            self._apply_magnitude(
-                self.token_lora_indices, y, output_slices, lora_magnitudes_stacked
-            )
+            self._apply_magnitude(self.token_lora_indices, y, output_slices,
+                                  lora_magnitudes_stacked)
 
     def add_lora_logits(
         self,
@@ -328,9 +330,15 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         if buffer is None:
             # We set the buffer to be float32 by default ,refer to:
             # https://github.com/triton-lang/triton/issues/1387
-            buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
+            buffer = torch.zeros((x.size(0), r),
+                                 dtype=torch.float32,
+                                 device=x.device)
         # LogitsProcessorWithLoRA always using bgmv.
         bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
-        bgmv_expand(buffer, lora_b_stacked, y, self.sampler_indices, add_inputs=True)
+        bgmv_expand(buffer,
+                    lora_b_stacked,
+                    y,
+                    self.sampler_indices,
+                    add_inputs=True)
         y = y.view_as(y_org)
         # TODO: not sure if and how to add DoRA magnitude scaling here
