@@ -76,3 +76,35 @@ def test_guided_regex(monkeypatch, sample_regex, guided_decoding_backend: str):
     #    assert generated_text is not None
     #    assert re.fullmatch(sample_regex, generated_text) is not None
     #    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend",
+                         GUIDED_DECODING_BACKENDS_V1)
+def test_guided_choice_completion(monkeypatch, sample_guided_choice,
+                                  guided_decoding_backend: str):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    llm = LLM(model=MODEL_NAME, max_model_len=1024)
+    sampling_params = SamplingParams(temperature=0.8,
+                                     top_p=0.95,
+                                     guided_decoding=GuidedDecodingParams(
+                                         choice=sample_guided_choice,
+                                         backend=guided_decoding_backend))
+    with pytest.raises(ValueError,
+                       match="Choice guided decoding is not supported."):
+        llm.generate(
+            prompts="The best language for type-safe systems programming is ",
+            sampling_params=sampling_params,
+            use_tqdm=True)
+
+    # Once choice is supported --
+    #assert outputs is not None
+    #for output in outputs:
+    #    assert output is not None
+    #    assert isinstance(output, RequestOutput)
+    #    prompt = output.prompt
+    #    generated_text = output.outputs[0].text
+    #    print(generated_text)
+    #    assert generated_text is not None
+    #    assert generated_text in sample_guided_choice
+    #    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
