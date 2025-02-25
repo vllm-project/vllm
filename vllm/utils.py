@@ -2325,7 +2325,6 @@ def prefix_sort(prompts):
     if not prompts:
         return prompts, []
 
-    # 检查输入数据类型
     is_dict_list = isinstance(prompts[0], dict)
 
     def get_key(item_with_index):
