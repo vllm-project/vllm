@@ -420,9 +420,15 @@ class DeepseekV2MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
+        # In the MLA backend, kv_cache includes both k_c and
+        # pe (i.e. decoupled position embeddings). In particular,
+        # the concat_and_cache_mla op requires
+        #     k_c.size(1) + k_pe.size(1) == kv_cache.size(2)
+        # i.e.
+        #     kv_lora_rank + qk_rope_head_dim == head_size
         self.mla_attn = Attention(
             num_heads=self.num_local_heads,
-            head_size=self.kv_lora_rank,
+            head_size=self.kv_lora_rank + self.qk_rope_head_dim,
             scale=self.scaling,
             num_kv_heads=1,
             cache_config=cache_config,
