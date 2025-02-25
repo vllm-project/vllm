@@ -57,7 +57,7 @@ class Grammar:
         hash=False,
         init=False,
     )
-    _accept_lock: threading.Lock = field(
+    _matcher_lock: threading.Lock = field(
         default_factory=lambda: threading.Lock(),
         repr=False,
         init=False,
@@ -67,7 +67,7 @@ class Grammar:
     def accept_token(self, token: int) -> bool:
         # NOTE: accept_token will determines whether we accept this token
         # and will also update the machine state
-        with self._accept_lock:
+        with self._matcher_lock:
             self.num_processed_tokens += 1
             return self.matcher.accept_token(token)
 
@@ -76,8 +76,9 @@ class Grammar:
         return self.matcher.fill_next_token_bitmask(bitmask, idx)
 
     def rollback(self, num_tokens: int):
-        self.num_processed_tokens -= num_tokens
-        self.matcher.rollback(num_tokens)
+        with self._matcher_lock:
+            self.num_processed_tokens -= num_tokens
+            self.matcher.rollback(num_tokens)
 
     def reset(self):
         self.num_processed_tokens = 0
