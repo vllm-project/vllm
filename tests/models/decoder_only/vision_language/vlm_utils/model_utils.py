@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Common utility functions relating to different models that are useful
 for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
@@ -5,7 +6,7 @@ typically specific to a small subset of models.
 import re
 import types
 from pathlib import PosixPath
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 from PIL.Image import Image
@@ -16,9 +17,7 @@ from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import patch_padding_side
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
-from .....conftest import (HfRunner, ImageAsset, PromptAudioInput,
-                           PromptImageInput, PromptVideoInput, _ImageAssets)
-from ....utils import TokensTextLogprobs
+from .....conftest import HfRunner, ImageAsset, _ImageAssets
 from .types import RunnerOutput
 
 
@@ -191,6 +190,14 @@ def deepseekvl2_trunc_hf_output(hf_output: RunnerOutput,
     return output_ids, output_str, out_logprobs
 
 
+def idefics3_trunc_hf_output(hf_output: RunnerOutput,
+                             model: str) -> RunnerOutput:
+    output_ids, output_str, out_logprobs = hf_output
+    if output_str.endswith("<end_of_utterance>"):
+        output_str = output_str.split("<end_of_utterance>")[0]
+    return output_ids, output_str, out_logprobs
+
+
 def minicpmv_trunc_hf_output(hf_output: RunnerOutput,
                              model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
@@ -333,12 +340,12 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         def __init__(self, hf_runner: HfRunner):
             self.num_image_token = hf_runner.model.num_image_token
             self.tokenizer = hf_runner.tokenizer
-            self.dtype = hf_runner.model.dtype
 
             self.config = AutoConfig.from_pretrained(hf_runner.model_name,
                                                      trust_remote_code=True)
             self.vision_config = self.config.vision_config
             self.use_thumbnail = self.config.use_thumbnail
+            self.use_msac = self.config.use_msac
             self.min_num = self.config.min_dynamic_patch
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
@@ -347,18 +354,19 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                      **kwargs):
             # yapf: disable
             from vllm.model_executor.models.h2ovl import (
-                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values)
+                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values_h2ovl)
 
             # yapf: enable
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
-                image_to_pixel_values(image,
-                                      self.image_size,
-                                      self.min_num,
-                                      self.max_num,
-                                      self.use_thumbnail,
-                                      use_MSAC=self.config.use_msac).to(
-                                          self.dtype) for image in images
+                image_to_pixel_values_h2ovl(
+                    image,
+                    input_size=self.image_size,
+                    min_num=self.min_num,
+                    max_num=self.max_num,
+                    use_thumbnail=self.use_thumbnail,
+                    use_msac=self.use_msac,
+                ) for image in images
             ]
             num_patches_list = [
                 pixel_value.shape[0] for pixel_value in pixel_values
@@ -393,7 +401,6 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         def __init__(self, hf_runner: HfRunner):
             self.num_image_token = hf_runner.model.num_image_token
             self.tokenizer = hf_runner.tokenizer
-            self.dtype = hf_runner.model.dtype
 
             self.config = AutoConfig.from_pretrained(hf_runner.model_name,
                                                      trust_remote_code=True)
@@ -406,13 +413,17 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         def __call__(self, text: str, images: Union[Image, List[Image]],
                      **kwargs):
             from vllm.model_executor.models.internvl import (
-                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values)
+                IMG_CONTEXT, IMG_END, IMG_START,
+                image_to_pixel_values_internvl)
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
-                image_to_pixel_values(image, self.image_size, self.min_num,
-                                      self.max_num,
-                                      self.use_thumbnail).to(self.dtype)
-                for image in images
+                image_to_pixel_values_internvl(
+                    image,
+                    input_size=self.image_size,
+                    min_num=self.min_num,
+                    max_num=self.max_num,
+                    use_thumbnail=self.use_thumbnail,
+                ) for image in images
             ]
             num_patches_list = [
                 pixel_value.shape[0] for pixel_value in pixel_values
@@ -447,7 +458,8 @@ def _internvl_generate(
 ) -> torch.LongTensor:
     """Generate method for InternVL2 model without fixed use_cache."""
     assert self.img_context_token_id is not None
-    vit_embeds = self.extract_feature(pixel_values)
+    target_dtype = next(self.parameters()).dtype
+    vit_embeds = self.extract_feature(pixel_values.to(target_dtype))
     input_embeds = self.language_model.get_input_embeddings()(input_ids)
     B, N, C = input_embeds.shape
     input_embeds = input_embeds.reshape(B * N, C)
@@ -497,74 +509,18 @@ def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
-def _generate_greedy_logprobs_limit(
-    self,
-    prompts: List[str],
-    max_tokens: int,
-    num_logprobs: int,
-    images: Optional[PromptImageInput] = None,
-    audios: Optional[PromptAudioInput] = None,
-    videos: Optional[PromptVideoInput] = None,
-    **kwargs: Any,
-) -> List[TokensTextLogprobs]:
-    all_inputs = self.get_inputs(prompts,
-                                 images=images,
-                                 videos=videos,
-                                 audios=audios)
+def minicpmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    orig_generate = hf_model.model.generate
 
-    # Process in batches for inference.
-    if len(all_inputs):
-        input_ids_lst = []
-        images_lst = []
-        images_input_idx_lst = []
-        imges_masks_lst = []
-        for inputs in all_inputs:
-            input_ids_lst.append(inputs["input_ids"])
-            images_lst.append(inputs["images"])
-            images_input_idx_lst.append(inputs["image_input_idx"])
-            imges_masks_lst.append(inputs["image_masks"])
-        batch_inputs = {}
-        batch_inputs['input_ids'] = torch.cat(input_ids_lst, dim=0)
-        batch_inputs['images'] = torch.cat(images_lst, dim=0)
-        batch_inputs['image_input_idx'] = torch.cat(images_input_idx_lst,
-                                                    dim=0)
-        batch_inputs['image_masks'] = torch.cat(imges_masks_lst, dim=0)
+    def _generate(self, *args, **kwargs):
+        return orig_generate(*args, decode_text=False, **kwargs)
 
-        outputs = self.model.generate_from_batch(
-            batch=self.wrap_device(batch_inputs,
-                                   device=self.model.device.type),
-            generation_config=GenerationConfig(
-                max_new_tokens=max_tokens,
-                stop_strings="<|endoftext|>",
-                do_sample=False,
-            ),
-            tokenizer=self.tokenizer,
-            output_hidden_states=True,
-            return_dict_in_generate=True,
-        )
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 
-    all_logprobs: List[List[Dict[int, float]]] = []
-    all_output_ids: List[List[int]] = []
-    all_output_strs: List[str] = []
-
-    for index in range(len(all_inputs)):
-        (
-            seq_logprobs_lst,
-            output_len,
-        ) = self._hidden_states_to_logprobs(outputs.hidden_states,
-                                            num_logprobs)
-        all_logprobs.append(seq_logprobs_lst)
-        seq_ids = outputs.sequences[index]
-        output_ids = seq_ids[-output_len:]
-        all_output_ids.append(output_ids.tolist())
-        all_output_strs.append(self.tokenizer.decode(output_ids))
-    outputs = zip(all_output_ids, all_output_strs, all_logprobs)
-    return [(output_ids, output_str, output_logprobs)
-            for output_ids, output_str, output_logprobs in outputs]
+    return hf_model
 
 
-####### Molmo-specific HuggingFace runner patchers
-def mlomo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Molmo."""
     hf_processor = hf_model.processor
 
@@ -573,10 +529,23 @@ def mlomo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = _processor
 
-    setattr(  # noqa: B010
-        hf_model,
-        "generate_greedy_logprobs_limit",
-        types.MethodType(_generate_greedy_logprobs_limit, hf_model),
-    )
+    def _generate(self, max_new_tokens=None, do_sample=None, **kwargs):
+        batch = {
+            k: kwargs.pop(k)
+            for k in ("input_ids", "images", "image_input_idx", "image_masks")
+            if k in kwargs
+        }
+
+        return self.generate_from_batch(
+            batch,
+            generation_config=GenerationConfig(
+                max_new_tokens=max_new_tokens,
+                stop_strings="<|endoftext|>",
+                do_sample=do_sample,
+            ),
+            **kwargs,
+        )
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 
     return hf_model

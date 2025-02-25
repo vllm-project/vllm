@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the with and without prefix caching.
 
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
@@ -15,7 +16,7 @@ from vllm.engine.llm_engine import LLMEngine
 from ..models.utils import check_outputs_equal
 
 MODELS = [
-    "facebook/opt-125m",
+    "distilbert/distilgpt2",
 ]
 
 UNSTABLE_PROMPT_SEQUENCE = [

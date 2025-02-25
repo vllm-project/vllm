@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -48,8 +49,7 @@ class Florence2LanguageModel(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 encoder_input_ids: torch.Tensor,
-                encoder_positions: torch.Tensor, kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata) -> torch.Tensor:
+                encoder_positions: torch.Tensor) -> torch.Tensor:
         r"""
         Args:
             input_ids
@@ -62,10 +62,6 @@ class Florence2LanguageModel(nn.Module):
                 Indices of *encoder* input sequence tokens in the vocabulary.
             encoder_positions:
                 Positions of *encoder* input sequence tokens.
-            kv_caches:
-                Layer-wise list of KV cache tensors
-            attn_metadata:
-                vLLM Attention metadata structure
         Returns:
             Model output torch.Tensor
         """
@@ -76,18 +72,14 @@ class Florence2LanguageModel(nn.Module):
             # Run encoder attention if a non-zero number of encoder tokens
             # are provided as input
             encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
-                                                 positions=encoder_positions,
-                                                 kv_caches=kv_caches,
-                                                 attn_metadata=attn_metadata)
+                                                 positions=encoder_positions)
 
         # decoder outputs consists of
         # (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
             decoder_positions=positions,
-            encoder_hidden_states=encoder_hidden_states,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata)
+            encoder_hidden_states=encoder_hidden_states)
 
         return decoder_outputs
 
@@ -120,8 +112,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         positions: torch.Tensor,
         encoder_input_ids: torch.Tensor,
         encoder_positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -134,15 +124,11 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
                 torch.Tensor of *encoder* input token ids.
             encoder_positions
                 torch.Tensor of *encoder* position indices
-            kv_caches:
-                Layer-wise list of KV cache tensors
-            attn_metadata:
-                vLLM Attention metadata structure
         Returns:
             Output torch.Tensor
         """
         return self.model(input_ids, positions, encoder_input_ids,
-                          encoder_positions, kv_caches, attn_metadata)
+                          encoder_positions)
 
     def compute_logits(
         self,
@@ -211,8 +197,6 @@ class Florence2ForConditionalGeneration(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         *,
         encoder_input_ids: torch.Tensor,
@@ -229,15 +213,11 @@ class Florence2ForConditionalGeneration(nn.Module):
                 torch.Tensor of *encoder* input token ids.
             encoder_positions
                 torch.Tensor of *encoder* position indices
-            kv_caches:
-                Layer-wise list of KV cache tensors
-            attn_metadata:
-                vLLM Attention metadata structure
         Returns:
             Output torch.Tensor
         """
         return self.language_model(input_ids, positions, encoder_input_ids,
-                                   encoder_positions, kv_caches, attn_metadata)
+                                   encoder_positions)
 
     def compute_logits(
         self,

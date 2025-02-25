@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import random
 
@@ -22,7 +24,7 @@ for i, v in enumerate(test_sizes):
 
 @ray.remote(num_gpus=1, max_calls=1)
 def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
-    del os.environ["CUDA_VISIBLE_DEVICES"]
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -78,7 +80,7 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
 
 @ray.remote(num_gpus=1, max_calls=1)
 def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
-    del os.environ["CUDA_VISIBLE_DEVICES"]
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,

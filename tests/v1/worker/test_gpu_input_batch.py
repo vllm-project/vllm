@@ -1,4 +1,6 @@
-from typing import Dict, List, Set, Tuple
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pytest
@@ -39,13 +41,15 @@ def _remove_requests(
     for index in req_indices_to_remove:
         input_batch.remove_request(reqs[index].req_id)
         req_ids_to_remove.add(reqs[index].req_id)
-    return (req_ids_to_remove, req_indices_to_remove_list)
+    return req_ids_to_remove, req_indices_to_remove_list
 
 
 def _construct_expected_sampling_metadata(
-        reqs: List[CachedRequestState], req_ids_retained: Set[int],
-        req_id_index_in_input_batch: Dict[str, int],
-        device: torch.device) -> SamplingMetadata:
+    reqs: List[CachedRequestState],
+    req_ids_retained: Set[int],
+    req_id_index_in_input_batch: Dict[str, int],
+    device: torch.device,
+) -> SamplingMetadata:
     """
     Constructs and returns the expected SamplingMetadata for this
     batch.
@@ -58,9 +62,14 @@ def _construct_expected_sampling_metadata(
     repetition_penalties = [1.0 for _ in range(num_reqs)]
     top_k = [0 for _ in range(num_reqs)]
     top_p = [0.0 for _ in range(num_reqs)]
+    min_p = [0.0 for _ in range(num_reqs)]
     temperature = [0.0 for _ in range(num_reqs)]
-    stop_token_ids: List[Set[int]] = [set() for _ in range(num_reqs)]
-    min_tokens = [0 for _ in range(num_reqs)]
+    min_tokens = {}
+    logit_bias = [None] * num_reqs
+    allowed_token_ids_mask = torch.zeros(num_reqs,
+                                         VOCAB_SIZE,
+                                         dtype=torch.bool,
+                                         device=device)
     for req in reqs:
         if req.req_id not in req_ids_retained:
             continue
@@ -69,63 +78,75 @@ def _construct_expected_sampling_metadata(
         prompt_token_ids[index_in_input_batch] = req.prompt_token_ids
         presence_penalties[
             index_in_input_batch] = req.sampling_params.presence_penalty
-        frequency_penalties[
-            index_in_input_batch] = req.sampling_params.frequency_penalty
-        repetition_penalties[
-            index_in_input_batch] = req.sampling_params.repetition_penalty
+        frequency_penalties[index_in_input_batch] = (
+            req.sampling_params.frequency_penalty)
+        repetition_penalties[index_in_input_batch] = (
+            req.sampling_params.repetition_penalty)
         top_k[index_in_input_batch] = req.sampling_params.top_k
         top_p[index_in_input_batch] = req.sampling_params.top_p
+        min_p[index_in_input_batch] = req.sampling_params.min_p
         temperature[index_in_input_batch] = req.sampling_params.temperature
-        stop_token_ids[
-            index_in_input_batch] = req.sampling_params.all_stop_token_ids
-        min_tokens[index_in_input_batch] = req.sampling_params.min_tokens
-
+        min_tokens[index_in_input_batch] = (
+            req.sampling_params.min_tokens,
+            req.sampling_params.all_stop_token_ids)
+        logit_bias[index_in_input_batch] = req.sampling_params.logit_bias
+        if req.sampling_params.allowed_token_ids:
+            allowed_token_ids_mask[index_in_input_batch][
+                req.sampling_params.allowed_token_ids] = True
 
     return SamplingMetadata(
-        temperature=torch.tensor(temperature, dtype=torch.float, device=device),
+        temperature=torch.tensor(temperature, dtype=torch.float,
+                                 device=device),
         all_greedy=False,
         all_random=True,
-        top_p=torch.tensor(top_p, dtype=torch.float, device=device),
-        top_k=torch.tensor(top_k, dtype=torch.int, device=device),
-        no_top_p=all(x == 1.0 for x in top_p),
-        no_top_k=all(x == 0 for x in top_k),
+        top_p=None if all(x == 1.0 for x in top_p) else torch.tensor(
+            top_p, dtype=torch.float, device=device),
+        top_k=None if all(x == 0 for x in top_k) else torch.tensor(
+            top_k, dtype=torch.int, device=device),
+        min_p=None if all(x == 0.0 for x in min_p) else torch.tensor(
+            min_p, dtype=torch.float, device=device),
         generators={},
         max_num_logprobs=0,
-        prompt_token_ids= make_tensor_with_pad(
+        prompt_token_ids=make_tensor_with_pad(
             prompt_token_ids,
             pad=VOCAB_SIZE,
             device=torch.device(device),
             dtype=torch.int64,
         ),
-        frequency_penalties=torch.tensor(
-            frequency_penalties, dtype=torch.float,
-            device=device),
-        presence_penalties=torch.tensor(
-            presence_penalties, dtype=torch.float,
-            device=device),
-        repetition_penalties=torch.tensor(
-            repetition_penalties, dtype=torch.float,
-            device=device),
+        frequency_penalties=torch.tensor(frequency_penalties,
+                                         dtype=torch.float,
+                                         device=device),
+        presence_penalties=torch.tensor(presence_penalties,
+                                        dtype=torch.float,
+                                        device=device),
+        repetition_penalties=torch.tensor(repetition_penalties,
+                                          dtype=torch.float,
+                                          device=device),
         output_token_ids=output_token_ids,
+        spec_token_ids=None,
         min_tokens=min_tokens,
-        stop_token_ids=stop_token_ids,
-        no_penalties=(all(x ==0 for x in presence_penalties) and \
-            all(x ==0 for x in frequency_penalties) and \
-                all(x ==1 for x in repetition_penalties))
+        no_penalties=(all(x == 0 for x in presence_penalties)
+                      and all(x == 0 for x in frequency_penalties)
+                      and all(x == 1 for x in repetition_penalties)),
+        logit_bias=logit_bias,
+        allowed_token_ids_mask=allowed_token_ids_mask,
     )
 
 
 def _create_sampling_params():
-    return SamplingParams(top_k=np.random.randint(1, 10),
-                          top_p=np.random.uniform(0.0, 1.0),
-                          presence_penalty=np.random.uniform(-2.0, 2.0),
-                          repetition_penalty=np.random.uniform(0.0, 2.0),
-                          frequency_penalty=np.random.uniform(-2.0, 2.0),
-                          min_tokens=np.random.randint(1, 10),
-                          stop_token_ids=[
-                              np.random.randint(0, VOCAB_SIZE)
-                              for _ in range(np.random.randint(10))
-                          ])
+    return SamplingParams(
+        top_k=np.random.randint(1, 10),
+        top_p=np.random.uniform(0.0, 1.0),
+        presence_penalty=np.random.uniform(-2.0, 2.0),
+        repetition_penalty=np.random.uniform(0.0, 2.0),
+        frequency_penalty=np.random.uniform(-2.0, 2.0),
+        min_tokens=np.random.randint(1, 10),
+        stop_token_ids=[
+            np.random.randint(0, VOCAB_SIZE)
+            for _ in range(np.random.randint(10))
+        ],
+        logit_bias={0: np.random.uniform(-3.0, 3.0)},
+    )
 
 
 def _construct_cached_request_state(req_id_suffix: int):
@@ -137,16 +158,18 @@ def _construct_cached_request_state(req_id_suffix: int):
         np.random.randint(0, VOCAB_SIZE)
         for _ in range(np.random.randint(0, NUM_OUTPUT_TOKENS))
     ]
-    return CachedRequestState(req_id=f"req_id_{req_id_suffix}",
-                              prompt_token_ids=prompt_token_ids,
-                              prompt=None,
-                              sampling_params=_create_sampling_params(),
-                              mm_inputs=[],
-                              mm_positions=[],
-                              block_ids=[],
-                              generator=None,
-                              num_computed_tokens=len(output_token_ids),
-                              output_token_ids=output_token_ids)
+    return CachedRequestState(
+        req_id=f"req_id_{req_id_suffix}",
+        prompt_token_ids=prompt_token_ids,
+        prompt=None,
+        sampling_params=_create_sampling_params(),
+        mm_inputs=[],
+        mm_positions=[],
+        block_ids=[],
+        generator=None,
+        num_computed_tokens=len(output_token_ids),
+        output_token_ids=output_token_ids,
+    )
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -161,12 +184,14 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     output of `make_sampling_metadata` is then compared against the expected
     results to ensure correctness.
     """
-    input_batch: InputBatch = InputBatch(max_num_reqs=batch_size,
-                                         max_model_len=1024,
-                                         max_num_blocks_per_req=10,
-                                         device=torch.device(device),
-                                         pin_memory=is_pin_memory_available(),
-                                         vocab_size=1024)
+    input_batch: InputBatch = InputBatch(
+        max_num_reqs=batch_size,
+        max_model_len=1024,
+        max_num_blocks_per_req=10,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=1024,
+    )
     reqs: List[CachedRequestState] = []
     req_id_reqs = {}
     req_id_output_token_ids = {}
@@ -187,8 +212,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     input_batch.condense(req_indices_to_remove)
 
     # Generate the sampling metadata
-    sampling_metadata = input_batch.make_sampling_metadata(
-        req_id_output_token_ids, skip_copy=False)
+    sampling_metadata = input_batch._make_sampling_metadata()
 
     # Create expected output.
     expected_sampling_metadata = _construct_expected_sampling_metadata(
@@ -197,28 +221,37 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         input_batch.req_id_to_index,
         device=torch.device(device))
 
+    def same(t1: Optional[torch.Tensor], t2: Optional[torch.Tensor]) -> bool:
+        return (t1 is None
+                and t2 is None) or (t1 is not None and t2 is not None
+                                    and torch.allclose(t1, t2))
+
     # Assert the actual and expected output.
     assert torch.allclose(expected_sampling_metadata.temperature,
                           sampling_metadata.temperature)
-    assert torch.allclose(expected_sampling_metadata.top_p,
-                          sampling_metadata.top_p)
-    assert torch.allclose(expected_sampling_metadata.top_k,
-                          sampling_metadata.top_k)
-    assert torch.allclose(expected_sampling_metadata.frequency_penalties,
-                          sampling_metadata.frequency_penalties)
-    assert torch.allclose(expected_sampling_metadata.presence_penalties,
-                          sampling_metadata.presence_penalties)
-    assert torch.allclose(expected_sampling_metadata.repetition_penalties,
-                          sampling_metadata.repetition_penalties)
+    assert same(expected_sampling_metadata.top_p, sampling_metadata.top_p)
+    assert same(expected_sampling_metadata.top_k, sampling_metadata.top_k)
+    assert torch.allclose(
+        expected_sampling_metadata.frequency_penalties,
+        sampling_metadata.frequency_penalties,
+    )
+    assert torch.allclose(
+        expected_sampling_metadata.presence_penalties,
+        sampling_metadata.presence_penalties,
+    )
+    assert torch.allclose(
+        expected_sampling_metadata.repetition_penalties,
+        sampling_metadata.repetition_penalties,
+    )
     assert torch.allclose(expected_sampling_metadata.prompt_token_ids,
                           sampling_metadata.prompt_token_ids)
     assert (expected_sampling_metadata.output_token_ids ==
             sampling_metadata.output_token_ids)
-    assert (
-        expected_sampling_metadata.min_tokens == sampling_metadata.min_tokens)
-    assert (expected_sampling_metadata.stop_token_ids ==
-            sampling_metadata.stop_token_ids)
-    assert (expected_sampling_metadata.no_penalties ==
-            sampling_metadata.no_penalties)
-    assert (expected_sampling_metadata.no_top_p == sampling_metadata.no_top_p)
-    assert (expected_sampling_metadata.no_top_k == sampling_metadata.no_top_k)
+    assert expected_sampling_metadata.min_tokens == sampling_metadata.min_tokens
+    assert expected_sampling_metadata.no_penalties == \
+           sampling_metadata.no_penalties
+    assert expected_sampling_metadata.logit_bias == sampling_metadata.logit_bias
+    if sampling_metadata.allowed_token_ids_mask:
+        assert torch.allclose(
+            expected_sampling_metadata.allowed_token_ids_mask,
+            sampling_metadata.allowed_token_ids_mask)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import TYPE_CHECKING, Dict, List, Set, Tuple
 
 from vllm.logger import init_logger
@@ -38,7 +40,8 @@ class EncoderCacheManager:
     def get_cached_input_ids(self, request: Request) -> Set[int]:
         return self.cached.get(request.request_id, set())
 
-    def free(self, request: Request, input_id: int) -> None:
+    def free_encoder_input(self, request: Request, input_id: int) -> None:
+        """Free a single encoder input id for the request."""
         req_id = request.request_id
         if req_id not in self.cached:
             return
@@ -48,6 +51,12 @@ class EncoderCacheManager:
             del self.cached[req_id]
         self.num_free_slots += request.get_num_encoder_tokens(input_id)
         self.freed.append((req_id, input_id))
+
+    def free(self, request: Request) -> None:
+        """Free all cached input ids for the request."""
+        input_ids = self.get_cached_input_ids(request).copy()
+        for input_id in input_ids:
+            self.free_encoder_input(request, input_id)
 
     def get_freed_ids(self) -> List[Tuple[str, int]]:
         freed = self.freed

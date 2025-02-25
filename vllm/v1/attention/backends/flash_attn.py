@@ -1,21 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
-import triton
-import triton.language as tl
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.envs import VLLM_FLASH_ATTN_VERSION
+from vllm.attention.backends.utils import get_flash_attn_version
+from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
-                                  flash_attn_varlen_func,
-                                  is_fa_version_supported)
+
+if current_platform.is_cuda():
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 logger = init_logger(__name__)
 
@@ -134,25 +134,7 @@ class FlashAttentionImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "FlashAttentionImpl")
-
-        # if hopper default to FA3, otherwise stick to FA2 for now
-        # TODO(lucas): profile FA3 on ampere to see if it makes sense to
-        #  use FA3 as default for both
-        if current_platform.get_device_capability()[0] >= 9:
-            self.fa_version = 3 if is_fa_version_supported(3) else 2
-        else:
-            self.fa_version = 2
-
-        if VLLM_FLASH_ATTN_VERSION is not None:
-            assert VLLM_FLASH_ATTN_VERSION in [2, 3]
-            self.fa_version = VLLM_FLASH_ATTN_VERSION
-
-        if not is_fa_version_supported(self.fa_version):
-            logger.error("Cannot use FA version %d is not supported due to %s",
-                         self.fa_version,
-                         fa_version_unsupported_reason(self.fa_version))
-
-        assert is_fa_version_supported(self.fa_version)
+        self.vllm_flash_attn_version = get_flash_attn_version()
 
     def forward(
         self,
@@ -226,7 +208,7 @@ class FlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 block_table=attn_metadata.block_table,
                 softcap=self.logits_soft_cap,
-                fa_version=self.fa_version,
+                fa_version=self.vllm_flash_attn_version,
             )
             return output
 
@@ -248,7 +230,7 @@ class FlashAttentionImpl(AttentionImpl):
             logits_soft_cap=self.logits_soft_cap,
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
-            fa_version=self.fa_version,
+            fa_version=self.vllm_flash_attn_version,
         )
         return output
 
@@ -390,69 +372,3 @@ def cascade_attention(
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
                       suffix_lse)
-
-
-def merge_attn_states(
-    output: torch.Tensor,
-    prefix_output: torch.Tensor,
-    prefix_lse: torch.Tensor,
-    suffix_output: torch.Tensor,
-    suffix_lse: torch.Tensor,
-) -> None:
-    num_tokens = output.shape[0]
-    num_query_heads = output.shape[1]
-    head_size = output.shape[2]
-    padded_head_size = triton.next_power_of_2(head_size)
-
-    # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
-    merge_attn_states_kernel[(num_tokens, num_query_heads)](
-        output,
-        prefix_output,
-        prefix_lse,
-        suffix_output,
-        suffix_lse,
-        head_size,
-        padded_head_size,
-    )
-
-
-@triton.jit
-def merge_attn_states_kernel(
-    output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    prefix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    prefix_lse,  # [NUM_HEADS, NUM_TOKENS]
-    suffix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    suffix_lse,  # [NUM_HEADS, NUM_TOKENS]
-    HEAD_SIZE: tl.constexpr,
-    PADDED_HEAD_SIZE: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    num_tokens = tl.num_programs(0)
-    head_idx = tl.program_id(1)
-    num_heads = tl.num_programs(1)
-
-    p_lse = tl.load(prefix_lse + head_idx * num_tokens + token_idx)
-    s_lse = tl.load(suffix_lse + head_idx * num_tokens + token_idx)
-    max_lse = tl.maximum(p_lse, s_lse)
-    p_lse = p_lse - max_lse
-    s_lse = s_lse - max_lse
-
-    head_arange = tl.arange(0, PADDED_HEAD_SIZE)
-    head_mask = head_arange < HEAD_SIZE
-    p_out = tl.load(prefix_output + token_idx * num_heads * HEAD_SIZE +
-                    head_idx * HEAD_SIZE + head_arange,
-                    mask=head_mask)
-    s_out = tl.load(suffix_output + token_idx * num_heads * HEAD_SIZE +
-                    head_idx * HEAD_SIZE + head_arange,
-                    mask=head_mask)
-
-    # NOTE(woosuk): Be careful with the numerical stability.
-    # We should compute the scale first, and then multiply it with the output.
-    # Do not multiply the output with tl.exp(p_lse) or tl.exp(s_lse) directly.
-    p_scale = tl.exp(p_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
-    s_scale = tl.exp(s_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
-    out = p_out * p_scale + s_out * s_scale
-    tl.store(output + token_idx * num_heads * HEAD_SIZE +
-             head_idx * HEAD_SIZE + head_arange,
-             out,
-             mask=head_mask)

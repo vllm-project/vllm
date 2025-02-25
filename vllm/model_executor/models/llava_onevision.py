@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
@@ -11,7 +13,6 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
     get_anyres_image_grid_shape, unpad_image)
 from typing_extensions import NotRequired
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -95,13 +96,17 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     def get_hf_config(self) -> LlavaOnevisionLikeConfig:
         return self.ctx.get_hf_config(LlavaOnevisionConfig)
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(LlavaOnevisionProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(LlavaOnevisionProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {
             "image": self.get_max_image_tokens(),
             "video": self.get_max_video_tokens(seq_len),
@@ -293,35 +298,68 @@ class LlavaOnevisionMultiModalProcessor(
                 mm_kwargs=mm_kwargs,
             )
 
-        processor = self.info.get_hf_processor()
-        video_token = processor.video_token
-
         # LLaVA-OneVision processor doesn't support multiple videos
         # with different sizes when converting back to tensors
-        text_image_outputs = super()._call_hf_processor(
+        # So, we process each component separately
+        # NOTE: No prompt replacement is applied in this case
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+        video_token = processor.video_token
+
+        text_outputs = super()._call_hf_processor(
             prompt=prompt,
-            mm_data=mm_data,
+            mm_data={},
             mm_kwargs=mm_kwargs,
         )
 
+        images = mm_data.pop("images", [])
+        assert isinstance(images, list)
+        if images:
+            processor_outputs = super()._call_hf_processor(
+                prompt=image_token * len(images),
+                mm_data={"images": images},
+                mm_kwargs=mm_kwargs,
+            )
+            image_outputs = {
+                k: v
+                for k, v in processor_outputs.items()
+                if k in ("pixel_values", "image_sizes")
+            }
+        else:
+            image_outputs = {}
+
         pixel_values_videos = []
         for video in videos:
-            item_processor_data = dict(prompt=video_token, videos=video)
-
             item_outputs = super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=item_processor_data,
+                prompt=video_token,
+                mm_data={"videos": video},
                 mm_kwargs=mm_kwargs,
             )
 
-            pixel_values_videos.append(
-                item_outputs.pop("pixel_values_videos")[0])
+            pixel_values_videos.append(item_outputs["pixel_values_videos"][0])
+
+        video_outputs = {"pixel_values_videos": pixel_values_videos}
 
         combined_outputs = dict(
-            **text_image_outputs,
-            pixel_values_videos=pixel_values_videos,
+            text_outputs,
+            **image_outputs,
+            **video_outputs,
         )
         return BatchFeature(combined_outputs)
+
+    def _hf_processor_applies_repl(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        base_result = super()._hf_processor_applies_repl(
+            prompt_text=prompt_text,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return base_result and mm_items.get_count("video", strict=False) == 0
 
     def _get_prompt_replacements(
         self,
@@ -370,11 +408,11 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
 
         self.linear_1 = nn.Linear(config.vision_config.hidden_size,
                                   config.text_config.hidden_size,
-                                  bias=True)
+                                  bias=config.multimodal_projector_bias)
         self.act = get_act_fn(config.projector_hidden_act)
         self.linear_2 = nn.Linear(config.text_config.hidden_size,
                                   config.text_config.hidden_size,
-                                  bias=True)
+                                  bias=config.multimodal_projector_bias)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
@@ -883,8 +921,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -916,8 +952,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 

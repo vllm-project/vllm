@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import pathlib
 from dataclasses import dataclass
@@ -93,7 +95,7 @@ class OpenAIServingModels:
             if isinstance(load_result, ErrorResponse):
                 raise ValueError(load_result.message)
 
-    def is_base_model(self, model_name):
+    def is_base_model(self, model_name) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
 
     def model_name(self, lora_request: Optional[LoRARequest] = None) -> str:
@@ -203,7 +205,7 @@ class OpenAIServingModels:
                for lora_request in self.lora_requests):
             return create_error_response(
                 message=
-                f"The lora adapter '{request.lora_name}' has already been"
+                f"The lora adapter '{request.lora_name}' has already been "
                 "loaded.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST)

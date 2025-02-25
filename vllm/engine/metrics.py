@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
@@ -6,9 +8,8 @@ from typing import Dict, List, Optional, Type, Union, cast
 import numpy as np
 import prometheus_client
 
-from vllm.config import VllmConfig
-from vllm.engine.metrics_types import (StatLoggerBase, Stats,
-                                       SupportsMetricsInfo)
+from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
 
@@ -235,7 +236,7 @@ class Metrics:
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + [Metrics.labelname_finish_reason])
 
-        # Speculatie decoding stats
+        # Speculative decoding stats
         self.gauge_spec_decode_draft_acceptance_rate = self._gauge_cls(
             name="vllm:spec_decode_draft_acceptance_rate",
             documentation="Speulative token acceptance rate.",
@@ -514,6 +515,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.labels = labels
         self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
                                          vllm_config=vllm_config)
+
+        # Use this flag to hide metrics that were deprecated in
+        # a previous release and which will be removed future
+        self.show_hidden_metrics = \
+            vllm_config.observability_config.show_hidden_metrics
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.

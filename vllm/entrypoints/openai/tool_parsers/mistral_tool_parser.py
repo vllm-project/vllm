@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import re
 from random import choices
@@ -31,7 +33,7 @@ class MistralToolCall(ToolCall):
 
     @staticmethod
     def generate_random_id():
-        # Mistral Tool Call Ids must be alphanumeric with a maximum length of 9.
+        # Mistral Tool Call Ids must be alphanumeric with a length of 9.
         # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
         return "".join(choices(ALPHANUMERIC, k=9))
 

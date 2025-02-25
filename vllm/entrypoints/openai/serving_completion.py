@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import time
 from typing import AsyncGenerator, AsyncIterator, Dict, List, Optional
@@ -164,7 +166,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        model_name = self.models.model_name(lora_request)
+        model_name = self._get_model_name(request.model, lora_request)
         num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the

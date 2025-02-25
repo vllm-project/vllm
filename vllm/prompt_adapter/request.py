@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import msgspec
 
 from vllm.adapter_commons.request import AdapterRequest

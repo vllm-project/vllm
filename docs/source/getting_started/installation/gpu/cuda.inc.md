@@ -10,9 +10,9 @@ vLLM contains pre-compiled C++ and CUDA (12.1) binaries.
 
 ### Create a new Python environment
 
-```{note}
+:::{note}
 PyTorch installed via `conda` will statically link `NCCL` library, which can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
-```
+:::
 
 In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
 
@@ -89,21 +89,31 @@ cd vllm
 VLLM_USE_PRECOMPILED=1 pip install --editable .
 ```
 
-This will download the [latest nightly wheel](https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl) and use the compiled libraries from there in the installation.
+This command will do the following:
+1. Look for the current branch in your vLLM clone.
+2. Identify the corresponding base commit in the main branch.
+3. Download the pre-built wheel of the base commit.
+4. Use its compiled libraries in the installation.
 
-The `VLLM_PRECOMPILED_WHEEL_LOCATION` environment variable can be used instead of `VLLM_USE_PRECOMPILED` to specify a custom path or URL to the wheel file. For example, to use the [0.6.1.post1 PyPi wheel](https://pypi.org/project/vllm/#files):
+:::{note}
+1. If you change C++ or kernel code, you cannot use Python-only build; otherwise you will see an import error about library not found or undefined symbol.
+2. If you rebase your dev branch, it is recommended to uninstall vllm and re-run the above command to make sure your libraries are up to date.
+:::
+
+In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the main branch was just merged and the wheel is being built. In this case, you can wait for around an hour to try again, or manually assign the previous commit in the installation using the `VLLM_PRECOMPILED_WHEEL_LOCATION` environment variable.
 
 ```console
-export VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/4a/4c/ee65ba33467a4c0de350ce29fbae39b9d0e7fcd887cc756fa993654d1228/vllm-0.6.3.post1-cp38-abi3-manylinux1_x86_64.whl
+export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
+export VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 pip install --editable .
 ```
 
 You can find more information about vLLM's wheels in <project:#install-the-latest-code>.
 
-```{note}
+:::{note}
 There is a possibility that your source code may have a different commit ID compared to the latest vLLM wheel, which could potentially lead to unknown errors.
 It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to <project:#install-the-latest-code> for instructions on how to install a specified wheel.
-```
+:::
 
 #### Full build (with compilation)
 
@@ -115,7 +125,7 @@ cd vllm
 pip install -e .
 ```
 
-```{tip}
+:::{tip}
 Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
 
 For example, you can install [ccache](https://github.com/ccache/ccache) using `conda install ccache` or `apt install ccache` .
@@ -123,7 +133,7 @@ As long as `which ccache` command can find the `ccache` binary, it will be used 
 
 [sccache](https://github.com/mozilla/sccache) works similarly to `ccache`, but has the capability to utilize caching in remote storage environments.
 The following environment variables can be set to configure the vLLM `sccache` remote: `SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1`. We also recommend setting `SCCACHE_IDLE_TIMEOUT=0`.
-```
+:::
 
 ##### Use an existing PyTorch installation
 

@@ -12,8 +12,42 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "vllm"
+authors = [{name = "vLLM Team"}]
+license = { "file"= "LICENSE" }
+readme = "README.md"
+description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
+classifiers = [
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+requires-python = ">=3.9"
+dynamic = [ "version", "dependencies", "optional-dependencies"]
+
+[project.urls]
+Homepage="https://github.com/vllm-project/vllm"
+Documentation="https://vllm.readthedocs.io/en/latest/"
+Slack="http://slack.vllm.ai/"
+
+[project.scripts]
+vllm = "vllm.entrypoints.cli.main:main"
+
 [tool.setuptools_scm]
-# version_file = "vllm/_version.py" # currently handled by `setup.py:get_version()`
+# no extra settings needed, presence enables setuptools-scm
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["benchmarks", "csrc", "docs", "examples", "tests*"]
+namespaces = false
 
 [tool.yapfignore]
 ignore_patterns = [
@@ -59,7 +93,8 @@ ignore = [
     "UP032",
     # Python 3.8 typing
     "UP006", "UP035",
-
+    # Can remove once 3.10+ is the minimum Python version
+    "UP007",
 ]
 
 [tool.mypy]
@@ -92,7 +127,7 @@ exclude = [
 
 [tool.codespell]
 ignore-words-list = "dout, te, indicies, subtile, ElementE"
-skip = "./tests/models/fixtures,./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
+skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build/*,vllm/third_party/*"
 
 [tool.isort]
 use_parentheses = true
@@ -111,6 +146,7 @@ markers = [
 ]
 
 [tool.pymarkdown]
+plugins.md004.style = "sublist" # ul-style
 plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html

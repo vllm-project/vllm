@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Make sure bad_words works.
 
 Run `pytest tests/samplers/test_no_bad_words.py`.
@@ -75,7 +76,7 @@ class TestOneTokenBadWord:
 
 class TestTwoTokenBadWord:
     # Another model (with a different tokenizer behaviour)
-    MODEL = "openai-community/gpt2"
+    MODEL = "distilbert/distilgpt2"
 
     PROMPT = "How old are you? I am 10"
     TARGET_TOKEN1 = "years"

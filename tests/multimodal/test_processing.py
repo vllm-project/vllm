@@ -1,9 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from contextlib import nullcontext
+from types import MethodType
 from typing import cast
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from transformers import ProcessorMixin
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -18,8 +22,8 @@ from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
                                         replace_token_matches)
 # yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
-from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               cached_tokenizer_from_config)
 from vllm.utils import full_groupby
 
 from .utils import random_image
@@ -572,7 +576,7 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
 
     processor = MULTIMODAL_REGISTRY.create_processor(
         model_config,
-        tokenizer=cached_get_tokenizer(model_config.tokenizer),
+        tokenizer=cached_tokenizer_from_config(model_config),
     )
     profiler = MultiModalProfiler(processor)
 
@@ -611,7 +615,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
 
     processor = MULTIMODAL_REGISTRY.create_processor(
         model_config,
-        tokenizer=cached_get_tokenizer(model_config.tokenizer),
+        tokenizer=cached_tokenizer_from_config(model_config),
     )
 
     rng = np.random.RandomState(0)
@@ -634,3 +638,70 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
             mm_data=mm_data,
             hf_processor_mm_kwargs={},
         )
+
+
+class _ProcessorProxy:
+
+    def __init__(self, processor: ProcessorMixin) -> None:
+        super().__init__()
+
+        self.__processor = processor
+
+    def __getattr__(self, key: str):
+        return getattr(self.__processor, key)
+
+    def __call__(
+        self,
+        text=None,
+        images=None,
+        videos=None,
+        exists=None,
+        return_tensors=None,
+    ):
+        return dict(exists=exists)
+
+
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
+# yapf: disable
+@pytest.mark.parametrize(
+    ("call_kwargs", "expected_kwargs"),
+    [
+        # Should ignore invalid kwargs
+        ({"does_not_exist": 100}, {"exists": None}),
+        ({"exists": 1}, {"exists": 1}),
+        ({"does_not_exist": 100, "exists": 1}, {"exists": 1}),
+    ],
+)
+# yapf: enable
+def test_hf_processor_kwargs(model_id, call_kwargs, expected_kwargs):
+    model_config = ModelConfig(
+        model=model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="half",
+        revision=None,
+    )
+
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
+    orig_get_hf_processor = processor.info.get_hf_processor
+
+    def get_hf_processor(self, **kwargs):
+        assert kwargs == call_kwargs
+        return _ProcessorProxy(orig_get_hf_processor())
+
+    processor.info.get_hf_processor = MethodType(get_hf_processor,
+                                                 processor.info)
+
+    out_kwargs = processor._call_hf_processor(
+        prompt="",
+        mm_data={},
+        mm_kwargs=call_kwargs,
+    )
+
+    assert out_kwargs == expected_kwargs

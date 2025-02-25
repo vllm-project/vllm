@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List
 
 import pytest
@@ -9,17 +11,20 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 
 # Provide absolute path and huggingface lora ids
 lora_fixture_name = ["sql_lora_files", "sql_lora_huggingface_id"]
+LLAMA_LORA_MODULES = [
+    "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
+    "lm_head"
+]
 
 
 @pytest.mark.parametrize("lora_fixture_name", lora_fixture_name)
 def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
     lora_name = request.getfixturevalue(lora_fixture_name)
-    supported_lora_modules = LlamaForCausalLM.supported_lora_modules
     packed_modules_mapping = LlamaForCausalLM.packed_modules_mapping
     embedding_modules = LlamaForCausalLM.embedding_modules
     embed_padding_modules = LlamaForCausalLM.embedding_padding_modules
     expected_lora_modules: List[str] = []
-    for module in supported_lora_modules:
+    for module in LLAMA_LORA_MODULES:
         if module in packed_modules_mapping:
             expected_lora_modules.extend(packed_modules_mapping[module])
         else:

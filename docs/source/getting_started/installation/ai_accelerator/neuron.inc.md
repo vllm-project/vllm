@@ -4,6 +4,10 @@ vLLM 0.3.3 onwards supports model inferencing and serving on AWS Trainium/Infere
 Paged Attention and Chunked Prefill are currently in development and will be available soon.
 Data types currently supported in Neuron SDK are FP16 and BF16.
 
+:::{attention}
+There are no pre-built wheels or images for this device, so you must build vLLM from source.
+:::
+
 ## Requirements
 
 - OS: Linux
@@ -67,9 +71,9 @@ Currently, there are no pre-built Neuron wheels.
 
 ### Build wheel from source
 
-```{note}
+:::{note}
 The currently supported version of Pytorch for Neuron installs `triton` version `2.1.0`. This is incompatible with `vllm >= 0.5.3`. You may see an error `cannot import name 'default_dump_dir...`. To work around this, run a `pip install --upgrade triton==3.0.0` after installing the vLLM wheel.
-```
+:::
 
 Following instructions are applicable to Neuron SDK 2.16 and beyond.
 

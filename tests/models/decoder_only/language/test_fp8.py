@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # flake8: noqa
 """Tests fp8 models against ground truth generation
 Note: these tests will only pass on L4 GPU.
@@ -24,12 +26,12 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
         # Test FP8 checkpoint w. fp8_e4m3 kv-cache scaling factors.
         ("fp8_e4m3", "meta-llama/Llama-3.2-1B-Instruct",
          "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"),
-        # Test FP16 checkpoint w. fp8_e5m2 kv-cache.
+        # Test BF16 checkpoint w. fp8_e5m2 kv-cache.
         ("fp8_e5m2", "meta-llama/Llama-3.2-1B-Instruct",
          "meta-llama/Llama-3.2-1B-Instruct"),
-        # Test FP16 checkpoint w. fp8_e4m3 kv-cache scaling factors in json.
-        ("fp8_e4m3", "meta-llama/Llama-2-7b-chat-hf",
-         "meta-llama/Llama-2-7b-chat-hf")
+        # Test BF16 checkpoint w. fp8_e4m3 kv-cache scaling factors in json.
+        ("fp8_e4m3", "meta-llama/Llama-3.2-1B-Instruct",
+         "meta-llama/Llama-3.2-1B-Instruct")
     ])
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])

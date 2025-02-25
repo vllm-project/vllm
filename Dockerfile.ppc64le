@@ -4,12 +4,12 @@ USER root
 
 ENV PATH="/usr/local/cargo/bin:$PATH:/opt/conda/bin/"
 
-RUN apt-get update -y && apt-get install -y git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential ffmpeg libsm6 libxext6 libgl1 libssl-dev 
+RUN apt-get update -y && apt-get install -y git wget kmod curl vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential ffmpeg libsm6 libxext6 libgl1 libssl-dev 
 
 # Some packages in requirements-cpu are installed here
 # IBM provides optimized packages for ppc64le processors in the open-ce project for mamba
 # Currently these may not be available for venv or pip directly
-RUN micromamba install -y -n base -c https://ftp.osuosl.org/pub/open-ce/1.11.0-p10/ -c defaults python=3.10 torchvision-cpu=0.16.2 rust && micromamba clean --all --yes
+RUN micromamba install -y -n base -c https://ftp.osuosl.org/pub/open-ce/1.11.0-p10/ -c defaults python=3.10 rust && micromamba clean --all --yes
 
 COPY ./ /workspace/vllm
 
@@ -21,7 +21,6 @@ RUN --mount=type=bind,source=.git,target=.git \
 RUN --mount=type=cache,target=/root/.cache/pip  \
     RUSTFLAGS='-L /opt/conda/lib' pip install -v --prefer-binary --extra-index-url https://repo.fury.io/mgiessing \
         'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
-        torch==2.3.1 \
         -r requirements-cpu.txt \
         xformers uvloop==0.20.0
 

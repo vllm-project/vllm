@@ -1,9 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Tuple
 
 import numpy
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -115,7 +118,7 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
             and input_size_per_partition % group_size != 0):
         raise ValueError(
             f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}."
+            f" is not divisible by group_size = {group_size}. "
             "Consider reducing tensor_parallel_size or running "
             "with --quantization gptq.")
 
@@ -131,6 +134,20 @@ def check_marlin_supports_shape(output_size_per_partition: int,
     except ValueError as e:
         return False, e.__str__()
     return True, None
+
+
+def check_marlin_supports_layer(layer: LinearBase, group_size: int) \
+                                    -> bool:
+    output_size_per_partition = getattr(layer, "output_size_per_partition",
+                                        None) or layer.output_size
+    input_size_per_partition = getattr(layer, "input_size_per_partition",
+                                       None) or layer.input_size
+
+    return check_marlin_supports_shape(
+        output_size_per_partition=output_size_per_partition,
+        input_size_per_partition=input_size_per_partition,
+        input_size=layer.input_size,
+        group_size=group_size)[0]
 
 
 def marlin_make_workspace(output_size_per_partition: int,

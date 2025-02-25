@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from typing import Mapping, Optional, Union
 
@@ -15,7 +17,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 
 
 class Processor:
@@ -31,6 +33,7 @@ class Processor:
     ):
 
         self.model_config = model_config
+        self.cache_config = cache_config
         self.lora_config = lora_config
         self.tokenizer = tokenizer
 
@@ -43,11 +46,55 @@ class Processor:
             model_config)
 
         # Multi-modal (huggingface) input mapper
-        self.mm_input_mapper_client = MMInputMapperClient(model_config)
+        self.mm_input_cache_client = MMInputCacheClient(model_config)
 
         # Multi-modal hasher (for images)
         self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
             cache_config.enable_prefix_caching
+
+    def _validate_logprobs(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+    ) -> None:
+        if not isinstance(params, SamplingParams):
+            return
+
+        max_logprobs = self.model_config.max_logprobs
+        # Validate sample logprobs.
+        if params.logprobs and params.logprobs > max_logprobs:
+            raise ValueError(
+                f"Requested sample logprobs of {params.logprobs}, "
+                f"which is greater than max allowed: {max_logprobs}")
+
+        # Validate prompt logprobs.
+        if params.prompt_logprobs and params.prompt_logprobs > max_logprobs:
+            raise ValueError(
+                f"Requested prompt logprobs of {params.prompt_logprobs}, "
+                f"which is greater than max allowed: {max_logprobs}")
+
+        # TODO(andy): enable this in follow up by recomputing.
+        if (params.prompt_logprobs is not None
+                and self.cache_config.enable_prefix_caching):
+            raise ValueError("Prefix caching with prompt logprobs not yet "
+                             "supported on VLLM V1.")
+
+    def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
+        if lora_request is not None and not self.lora_config:
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
+
+    def _validate_allowed_token_ids(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+    ) -> None:
+        if not isinstance(params, SamplingParams):
+            return
+        if params.allowed_token_ids is None:
+            return
+        if not all(0 <= tid < self.model_config.vocab_size
+                   for tid in params.allowed_token_ids):
+            raise ValueError(
+                "allowed_token_ids contains out-of-vocab token id")
 
     def process_inputs(
         self,
@@ -62,27 +109,35 @@ class Processor:
     ) -> EngineCoreRequest:
 
         # TODO(woosuk): Support pooling models.
-        # TODO(woosuk): Check max_logprobs
         # TODO(woosuk): Support encoder-decoder models.
 
-        if lora_request is not None and not self.lora_config:
-            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
-                             "not enabled!")
+        self._validate_logprobs(params)
+        self._validate_lora(lora_request)
+        self._validate_allowed_token_ids(params)
+
         if arrival_time is None:
             arrival_time = time.time()
         assert priority == 0, "vLLM V1 does not support priority at the moment."
         assert trace_headers is None, "vLLM V1 does not support tracing yet."
 
-        # Process inputs.
+        # Process inputs, which includes:
+        # 1. Tokenize text prompt, with LoRA request if one exists.
+        # 2. For multimodal models with a merged preprocessor, preprocess
+        #   multimodal data and expand prompt token ids accordingly.
+        # 3. Apply prompt adapter to prompt token ids if one exists.
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        processed_inputs = self.input_processor(preprocessed_inputs)
-        self._validate_model_inputs(processed_inputs)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
+
+        # Process prompt and prompt token ids.
+        # Only applicable to multimodal models with legacy input processor.
+        processed_inputs = self.input_processor(preprocessed_inputs)
+
+        self._validate_model_inputs(processed_inputs)
 
         if is_encoder_decoder_inputs(processed_inputs):
             decoder_inputs = SingletonInputsAdapter(
@@ -167,8 +222,8 @@ class Processor:
                     key=lambda mm_input: modality_order_dict[list(
                         mm_input.modalities)[0]])
 
-            # Apply mm input cache update (and input mapper if necessary).
-            sorted_mm_inputs = self.mm_input_mapper_client.process_inputs(
+            # Apply mm input cache update and legacy input mapper if one exists.
+            sorted_mm_inputs = self.mm_input_cache_client.process_inputs(
                 mm_data=decoder_mm_data,
                 mm_hashes=sorted_mm_hashes,
                 mm_processor_kwargs=decoder_inputs.mm_processor_kwargs,
@@ -205,6 +260,11 @@ class Processor:
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
+
+        if len(prompt_ids) >= self.model_config.max_model_len:
+            raise ValueError(
+                f"Prompt length of {len(prompt_ids)} is longer than the "
+                f"maximum model length of {self.model_config.max_model_len}.")
 
         if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len

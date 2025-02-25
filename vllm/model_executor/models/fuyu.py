@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/fuyu/modeling_fuyu.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 HuggingFace Inc. team. All rights reserved.
@@ -23,7 +25,6 @@ import torch.nn as nn
 from transformers import (BatchFeature, FuyuConfig, FuyuImageProcessor,
                           FuyuProcessor)
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -69,8 +70,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(FuyuConfig)
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(FuyuProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(FuyuProcessor, **kwargs)
 
     def get_image_processor(self) -> FuyuImageProcessor:
         return self.get_hf_processor().image_processor
@@ -78,7 +79,11 @@ class FuyuProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         target_width, target_height = self.get_image_size_with_most_features()
 
         max_ncols, max_nrows = self.get_image_feature_grid_size(
@@ -98,6 +103,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
         image_processor = self.get_image_processor()
         target_width = image_processor.size["width"]
         target_height = image_processor.size["height"]
+        patch_width = image_processor.patch_size["width"]
+        patch_height = image_processor.patch_size["height"]
 
         if not (image_width <= target_width and image_height <= target_height):
             height_scale_factor = target_height / image_height
@@ -107,8 +114,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
             image_height = int(image_height * optimal_scale_factor)
             image_width = int(image_width * optimal_scale_factor)
 
-        ncols = math.ceil(image_width / 30)
-        nrows = math.ceil(image_height / 30)
+        ncols = math.ceil(image_width / patch_width)
+        nrows = math.ceil(image_height / patch_height)
         return ncols, nrows
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -283,7 +290,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 expected_expr = str(expected_dims)
                 raise ValueError(
                     "The expected shape of pixel values per image per batch "
-                    f" per patch is {expected_expr}. "
+                    f"per patch is {expected_expr}. "
                     f"You supplied {tuple(d.shape)}.")
 
         for d in data:
@@ -343,8 +350,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -363,8 +368,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states = self.language_model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )

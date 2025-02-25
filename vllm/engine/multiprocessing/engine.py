@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pickle
 import signal
 from contextlib import contextmanager
@@ -18,8 +20,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
                                          RPCResetPrefixCacheRequest,
-                                         RPCStartupRequest, RPCStartupResponse,
-                                         RPCUProfileRequest)
+                                         RPCSleepRequest, RPCStartupRequest,
+                                         RPCStartupResponse,
+                                         RPCUProfileRequest, RPCWakeUpRequest)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -240,6 +243,10 @@ class MQLLMEngine:
                     self._handle_load_adapter_request(request)
                 elif isinstance(request, RPCResetPrefixCacheRequest):
                     self.reset_prefix_cache()
+                elif isinstance(request, RPCSleepRequest):
+                    self.sleep(request.value)
+                elif isinstance(request, RPCWakeUpRequest):
+                    self.wake_up()
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -366,6 +373,12 @@ class MQLLMEngine:
 
     def reset_prefix_cache(self) -> bool:
         return self.engine.reset_prefix_cache()
+
+    def sleep(self, level: int = 1) -> None:
+        self.engine.sleep(level)
+
+    def wake_up(self) -> None:
+        self.engine.wake_up()
 
 
 def signal_handler(*_) -> None:

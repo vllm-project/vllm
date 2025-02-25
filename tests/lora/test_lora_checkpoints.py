@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List
 
 import pytest
@@ -10,6 +12,12 @@ from vllm.model_executor.models.utils import WeightsMapper
 lora_lst = [
     "baichuan7B", "baichuan7B-zero", "baichuan7B-zero-regex", "chatglm3-6b"
 ]
+BAICHUAN_LORA_MODULES = [
+    "W_pack",
+    "o_proj",
+    "gate_up_proj",
+    "down_proj",
+]
 
 
 @pytest.mark.parametrize("lora_name", lora_lst)
@@ -20,12 +28,11 @@ def test_load_checkpoints(
     baichuan_regex_lora_files,
     chatglm3_lora_files,
 ):
-    supported_lora_modules = BaiChuanBaseForCausalLM.supported_lora_modules
     packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
     embedding_modules = BaiChuanBaseForCausalLM.embedding_modules
     embed_padding_modules = BaiChuanBaseForCausalLM.embedding_padding_modules
     expected_lora_modules: List[str] = []
-    for module in supported_lora_modules:
+    for module in BAICHUAN_LORA_MODULES:
         if module in packed_modules_mapping:
             expected_lora_modules.extend(packed_modules_mapping[module])
         else:
@@ -88,12 +95,12 @@ def test_load_checkpoints(
 
 
 def test_lora_weights_mapping(baichuan_lora_files):
-    supported_lora_modules = BaiChuanBaseForCausalLM.supported_lora_modules
+
     packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
     embedding_modules = BaiChuanBaseForCausalLM.embedding_modules
     embed_padding_modules = BaiChuanBaseForCausalLM.embedding_padding_modules
     expected_lora_modules: List[str] = []
-    for module in supported_lora_modules:
+    for module in BAICHUAN_LORA_MODULES:
         if module in packed_modules_mapping:
             expected_lora_modules.extend(packed_modules_mapping[module])
         else:

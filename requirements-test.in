@@ -12,19 +12,23 @@ decord # required for video tests
 einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio tests
+vector_quantize_pytorch # required for minicpmo_26 test
+vocos # required for minicpmo_26 test
 peft
 pqdm
 ray[adag]==2.40.0
 sentence-transformers # required for embedding tests
 soundfile # required for audio tests
+jiwer # required for audio tests
 timm # required for internvl test
 torch==2.5.1
+torchaudio==2.5.1
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.0 # required for pixtral test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.4 # required for model evaluation test
-
+transformers==4.48.2 
 # quantization
 bitsandbytes>=0.45.0
 buildkite-test-collector==0.1.9
@@ -33,3 +37,5 @@ genai_perf==0.0.8
 tritonclient==2.51.0
 
 numpy < 2.0.0
+runai-model-streamer==0.11.0
+runai-model-streamer-s3==0.11.0

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
@@ -29,7 +31,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ErrorResponse, RerankRequest,
                                               ScoreRequest,
                                               TokenizeChatRequest,
-                                              TokenizeCompletionRequest)
+                                              TokenizeCompletionRequest,
+                                              TranscriptionRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
@@ -49,13 +52,14 @@ from vllm.utils import is_list_of, make_async, random_uuid
 logger = init_logger(__name__)
 
 CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
-                              EmbeddingCompletionRequest, ScoreRequest,
-                              TokenizeCompletionRequest]
+                              EmbeddingCompletionRequest, RerankRequest,
+                              ScoreRequest, TokenizeCompletionRequest]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 
-AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest]
+AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest,
+                   TranscriptionRequest]
 
 
 class TextTokensPrompt(TypedDict):
@@ -398,8 +402,7 @@ class OpenAIServing:
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
         request_prompt: Union[str, List[int]]
-        is_mistral_tokenizer = isinstance(tokenizer, MistralTokenizer)
-        if is_mistral_tokenizer:
+        if isinstance(tokenizer, MistralTokenizer):
             request_prompt = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
@@ -448,6 +451,8 @@ class OpenAIServing:
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
         return conversation, [request_prompt], [engine_prompt]
 
@@ -518,5 +523,16 @@ class OpenAIServing:
             return logprob.decoded_token
         return tokenizer.decode(token_id)
 
-    def _is_model_supported(self, model_name):
+    def _is_model_supported(self, model_name: Optional[str]) -> bool:
+        if not model_name:
+            return True
         return self.models.is_base_model(model_name)
+
+    def _get_model_name(self,
+                        model_name: Optional[str] = None,
+                        lora_request: Optional[LoRARequest] = None) -> str:
+        if lora_request:
+            return lora_request.lora_name
+        if model_name is None:
+            return self.models.base_model_paths[0].name
+        return model_name

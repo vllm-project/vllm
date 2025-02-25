@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, Generator, List, Optional
 
 import pytest
@@ -29,7 +31,7 @@ TOKENIZERS = [
     "bigscience/bloom-560m",
     "mosaicml/mpt-7b",
     "tiiuae/falcon-7b",
-    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Llama-3.2-1B-Instruct",
     "codellama/CodeLlama-7b-hf",
     "mistralai/Pixtral-12B-2409",
 ]

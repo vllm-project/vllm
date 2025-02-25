@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
@@ -10,6 +12,7 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+import datetime
 import inspect
 import logging
 import os
@@ -25,7 +28,7 @@ sys.path.append(os.path.abspath("../.."))
 # -- Project information -----------------------------------------------------
 
 project = 'vLLM'
-copyright = '2024, vLLM Team'
+copyright = f'{datetime.datetime.now().year}, vLLM Team'
 author = 'the vLLM Team'
 
 # -- General configuration ---------------------------------------------------
@@ -35,7 +38,6 @@ author = 'the vLLM Team'
 # ones.
 extensions = [
     "sphinx.ext.napoleon",
-    "sphinx.ext.viewcode",
     "sphinx.ext.linkcode",
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
@@ -70,14 +72,19 @@ copybutton_prompt_is_regexp = True
 html_title = project
 html_theme = 'sphinx_book_theme'
 html_logo = 'assets/logos/vllm-logo-text-light.png'
+html_favicon = 'assets/logos/vllm-logo-only-light.ico'
 html_theme_options = {
     'path_to_docs': 'docs/source',
     'repository_url': 'https://github.com/vllm-project/vllm',
     'use_repository_button': True,
     'use_edit_page_button': True,
 }
+# Add any paths that contain custom static files (such as style sheets) here,
+# relative to this directory. They are copied after the builtin static files,
+# so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
 html_js_files = ["custom.js"]
+html_css_files = ["custom.css"]
 
 myst_url_schemes = {
     'http': None,
@@ -118,11 +125,6 @@ if READTHEDOCS_VERSION_TYPE == "tag":
     # (readthedocs build both HTML and PDF versions separately)
     if os.path.exists(header_file):
         os.remove(header_file)
-
-# Add any paths that contain custom static files (such as style sheets) here,
-# relative to this directory. They are copied after the builtin static files,
-# so a file named "default.css" will overwrite the builtin "default.css".
-# html_static_path = ['_static']
 
 
 # Generate additional rst documentation here.

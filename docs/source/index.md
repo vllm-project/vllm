@@ -1,13 +1,13 @@
 # Welcome to vLLM
 
-```{figure} ./assets/logos/vllm-logo-text-light.png
+:::{figure} ./assets/logos/vllm-logo-text-light.png
 :align: center
 :alt: vLLM
 :class: no-scaled-link
 :width: 60%
-```
+:::
 
-```{raw} html
+:::{raw} html
 <p style="text-align:center">
 <strong>Easy, fast, and cheap LLM serving for everyone
 </strong>
@@ -19,11 +19,11 @@
 <a class="github-button" href="https://github.com/vllm-project/vllm/subscription" data-icon="octicon-eye" data-size="large" aria-label="Watch">Watch</a>
 <a class="github-button" href="https://github.com/vllm-project/vllm/fork" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
 </p>
-```
+:::
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
-Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evloved into a community-driven project with contributions from both academia and industry.
+Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
 
 vLLM is fast with:
 
@@ -58,7 +58,7 @@ For more information, check out the following:
 
 % How to start using vLLM?
 
-```{toctree}
+:::{toctree}
 :caption: Getting Started
 :maxdepth: 1
 
@@ -67,11 +67,11 @@ getting_started/quickstart
 getting_started/examples/examples_index
 getting_started/troubleshooting
 getting_started/faq
-```
+:::
 
 % What does vLLM support?
 
-```{toctree}
+:::{toctree}
 :caption: Models
 :maxdepth: 1
 
@@ -79,27 +79,28 @@ models/generative_models
 models/pooling_models
 models/supported_models
 models/extensions/index
-```
+:::
 
 % Additional capabilities
 
-```{toctree}
+:::{toctree}
 :caption: Features
 :maxdepth: 1
 
 features/quantization/index
 features/lora
 features/tool_calling
+features/reasoning_outputs
 features/structured_outputs
 features/automatic_prefix_caching
 features/disagg_prefill
 features/spec_decode
 features/compatibility_matrix
-```
+:::
 
 % Details about running vLLM
 
-```{toctree}
+:::{toctree}
 :caption: Inference and Serving
 :maxdepth: 1
 
@@ -112,11 +113,11 @@ serving/engine_args
 serving/env_vars
 serving/usage_stats
 serving/integrations/index
-```
+:::
 
 % Scaling up vLLM for production
 
-```{toctree}
+:::{toctree}
 :caption: Deployment
 :maxdepth: 1
 
@@ -125,21 +126,21 @@ deployment/k8s
 deployment/nginx
 deployment/frameworks/index
 deployment/integrations/index
-```
+:::
 
 % Making the most out of vLLM
 
-```{toctree}
+:::{toctree}
 :caption: Performance
 :maxdepth: 1
 
 performance/optimization
 performance/benchmarks
-```
+:::
 
 % Explanation of vLLM internals
 
-```{toctree}
+:::{toctree}
 :caption: Design Documents
 :maxdepth: 2
 
@@ -150,11 +151,18 @@ design/kernel/paged_attention
 design/mm_processing
 design/automatic_prefix_caching
 design/multiprocessing
-```
+:::
+
+:::{toctree}
+:caption: V1 Design Documents
+:maxdepth: 2
+
+design/v1/prefix_caching
+:::
 
 % How to contribute to the vLLM project
 
-```{toctree}
+:::{toctree}
 :caption: Developer Guide
 :maxdepth: 2
 
@@ -163,11 +171,11 @@ contributing/profiling/profiling_index
 contributing/dockerfile/dockerfile
 contributing/model/index
 contributing/vulnerability_management
-```
+:::
 
 % Technical API specifications
 
-```{toctree}
+:::{toctree}
 :caption: API Reference
 :maxdepth: 2
 
@@ -176,18 +184,18 @@ api/engine/index
 api/inference_params
 api/multimodal/index
 api/model/index
-```
+:::
 
 % Latest news and acknowledgements
 
-```{toctree}
+:::{toctree}
 :caption: Community
 :maxdepth: 1
 
 community/blog
 community/meetups
 community/sponsors
-```
+:::
 
 ## Indices and tables
 

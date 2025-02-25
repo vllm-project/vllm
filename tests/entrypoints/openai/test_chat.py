@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # imports for guided decoding tests
 import json
 import re
@@ -7,6 +9,7 @@ import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import requests
 import torch
 from openai import BadRequestError
 
@@ -994,3 +997,34 @@ async def test_long_seed(client: openai.AsyncOpenAI):
 
         assert ("greater_than_equal" in exc_info.value.message
                 or "less_than_equal" in exc_info.value.message)
+
+
+@pytest.mark.asyncio
+async def test_http_chat_wo_model_name(server: RemoteOpenAIServer):
+    url = f"http://localhost:{server.port}/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+    }
+    data = {
+        # model_name is avoided here.
+        "messages": [{
+            "role": "system",
+            "content": "You are a helpful assistant."
+        }, {
+            "role": "user",
+            "content": "what is 1+1?"
+        }],
+        "max_tokens":
+        5
+    }
+
+    response = requests.post(url, headers=headers, json=data)
+    response_data = response.json()
+    print(response_data)
+
+    choice = response_data.get("choices")[0]
+    message = choice.get("message")
+    assert message is not None
+    content = message.get("content")
+    assert content is not None
+    assert len(content) > 0

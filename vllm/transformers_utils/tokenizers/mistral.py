@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import re
 from dataclasses import dataclass
@@ -6,21 +8,19 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from mistral_common.tokens.tokenizers.base import SpecialTokens
-# yapf: disable
-from mistral_common.tokens.tokenizers.mistral import (
-    MistralTokenizer as PublicMistralTokenizer)
-# yapf: enable
-from mistral_common.tokens.tokenizers.sentencepiece import (
-    SentencePieceTokenizer)
-from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
-                                                     Tekkenizer)
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer_base import TokenizerBase
 from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
+    # make sure `mistral_common` is lazy imported,
+    # so that users who only use non-mistral models
+    # will not be bothered by the dependency.
+    from mistral_common.protocol.instruct.request import ChatCompletionRequest
+    from mistral_common.tokens.tokenizers.mistral import (
+        MistralTokenizer as PublicMistralTokenizer)
+
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 logger = init_logger(__name__)
@@ -31,7 +31,7 @@ class Encoding:
     input_ids: Union[List[int], List[List[int]]]
 
 
-def maybe_serialize_tool_calls(request: ChatCompletionRequest):
+def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
     # SEE: https://github.com/vllm-project/vllm/pull/9951
     # Credits go to: @gcalmettes
     # NOTE: There is currently a bug in pydantic where attributes
@@ -68,6 +68,36 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
             request.messages[i]["tool_calls"] = validated_tool_calls
 
 
+def truncate_tool_call_ids(request: "ChatCompletionRequest"):
+    """Truncates tool call IDs for Mistral's ID requirements."""
+    for i, message in enumerate(request.messages):
+        if message.get("role") == 'assistant':
+            tool_calls = message.get("tool_calls", [])
+            for tool_call in tool_calls:
+                if len(tool_call["id"]) > 9:
+                    logger.warning(
+                        "Truncating tool call ID: %s to %s",
+                        tool_call["id"],
+                        tool_call["id"][-9:],
+                    )
+                    tool_call["id"] = tool_call["id"][-9:]
+
+            request.messages[i]["tool_calls"] = tool_calls
+
+        elif message.get("role") in {"tool_results", "tool"}:
+            if "tool_call_id" in message:
+                tool_call_id = message["tool_call_id"]
+
+                if len(tool_call_id) > 9:
+                    logger.warning(
+                        "Truncating tool_call_id: %s to %s",
+                        tool_call_id,
+                        tool_call_id[-9:],
+                    )
+                    tool_call_id = tool_call_id[-9:]
+                request.messages[i]["tool_call_id"] = tool_call_id
+
+
 def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
     repo_cache = os.path.join(
         huggingface_hub.constants.HF_HUB_CACHE,
@@ -89,7 +119,8 @@ def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
 
 
 def find_tokenizer_file(files: List[str]):
-    file_pattern = re.compile(r"^tokenizer\.model\.v.*$|^tekken\.json$")
+    file_pattern = re.compile(
+        r"^tokenizer\.model\.v.*$|^tekken\.json$|^tokenizer\.mm\.model\.v.*$")
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
@@ -104,14 +135,54 @@ def find_tokenizer_file(files: List[str]):
     return matched_files[0]
 
 
-class MistralTokenizer:
+def make_mistral_chat_completion_request(
+        messages: List["ChatCompletionMessageParam"],
+        tools: Optional[List[Dict[str,
+                                  Any]]] = None) -> "ChatCompletionRequest":
+    last_message = cast(Dict[str, Any], messages[-1])
+    if last_message["role"] == "assistant":
+        last_message["prefix"] = True
 
-    def __init__(self, tokenizer: PublicMistralTokenizer) -> None:
+        last_message = cast(Dict[str, Any], messages[-1])
+        if last_message["role"] == "assistant":
+            last_message["prefix"] = True
+
+    # mistral-common requires AssistantMessage content to be string [1].
+    #
+    # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
+    for message in messages:
+        if message.get("role") == "assistant":
+            content = message.get("content")
+            if isinstance(content, list):
+                content = "\n".join(chunk.get("text") for chunk in content)
+                message["content"] = content
+
+    # The Mistral client, in comparison to the OpenAI client, requires the
+    # "parameters" dict to be present, even if it's empty.
+    if tools:
+        for function in [
+                tool["function"] for tool in tools
+                if tool["type"] == "function"
+        ]:
+            function.setdefault("parameters", {})
+
+    from mistral_common.protocol.instruct.request import ChatCompletionRequest
+    return ChatCompletionRequest(messages=messages,
+                                 tools=tools)  # type: ignore[type-var]
+
+
+class MistralTokenizer(TokenizerBase):
+
+    def __init__(self, tokenizer: "PublicMistralTokenizer") -> None:
         self.mistral = tokenizer
         self.instruct = tokenizer.instruct_tokenizer
 
         tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
+        from mistral_common.tokens.tokenizers.tekken import (
+            SpecialTokenPolicy, Tekkenizer)
         self.is_tekken = isinstance(tokenizer_, Tekkenizer)
+        from mistral_common.tokens.tokenizers.sentencepiece import (
+            SentencePieceTokenizer)
         self.is_spm = isinstance(tokenizer_, SentencePieceTokenizer)
         if self.is_tekken:
             # Make sure special tokens will not raise
@@ -151,6 +222,8 @@ class MistralTokenizer:
             assert Path(
                 path_or_repo_id).is_file(), f"Invalid path: {path_or_repo_id}"
 
+        from mistral_common.tokens.tokenizers.mistral import (
+            MistralTokenizer as PublicMistralTokenizer)
         mistral_tokenizer = PublicMistralTokenizer.from_file(tokenizer_file)
         return cls(mistral_tokenizer)
 
@@ -179,6 +252,8 @@ class MistralTokenizer:
     # by the guided structured output backends.
     @property
     def all_special_tokens_extended(self) -> List[str]:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
+
         # tekken defines its own extended special tokens list
         if hasattr(self.tokenizer, "SPECIAL_TOKENS"):
             special_tokens = self.tokenizer.SPECIAL_TOKENS
@@ -208,6 +283,14 @@ class MistralTokenizer:
         return self.tokenizer.eos_id
 
     @property
+    def sep_token(self) -> str:
+        raise NotImplementedError()
+
+    @property
+    def pad_token(self) -> str:
+        raise NotImplementedError()
+
+    @property
     def is_fast(self) -> bool:
         return True
 
@@ -224,25 +307,26 @@ class MistralTokenizer:
 
     def __call__(
         self,
-        prompt: Union[str, List[str], List[int]],
+        text: Union[str, List[str], List[int]],
+        text_pair: Optional[str] = None,
         add_special_tokens: bool = False,
         truncation: bool = False,
         max_length: Optional[int] = None,
     ):
         input_ids: Union[List[int], List[List[int]]]
         # For List[str], original prompt text
-        if is_list_of(prompt, str):
+        if is_list_of(text, str):
             input_ids_: List[List[int]] = []
-            for p in prompt:
+            for p in text:
                 each_input_ids = self.encode_one(p, truncation, max_length)
                 input_ids_.append(each_input_ids)
             input_ids = input_ids_
         # For List[int], apply chat template output, already tokens.
-        elif is_list_of(prompt, int):
-            input_ids = prompt
+        elif is_list_of(text, int):
+            input_ids = text
         # For str, single prompt text
         else:
-            input_ids = self.encode_one(prompt, truncation, max_length)
+            input_ids = self.encode_one(text, truncation, max_length)
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
@@ -256,40 +340,43 @@ class MistralTokenizer:
 
     def encode_one(
         self,
-        prompt: str,
+        text: str,
         truncation: bool = False,
         max_length: Optional[int] = None,
     ) -> List[int]:
         # Mistral Tokenizers should not add special tokens
-        input_ids = self.encode(prompt)
+        input_ids = self.encode(text)
 
         if truncation:
             input_ids = input_ids[:max_length]
         return input_ids
 
-    def encode(self, prompt: str) -> List[int]:
+    def encode(self,
+               text: str,
+               add_special_tokens: Optional[bool] = None) -> List[int]:
         # `encode` should only be used for prompt completion
         # it should never be used for chat_completion.
         # For chat completion use `apply_chat_template`
-        return self.tokenizer.encode(prompt, bos=True, eos=False)
+        if add_special_tokens is not None:
+            return self.tokenizer.encode(text,
+                                         bos=add_special_tokens,
+                                         eos=add_special_tokens)
+        else:
+            return self.tokenizer.encode(text, bos=True, eos=False)
 
     def apply_chat_template(self,
                             messages: List["ChatCompletionMessageParam"],
-                            tools: Optional[Dict[str, Any]] = None,
+                            tools: Optional[List[Dict[str, Any]]] = None,
                             **kwargs) -> List[int]:
 
-        last_message = cast(Dict[str, Any], messages[-1])
-        if last_message["role"] == "assistant":
-            last_message["prefix"] = True
-
-        request = ChatCompletionRequest(messages=messages,
-                                        tools=tools)  # type: ignore[type-var]
+        request = make_mistral_chat_completion_request(messages, tools)
         encoded = self.mistral.encode_chat_completion(request)
 
         # encode-decode to get clean prompt
         return encoded.tokens
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
         if self.is_tekken:
             tokens = [
                 t for t in tokens
@@ -361,6 +448,8 @@ class MistralTokenizer:
         ids: List[int],
         skip_special_tokens: bool = True,
     ) -> List[str]:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
+
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
             skip_special_tokens
