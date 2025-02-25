@@ -106,10 +106,6 @@ class DeepseekV2MoE(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
         self.routed_scaling_factor = config.routed_scaling_factor
-        if self.tp_size > config.n_routed_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.n_routed_experts}.")
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -257,9 +253,7 @@ class DeepseekV2Attention(nn.Module):
                                         prefix=f"{prefix}.o_proj")
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
-            self.use_normal_rope = False
-        else:
-            self.use_normal_rope = True
+
         self.rotary_emb = get_rope(qk_rope_head_dim,
                                    rotary_dim=qk_rope_head_dim,
                                    max_position=max_position_embeddings,
@@ -309,16 +303,7 @@ class DeepseekV2Attention(nn.Module):
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k_pe = latent_cache[:, :, self.kv_lora_rank:]
 
-        if self.use_normal_rope:
-            seq_len = positions.size(0)
-            ori_q_pe_shape, ori_k_pe_shape = q_pe.shape, k_pe.shape
-            q_pe = q_pe.reshape(seq_len, -1)
-            k_pe = k_pe.reshape(seq_len, -1)
-
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-
-        if self.use_normal_rope:
-            q_pe, k_pe = q_pe.view(ori_q_pe_shape), k_pe.view(ori_k_pe_shape)
 
         q[..., self.qk_nope_head_dim:] = q_pe
         k = torch.empty_like(q)
@@ -592,7 +577,8 @@ class DeepseekV2Model(nn.Module):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
-            )
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens")
         else:
             self.embed_tokens = PPMissingLayer()
 
@@ -742,13 +728,9 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            # TODO(simon): support nextn predict layers
-            if hasattr(self.config, "num_nextn_predict_layers"
-                       ) and self.config.num_nextn_predict_layers > 0:
-                assert self.config.num_nextn_predict_layers == 1
-                layer_idx = self.config.num_hidden_layers
-                if name.startswith(f"model.layers.{layer_idx}"):
-                    continue
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+            if spec_layer is not None:
+                continue  # skip spec decode layers for main model
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -815,3 +797,15 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
 
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
     pass
+
+
+def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
+                                        weight_name: str) -> Optional[int]:
+    if hasattr(config,
+               "num_nextn_predict_layers") and (config.num_nextn_predict_layers
+                                                > 0):
+        layer_idx = config.num_hidden_layers
+        for i in range(config.num_nextn_predict_layers):
+            if weight_name.startswith(f"model.layers.{layer_idx+i}."):
+                return layer_idx + i
+    return None

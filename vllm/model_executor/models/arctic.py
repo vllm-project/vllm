@@ -30,10 +30,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.arctic import ArcticConfig
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsQuant
 from .utils import (extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -138,13 +139,13 @@ class ArcticMoE(nn.Module):
                     torch.empty(self.num_experts,
                                 2 * self.intermediate_size,
                                 self.hidden_size,
-                                device="cuda",
+                                device=current_platform.device_type,
                                 dtype=self.params_dtype))
                 self.w2s = nn.Parameter(
                     torch.empty(self.num_experts,
                                 self.hidden_size,
                                 self.intermediate_size,
-                                device="cuda",
+                                device=current_platform.device_type,
                                 dtype=self.params_dtype))
             set_weight_attrs(self.ws, {
                 "weight_loader": self.weight_loader,
@@ -423,7 +424,8 @@ class ArcticModel(nn.Module):
         return hidden_states
 
 
-class ArcticForCausalLM(nn.Module, SupportsPP):
+class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

@@ -16,8 +16,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce,
-                              tensor_model_parallel_gather)
+                              tensor_model_parallel_all_reduce)
 from vllm.distributed.utils import divide
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -1040,10 +1039,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = lm_head.linear_method.apply(lm_head, hidden_states)
+        logits = lm_head.quant_method.apply(lm_head, hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits)
+
+        # Gather logits for TP
+        logits = self.base_layer._gather_logits(logits)
+
         if logits is None:
             return None
 
