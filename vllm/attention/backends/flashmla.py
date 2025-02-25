@@ -44,12 +44,10 @@ class FlashMLABackend(MLACommonBackend):
 
 
 @dataclass
-class FlashMLAMetadata(MLACommonMetadata["FlashMLAMetadata"]):
+class FlashMLAMetadata(MLACommonMetadata):
     decode_tile_scheduler_metadata: Optional[Tuple[torch.Tensor,
                                                    torch.Tensor]] = None
     decode_num_splits: Optional[torch.Tensor] = None
-
-    _cached_decode_metadata: Optional["MLACommonMetadata"] = None
 
     @property
     def decode_metadata(self):
