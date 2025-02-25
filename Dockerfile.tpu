@@ -16,7 +16,7 @@ COPY requirements-tpu.txt requirements-tpu.txt
 RUN grep -v -E "^torch(_xla)?\b" requirements-tpu.txt > requirements-filtered.txt
 # Image does not come with pallas dependencies so we must add them manually 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-filtered.txt jax==0.5.1.dev20250210 jaxlib
+    python3 -m pip install -r requirements-filtered.txt jax==0.5.1.dev20250210 jaxlib==0.5.1.dev20250210
 
 # Build vLLM.
 COPY . .
