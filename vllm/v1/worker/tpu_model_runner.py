@@ -25,7 +25,9 @@ from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput, SamplerOutput
+from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.sampler import Sampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -67,6 +69,31 @@ class DecodeData:
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     attn_metadata: Optional[PallasMetadata] = None
+
+# TODO refactor to utils
+def get_default_sampling_params(device: torch.device)->SamplingMetadata:
+    # SamplingMetadata for tracing all available sampling options
+    temp = torch.tensor([0.1], device=device)
+    topp = torch.tensor([0.6], device=device) # some value just for tracing
+    topk = torch.tensor([10], dtype=torch.long, device=device)
+    minp = torch.tensor([0.1], device=device) 
+    # unsupported, you need to return an extra tensor of static size BxV
+    max_num_logprobs = None  
+    # NOTE prompt sequences must be padded to a shape we compile for
+    prompt_ids = None
+    freq_penalty = torch.tensor([0.1], device=device) 
+    pres_penalty = torch.tensor([0.1], device=device) 
+    rep_penalty = torch.tensor([0.1], device=device) 
+    out_tokens = [] # This is a list, use a tensor to have proper support
+    min_tokens = None # impl is not vectorized
+    logit_bias = []
+    allowed_token_ids_mask = None # TODO
+    # TODO true argmax sampling=>must be remapped to TOPK=1
+    # TODO penalties disabled for now
+    # Generator not supported by xla
+    return SamplingMetadata(temp, False, False, None, topp, topk, minp, {}, None, 
+                        True, prompt_ids, freq_penalty, pres_penalty, rep_penalty,
+                          out_tokens, min_tokens, logit_bias, allowed_token_ids_mask)
 
 
 class TPUModelRunner:
@@ -617,13 +644,13 @@ class TPUModelRunner:
                 is_first = False
 
             # Run forward pass
+            sampling_metadata = self.input_batch.get_sampling_metadata(scheduler_output.scheduled_spec_decode_tokens)
             with set_forward_context(prompt_data.attn_metadata,
                                      self.vllm_config):
                 assert self.model is not None
                 selected_token_ids = self.model(prompt_data.input_tokens,
                                                 prompt_data.input_positions,
-                                                self.kv_caches)
-
+                                                self.kv_caches, sampling_metadata)
             # In parallel to TPU execution, prepare the next iteration
             if i < num_prompts - 1:
                 # There is next prompt => prepare it
@@ -722,10 +749,13 @@ class TPUModelRunner:
         xm.mark_step()
         xm.wait_device_ops()
         model = ModelWrapperV1(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model = model
+        # TODO (Nicolo) will yield multiple fxsubgraph that trigger more
+        # recompilations xla-side..can we benchmark this before enabling?
+        # self.model = torch.compile(model,
+                                #    backend="openxla",
+                                #    fullgraph=True,
+                                #    dynamic=False)
 
     def dummy_run(
         self,
@@ -834,9 +864,11 @@ class TPUModelRunner:
             torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
             torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
 
+        # To allow sampling, trace the forward with all supported sampling args
+        sampling_meta = get_default_sampling_params(self.device)
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
-            self.model(token_ids, position_ids, kv_caches)
+            self.model(token_ids, position_ids, kv_caches, sampling_meta)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -865,7 +897,7 @@ class TPUModelRunner:
                     end - start)
 
         # Prefix prefill
-        if self.scheduler_config.enable_chunked_prefill:
+        if self.cache_config.enable_prefix_caching:
             logger.info("Compiling the model with different input shapes for "
                         "prefix prefill:")
             start = time.time()
@@ -955,12 +987,27 @@ class ModelWrapperV1(nn.Module):
     def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model
+        self.sampler = Sampler()
+    
+    def _validate_sampling_metadata(sampling_metadata: SamplingMetadata)->SamplingMetadata:
+        # As sampling happens on a single traced function, we need to disable
+        # unused options by setting their arg value to an operation 
+        # functionally identical to the Identity.
+        # TODO
+        return sampling_metadata
+
+    def sample(self, logits: torch.Tensor,
+               sampling_metadata: SamplingMetadata) -> SamplerOutput:
+        sampling_metadata = self._validate_sampling_metadata(sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
 
     def forward(
         self,
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        sampling_metadata: Optional[SamplingMetadata]=None,
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -1002,10 +1049,11 @@ class ModelWrapperV1(nn.Module):
         hidden_states = hidden_states.flatten(0, 1)
         logits = self.model.compute_logits(hidden_states, None)
 
-        # Greedy sampling.
-        argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-        argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
-        return argmax_token_ids
+        # Sample with traced function.
+        sampler_output = self.sampler(logits, sampling_metadata)
+        # TODO support logprobs here
+        sampled_token_ids = sampler_output.sampled_token_ids
+        return sampled_token_ids
 
 
 def swap_positions(b: InputBatch, id_1, id_2):
