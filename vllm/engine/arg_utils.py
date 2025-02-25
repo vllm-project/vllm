@@ -169,7 +169,7 @@ class EngineArgs:
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: Optional[bool] = None
-    enable_prefix_sorting: bool = None
+    enable_prefix_sorting: Optional[bool] = None
 
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
