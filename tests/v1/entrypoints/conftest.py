@@ -70,8 +70,9 @@ def sample_json_schema():
     }
 
 
+# A schema unsupported by xgrammar
 @pytest.fixture
-def sample_complex_json_schema():
+def unsupported_json_schema():
     return {
         "type": "object",
         "properties": {

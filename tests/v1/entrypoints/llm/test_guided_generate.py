@@ -49,6 +49,29 @@ def test_guided_json_completion(monkeypatch, sample_json_schema,
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+def test_guided_json_unsupported_schema(monkeypatch, unsupported_json_schema,
+                                        guided_decoding_backend: str):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    llm = LLM(model=MODEL_NAME, max_model_len=1024)
+    sampling_params = SamplingParams(temperature=1.0,
+                                     max_tokens=1000,
+                                     guided_decoding=GuidedDecodingParams(
+                                         json=unsupported_json_schema,
+                                         backend=guided_decoding_backend))
+    with pytest.raises(ValueError,
+                       match="The provided JSON schema contains features "
+                       "not supported by xgrammar."):
+        llm.generate(prompts=[
+            f"Give an example JSON for an employee profile "
+            f"that fits this schema: {unsupported_json_schema}"
+        ] * 2,
+                     sampling_params=sampling_params,
+                     use_tqdm=True)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend",
+                         GUIDED_DECODING_BACKENDS_V1)
 def test_guided_regex(monkeypatch, sample_regex, guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
