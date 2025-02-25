@@ -9,15 +9,11 @@ RUN apt-get update && apt-get install -y \
     git \
     ffmpeg libsm6 libxext6 libgl1
 
-# Install uv for faster pip installs
-RUN --mount=type=cache,target=/root/.cache/uv \
-    python3 -m pip install uv
-
 # Install Python dependencies
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-tpu.txt requirements-tpu.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements-tpu.txt
+    python3 -m pip install -r requirements-tpu.txt
 
 # Build vLLM.
 COPY . .
@@ -29,6 +25,6 @@ ENV VLLM_TARGET_DEVICE="tpu"
 RUN python3 setup.py develop
 
 # install development dependencies (for testing)
-RUN uv pip install --system -e tests/vllm_test_utils
+RUN python3 -m pip install -e tests/vllm_test_utils
 
 CMD ["/bin/bash"]
