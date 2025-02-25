@@ -1456,7 +1456,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm.
     """
 
-    model: Optional[str] = None
+    model: str
     """ID of the model to use.
     """
 
@@ -1468,7 +1468,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     will improve accuracy and latency.
     """
 
-    prompt: str = Field(default="")
+    prompt: Optional[str] = Field(default="")
     """An optional text to guide the model's style or continue a previous audio
     segment.
 
@@ -1476,14 +1476,14 @@ class TranscriptionRequest(OpenAIBaseModel):
     should match the audio language.
     """
 
-    response_format: AudioResponseFormat = Field(default="json")
+    response_format: Optional[AudioResponseFormat] = Field(default="json")
     """
     The format of the output, in one of these options: `json`, `text`, `srt`,
     `verbose_json`, or `vtt`.
     """
 
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
-    temperature: float = Field(default=0.0)
+    temperature: Optional[float] = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
     Higher values like 0.8 will make the output more random, while lower values
@@ -1492,8 +1492,9 @@ class TranscriptionRequest(OpenAIBaseModel):
     to automatically increase the temperature until certain thresholds are hit.
     """
 
-    timestamp_granularities: List[Literal["word", "segment"]] = Field(
-        alias="timestamp_granularities[]", default=[])
+    timestamp_granularities: Optional[List[Literal[
+        "word", "segment"]]] = Field(alias="timestamp_granularities[]",
+                                     default=["segment"])
     """The timestamp granularities to populate for this transcription.
 
     `response_format` must be set `verbose_json` to use timestamp granularities.
@@ -1511,17 +1512,18 @@ class TranscriptionRequest(OpenAIBaseModel):
     def from_form_data(
         cls,
         file: UploadFile,
-        model: Annotated[Optional[str], Form()] = None,
+        model: Annotated[str, Form()],
         language: Annotated[Optional[str], Form()] = None,
-        prompt: Annotated[str, Form()] = "",
-        response_format: Annotated[AudioResponseFormat,
+        prompt: Annotated[Optional[str], Form()] = "",
+        response_format: Annotated[Optional[AudioResponseFormat],
                                    Form()] = "json",
-        temperature: Annotated[float, Form()] = 0.0,
-        timestamp_granularities: Annotated[List[Literal["word", "segment"]],
+        temperature: Annotated[Optional[float], Form()] = 0.0,
+        timestamp_granularities: Annotated[Optional[List[Literal["word",
+                                                                 "segment"]]],
                                            Form()] = None
     ) -> "TranscriptionRequest":
         if timestamp_granularities is None:
-            timestamp_granularities = []
+            timestamp_granularities = ["segment"]
         return cls(file=file,
                    model=model,
                    language=language,
