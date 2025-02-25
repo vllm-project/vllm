@@ -14,6 +14,7 @@ from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -211,6 +212,17 @@ class Worker(WorkerBase):
             self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
+
+        if get_pp_group().is_last_rank:
+            # Warm up sampler and preallocate memory buffer for logits and other
+            # sampling related tensors of max possible shape to avoid memory
+            # fragmentation issue.
+            # NOTE: This is called after `capture_model` on purpose to prevent
+            # memory buffers from being cleared by `torch.cuda.empty_cache`.
+            self.model_runner._dummy_sampler_run(
+                hidden_states=self.model_runner._dummy_run(
+                    num_tokens=self.scheduler_config.max_num_seqs))
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
