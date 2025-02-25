@@ -159,3 +159,15 @@ table ::= "table_1" | "table_2"
 condition ::= column "=" number
 number ::= "1" | "2"
 """
+
+
+@pytest.fixture
+def sample_sql_lark():
+    return ("""
+start: select_statement
+select_statement: "SELECT" column "from" table "where" condition
+column: "col_1" | "col_2"
+table: "table_1" | "table_2"
+condition: column "=" number
+number: "1" | "2"
+""")
