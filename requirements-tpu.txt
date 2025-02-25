@@ -19,6 +19,4 @@ ray[default]
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 torch==2.7.0.dev20250224+cpu
 torchvision==0.22.0.dev20250224+cpu
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.7.0.dev20250224-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.7.0.dev20250224-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.7.0.dev20250224-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
+torch_xla[tpu, pallas]  # Install whichever version is compatible with torch
