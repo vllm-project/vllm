@@ -582,8 +582,9 @@ class Scheduler:
             new_token_ids: List[int] = []
 
             # Handle guided decoding FSM advancement if applicable
-            if (request.use_guided_decoding and request.grammar
-                    and request.is_grammar_ready):
+            # NOTE: For all requests that uses guided decoding, the grammar
+            # should be ready at this point.
+            if request.use_guided_decoding:
                 index = model_runner_output.req_id_to_index.get(req_id)
                 if index is not None:
                     token_ids = sampled_token_ids[index]
@@ -593,8 +594,10 @@ class Scheduler:
                             "more than one token at a time. Only the first "
                             "token will be used.")
                     token_id = token_ids[0]
+                    assert request.grammar is not None
                     # accept_token advances the FSM
-                    accepted = request.grammar.accept_token(token_id)
+                    accepted = request.grammar.accept_token(
+                        token_id)  # type: ignore[union-attr]
                     if not accepted:
                         logger.error(
                             "Failed to advance FSM for request %s "
@@ -704,8 +707,10 @@ class Scheduler:
         self._cached_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
-        if request.use_guided_decoding and request.grammar:
-            request.grammar.reset()
+        if request.use_guided_decoding:
+            # NOTE: grammar should NOT be None
+            # if use_guided_decoding is True
+            request.grammar.reset()  # type: ignore[union-attr]
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
