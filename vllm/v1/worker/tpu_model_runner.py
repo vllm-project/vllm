@@ -13,11 +13,10 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
-from vllm.attention import AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -652,44 +651,42 @@ class TPUModelRunner:
                 self.encoder_cache[req_id] = {}
             self.encoder_cache[req_id][input_id] = output
 
-    def _gather_encoder_outputs(
+    def _gather_req_encoder_outputs(
         self,
+        req_id: str,
         scheduler_output: "SchedulerOutput",
     ) -> List[torch.Tensor]:
         encoder_outputs: List[torch.Tensor] = []
-        num_reqs = self.input_batch.num_reqs
-        for req_id in self.input_batch.req_ids[:num_reqs]:
-            assert req_id is not None
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
-                req_id]
-            req_state = self.requests[req_id]
-            num_computed_tokens = req_state.num_computed_tokens
-            mm_positions = req_state.mm_positions
-            for i, pos_info in enumerate(mm_positions):
-                start_pos = pos_info["offset"]
-                num_encoder_tokens = pos_info["length"]
+        assert req_id is not None
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        req_state = self.requests[req_id]
+        num_computed_tokens = req_state.num_computed_tokens
+        mm_positions = req_state.mm_positions
+        for i, pos_info in enumerate(mm_positions):
+            start_pos = pos_info["offset"]
+            num_encoder_tokens = pos_info["length"]
 
-                # The encoder output is needed if the two ranges overlap:
-                # [num_computed_tokens,
-                #  num_computed_tokens + num_scheduled_tokens) and
-                # [start_pos, start_pos + num_encoder_tokens)
-                if start_pos >= num_computed_tokens + num_scheduled_tokens:
-                    # The encoder output is not needed in this step.
-                    break
-                if start_pos + num_encoder_tokens <= num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    continue
+            # The encoder output is needed if the two ranges overlap:
+            # [num_computed_tokens,
+            #  num_computed_tokens + num_scheduled_tokens) and
+            # [start_pos, start_pos + num_encoder_tokens)
+            if start_pos >= num_computed_tokens + num_scheduled_tokens:
+                # The encoder output is not needed in this step.
+                break
+            if start_pos + num_encoder_tokens <= num_computed_tokens:
+                # The encoder output is already processed and stored
+                # in the decoder's KV cache.
+                continue
 
-                start_idx = max(num_computed_tokens - start_pos, 0)
-                end_idx = min(
-                    num_computed_tokens - start_pos + num_scheduled_tokens,
-                    num_encoder_tokens)
-                assert start_idx < end_idx
-                assert req_id in self.encoder_cache
-                assert i in self.encoder_cache[req_id]
-                encoder_output = self.encoder_cache[req_id][i]
-                encoder_outputs.append(encoder_output[start_idx:end_idx])
+            start_idx = max(num_computed_tokens - start_pos, 0)
+            end_idx = min(
+                num_computed_tokens - start_pos + num_scheduled_tokens,
+                num_encoder_tokens)
+            assert start_idx < end_idx
+            assert req_id in self.encoder_cache
+            assert i in self.encoder_cache[req_id]
+            encoder_output = self.encoder_cache[req_id][i]
+            encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
     @torch.no_grad()
@@ -703,9 +700,6 @@ class TPUModelRunner:
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
             self._execute_encoder(scheduler_output)
-            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
-        else:
-            encoder_outputs = []
 
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
@@ -742,6 +736,10 @@ class TPUModelRunner:
                 # embeddings), we always use embeddings (rather than token ids)
                 # as input to the multimodal model, even when the input is text.
                 input_ids = prompt_data.input_tokens
+                # NOTE(mgoin): Once we run prompts together, this function
+                # _gather_encoder_outputs should be called at _execute_encoder
+                encoder_outputs = self._gather_req_encoder_outputs(
+                    req_id, scheduler_output)
                 if encoder_outputs:
                     inputs_embeds = self.model.get_input_embeddings(
                         input_ids, encoder_outputs)
@@ -763,7 +761,6 @@ class TPUModelRunner:
                 selected_token_ids = self.model(
                     input_ids=input_ids,
                     positions=prompt_data.input_positions,
-                    attn_metadata=prompt_data.attn_metadata,
                     kv_caches=self.kv_caches,
                     inputs_embeds=inputs_embeds,
                 )
@@ -809,7 +806,6 @@ class TPUModelRunner:
                 selected_token_ids = self.model(
                     input_ids=decode_data.input_tokens,
                     positions=decode_data.input_positions,
-                    attn_metadata=decode_data.attn_metadata,
                     kv_caches=self.kv_caches,
                     inputs_embeds=inputs_embeds,
                 )
@@ -1009,7 +1005,6 @@ class TPUModelRunner:
                 input_ids=input_ids,
                 positions=position_ids,
                 kv_caches=kv_caches,
-                attn_metadata=attn_metadata,
                 inputs_embeds=inputs_embeds,
             )
 
@@ -1136,7 +1131,6 @@ class ModelWrapperV1(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
@@ -1146,12 +1140,12 @@ class ModelWrapperV1(nn.Module):
             positions: The input position IDs of shape [batch_size, seq_len].
             kv_caches: The key and value caches. They can be None during the
                 memory profiling at initialization.
-            attn_metadata: The Pallas attention metadata.
             inputs_embeds: The input embeddings of shape [batch_size, seq_len,
                 hidden_size]. It is used for multimodal models.
         """
         # Skip this in memory profiling at initialization.
-        if attn_metadata is not None and kv_caches[0][0].numel() > 0:
+        if kv_caches[0][0].numel() > 0:
+            attn_metadata = get_forward_context().attn_metadata
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it
@@ -1175,8 +1169,6 @@ class ModelWrapperV1(nn.Module):
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             inputs_embeds=inputs_embeds,
         )
 
@@ -1226,8 +1218,6 @@ def swap_positions(b: InputBatch, id_1, id_2):
 
     b.min_tokens[id_1], b.min_tokens[id_2] = b.min_tokens[id_2], b.min_tokens[
         id_1]
-    b.stop_token_ids[id_1], b.stop_token_ids[id_2] = b.stop_token_ids[
-        id_2], b.stop_token_ids[id_1]
 
     gen_1 = b.generators.pop(id_1, None)
     gen_2 = b.generators.pop(id_2, None)
