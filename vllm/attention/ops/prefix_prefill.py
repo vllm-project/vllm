@@ -20,12 +20,12 @@ if triton.__version__ >= "3.2.0":
     @triton.autotune(
         configs=[
             triton.Config({'BLOCK_M': block_m, 'BLOCK_N': block_n, "kpack": 2, \
-                            "num_stages_cache": num_stages_cache, \
-                            "num_stages_request": num_stages_request }, \
+                            "num_unroll_cache": num_unroll_cache, \
+                            "num_unroll_request": num_unroll_request }, \
                             num_warps=num_warps) \
             for block_m in [32, 64, 128] for block_n in [32, 64, 128] \
-            for num_warps in [4, 8] for num_stages_cache in [1, 2] \
-            for num_stages_request in [1, 2]
+            for num_warps in [4, 8] for num_unroll_cache in [1, 2] \
+            for num_unroll_request in [1, 2]
         ],
         key=["BLOCK_M", "BLOCK_N", "BLOCK_SIZE", \
              "BLOCK_DMODEL_PADDED", "BLOCK_DMODEL"]
@@ -72,13 +72,14 @@ if triton.__version__ >= "3.2.0":
             IN_PRECISION: tl.constexpr,
             BLOCK_M: tl.constexpr,
             BLOCK_DMODEL: tl.constexpr,  # head size
-            BLOCK_DMODEL_PADDED: tl.
-        constexpr,  # head size padded to a power of 2
+            # head size padded to a power of 2
+            BLOCK_DMODEL_PADDED: tl.constexpr,
             BLOCK_SIZE: tl.constexpr,
             BLOCK_N: tl.constexpr,
             SLIDING_WINDOW: tl.constexpr,
-            num_stages_cache: tl.constexpr,
-            num_stages_request: tl.constexpr):
+            num_unroll_cache: tl.constexpr,
+            num_unroll_request: tl.constexpr):
+
         cur_batch = tl.program_id(0)
         cur_head = tl.program_id(1)
         start_m = tl.program_id(2)
@@ -127,7 +128,7 @@ if triton.__version__ >= "3.2.0":
 
         # compute query against context (no causal mask here)
         for start_n in tl.range(0, cur_batch_ctx_len, BLOCK_SIZE, \
-                                num_stages=num_stages_cache):
+                                loop_unroll_factor=num_unroll_cache):
             start_n = tl.multiple_of(start_n, BLOCK_SIZE)
             # -- compute qk ----
             bn = tl.load(B_Loc + cur_batch * stride_b_loc_b +
@@ -211,7 +212,7 @@ if triton.__version__ >= "3.2.0":
         # compute query against itself (with causal mask)
         for start_n in tl.range(0, \
                                 block_mask * (start_m + 1) * BLOCK_M, BLOCK_N, \
-                                num_stages=num_stages_request):
+                                loop_unroll_factor=num_unroll_request):
             start_n = tl.multiple_of(start_n, BLOCK_N)
             # -- compute qk ----
             k = tl.load(k_ptrs +
