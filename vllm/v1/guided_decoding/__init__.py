@@ -33,11 +33,6 @@ class GuidedDecodingOptions(enum.Enum):
 GuidedDecodingKey = Tuple[GuidedDecodingOptions, str]
 
 
-def reset_bitmask(bitmask: torch.Tensor):
-    # this calls bitmask.fill_(tensor([1, 1, ...], dtype=int32))
-    xgr.reset_token_bitmask(bitmask)
-
-
 def apply_bitmask(logits: torch.Tensor, vocab_mask: torch.Tensor,
                   indices: List[int]) -> None:
     xgr.apply_token_bitmask_inplace(logits, vocab_mask, indices=indices)
@@ -110,9 +105,6 @@ class GuidedDecodingManager:
 
     def __getitem__(self, key: GuidedDecodingKey) -> Optional[Grammar]:
         return self.request_key_to_grammar.get(key)
-
-    def reset_bitmask(self):
-        reset_bitmask(self.grammar_bitmask)
 
     def remove_requests(self, request_ids: List[str]) -> None:
         with self._requests_lock:
