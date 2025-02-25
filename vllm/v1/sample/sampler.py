@@ -120,7 +120,7 @@ class Sampler(nn.Module):
                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
         if sampling_metadata.all_greedy:
             return logits
-        # Apply temperature.
+        # Apply temperature. This is an in-place op changing logits.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         return logits.softmax(dim=-1, dtype=torch.float32)
 
