@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
 import argparse
 import json
 import os
-import sys
 import subprocess
+import sys
 
 from vllm.logger import init_logger
 
@@ -18,38 +19,53 @@ def error_exit(message: str) -> None:
 
 def arg_parser():
     parser = argparse.ArgumentParser(description="vLLM multi-node launcher")
-    parser.add_argument("--model", type=str, required=True,
+    parser.add_argument("--model",
+                        type=str,
+                        required=True,
                         help="Model or model path")
-    parser.add_argument("--world-size", type=int, required=True,
+    parser.add_argument("--world-size",
+                        type=int,
+                        required=True,
                         help="World size for distributed inference")
-    parser.add_argument("--max-num-seqs", type=int, required=True,
+    parser.add_argument("--max-num-seqs",
+                        type=int,
+                        required=True,
                         help="Maximum number of sequences (or batch size)")
-    parser.add_argument("--max-model-len", type=int, default=8192,
+    parser.add_argument("--max-model-len",
+                        type=int,
+                        default=8192,
                         help="Maximum sequence length")
-    parser.add_argument("--max-context-length", type=int,
+    parser.add_argument("--max-context-length",
+                        type=int,
                         help="Maximum context length")
     parser.add_argument("--compiled-model-path",
                         help="Path to the compiled model. If not present, "
-                             "model artifacts will be created in local-models "
-                             "folder")
-    parser.add_argument("--local-ranks-size", type=int, default=32,
+                        "model artifacts will be created in local-models "
+                        "folder")
+    parser.add_argument("--local-ranks-size",
+                        type=int,
+                        default=32,
                         help="Local ranks size")
     parser.add_argument("--on-device-sampling-config",
                         type=json.loads,
                         help="On-device sampling configuration")
-    parser.add_argument("--quantized", type=bool, default=False,
+    parser.add_argument("--quantized",
+                        type=bool,
+                        default=False,
                         help="Enable quantized mode (default: False)")
-    parser.add_argument("--quantized-checkpoints-path", type=str,
+    parser.add_argument("--quantized-checkpoints-path",
+                        type=str,
                         help="Path to quantized checkpoints "
-                             "(required if --quantized is True)")
-    parser.add_argument("--port", type=int, default=8080,
+                        "(required if --quantized is True)")
+    parser.add_argument("--port",
+                        type=int,
+                        default=8080,
                         help="Port for the API server")
 
     args = parser.parse_args()
     if args.quantized and not args.quantized_checkpoints_path:
-        parser.error(
-            "--quantized-checkpoints-path is required when "
-            "--quantized is enabled.")
+        parser.error("--quantized-checkpoints-path is required when "
+                     "--quantized is enabled.")
     return args
 
 
@@ -91,7 +107,7 @@ def main() -> None:
         "ENABLE_NEURON_MULTI_NODE": "true",
         "WORLD_SIZE": str(mpi_world_size),
         "NEURON_RT_ROOT_COMM_ID":
-            f"{master_addr}:{NEURON_RT_ROOT_COMM_ID_PORT}",
+        f"{master_addr}:{NEURON_RT_ROOT_COMM_ID_PORT}",
         "NEURON_LOCAL_TP": str(args.local_ranks_size),
         "NEURON_RANK_ID": str(rank)
     })
@@ -101,9 +117,7 @@ def main() -> None:
         logger.info("Starting vLLM API server on rank 0...")
         cmd = [
             "python", "-m", "vllm.entrypoints.api_server",
-            f"--model={args.model}",
-            f"--port={args.port}",
-            "--device=neuron",
+            f"--model={args.model}", f"--port={args.port}", "--device=neuron",
             f"--max-num-seqs={args.max_num_seqs}",
             f"--max-model-len={args.max_model_len}",
             f"--override-neuron-config={json.dumps(override_config)}"
@@ -118,10 +132,8 @@ def main() -> None:
         current_script_dir = os.path.dirname(os.path.abspath(__file__))
         worker_file_path = os.path.join(current_script_dir, "worker.py")
         cmd = [
-            "python", worker_file_path,
-            f"--model={args.model}",
-            "--device=neuron",
-            f"--max-num-seqs={args.max_num_seqs}",
+            "python", worker_file_path, f"--model={args.model}",
+            "--device=neuron", f"--max-num-seqs={args.max_num_seqs}",
             f"--max-model-len={args.max_model_len}",
             f"--override-neuron-config={json.dumps(override_config)}"
         ]

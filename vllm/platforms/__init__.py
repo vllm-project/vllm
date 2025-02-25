@@ -148,7 +148,7 @@ def neuron_platform_plugin() -> Optional[str]:
         pass
 
     try:
-        import neuronx_distributed_inference # noqa: F401
+        import neuronx_distributed_inference  # noqa: F401
         nxd_installed = True
     except ImportError:
         pass
