@@ -85,6 +85,11 @@ class Attention(nn.Module):
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
 
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.num_kv_heads = num_kv_heads
+        self.sliding_window = sliding_window
+
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None:
@@ -116,10 +121,6 @@ class Attention(nn.Module):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,
                              **extra_impl_args)
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.num_kv_heads = num_kv_heads
-        self.sliding_window = sliding_window
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 
