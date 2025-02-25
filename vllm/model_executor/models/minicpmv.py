@@ -673,7 +673,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         for modality, count in counts.items():
             if modality not in inputs or not inputs[modality]:
                 raise ValueError(f"None input data of {modality}."
-                                 "But prompt requires.")
+                                 " But prompt requires.")
             counter_key = self.get_modality_num_counter(modality)
             if len(inputs[modality][counter_key]) != count:
                 raise ValueError(f"The prompt requires {count} "

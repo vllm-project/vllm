@@ -438,7 +438,7 @@ class FlashInferMetadata(AttentionMetadata):
                 not in supported_head_sizes:
             raise ValueError(
                 f"Only {supported_head_sizes} are supported for head_dim,",
-                f"received {self.head_dim}.")
+                f" received {self.head_dim}.")
 
     def begin_forward(self):
         if self.num_prefill_tokens > 0:

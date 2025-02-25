@@ -160,7 +160,7 @@ class MultiModalProfiler(Generic[_I]):
 
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(
-                "The keys returned by `get_supported_mm_limits`"
+                "The keys returned by `get_supported_mm_limits` "
                 f"({set(mm_counts.keys())}) should be the same as those "
                 "returned by `get_mm_max_tokens_per_item` "
                 f"({set(mm_max_tokens_per_item.keys())})")

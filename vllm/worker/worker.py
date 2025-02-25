@@ -525,7 +525,7 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the"
+                "You can use float16 instead by explicitly setting the "
                 "`dtype` flag in CLI, for example: --dtype=half.")
 
 
@@ -533,7 +533,7 @@ def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
                                 max_model_len) -> None:
     if is_attention_free and num_gpu_blocks != 0:
         raise ValueError("No memory should be allocated for the cache blocks "
-                         f"for an attention-free model, but {num_gpu_blocks}"
+                         f"for an attention-free model, but {num_gpu_blocks} "
                          "blocks are allocated.")
     if not is_attention_free and num_gpu_blocks <= 0:
         raise ValueError("No available memory for the cache blocks. "

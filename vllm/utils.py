@@ -447,7 +447,7 @@ def get_ip() -> str:
         logger.warning(
             "The environment variable HOST_IP is deprecated and ignored, as"
             " it is often used by Docker and other software to"
-            "interact with the container's network stack. Please "
+            " interact with the container's network stack. Please "
             "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
             " to communicate with each other.")
     if host_ip:
@@ -2091,8 +2091,8 @@ def set_ulimit(target_soft_limit=65535):
                                (target_soft_limit, current_hard))
         except ValueError as e:
             logger.warning(
-                "Found ulimit of %s and failed to automatically increase"
-                "with error %s. This can cause fd limit errors like"
+                "Found ulimit of %s and failed to automatically increase "
+                "with error %s. This can cause fd limit errors like "
                 "`OSError: [Errno 24] Too many open files`. Consider "
                 "increasing with ulimit -n", current_soft, e)
 

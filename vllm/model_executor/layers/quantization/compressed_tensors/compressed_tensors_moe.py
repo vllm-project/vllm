@@ -71,7 +71,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         if not (self.weight_quant.strategy == QuantizationStrategy.TENSOR
                 and self.input_quant.strategy == QuantizationStrategy.TENSOR):
             raise ValueError(
-                "For FP8 Fused MoE layers, only per-tensor scales"
+                "For FP8 Fused MoE layers, only per-tensor scales "
                 "for weights and activations are supported. Found "
                 f"{self.weight_quant}, {self.input_quant}")
 

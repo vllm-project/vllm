@@ -90,8 +90,8 @@ class GritLMPooler(nn.Module):
 
         # Return no instruction in case of missing BOS token.
         if prompt_token_ids[0] != self.token_ids["<s>"]:
-            logger.warning("BOS token not found in prompt,"
-                           "thus using empty string for instruction."
+            logger.warning("BOS token not found in prompt, "
+                           "thus using empty string for instruction. "
                            "GritLM requires BOS token in prompt.")
             return instruction_len
 
@@ -111,8 +111,8 @@ class GritLMPooler(nn.Module):
         if found_embed_pattern_idx != -1:
             instruction_len = found_embed_pattern_idx + len(embed_pattern_ids)
         else:
-            logger.warning("Query instruction not found in prompt,"
-                           "thus using BOS token as instruction instead."
+            logger.warning("Query instruction not found in prompt, "
+                           "thus using BOS token as instruction instead. "
                            "GritLM requires query instruction in prompt.")
             instruction_len = 1
 

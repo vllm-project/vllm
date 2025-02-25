@@ -118,7 +118,7 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
             and input_size_per_partition % group_size != 0):
         raise ValueError(
             f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}."
+            f" is not divisible by group_size = {group_size}. "
             "Consider reducing tensor_parallel_size or running "
             "with --quantization gptq.")
 
