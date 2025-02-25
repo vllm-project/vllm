@@ -443,7 +443,7 @@ class MLACommonState(AttentionState, Generic[T]):
 
 
 @dataclass
-class MLACommonMetadata(AttentionMetadata, Generic[T]):
+class MLACommonMetadata(AttentionMetadata):
     """Metadata for MLACommon. 
     
     NOTE: Please read the comment at the top of the file before trying to 
@@ -511,8 +511,8 @@ class MLACommonMetadata(AttentionMetadata, Generic[T]):
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor] = None
 
-    _cached_prefill_metadata: Optional[T] = None
-    _cached_decode_metadata: Optional[T] = None
+    _cached_prefill_metadata: Optional[Any] = None
+    _cached_decode_metadata: Optional[Any] = None
 
     num_prefill_tokens: int
 
@@ -541,7 +541,7 @@ class MLACommonMetadata(AttentionMetadata, Generic[T]):
                 f" received {self.head_dim}.")
 
     @property
-    def prefill_metadata(self) -> Optional[T]:
+    def prefill_metadata(self):
         if self.num_prefills == 0:
             return None
 
@@ -603,7 +603,7 @@ class MLACommonMetadata(AttentionMetadata, Generic[T]):
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional[T]:
+    def decode_metadata(self):
         if self.num_decode_tokens == 0:
             return None
 
