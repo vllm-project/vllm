@@ -124,7 +124,7 @@ class GuidedDecodingManager:
         return False
 
     def cache(self, request: Request):
-        self._validate_grammer_is_supported(request.guided_decoding_key)
+        self._validate_grammar_is_supported(request.guided_decoding_key)
         return self.executor.submit(self._executor_loop, request)
 
     def _executor_loop(self, request: Request) -> Grammar:
@@ -137,7 +137,7 @@ class GuidedDecodingManager:
         self.request_key_to_grammar[key] = self.initialize_grammar(key)
         return self.request_key_to_grammar[key]
 
-    def _validate_grammer_is_supported(self, key: GuidedDecodingKey):
+    def _validate_grammar_is_supported(self, key: GuidedDecodingKey):
         request_type, grammar_spec = key
         if request_type == GuidedDecodingOptions.json:
             try:
