@@ -14,11 +14,12 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
 from vllm import envs
+from vllm.connector import create_remote_connector
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import check_gguf_file, is_remote_url
 from vllm.utils import make_async
 
 if TYPE_CHECKING:
@@ -175,6 +176,14 @@ def get_tokenizer(
                     # Ignore weights - we only need the tokenizer.
                     ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
                 tokenizer_name = tokenizer_path
+
+    if is_remote_url(tokenizer_name):
+        # BaseConnector implements __del__() to clean up the local dir.
+        # Since config files need to exist all the time, so we DO NOT use
+        # with statement to avoid closing the client.
+        client = create_remote_connector(tokenizer_name)
+        client.pull_files(ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+        tokenizer_name = client.get_local_dir()
 
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):

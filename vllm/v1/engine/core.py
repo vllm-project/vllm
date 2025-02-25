@@ -409,6 +409,9 @@ class EngineCore:
                                                pattern=pattern,
                                                max_size=max_size)
 
+    def save_remote_state(self, url: str) -> None:
+        self.model_executor.save_remote_state(url=url)
+
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,

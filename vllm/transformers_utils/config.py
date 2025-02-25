@@ -40,7 +40,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import check_gguf_file, is_remote_url
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -336,8 +336,26 @@ def maybe_override_with_speculators_target_model(
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+
+    if is_remote_url(model):
+        from vllm.connector import create_remote_connector
+
+        # BaseConnector implements __del__() to clean up the local dir.
+        # Since config files need to exist all the time, so we DO NOT use
+        # with statement to avoid closing the client.
+        client = create_remote_connector(model)
+        client.pull_files(ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+        tmp_model = client.get_local_dir()
+
+    if gguf_model_repo is not None:
+        config_model = gguf_model_repo
+    elif tmp_model is not None:
+        config_model = tmp_model
+    else:
+        config_model = model
+
     config_dict, _ = PretrainedConfig.get_config_dict(
-        model if gguf_model_repo is None else gguf_model_repo,
+        config_model,
         revision=revision,
         trust_remote_code=trust_remote_code,
         token=_get_hf_token(),
@@ -367,6 +385,16 @@ def get_config(
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
+
+    if is_remote_url(model):
+        from vllm.connector import create_remote_connector
+
+        # BaseConnector implements __del__() to clean up the local dir.
+        # Since config files need to exist all the time, so we DO NOT use
+        # with statement to avoid closing the client.
+        client = create_remote_connector(model)
+        client.pull_files(ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+        model = client.get_local_dir()
 
     if config_format == ConfigFormat.AUTO:
         try:

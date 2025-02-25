@@ -594,6 +594,15 @@ class Worker(WorkerBase):
         self.model_runner.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
+    def save_remote_state(
+        self,
+        url: str,
+    ) -> None:
+        from vllm.model_executor.model_loader import RemoteModelLoader
+        RemoteModelLoader.save_model(self.model_runner.model,
+                                     self.model_config.model,
+                                     url=url)
+
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,

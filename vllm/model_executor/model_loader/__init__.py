@@ -13,6 +13,7 @@ from vllm.model_executor.model_loader.bitsandbytes_loader import (
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
+from vllm.model_executor.model_loader.remote_loader import RemoteModelLoader
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader)
 from vllm.model_executor.model_loader.sharded_state_loader import (
@@ -39,6 +40,7 @@ LoadFormats = Literal[
     "safetensors",
     "sharded_state",
     "tensorizer",
+    "remote",
 ]
 _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "auto": DefaultModelLoader,
@@ -54,6 +56,7 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "safetensors": DefaultModelLoader,
     "sharded_state": ShardedStateLoader,
     "tensorizer": TensorizerLoader,
+    "remote": RemoteModelLoader,
 }
 
 
