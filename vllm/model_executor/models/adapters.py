@@ -160,7 +160,6 @@ def as_classification_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.attention import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.linear import RowParallelLinear
     from vllm.model_executor.layers.pooler import PoolingType
@@ -201,13 +200,10 @@ def as_classification_model(cls: _T) -> _T:
             self,
             input_ids: torch.Tensor,
             positions: torch.Tensor,
-            kv_caches: list[torch.Tensor],
-            attn_metadata: AttentionMetadata,
             intermediate_tensors: Optional[IntermediateTensors] = None,
             inputs_embeds: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
-            hidden_states = super().forward(input_ids, positions, kv_caches,
-                                            attn_metadata,
+            hidden_states = super().forward(input_ids, positions,
                                             intermediate_tensors,
                                             inputs_embeds)
             logits, _ = self.score(hidden_states)

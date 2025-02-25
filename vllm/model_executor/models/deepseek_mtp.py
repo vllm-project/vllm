@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -69,8 +68,6 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_index: int = 0,
@@ -88,8 +85,6 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         hidden_states, residual = self.mtp_block(positions=positions,
                                                  hidden_states=hidden_states,
-                                                 kv_cache=kv_cache,
-                                                 attn_metadata=attn_metadata,
                                                  residual=None)
         hidden_states = residual + hidden_states
         return self.shared_head(hidden_states)
@@ -122,8 +117,6 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
@@ -131,8 +124,6 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         return self.layers[str(self.mtp_start_layer_idx + spec_step_idx)](
             input_ids,
             positions,
-            kv_caches[spec_step_idx],
-            attn_metadata,
             previous_hidden_states,
             inputs_embeds,
             spec_step_idx,
@@ -165,16 +156,14 @@ class DeepSeekMTP(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, previous_hidden_states,
-                                   inputs_embeds, spec_step_idx)
+        hidden_states = self.model(input_ids, positions,
+                                   previous_hidden_states, inputs_embeds,
+                                   spec_step_idx)
         return hidden_states
 
     def compute_logits(

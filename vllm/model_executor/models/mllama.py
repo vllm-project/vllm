@@ -38,7 +38,8 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tp_group
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -416,11 +417,11 @@ class MllamaVisionSdpaAttention(nn.Module):
                  prefix: str = ""):
         super().__init__()
 
-        model_parallel_size = get_tensor_model_parallel_world_size()
+        tensor_parallel_size = get_tp_group().world_size
         self.embed_dim = config.hidden_size
         self.num_heads = config.attention_heads
         self.head_dim = config.hidden_size // config.attention_heads
-        self.num_local_heads = self.num_heads // model_parallel_size
+        self.num_local_heads = self.num_heads // tensor_parallel_size
         self.q_size = self.num_local_heads * self.head_dim
         self.kv_size = self.num_local_heads * self.head_dim
 
@@ -771,12 +772,13 @@ class MllamaTextCrossAttention(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.model_parallel_size = get_tensor_model_parallel_world_size()
+        self.pipeline_parallel_rank = get_pp_group().rank_in_group
+        self.tensor_parallel_size = get_tp_group().world_size
         self.num_heads = self.config.num_attention_heads
-        self.num_local_heads = self.num_heads // self.model_parallel_size
+        self.num_local_heads = self.num_heads // self.tensor_parallel_size
         self.num_key_value_heads = self.config.num_key_value_heads
         self.num_local_key_value_heads = \
-            self.num_key_value_heads // self.model_parallel_size
+            self.num_key_value_heads // self.tensor_parallel_size
         self.dropout = config.dropout
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
@@ -824,8 +826,6 @@ class MllamaTextCrossAttention(nn.Module):
         attention_mask: Optional[torch.Tensor],
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv_dec, _ = self.qkv_proj(hidden_states)
         q, _, _ = qkv_dec.split(
@@ -846,14 +846,11 @@ class MllamaTextCrossAttention(nn.Module):
         q = self.q_norm(q)
 
         if attention_mask is not None:
-            output = self._attention_with_mask(q, k, v, kv_cache,
-                                               attention_mask,
-                                               kv_range_for_decode,
-                                               attn_metadata)
+            output = self._attention_with_mask(q, k, v, attention_mask,
+                                               kv_range_for_decode)
         else:
             output = self.attn(
-                q.view(-1, self.num_local_heads * self.head_dim), k, v,
-                kv_cache, attn_metadata)
+                q.view(-1, self.num_local_heads * self.head_dim), k, v)
         out, _ = self.o_proj(output)
         return out
 
@@ -862,11 +859,11 @@ class MllamaTextCrossAttention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        kv_cache: torch.Tensor,
         attention_mask: torch.Tensor,
         kv_range_for_decode: List[Tuple[int, int]],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         # Skip writing kv-cache for the initial profiling run.
         if len(kv_cache.shape) > 1:
             i = torch.ones(1, dtype=torch.float32)
@@ -978,8 +975,6 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         cross_attention_mask: torch.Tensor,
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         full_text_row_masked_out_mask: torch.Tensor,
-        kv_cache: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -989,8 +984,6 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             attention_mask=cross_attention_mask,
             kv_range_for_decode=kv_range_for_decode,
             cross_attention_states=cross_attention_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         hidden_states = full_text_row_masked_out_mask * hidden_states
         hidden_states = residual + self.cross_attn_attn_gate.tanh(
@@ -1054,14 +1047,12 @@ class MllamaTextModel(nn.Module):
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
                                                       torch.Tensor]],
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         skip_cross_attention: bool,
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
-        for idx, decoder_layer in enumerate(self.layers):
+        for decoder_layer in self.layers:
             if isinstance(decoder_layer, MllamaCrossAttentionDecoderLayer):
                 if not skip_cross_attention:
                     hidden_states = decoder_layer(
@@ -1071,15 +1062,11 @@ class MllamaTextModel(nn.Module):
                         kv_range_for_decode=kv_range_for_decode,
                         full_text_row_masked_out_mask=
                         full_text_row_masked_out_mask,
-                        kv_cache=kv_caches[idx],
-                        attn_metadata=attn_metadata,
                     )
             elif isinstance(decoder_layer, LlamaDecoderLayer):
                 hidden_states, residual = decoder_layer(
                     positions=positions,
                     hidden_states=hidden_states,
-                    kv_cache=kv_caches[idx],
-                    attn_metadata=attn_metadata,
                     residual=None,
                 )
                 hidden_states = hidden_states + residual
@@ -1124,8 +1111,6 @@ class MllamaForCausalLM(nn.Module):
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
                                                       torch.Tensor]],
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         skip_cross_attention: bool,
     ) -> torch.Tensor:
         hidden_states = self.model(
@@ -1135,8 +1120,6 @@ class MllamaForCausalLM(nn.Module):
             cross_attention_mask=cross_attention_mask,
             kv_range_for_decode=kv_range_for_decode,
             full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             skip_cross_attention=skip_cross_attention,
         )
         return hidden_states
@@ -1353,10 +1336,9 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         **kwargs: object,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        attn_metadata = get_forward_context().attn_metadata
         if attn_metadata.num_prefill_tokens > 0 and \
             attn_metadata.num_decode_tokens > 0:
             raise ValueError("Chunk prefill not supported")
@@ -1410,8 +1392,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             cross_attention_mask=cross_attention_mask,
             kv_range_for_decode=kv_range_for_decode,
             full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             skip_cross_attention=skip_cross_attention,
         )
 

@@ -33,7 +33,6 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.whisper.modeling_whisper import (
     ACT2FN, WHISPER_ATTENTION_CLASSES, WhisperConfig, WhisperEncoder)
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import MultiModalFieldConfig
@@ -792,8 +791,6 @@ class MiniCPMO(MiniCPMV2_6):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
@@ -818,8 +815,6 @@ class MiniCPMO(MiniCPMV2_6):
         output = self.llm.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=vlm_embeddings,
         )

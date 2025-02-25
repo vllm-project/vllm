@@ -644,11 +644,7 @@ def _run_encoder_attention_test(
         # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
         reshaped_query = packed_qkv.query.view(
             -1, test_pt.num_heads * test_pt.head_size)
-        return attn.forward(
-            reshaped_query, packed_qkv.key, packed_qkv.value,
-            torch.tensor([],
-                         dtype=torch.float32,
-                         device=packed_qkv.query.device), attn_metadata)
+        return attn.forward(reshaped_query, packed_qkv.key, packed_qkv.value)
 
 
 def _run_decoder_self_attention_test(
@@ -682,7 +678,6 @@ def _run_decoder_self_attention_test(
       & attn_metadata
     '''
     attn = test_rsrcs.attn
-    kv_cache = test_rsrcs.kv_cache
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata, vllm_config):
@@ -695,8 +690,7 @@ def _run_decoder_self_attention_test(
         # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
         reshaped_query = packed_qkv.query.view(
             -1, test_pt.num_heads * test_pt.head_size)
-        return attn.forward(reshaped_query, packed_qkv.key, packed_qkv.value,
-                            kv_cache, attn_metadata)
+        return attn.forward(reshaped_query, packed_qkv.key, packed_qkv.value)
 
 
 def _run_encoder_decoder_cross_attention_test(
@@ -744,7 +738,6 @@ def _run_encoder_decoder_cross_attention_test(
     assert decoder_test_params.packed_qkvo.packed_qkv is not None
 
     attn = test_rsrcs.attn
-    kv_cache = test_rsrcs.kv_cache
     if cross_test_params is None:
         key = None
         value = None
@@ -762,8 +755,7 @@ def _run_encoder_decoder_cross_attention_test(
         # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
         reshaped_query = decoder_test_params.packed_qkvo.packed_qkv.query.view(
             -1, test_pt.num_heads * test_pt.head_size)
-        return attn.forward(reshaped_query, key, value, kv_cache,
-                            attn_metadata)
+        return attn.forward(reshaped_query, key, value)
 
 
 @pytest.fixture(autouse=True)
