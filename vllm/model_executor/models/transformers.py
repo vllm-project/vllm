@@ -22,11 +22,16 @@ from torch import nn
 from transformers import AutoModel, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.logger import init_logger
+from vllm.lora.fully_sharded_layers import (
+    ColumnParallelLinearWithShardedLoRA, RowParallelLinearWithShardedLoRA)
+from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
+                              ReplicatedLinearWithLoRA,
+                              RowParallelLinearWithLoRA)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -54,7 +59,6 @@ def vllm_flash_attention_forward(
         # Transformers kwargs
         scaling: Optional[float] = None,
         # vLLM kwargs
-        attn_metadata: Optional[AttentionMetadata] = None,
         attention_instances: Optional[list[Attention]] = None,
         **kwargs):
     self_attn = attention_instances[module.layer_idx]
@@ -63,12 +67,7 @@ def vllm_flash_attention_forward(
     hidden = query.shape[-2]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    return self_attn.forward(
-        query,
-        key,
-        value,
-        kv_cache=None,  # argument not used
-        attn_metadata=attn_metadata), None
+    return self_attn.forward(query, key, value), None
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
@@ -103,6 +102,23 @@ def replace_linear_class(
         "rowwise": RowParallelLinear,
     }.get(style, ReplicatedLinear)
 
+    lora_linear_cls = {
+        ColumnParallelLinear: {
+            True: ColumnParallelLinearWithShardedLoRA,  # fully sharded
+            False: ColumnParallelLinearWithLoRA  # not fully sharded
+        },
+        RowParallelLinear: {
+            True: RowParallelLinearWithShardedLoRA,
+            False: RowParallelLinearWithLoRA
+        },
+        # ReplicatedLinear doesn't support fully sharded LoRA yet,
+        # so we use the same class for both cases.
+        ReplicatedLinear: {
+            True: ReplicatedLinearWithLoRA,
+            False: ReplicatedLinearWithLoRA
+        }
+    }
+
     class HFCompatibleLinear(vllm_linear_cls):
         """
         Wrapper class that removes `output_bias` from returned output.
@@ -110,6 +126,19 @@ def replace_linear_class(
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return super().forward(input)[0]
+
+        @classmethod
+        def get_lora_class(cls, fully_sharded: bool = False):
+            """
+            Get the LoRA class corresponding to the current transformer
+            linear class.
+
+            Args:
+                fully_sharded (bool): If True, select the LoRA class variant
+                that supports fully sharded LoRA. Defaults to False.
+
+            """
+            return lora_linear_cls[vllm_linear_cls][fully_sharded]
 
     return HFCompatibleLinear(
         input_size=linear.in_features,
@@ -216,8 +245,6 @@ class TransformersModel(nn.Module, SupportsQuant):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: list[torch.Tensor],  # argument not used
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -225,7 +252,6 @@ class TransformersModel(nn.Module, SupportsQuant):
             input_ids[None, ...],
             use_cache=False,
             position_ids=positions[None, ...],
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             attention_instances=self.attention_instances,
             return_dict=False)[0][0, ...]  # we remove batch dimension for now
