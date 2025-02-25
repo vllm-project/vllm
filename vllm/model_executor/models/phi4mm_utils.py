@@ -4,7 +4,6 @@
 # but implemented by the Phi-Speech team
 #!/usr/bin/env python3
 import abc
-import backoff
 from functools import partial
 import math
 from typing import Optional, Tuple, Union, List, Literal, Union, Dict, Callable
@@ -876,20 +875,6 @@ class AbsolutePositionalEncoding(nn.Module):
 
 
 #### forward embedding layers starts here
-
-
-@backoff.on_exception(backoff.expo, Exception, max_tries=10)
-def np_loadtxt_with_retry(filepath):
-    """np.loadtxt with retry
-
-    Args:
-        filepath: str
-            file path to the numpy array.
-    """
-    result = np.loadtxt(filepath, dtype="f")
-    return result
-
-
 class MeanVarianceNormLayer(nn.Module):
     """Mean/variance normalization layer.
 
@@ -917,36 +902,6 @@ class MeanVarianceNormLayer(nn.Module):
                 input tensor.
         """
         return (input_ - self.global_mean) * self.global_invstd
-
-    def load_mean_invstd(self, mean_file, invstd_file, cuside_features=False):
-        """Load feature mean and variance used for normalization.
-
-        Args:
-            mean_file: str
-                path to the feature mean statistics file.
-            invstd_file: str
-                path to the features inverted standard deviation
-                 statistics file.
-            cuside_features: bool
-                Boolean that indicates CUSIDE is being used.
-                The statistics of CUSIDE features are copied
-                from the normal features
-        """
-        self.global_mean.data = torch.from_numpy(
-            np_loadtxt_with_retry(mean_file)
-        )
-        self.global_invstd.data = torch.from_numpy(
-            np_loadtxt_with_retry(invstd_file)
-        )
-
-        if cuside_features:
-            self.global_mean.data = torch.cat(
-                (self.global_mean.data, self.global_mean.data), 0
-            )
-            self.global_invstd.data = torch.cat(
-                (self.global_invstd.data, self.global_invstd.data), 0
-            )
-
 
 class CausalConv1D(nn.Conv1d):
     """
@@ -2472,11 +2427,6 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                 self.encoder_embedding_config["input_size"]
             )
 
-        mean_file = init_model_config.get("mean_file", None)
-        invstd_file = init_model_config.get("invstd_file", None)
-        if mean_file is not None and invstd_file is not None:
-            self.encoder_embedding.load_mean_invstd(mean_file, invstd_file)
-
     def compute_lens_change(self, feature_lens):
         """feature_lens: int
         return updated feature lens.
@@ -3352,16 +3302,6 @@ class AudioEmbedding(nn.Module):
         self.vocab_size = config.vocab_size
         self.input_embeds = None
         self.audio_embed_sizes = None
-
-    def post_init(self, audio_config):
-        # execute after the from_pretrained() initialization of the phi model
-        if audio_config.get("name", None) == "cascades":
-            init_model_config = audio_config.get("init_model", {})
-            self.encoder.post_init(init_model_config)
-            # remove the init model in config so it is not saved in the config.
-            # This might affect the model loading in resuming training and decoding.
-            if "init_model" in audio_config:
-                audio_config.pop("init_model")
 
     def set_audio_embeds(self, input_embeds: torch.FloatTensor) -> None:
         self.input_embeds = input_embeds

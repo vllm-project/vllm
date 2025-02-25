@@ -460,7 +460,7 @@ if __name__ == "__main__":
         "--model-path",
         "-p",
         type=str,
-        default="/scratch/turing_westus3_prm_data/users/congcongchen/final_checkpoint_new/MoE_weijian_phio-final_2-newtxtsftmore-hf",
+        default="/scratch/turing_westus3_prm_data/users/congcongchen/phi4-mini-mm",
         help="Path to the (HuggingFace) model checkpoint.",
     )
 
@@ -468,7 +468,7 @@ if __name__ == "__main__":
         "--vision-lora-path",
         "-v",
         type=str,
-        default="/scratch/turing_westus3_prm_data/users/congcongchen/final_checkpoint_new/vision-lora-only-from-hf-unified-model",
+        default="/scratch/turing_westus3_prm_data/users/congcongchen/phi4-mini-mm/vision-lora",
         help="Path to the (HuggingFace) vision lora model checkpoint.",
     )
 
@@ -476,7 +476,7 @@ if __name__ == "__main__":
         "--speech-lora-path",
         "-s",
         type=str,
-        default="/scratch/turing_westus3_prm_data/users/congcongchen/final_checkpoint_new/speech-lora-only-from-hf-unified-model",
+        default="/scratch/turing_westus3_prm_data/users/congcongchen/phi4-mini-mm/speech-lora",
         help="Path to the (HuggingFace) speech lora model checkpoint.",
     )
 

@@ -36,7 +36,7 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalInputs, NestedTensors
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.sequence import IntermediateTensors, SequenceData
 from transformers.utils import logging
 
@@ -997,7 +997,7 @@ def input_processor_for_phi4mm(
         prompt_chunk_strings = [s for s in prompt_chunk_strings if s != ""]
 
         # Create the new input_ids with the placholder image and audio tokens inserted
-        tokenizer = cached_get_tokenizer(ctx.model_config.tokenizer)
+        tokenizer = cached_tokenizer_from_config(ctx.model_config)
         input_ids = []
         has_imag, has_audio, has_user_text_input = False, False, False
         for prompt_chunk_string in prompt_chunk_strings:
@@ -1590,8 +1590,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> torch.Tensor:
@@ -1637,8 +1635,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         hidden_states = self.model(
             input_ids,
             positions,
-            kv_caches,
-            attn_metadata,
             intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
