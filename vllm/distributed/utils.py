@@ -67,9 +67,17 @@ def split_tensor_along_last_dim(
 def get_pp_indices(num_hidden_layers: int, pp_rank: int,
                    pp_size: int) -> Tuple[int, int]:
     """Try to evenly distribute layers across partitions.
+
     If the number of layers is not divisible by the number of partitions,
     the remaining layers are evenly distributed across all but the last
-    partition.
+    partition. The last partition is excluded because it often contains an
+    additional norm layer and we are attempting to balance compute.
+
+    If `pp_size > 2` and the number of remaining layers is
+    `0 < x <= pp_size - 2` then the remaining layers are evenly distributed
+    across the middle partitions. The first and last partitions are excluded
+    because they contain the input and output embeddings respectively and we
+    are attempting to reduce maximum memory consumption across partitions.
     """
     partition_list_str = envs.VLLM_PP_LAYER_PARTITION
     if partition_list_str is not None:
