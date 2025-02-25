@@ -370,9 +370,9 @@ class InputBatch:
             self._req_ids[i2], self._req_ids[i1] # noqa
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
             self.req_output_token_ids[i2], self.req_output_token_ids[i1]
-        if old_id_i1 is not None and old_id_i2 is not None:
-            self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] =\
-                self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
+        assert old_id_i1 is not None and old_id_i2 is not None
+        self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] =\
+            self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
         self.num_tokens[i1], self.num_tokens[i2] =\
             self.num_tokens[i2], self.num_tokens[i1]
         self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
