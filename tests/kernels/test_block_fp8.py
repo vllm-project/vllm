@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
-import itertools
+import deep_gemm
 
+import itertools
 import pytest
 import torch
+
+from typing import Tuple
 
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
@@ -268,3 +271,77 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
                 torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.03
+
+
+#########################################################################################
+
+def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2 and x.size(1) % 128 == 0
+    m, n = x.shape
+    x_view = x.view(m, -1, 128)
+    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), (x_amax / 448.0).view(m, -1)
+
+
+def per_block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2
+    m, n = x.shape
+    x_padded = torch.zeros((deep_gemm.cell_div(m, 128) * 128, deep_gemm.cell_div(n, 128) * 128), dtype=x.dtype, device=x.device)
+    x_padded[:m, :n] = x
+    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
+    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
+
+
+@pytest.mark.parametrize(
+    "M,N,K,block_size,out_dtype,seed",
+    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
+@torch.inference_mode()
+def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
+    torch.manual_seed(seed)
+
+    # only aligned sizes
+    if M % 4 != 0 or K % 128 != 0 or N % 64 != 0:
+        return
+
+    # weird max diff errors
+    if False and (M == 512 or M == 2048):
+        return
+
+    factor_for_scale = 1e-2
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    fp8_max, fp8_min = fp8_info.max, fp8_info.min
+
+    A_fp32 = (torch.rand(M, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+    A_fp8 = A_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+
+    B_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+    B_fp8 = B_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+
+    block_n, block_k = block_size[0], block_size[1]
+    n_tiles = (N + block_n - 1) // block_n
+    k_tiles = (K + block_k - 1) // block_k
+
+    As = torch.rand(M, k_tiles, dtype=torch.float32) * factor_for_scale
+    Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
+
+    ref_out = native_w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size,
+                                           out_dtype)
+
+    A_fp8_dg, As_dg = per_token_group_quant_fp8(A_fp32, block_k)
+    B_fp8_dg, Bs_dg = per_block_cast_to_fp8(B_fp32)
+
+    # Transpose earlier so that the testing will not trigger transposing kernels
+    As_dg = deep_gemm.get_col_major_tma_aligned_tensor(As_dg)
+
+    out = torch.empty((M, N), device='cuda', dtype=out_dtype)
+
+    assert As_dg.shape == (M, (K + 127) // 128), f"{As_dg.shape} != {(M, (K + 127) // 128)}"
+
+    deep_gemm.gemm_fp8_fp8_bf16_nt((A_fp8_dg, As_dg), (B_fp8_dg, Bs_dg), out)
+
+    rel_diff = (torch.mean(
+        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    assert rel_diff < 0.001
