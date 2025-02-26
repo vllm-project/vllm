@@ -21,6 +21,7 @@ from loguru import logger
 from loguru._logger import Logger as LoguruLogger
 
 import vllm.envs as envs
+from vllm.logging_utils import NewLineFormatter
 
 VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
@@ -162,20 +163,22 @@ class CustomizeLogger:
         """
         config = cls.load_logging_config(config_path)
         logging_config = config.get("logger")
+        if logging_config is None:
+            logging_config = {}
 
         params = {
             "structured_filepath":
-            logging_config.get("structured_log_file_path"),
+            logging_config.get("structured_log_file_path"),  # type: ignore
             "unstructured_filepath":
-            logging_config.get("unstructured_log_file_path"),
+            logging_config.get("unstructured_log_file_path"),  # type: ignore
             "level":
-            logging_config.get("level"),
+            logging_config.get("level"),  # type: ignore
             "retention":
-            logging_config.get("retention"),
+            logging_config.get("retention"),  # type: ignore
             "rotation":
-            logging_config.get("rotation"),
+            logging_config.get("rotation"),  # type: ignore
             "format":
-            logging_config.get("format"),
+            logging_config.get("format"),  # type: ignore
         }
 
         _logger = cls.customize_logging(**params)
@@ -210,7 +213,9 @@ class CustomizeLogger:
         error = ""
         if exception:
             _, ex, _ = exception
-            error = f" {ex.__class__.__name__}: {ex}\n{format_exception(ex)}"
+            error = (
+                f" {ex.__class__.__name__}: {ex}\n"  # type: ignore
+                f"{format_exception(ex)}")  # type: ignore
 
         subset = {
             "module": record["module"],
@@ -386,18 +391,17 @@ def _setup_logger():
     """Configure the vllm logger with basic settings when 
     VLLM_CONFIGURE_LOGGING is False."""
     global _default_handler, _root_logger
-    _root_logger.setLevel(logging.DEBUG)
+    _root_logger.setLevel(logging.DEBUG)  # type: ignore
     if _default_handler is None:
         _default_handler = logging.StreamHandler(sys.stdout)
         _default_handler.flush = sys.stdout.flush  # type: ignore
         _default_handler.setLevel(logging.INFO)
-        _root_logger.addHandler(_default_handler)
-    from vllm.logging_utils import NewLineFormatter
+        _root_logger.addHandler(_default_handler)  # type: ignore
 
     fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
     _default_handler.setFormatter(fmt)
     # Setting this will avoid the message being propagated to the parent logger
-    _root_logger.propagate = False
+    _root_logger.propagate = False  # type: ignore
 
 
 # Initialize the logger based on configuration
