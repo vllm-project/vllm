@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 from transformers import PreTrainedTokenizer
 
 from vllm.model_executor.guided_decoding.reasoner.deepseek_reasoner import (  # noqa: E501
