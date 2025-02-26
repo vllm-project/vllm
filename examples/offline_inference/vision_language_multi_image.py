@@ -439,7 +439,7 @@ def load_qwen2_5_vl(question, image_urls: List[str]) -> ModelRequestData:
         image_data = [fetch_image(url) for url in image_urls]
     else:
         image_data, _ = process_vision_info(messages,
-                                            return_video_sample_fps=False)
+                                            return_video_kwargs=False)
 
     return ModelRequestData(
         llm=llm,
