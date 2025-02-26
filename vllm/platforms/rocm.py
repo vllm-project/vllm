@@ -110,6 +110,9 @@ class RocmPlatform(Platform):
         "fbgemm_fp8", "gguf", "quark", "ptpc_fp8"
     ]
 
+    def is_rocm_aiter_linear_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_LINEAR
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
