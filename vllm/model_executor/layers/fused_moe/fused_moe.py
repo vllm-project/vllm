@@ -17,6 +17,12 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
+USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE and current_platform.is_rocm(
+)
+if USE_ROCM_AITER_FMOE:
+    import aiter
+    import aiter.fused_moe_bf16_asm as aiter_fmoe_asm
+
 logger = init_logger(__name__)
 
 
@@ -946,17 +952,22 @@ def fused_topk(
                                         dtype=torch.int32,
                                         device=hidden_states.device)
 
-    ops.topk_softmax(
-        topk_weights,
-        topk_ids,
-        token_expert_indicies,
-        gating_output.float(),  # TODO(woosuk): Optimize this.
-    )
+    if USE_ROCM_AITER_FMOE:
+        aiter.topk_softmax(topk_weights, topk_ids, token_expert_indicies,
+                           gating_output.float(), renormalize)
+    else:
+        ops.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            gating_output.float(),  # TODO(woosuk): Optimize this.
+        )
+
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                           keepdim=True)
+
     del token_expert_indicies  # Not used. Will be used in the future.
-
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-
     return topk_weights, topk_ids
 
 
@@ -1141,6 +1152,81 @@ direct_register_custom_op(
 )
 
 
+def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
+                             w1: torch.Tensor,
+                             w2: torch.Tensor,
+                             topk_weights: torch.Tensor,
+                             topk_ids: torch.Tensor,
+                             use_fp8_w8a8: bool = False,
+                             use_fp8_blockscale: bool = False,
+                             w1_scale: Optional[torch.Tensor] = None,
+                             w2_scale: Optional[torch.Tensor] = None,
+                             block_shape: Optional[List[int]] = None,
+                             expert_mask: Optional[torch.Tensor] = None):
+
+    if use_fp8_blockscale:
+        local_E = E = w1.shape[0]
+        if expert_mask is not None:
+            E = expert_mask.numel()
+
+        topk = topk_ids.shape[1]
+        model_dim = w1.shape[-1]
+        dtype = hidden_states.dtype
+        scale_blk_k = block_shape[1]
+
+        (
+            sorted_token_ids,
+            sorted_weight_buf,
+            sorted_expert_ids,
+            num_valid_ids,
+            out_asm,
+        ) = aiter_fmoe_asm.moe_sorting_ck(topk_ids,
+                                          topk_weights,
+                                          E,
+                                          model_dim,
+                                          dtype,
+                                          expert_mask=expert_mask)
+
+        a1, a1_scale = per_token_group_quant_fp8(hidden_states, scale_blk_k)
+        aiter.fmoe_fp8_blockscale_g1u1(
+            out_asm,
+            a1,
+            w1,
+            w2,
+            sorted_token_ids,
+            sorted_weight_buf,
+            sorted_expert_ids,
+            num_valid_ids,
+            topk,
+            w1_scale.view(local_E, -1),
+            w2_scale.view(local_E, -1),
+            a1_scale.t().contiguous(),
+            block_shape[0],
+            block_shape[1],
+            None,
+        )
+        return out_asm
+
+    if use_fp8_w8a8:
+        return aiter_fmoe_asm.asm_moe(hidden_states=hidden_states,
+                                      w1=w1,
+                                      w2=w2,
+                                      topk_weight=topk_weights,
+                                      topk_ids=topk_ids,
+                                      fc1_scale=w1_scale,
+                                      fc2_scale=w2_scale,
+                                      fc1_smooth_scale=None,
+                                      fc2_smooth_scale=None,
+                                      a16=False)
+    else:
+        return aiter.ck_moe(hidden_states=hidden_states,
+                            w1=w1,
+                            w2=w2,
+                            topk_weights=topk_weights,
+                            topk_ids=topk_ids,
+                            expert_mask=expert_mask)
+
+
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
                   w2: torch.Tensor,
@@ -1150,6 +1236,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   use_fp8_w8a8: bool = False,
                   use_int8_w8a16: bool = False,
                   use_int4_w4a16: bool = False,
+                  use_fp8_blockscale: bool = False,
                   global_num_experts: int = -1,
                   expert_map: Optional[torch.Tensor] = None,
                   w1_scale: Optional[torch.Tensor] = None,
@@ -1158,8 +1245,12 @@ def fused_experts(hidden_states: torch.Tensor,
                   w2_zp: Optional[torch.Tensor] = None,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None,
-                  block_shape: Optional[List[int]] = None) -> torch.Tensor:
-
+                  block_shape: Optional[List[int]] = None,
+                  expert_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    if USE_ROCM_AITER_FMOE:
+        rocm_aiter_fused_experts(hidden_states, w1, w2, topk_weights, topk_ids,
+                                 use_fp8_w8a8, use_fp8_blockscale, w1_scale,
+                                 w2_scale, block_shape, expert_mask)
     if inplace:
         torch.ops.vllm.inplace_fused_experts(
             hidden_states, w1, w2, topk_weights, topk_ids, use_fp8_w8a8,

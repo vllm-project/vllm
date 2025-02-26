@@ -33,6 +33,11 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
+USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE and current_platform.is_rocm(
+)
+if USE_ROCM_AITER_FMOE:
+    import aiter.ops as aiter_ops
+
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
@@ -655,6 +660,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         start:start + shard_size, :], _ = ops.scaled_fp8_quant(
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
+
+            if USE_ROCM_AITER_FMOE:
+                max_w13_scales = max_w13_scales.unsqueeze(-1).unsqueeze(
+                    -1).expand((-1, layer.w13_weight.shape[1], -1))
+                w2_scales = layer.w2_weight_scale.data.unsqueeze(-1).unsqueeze(
+                    -1).expand((-1, layer.w2_weight.shape[1], -1))
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+                layer.w13_weight = torch.nn.Parameter(aiter_ops.shuffle_weight(
+                    layer.w13_weight),
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(aiter_ops.shuffle_weight(
+                    layer.w2_weight),
+                                                     requires_grad=False)
 
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
