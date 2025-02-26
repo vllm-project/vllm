@@ -113,6 +113,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -134,6 +135,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                              topk_weights=topk_weights,
                              topk_ids=topk_ids,
                              inplace=True,
+                             activation=activation,
                              use_int8_w8a16=True,
                              global_num_experts=global_num_experts,
                              expert_map=expert_map,
