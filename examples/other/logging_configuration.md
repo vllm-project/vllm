@@ -157,6 +157,55 @@ VLLM_CONFIGURE_LOGGING=0 \
     vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
 
+### Example 4: Structured JSON Logging with Loguru
+
+vLLM also supports structured JSON logging using the [`loguru`](https://github.com/Delgan/loguru) library. This approach provides more features for log handling and a more ergonomic format for log aggregation and analysis.
+
+To use loguru-based structured logging, create a configuration file with a different format:
+
+**/path/to/logging_config.json:**
+
+```json
+{
+  "logger": {
+    "level": "info",
+    "rotation": "20 MB",
+    "retention": "1 week",
+    "format": "<level>{level: <8}</level> <green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> - <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>"
+  }
+}
+```
+
+For file logging (optional), you can add file paths:
+
+```json
+{
+  "logger": {
+    "structured_log_file_path": "/path/to/logs/vllm_structured.log",
+    "unstructured_log_file_path": "/path/to/logs/vllm.log",
+    "level": "info",
+    "rotation": "20 MB",
+    "retention": "1 week",
+    "format": "<level>{level: <8}</level> <green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> - <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>"
+  }
+}
+```
+
+The loguru configuration supports:
+- `level`: Log level (debug, info, warning, error, critical)
+- `rotation`: When to rotate logs (size or time-based)
+- `retention`: How long to keep logs
+- `format`: Log message format with rich text formatting
+- `structured_log_file_path`: Path for JSON structured logs (optional)
+- `unstructured_log_file_path`: Path for human-readable logs (optional)
+
+Run vLLM with this configuration:
+
+```bash
+VLLM_LOGGING_CONFIG_PATH=/path/to/logging_config.json \
+    vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
+```
+
 ## Additional resources
 
 - [`logging.config` Dictionary Schema Details](https://docs.python.org/3/library/logging.config.html#dictionary-schema-details)

@@ -14,14 +14,13 @@ from logging.config import dictConfig
 from os import path
 from pathlib import Path
 from types import MethodType
-from typing import Any, Optional, cast
+from typing import Any, Callable, Dict, Optional, Union, cast
 
 from loguru import logger
 
 import vllm.envs as envs
 
-# Keep both environment configuration approaches for compatibility
-VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
+VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
 VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
@@ -114,7 +113,7 @@ class InterceptHandler(logging.Handler):
         0: 'NOTSET',
     }
 
-    def emit(self, record: logging.LogRecord):
+    def emit(self, record: logging.LogRecord) -> None:
         """Process the logging record.
 
         Overrides the default emit method to handle log records. It binds the
@@ -149,34 +148,49 @@ class CustomizeLogger:
     """
 
     @classmethod
-    def make_logger(cls, config_path: Path):
+    def make_logger(cls, config_path: Path) -> "logger.Logger":
+        """Create and configure a logger based on a config file.
+
+        Args:
+            config_path: Path to the logging configuration file.
+
+        Returns:
+            A configured logger instance.
+        """
         config = cls.load_logging_config(config_path)
         logging_config = config.get('logger')
 
-        logger = cls.customize_logging(
-            structured_filepath=logging_config.get('structured_log_file_path'),
-            unstructured_filepath=logging_config.get(
-                "unstructured_log_file_path"),
-            level=logging_config.get('level'),
-            retention=logging_config.get('retention'),
-            rotation=logging_config.get('rotation'),
-            format=logging_config.get('format'),
-        )
+        params = {
+            'structured_filepath':
+            logging_config.get('structured_log_file_path'),
+            'unstructured_filepath':
+            logging_config.get('unstructured_log_file_path'),
+            'level':
+            logging_config.get('level'),
+            'retention':
+            logging_config.get('retention'),
+            'rotation':
+            logging_config.get('rotation'),
+            'format':
+            logging_config.get('format'),
+        }
 
-        return logger
+        _logger = cls.customize_logging(**params)
+
+        return _logger
 
     @classmethod
-    def serialize(cls, record):
+    def serialize(cls, record: Dict[str, Any]) -> str:
         """Serialize a log record to JSON.
 
         Args:
-            record (dict): The log record to serialize.
+            record: The log record to serialize.
 
         Returns:
-            str: The serialized JSON string.
+            The serialized JSON string.
         """
 
-        def format_exception(ex):
+        def format_exception(ex: Exception) -> str:
             """Format exception to include the entire traceback chain."""
             lines = []
             while ex:
@@ -209,17 +223,17 @@ class CustomizeLogger:
         return json.dumps(subset)
 
     @classmethod
-    def formatter(cls, record):
+    def formatter(cls, record: Dict[str, Any]) -> str:
         """Format a log record for structured logging.
 
         Note: This function returns the string to be formatted, not the actual
         message to be logged.
 
         Args:
-            record (dict): The log record to format.
+            record: The log record to format.
 
         Returns:
-            str: The formatted log record.
+            The formatted log record.
         """
         record["extra"]["serialized"] = cls.serialize(record)
         return "{extra[serialized]}\n"
@@ -227,13 +241,13 @@ class CustomizeLogger:
     @classmethod
     def customize_logging(
         cls,
-        structured_filepath: Path,
-        unstructured_filepath: Path,
-        level: str,
-        rotation: str,
-        retention: str,
-        format: str,
-    ):
+        structured_filepath: Optional[Path],
+        unstructured_filepath: Optional[Path],
+        level: Optional[str],
+        rotation: Optional[str],
+        retention: Optional[str],
+        format: Optional[str],
+    ) -> "logger.Logger":
         """Customize logging setup based on configuration options.
 
         Configures logging with options for both structured and unstructured
@@ -241,65 +255,69 @@ class CustomizeLogger:
         enabling/disabling file logging and structured logging.
 
         Args:
-            structured_filepath (Path): Path to the structured log file.
-            unstructured_filepath (Path): Path to the unstructured log file.
-            level (str): Logging level.
-            rotation (str): Log rotation policy.
-            retention (str): Log retention policy.
-            format (str): Log format.
+            structured_filepath: Path to the structured log file.
+            unstructured_filepath: Path to the unstructured log file.
+            level: Logging level.
+            rotation: Log rotation policy.
+            retention: Log retention policy.
+            format: Log format.
 
         Returns:
-            Logger: Configured logger instance.
+            Configured logger instance.
         """
         logger.remove()
         logger.add(
             sys.stdout,
             enqueue=True,
             backtrace=True,
-            level=level.upper(),
-            format=format,
+            level=level.upper() if level else "INFO",
+            format=format
+            or ("<level>{level: <8}</level> "
+                "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> - "
+                "<level>{message}</level>"),
         )
 
-        # File logging configuration with null checks
         if unstructured_filepath:
             # Unstructured file logging configuration
             logger.add(
                 str(unstructured_filepath),
-                rotation=rotation,
-                retention=retention,
+                rotation=rotation or "1 days",
+                retention=retention or "1 weeks",
                 enqueue=True,
                 backtrace=True,
-                level=level.upper(),
+                level=(level or "INFO").upper(),
                 serialize=False,
-                format=format,
+                format=format
+                or ("<level>{level: <8}</level> "
+                    "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> - "
+                    "<level>{message}</level>"),
             )
         if structured_filepath:
             # Structured file logging configuration
             logger.add(
                 str(structured_filepath),
-                rotation=rotation,
-                retention=retention,
+                rotation=rotation or "1 days",
+                retention=retention or "1 weeks",
                 enqueue=True,
                 backtrace=True,
-                level=level.upper(),
+                level=(level or "INFO").upper(),
                 serialize=False,
                 format=cls.formatter,
             )
 
-        # Basic configuration for intercepting standard logging messages
         logging.basicConfig(handlers=[InterceptHandler()], level=0)
 
         return logger.bind(name="vllm")
 
     @classmethod
-    def load_logging_config(cls, config_path: Path):
+    def load_logging_config(cls, config_path: Path) -> Dict[str, Any]:
         """Load logging configuration from a JSON file.
 
         Args:
-            config_path (Path): Path to the configuration file.
+            config_path: Path to the configuration file.
 
         Returns:
-            dict: Loaded configuration.
+            Loaded configuration.
         """
         config = None
         with open(config_path) as config_file:
@@ -308,8 +326,8 @@ class CustomizeLogger:
 
 
 def _configure_vllm_root_logger() -> None:
-    """Configure the root vLLM logger based on environment variables or JSON config."""
-    # Check for standard logging configuration
+    """Configure the root vLLM logger based on environment variables 
+    or JSON config."""
     logging_config = dict[str, Any]()
 
     if not VLLM_CONFIGURE_LOGGING and VLLM_LOGGING_CONFIG_PATH:
@@ -355,15 +373,13 @@ if VLLM_CONFIGURE_LOGGING:
     if os.path.exists(config_path):
         _root_logger = CustomizeLogger.make_logger(config_path)
     else:
-        # If we're configured to use logging but config file is missing, 
-        # use standard logging configuration
         _configure_vllm_root_logger()
         _root_logger = None
 else:
     _root_logger = logging.getLogger("vllm")
 
 
-def init_logger(name: str):
+def init_logger(name: str) -> Union["logger.Logger", _VllmLogger]:
     """Initialize a logger for the given name.
     
     This function supports both standard Python logging and loguru logging
@@ -373,20 +389,17 @@ def init_logger(name: str):
         name: The name of the logger.
         
     Returns:
-        A logger instance (either a loguru logger or standard Logger with custom methods).
+        A logger instance (either a loguru logger or standard Logger 
+        with custom methods).
     """
     if VLLM_CONFIGURE_LOGGING and _root_logger:
-        # Use loguru logger if configured
         return _root_logger.bind(name=name)
-    
-    # Otherwise use standard logging
+
     logger = logging.getLogger(name)
-    
+
     if not VLLM_CONFIGURE_LOGGING:
-        # Set log level from environment when not using configuration
         logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
-    
-    # Add convenience methods for traditional logging
+
     methods_to_patch = {
         "info_once": _print_info_once,
         "warning_once": _print_warning_once,
@@ -398,10 +411,26 @@ def init_logger(name: str):
     return cast(_VllmLogger, logger)
 
 
-logger = init_logger(__name__)
+module_logger = init_logger(__name__)
 
 
-def _trace_calls(log_path, root_dir, frame, event, arg=None):
+def _trace_calls(log_path: str,
+                 root_dir: str,
+                 frame: Any,
+                 event: str,
+                 arg: Any = None) -> Callable:
+    """Trace function calls and log them to a file.
+    
+    Args:
+        log_path: Path to the log file.
+        root_dir: Root directory to filter traced functions.
+        frame: Current frame being executed.
+        event: Event type (call or return).
+        arg: Additional arguments.
+        
+    Returns:
+        A callable for the next trace call.
+    """
     if event in ['call', 'return']:
         # Extract the filename, line number, function name, and the code object
         filename = frame.f_code.co_filename
@@ -409,7 +438,7 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
         func_name = frame.f_code.co_name
         if not filename.startswith(root_dir):
             # only log the functions in the vllm root_dir
-            return
+            return partial(_trace_calls, log_path, root_dir)
         # Log every function call or return
         try:
             last_frame = frame.f_back
@@ -441,7 +470,7 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
 
 
 def enable_trace_function_call(log_file_path: str,
-                               root_dir: Optional[str] = None):
+                               root_dir: Optional[str] = None) -> None:
     """
     Enable tracing of every function call in code under `root_dir`.
     This is useful for debugging hangs or crashes.
