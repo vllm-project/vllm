@@ -208,13 +208,17 @@ class UltravoxMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        num_chunks = hf_inputs.get('audio_num_chunks', torch.zeros(0))
         return dict(
             # to handle longer than 30s audio, each audio might be split
             # into multiple chunks as such, their batch dimension can be
             # higher than the number of audio samples
-            audio_features=MultiModalFieldConfig.batched("audio_chunked"),
-            audio_token_len=MultiModalFieldConfig.batched("audio_chunked"),
-            audio_lens=MultiModalFieldConfig.batched("audio_chunked"),
+            audio_features=MultiModalFieldConfig.flat_from_sizes(
+                "audio", num_chunks),
+            audio_token_len=MultiModalFieldConfig.flat_from_sizes(
+                "audio", num_chunks),
+            audio_lens=MultiModalFieldConfig.flat_from_sizes(
+                "audio", num_chunks),
             # num_chunks can convert audio_chunked to audio batch dimension
             audio_num_chunks=MultiModalFieldConfig.batched("audio"),
             audio_embeds=MultiModalFieldConfig.batched("audio"),
@@ -428,9 +432,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        # Due to the batching of audio chunks, the preprocessor cache cannot
-        # do the right thing so disable it.
-        vllm_config.model_config.disable_mm_preprocessor_cache = True
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multi_modal_config = multimodal_config
