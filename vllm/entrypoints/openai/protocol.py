@@ -1604,10 +1604,26 @@ class TranscriptionRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
+    
+    seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    """The seed to use for sampling."""
+
+    frequency_penalty: Optional[float] = Field(default=0.0)
+    """The frequency penalty to use for sampling."""
+
+    repetition_penalty: Optional[float] = Field(default=1.0)
+    """The repetition penalty to use for sampling."""
+
+    presence_penalty: Optional[float] = Field(default=0.0)
+    """The presence penalty to use for sampling."""
 
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "temperature": 0,
+        "seed": None,
+        "frequency_penalty": 0.0,
+        "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
     }
 
     def to_sampling_params(
@@ -1624,8 +1640,32 @@ class TranscriptionRequest(OpenAIBaseModel):
             temperature = default_sampling_params.get(
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
 
+        if (seed := self.seed) is None:
+            seed = default_sampling_params.get(
+                "seed", self._DEFAULT_SAMPLING_PARAMS["seed"])
+
+        if (frequency_penalty := self.frequency_penalty) is None:
+            frequency_penalty = default_sampling_params.get(
+                "frequency_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["frequency_penalty"])
+
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get(
+                "repetition_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"])
+
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get(
+                "presence_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["presence_penalty"])
+
+
         return SamplingParams.from_optional(temperature=temperature,
                                             max_tokens=max_tokens,
+                                            seed=seed,
+                                            frequency_penalty=frequency_penalty,
+                                            repetition_penalty=repetition_penalty,
+                                            presence_penalty=presence_penalty,
                                             output_kind=RequestOutputKind.DELTA
                                             if self.stream \
                                             else RequestOutputKind.FINAL_ONLY)
