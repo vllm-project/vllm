@@ -490,22 +490,11 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(List[List[int]], self.req_output_token_ids),
-            spec_token_ids=None,
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
             allowed_token_ids_mask=allowed_token_ids_mask,
         )
-
-    def get_sampling_metadata(
-        self,
-        req_id_to_spec_token_ids: Dict[str, List[int]],
-    ) -> SamplingMetadata:
-        # Set the new spec token ids in the cached sampling metadata.
-        self.sampling_metadata.spec_token_ids = [
-            req_id_to_spec_token_ids.get(req_id, []) for req_id in self.req_ids
-        ] if req_id_to_spec_token_ids else None
-        return self.sampling_metadata
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
         max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()

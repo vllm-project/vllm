@@ -32,7 +32,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
+from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -122,7 +122,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
-
+            self.rejection_sampler = RejectionSampler()
             # TODO: find a better way to check if we are using ngram.
             assert self.speculative_config.ngram_prompt_lookup_min, \
                     "Currently, only ngram spec decode is supported in V1."
@@ -951,12 +951,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
-        sampling_metadata = self.input_batch.get_sampling_metadata(
-            scheduler_output.scheduled_spec_decode_tokens)
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+        sampling_metadata = self.input_batch.sampling_metadata
+        if not self.use_spec_decode:
+            sampler_output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+        else:
+            target_probs = self.model.sampler.compute_probs(
+                logits, sampling_metadata)
+            scheduled_request_ids = scheduler_output.num_scheduled_tokens.keys(
+            )
+            draft_token_ids = [
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+                for req_id in scheduled_request_ids
+            ]
+            sampler_output = self.rejection_sampler(draft_token_ids,
+                                                    target_probs,
+                                                    sampling_metadata)
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1293,7 +1305,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     temperature=dummy_tensors(0.5),
                     all_greedy=False,
                     all_random=False,
-                    spec_token_ids=None,
                     top_p=dummy_tensors(0.9),
                     top_k=dummy_tensors(logits.size(1) - 1),
                     min_p=None,
