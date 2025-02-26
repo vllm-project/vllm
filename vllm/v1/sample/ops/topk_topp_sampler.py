@@ -48,6 +48,8 @@ class TopKTopPSampler(nn.Module):
                     "native implementation of top-p & top-k sampling. For the "
                     "best performance, please install FlashInfer.")
                 self.forward = self.forward_native
+        elif current_platform.is_tpu():
+            self.forward = self.forward_tpu
         else:
             self.forward = self.forward_native
 
@@ -79,6 +81,16 @@ class TopKTopPSampler(nn.Module):
             return random_sample(probs, generators)
         return flashinfer_sample(probs, k, p, generators)
 
+    def forward_tpu(
+        self,
+        logits: torch.Tensor,
+        generators: Dict[int, torch.Generator],
+        k: Optional[torch.Tensor],
+        p: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        # TODO Placeholder for TPU optimized topk/p kernel
+        return self.forward_cuda(logits, generators, k, p)
+
 
 def apply_top_k_top_p(
     logits: torch.Tensor,
@@ -95,11 +107,9 @@ def apply_top_k_top_p(
 
     if k is not None:
         # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k
-        # Broadcast to each element (xla friendly). 
-        indices = torch.ones((logits.shape[0], 1), dtype=torch.long, device=logits_sort.device) * top_k_mask
+        top_k_mask = logits_sort.size(1) - k.to(torch.long) # shape: B
         # Get all the top_k values.
-        top_k_mask = logits_sort.gather(1, indices)
+        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
         top_k_mask = logits_sort < top_k_mask
         logits_sort.masked_fill_(top_k_mask, -float("inf"))
 

@@ -50,31 +50,82 @@ logger = init_logger(__name__)
 _PAD_SLOT_ID = 1_000_000_000
 INVALID_TOKEN_ID = -1
 
-# TODO refactor to utils
-def get_default_sampling_params(batch_size: int, device: torch.device)->SamplingMetadata:
-    # SamplingMetadata for tracing all available sampling options
-    temp = torch.tensor([0.1]*batch_size, device=device)
-    topp = torch.tensor([0.6]*batch_size, device=device) # some value just for tracing
-    topk = torch.tensor([10]*batch_size, dtype=torch.long, device=device)
-    minp = torch.tensor([0.1]*batch_size, device=device) 
-    # unsupported, you need to return an extra tensor of static size BxV
-    max_num_logprobs = None  
-    # NOTE prompt sequences must be padded to a shape we compile for
-    prompt_ids = None
-    freq_penalty = torch.tensor([0.1]*batch_size, device=device) 
-    pres_penalty = torch.tensor([0.1]*batch_size, device=device) 
-    rep_penalty = torch.tensor([0.1]*batch_size, device=device) 
-    out_tokens = [] # This is a list, use a tensor to have proper support
-    min_tokens = None # impl is not vectorized
-    logit_bias = []
-    allowed_token_ids_mask = None # TODO
-    # TODO true argmax sampling=>must be remapped to TOPK=1
-    # TODO penalties disabled for now
-    # Generator not supported by xla
-    return SamplingMetadata(temp, False, False, None, topp, topk, minp, {}, None, 
-                        True, prompt_ids, freq_penalty, pres_penalty, rep_penalty,
-                          out_tokens, min_tokens, logit_bias, allowed_token_ids_mask)
+@dataclass
+class TPUSupportedSamplingMetadata:
 
+    temperature: torch.Tensor
+
+    top_k: torch.Tensor
+    min_p: torch.Tensor
+    top_p: torch.Tensor = None
+
+    all_greedy: bool = False
+    all_random: bool = False
+
+    # speculation not supported
+    spec_token_ids = None
+
+    # Generator not supported by xla
+    generators = []
+
+    # unsupported, you need to return an extra tensor of static size BxV
+    max_num_logprobs = None
+    
+    # TODO No penalties for now
+    no_penalties: bool = True
+    prompt_token_ids = None
+    frequency_penalties = None
+    presence_penalties = None
+    repetition_penalties = None
+    output_token_ids = [] # should use tensor
+
+    min_tokens = None  # impl is not vectorized
+
+    logit_bias = []
+
+    allowed_token_ids_mask = None
+
+    @classmethod
+    def from_sampling_metadata(cls, metadata: SamplingMetadata)->"TPUSupportedSamplingMetadata":
+        return cls(temperature=metadata.temperature, top_p=None, 
+                        top_k=metadata.top_k, min_p=metadata.min_p)
+
+    # TODO refactor to utils
+    @classmethod
+    def get_default_sampling_params(cls, batch_size: int, device: torch.device)->"TPUSupportedSamplingMetadata":
+        # SamplingMetadata for tracing all available sampling options
+        temp = torch.tensor([0.1]*batch_size, device=device)
+        topp = torch.tensor([0.6]*batch_size, device=device) # some value just for tracing
+        topk = torch.tensor([10]*batch_size, dtype=torch.long, device=device)
+        minp = torch.tensor([0.1]*batch_size, device=device) 
+        # NOTE prompt sequences must be padded to a shape we compile for
+        # prompt_ids = None
+        # freq_penalty = torch.tensor([0.1]*batch_size, device=device) 
+        # pres_penalty = torch.tensor([0.1]*batch_size, device=device) 
+        # rep_penalty = torch.tensor([0.1]*batch_size, device=device) 
+        return cls(temperature=temp, top_p=None, top_k=topk, min_p=minp)
+
+def validate_sampling_metadata(sampling_metadata: SamplingMetadata, batch_size: int, device: torch.device)->SamplingMetadata:
+    # As sampling happens on a single traced function, we need to disable
+    # unused options by setting their arg value to an operation 
+    # functionally identical to the Identity.
+    # TODO
+    sampling_metadata.all_random = False
+    if sampling_metadata.all_greedy:
+        # Argmax sampling has to be implemented through topk=1. It is
+        # functionally identical.
+        sampling_metadata.top_k = torch.tensor([1], dtype=torch.long, device=device)
+        sampling_metadata.all_greedy = False
+    # Also, we need to adjust sampling params to match sequence padding, as
+    # every element in the batch can have different ones.
+    for field in fields(sampling_metadata):
+        val = getattr(sampling_metadata, field.name)
+        if isinstance(val, torch.Tensor) and val.numel()>1 and val.numel() != batch_size:
+            # TODO not efficient, manage a tensor of compiled size B
+            padded_param = torch.zeros(batch_size, device=val.device)
+            padded_param[:val.shape[0]] = val
+            setattr(sampling_metadata, field.name, padded_param)
+        return sampling_metadata
 
 class TPUModelRunner:
 
@@ -708,8 +759,6 @@ class TPUModelRunner:
         xm.wait_device_ops()
         model = ModelWrapperV1(model)
         self.model = model
-        # TODO (Nicolo) will yield multiple fxsubgraph that trigger more
-        # recompilations xla-side..but disabling it will break things(??)
         self.model = torch.compile(model,
                                    backend="openxla",
                                    fullgraph=True,
@@ -768,7 +817,7 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         # To allow sampling, trace the forward with all supported sampling args
-        sampling_meta = get_default_sampling_params(num_tokens, self.device)
+        sampling_meta = TPUSupportedSamplingMetadata.get_default_sampling_params(num_tokens, self.device)
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
             hidden_states = self.model(
@@ -860,29 +909,20 @@ class ModelWrapperV1(nn.Module):
         super().__init__()
         self.model = model
         self.sampler = Sampler()
-    
-    def _validate_sampling_metadata(self, sampling_metadata: SamplingMetadata, logits: torch.Tensor)->SamplingMetadata:
-        # As sampling happens on a single traced function, we need to disable
-        # unused options by setting their arg value to an operation 
-        # functionally identical to the Identity.
-        # TODO
-        # Also, we need to adjust sampling params to match sequence padding, as
-        # every element in the batch can have different ones.
-        for field in fields(sampling_metadata):
-            val = getattr(sampling_metadata, field.name)
-            if isinstance(val, torch.Tensor) and val.numel()>1 and val.numel() != logits.shape[0]:
-                # TODO not efficient, manage a tensor of compiled size B
-                padded_param = torch.zeros(logits.shape[0], device=val.device)
-                padded_param[:val.shape[0]] = val
-                setattr(sampling_metadata, field.name, padded_param)
-        return sampling_metadata
 
     def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> SamplerOutput:
-        sampling_metadata = self._validate_sampling_metadata(sampling_metadata, logits)
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+               sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
+        # Greedy sampling.
+        # argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        # argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+        # return argmax_token_ids
+        # TODO this is currently 2 orders of magnitude slower than code above <.<
+        sampler_out = self.sampler(logits, sampling_metadata)
+        sampled_token_ids = sampler_out.sampled_token_ids
+        return sampled_token_ids.squeeze(dim=-1)
 
+    # TODO having sampling_metadata in the signature here significantly increases
+    # torch compile time(30->~300)
     def forward(
         self,
         input_ids: torch.Tensor,
