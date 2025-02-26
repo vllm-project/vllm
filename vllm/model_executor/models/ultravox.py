@@ -195,11 +195,9 @@ class UltravoxMultiModalProcessor(
         tokenizer = self.info.get_tokenizer()
         assert prompt_tokens[0] == tokenizer.bos_token_id
 
-        # temporary fix: when running with api_server, the bos_token_id is not
-        # added to the prompt_tokens, but when using llm.generate(), it is.
-        # This is a hack to make the output consistent between the two cases.
-        # TODO: find the root cause and fix it.
-        if prompt_tokens[0] == prompt_tokens[1]:
+        # If the prompt was generated with the bos_token_id, we might end up
+        # with two bos_token_ids in the prompt, so we remove the first one.
+        if len(prompt_tokens) > 1 and prompt_tokens[0] == prompt_tokens[1]:
             return prompt_tokens[1:]
         return prompt_tokens
 
