@@ -196,7 +196,7 @@ TEXT_GENERATION_MODELS = {
 
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
-    "intfloat/multilingual-e5-small": PPTestSettings.fast(),
+    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
     "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(),
     "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(load_format="dummy"),
 }
@@ -233,7 +233,7 @@ TEST_MODELS = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "ibm/PowerLM-3b",
     # [LANGUAGE EMBEDDING]
-    "intfloat/multilingual-e5-small",
+    "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL2-1B",
