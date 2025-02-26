@@ -293,9 +293,9 @@ def _create_uniform_samples(seeded_seqs: Optional[Dict[int, torch.Generator]],
                 random values in the range [0, 1).
         """
     if not seeded_seqs:
-        return torch.rand(batch_size, k + 1, device=device)
+        return torch.rand(batch_size, k, device=device)
 
-    uniform_rand = torch.empty(batch_size, k + 1, device=device)
+    uniform_rand = torch.empty(batch_size, k, device=device)
 
     non_seeded_indices = []
     for idx in range(batch_size):
