@@ -159,6 +159,10 @@ class Attention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        # For some alternate attention backends like MLA the attention output
+        # shape does not match the query shape, so we optionally let the model
+        # definition specify the output tensor shape.
+        output_shape: Optional[torch.Size] = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -174,8 +178,12 @@ class Attention(nn.Module):
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(key, value)
         if self.use_output:
-            output = torch.empty_like(query)
-            hidden_size = query.size(-1)
+            output_shape = (output_shape
+                            if output_shape is not None else query.shape)
+            output = torch.empty(output_shape,
+                                 dtype=query.dtype,
+                                 device=query.device)
+            hidden_size = output_shape[-1]
             # We skip reshaping query, key and value tensors for the MLA
             # backend since these tensors have different semantics and are
             # processed differently.

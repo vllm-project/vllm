@@ -464,7 +464,10 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-        return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe)
+        return self.mla_attn(hidden_states_or_q_c,
+                             kv_c_normed,
+                             k_pe,
+                             output_shape=hidden_states.shape)
 
 
 class DeepseekV2DecoderLayer(nn.Module):

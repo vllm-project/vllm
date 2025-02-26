@@ -397,10 +397,24 @@ class InputBatch:
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
         self.min_p_cpu[i1], self.min_p_cpu[i2] =\
             self.min_p_cpu[i2], self.min_p_cpu[i1]
-        self.generators[i1], self.generators[i2] =\
-            self.generators[i2], self.generators[i1]
-        self.min_tokens[i1], self.min_tokens[i2] =\
-            self.min_tokens[i2], self.min_tokens[i1]
+        if i1 in self.generators and i2 in self.generators:
+            self.generators[i1], self.generators[i2] =\
+                self.generators[i2], self.generators[i1]
+        elif i1 in self.generators:
+            raise RuntimeError(
+                f"only {i1=} is in the generators but not {i2=}")
+        elif i2 in self.generators:
+            raise RuntimeError(
+                f"only {i2=} is in the generators but not {i1=}")
+        if i1 in self.min_tokens and i2 in self.min_tokens:
+            self.min_tokens[i1], self.min_tokens[i2] =\
+                self.min_tokens[i2], self.min_tokens[i1]
+        elif i1 in self.min_tokens:
+            raise RuntimeError(
+                f"only {i1=} is in the min_tokens but not {i2=}")
+        elif i2 in self.min_tokens:
+            raise RuntimeError(
+                f"only {i2=} is in the min_tokens but not {i1=}")
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
             self.request_lora_mapping[i2], self.request_lora_mapping[i1]
         self.logit_bias[i1], self.logit_bias[i2] =\
