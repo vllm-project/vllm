@@ -5,7 +5,7 @@ from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import FalconMamba2Config
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
@@ -38,231 +38,6 @@ from .utils import (is_pp_missing_parameter,
                     maybe_prefix)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-
-class FalconMamba2Config(PretrainedConfig):
-    """
-    This configuration class merges attributes from both `Mamba2Config` 
-    and `MHAConfig`. It is used to instantiate a FalconMamba2 model architecture 
-    that combines the capabilities of both models.
-
-    Args:
-        num_heads (`int`, *optional*, defaults to 128): Number of heads for the
-        Mamba2 part of the model.
-        head_dim (`int`, *optional*, defaults to 64): Dimension of each head
-        in Mamba2.
-        vocab_size (`int`, *optional*, defaults to 32768): Vocabulary size 
-        of the model.
-        hidden_size (`int`, *optional*, defaults to 4096): Dimensionality 
-        of the embeddings and hidden states in Mamba2.
-        state_size (`int`, *optional*, defaults to 128): Shape of the state space
-        latents.
-        num_hidden_layers (`int`, *optional*, defaults to 64): Number of hidden 
-        layers in Mamba2.
-        expand (`int`, *optional*, defaults to 2): Expanding factor used
-        in Mamba2.
-        conv_kernel (`int`, *optional*, defaults to 4): Convolution kernel size 
-        in Mamba2.
-        n_groups (`int`, *optional*, defaults to 8): Number of groups 
-        for evolution matrices.
-        use_bias (`bool`, *optional*, defaults to `False`): Whether to use bias
-        in Mamba2 projections.
-        use_conv_bias (`bool`, *optional*, defaults to `True`): Whether to use
-        bias in the convolution layer in Mamba2.
-        hidden_act (`str`, *optional*, defaults to `"silu"`): Non-linear 
-        activation function in the decoder.
-        initializer_range (`float`, *optional*, defaults to 0.1): Initialization
-        range for weights.
-        time_step_rank (`Union[int,str]`, *optional*, defaults to `"auto"`):
-        Rank of the time-step projection matrix.
-        time_step_min (`float`, *optional*, defaults to 0.001): Minimum 
-        time step for `dt_proj.bias`.
-        time_step_max (`float`, *optional*, defaults to 0.1): Maximum time step 
-        for `dt_proj.bias`.
-        time_step_floor (`float`, *optional*, defaults to 1e-4): Floor value 
-        for the `dt_proj.bias`.
-        time_step_limit (`tuple`, *optional*, defaults to `(0.0, inf)`): 
-        Time-step limit range.
-        rescale_prenorm_residual (`bool`, *optional*, defaults to `False`): 
-        Whether to rescale pre-norm residuals.
-        use_cache (`bool`, *optional*, defaults to `True`): Whether to use cache
-        for the model.
-        rms_norm (`bool`, *optional*, defaults to `True`): Whether to use 
-        RMS norm.
-        chunk_size (`int`, defaults to 256): Chunk size for processing.
-        tie_word_embeddings (`bool`, *optional*, defaults to `False`): 
-        Whether to tie word embeddings.
-
-        # Parameters from MHAConfig
-        hidden_size_mha (`int`): Embedding dimension for MHA part of the model.
-        num_heads_mha (`int`): Number of attention heads in MHA part.
-        num_key_value_heads (`int`, *optional*): Number of heads for the 
-        key-value projections in MHA.
-        head_dim_mha (`int`, *optional*): Dimension for heads in MHA.
-        rotary_emb_dim (`int`, *optional*, defaults to 0): Dimension for rotary embeddings in MHA.
-        rotary_emb_base (`int`, *optional*, defaults to 10000): Base for rotary embeddings.
-        softmax_scale (`float`, *optional*): Scaling factor for softmax in MHA.
-        causal (`bool`, *optional*, defaults to `False`): Whether attention mechanism is causal in MHA.
-        sliding_window (`tuple`, *optional*): Window size for attention in MHA.
-        qkv_proj_bias (`bool`, *optional*, defaults to `True`): Whether to use bias in the query, key, value projections.
-        out_proj_bias (`bool`, *optional*, defaults to `True`): Whether to use bias in the output projection of MHA.
-    """
-
-    model_type = "falconmamba2"
-
-    def __init__(
-        self,
-        vocab_size=128000,
-        tie_word_embeddings=False,
-        hidden_size=4096,
-        intermediate_size=14336,
-        num_hidden_layers=32,
-        num_attention_heads=32,
-        num_key_value_heads=8,
-        hidden_act="silu",
-        initializer_range=0.02,
-        rms_norm_eps=1e-5,
-        use_cache=True,
-        num_logits_to_keep=1,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
-        max_position_embeddings=262144,
-        attention_dropout=0.0,
-        attn_layer_indices=None,
-        mlp_expansion_factor=8,
-        mamba_d_ssm=1024,
-        mamba_n_heads=128,
-        mamba_d_head="auto",
-        mamba_n_groups=1,
-        mamba_d_state=256,
-        mamba_d_conv=4,
-        mamba_expand=2,
-        mamba_chunk_size=256,
-        mamba_conv_bias=True,
-        mamba_proj_bias=False,
-        mamba_use_mlp=True,
-        mamba_norm_before_gate=True,
-        mamba_rms_norm=False,
-        projectors_bias=False,
-        rope_theta=100000.0,
-        rope_scaling=None,
-        lm_head_multiplier=1.0,
-        embedding_multiplier=1.0,
-        mlp_multipliers=None,
-        key_multiplier=None,
-        attention_out_multiplier=None,
-        attention_in_multiplier=None,
-        ssm_multipliers=None,
-        ssm_in_multiplier=None,
-        ssm_out_multiplier=None,
-        **kwargs,
-    ):
-        self.vocab_size = vocab_size
-        self.tie_word_embeddings = tie_word_embeddings
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.max_position_embeddings = max_position_embeddings
-        self.attention_dropout = attention_dropout
-        self.attention_bias = False
-        self.mlp_bias = False
-
-        # for backward compatibility
-        if num_key_value_heads is None:
-            num_key_value_heads = num_attention_heads
-
-        self.num_key_value_heads = num_key_value_heads
-        self.hidden_act = hidden_act
-        self.initializer_range = initializer_range
-        self.rms_norm_eps = rms_norm_eps
-
-        self.use_cache = use_cache
-        self.num_logits_to_keep = num_logits_to_keep
-
-        self.attn_layer_indices = attn_layer_indices
-        self.rope_theta = rope_theta
-        self.rope_scaling = None
-        self.rope_scaling = rope_scaling
-        self.mlp_expansion_factor = mlp_expansion_factor
-        self.projectors_bias = projectors_bias
-        mamba_intermediate = (
-            mamba_expand * hidden_size if mamba_d_ssm is None else mamba_d_ssm
-        )
-
-        if mamba_intermediate % mamba_n_heads != 0:
-            raise ValueError("mamba_n_heads must divide mamba_expand * hidden_size")
-
-        # for the mamba_v2, must satisfy the following
-        if mamba_d_head == "auto":
-            mamba_d_head = mamba_intermediate // mamba_n_heads
-
-        if mamba_d_head * mamba_n_heads != mamba_intermediate:
-            raise ValueError(
-                "The dimensions for the Mamba head state do not match the model intermediate_size"
-            )
-
-        self.mamba_d_ssm = mamba_d_ssm
-        self.mamba_n_heads = mamba_n_heads
-        self.mamba_d_head = mamba_d_head
-        self.mamba_n_groups = mamba_n_groups
-        self.mamba_d_state = mamba_d_state
-        self.mamba_d_conv = mamba_d_conv
-        self.mamba_expand = mamba_expand
-        self.mamba_chunk_size = mamba_chunk_size
-        self.mamba_conv_bias = mamba_conv_bias
-        self.mamba_proj_bias = mamba_proj_bias
-        self.mamba_use_mlp = mamba_use_mlp
-        self.mamba_norm_before_gate = mamba_norm_before_gate
-        self.mamba_rms_norm = mamba_rms_norm
-
-        self.lm_head_multiplier = lm_head_multiplier
-        self.embedding_multiplier = embedding_multiplier
-
-        if mlp_multipliers is not None:
-            self.mlp_multipliers = mlp_multipliers
-        else:
-            self.mlp_multipliers = [1.0, 1.0]
-
-        if attention_out_multiplier is not None:
-            self.attention_out_multiplier = attention_out_multiplier
-        else:
-            self.attention_out_multiplier = 1.0
-
-        if attention_in_multiplier is not None:
-            self.attention_in_multiplier = attention_in_multiplier
-        else:
-            self.attention_in_multiplier = 1.0
-
-        if key_multiplier is not None:
-            self.key_multiplier = key_multiplier
-        else:
-            self.key_multiplier = 1.0
-
-        if ssm_multipliers is not None:
-            self.ssm_multipliers = ssm_multipliers
-        else:
-            #
-            self.ssm_multipliers = [1.0, 1.0, 1.0, 1.0, 1.0]
-
-        if ssm_in_multiplier is not None:
-            self.ssm_in_multiplier = ssm_in_multiplier
-        else:
-            self.ssm_in_multiplier = 1.0
-
-        if ssm_out_multiplier is not None:
-            self.ssm_out_multiplier = ssm_out_multiplier
-        else:
-            self.ssm_out_multiplier = 1.0
-
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
 
 
 class FalconMamba2MLP(nn.Module):
@@ -540,6 +315,8 @@ class FalconMamba2ParallelHybrid(nn.Module):
         self.ssm_in_multiplier = config.ssm_in_multiplier
         self.attention_in_multiplier = config.attention_in_multiplier
 
+        self.feed_forward = FalconMamba2MLP(config)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -579,7 +356,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
         # Sum the outputs from both branches.
         # We assume both branches produce outputs of the same
         # dimensionality (config.hidden_size).
-        hybrid_hidden = attn_hidden + ssm_hidden * self.ssm_out_multiplier
+        hybrid_hidden = attn_hidden + (ssm_hidden * self.ssm_out_multiplier)
         # For the residual, resi.
         # Here we simply return the residual from the attention branch.
         hybrid_res = residuals
@@ -597,10 +374,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
 class FalconMamba2Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = (
-            FalconMamba2Config()
-        )  # no HF integration, initialize falconMamba2Config locally
-        # config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -615,7 +389,9 @@ class FalconMamba2Model(nn.Module):
         self.org_vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size, config.hidden_size, org_num_embeddings=config.vocab_size
+            self.vocab_size, 
+            config.hidden_size, 
+            org_num_embeddings=config.vocab_size
         )
         self.embedding_multiplier = config.embedding_multiplier
 
