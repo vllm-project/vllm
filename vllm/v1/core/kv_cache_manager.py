@@ -312,6 +312,7 @@ class KVCacheManager:
 
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = defaultdict(dict)
+        self.cached_block_hash_to_block_get = self.cached_block_hash_to_block.get
 
         # Remove all hashes from all blocks.
         for block in self.block_pool:
