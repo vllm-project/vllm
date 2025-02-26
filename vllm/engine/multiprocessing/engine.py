@@ -27,6 +27,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
+from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
 
@@ -210,6 +211,14 @@ class MQLLMEngine:
             return self.engine.step()
         except SystemExit:
             raise
+        except InputProcessingError as e:
+            # Special case where we handle an error preparing the inputs for
+            # a single request in the batch
+            rpc_err = RPCError(request_id=e.request_id,
+                               is_engine_errored=False,
+                               exception=e.__cause__)
+            self._send_outputs(rpc_err)
+            return []
         except BaseException as e:
             self._set_errored(e)
             rpc_err = RPCError(request_id=None,

@@ -261,3 +261,21 @@ class ModelRunnerWrapperBase:
 
     def __getattr__(self, attr):
         return getattr(self.model_runner, attr)
+
+
+class InputProcessingError(Exception):
+    """This exception is raised when an error occurs preparing the inputs for
+    a single sequence group.
+    This allows the engine to gracefully handle errors with a single sequence
+    group without having to fail the entire batch.
+    """
+
+    def __init__(self, request_id, message):
+        """request_id is the id of the offending sequence group"""
+        self.request_id = request_id
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return "Failed to prepare inputs for sequence group with request id: " \
+                f"{self.request_id}, Error: {self.message}"
