@@ -143,11 +143,10 @@ class IterationStats:
                 if lora_stats is not None:
                     lora_stats.waiting_requests.add(req_id)
             elif event.type == EngineCoreEventType.SCHEDULED:
-                req_stats.scheduled_ts = event.timestamp
+                if req_stats.scheduled_ts == 0.0:  # ignore preemptions
+                    req_stats.scheduled_ts = event.timestamp
                 LoRARequestStates.scheduled_request(lora_stats, req_id)
             elif event.type == EngineCoreEventType.PREEMPTED:
-                req_stats.scheduled_ts = 0.0
-                req_stats.first_token_ts = 0.0
                 self.num_preempted_reqs += 1
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
@@ -155,10 +154,20 @@ class IterationStats:
                                      req_stats: RequestStateStats):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
+        # Queued interval is from first QUEUED event to first SCHEDULED
         queued_time = req_stats.scheduled_ts - req_stats.queued_ts
+
+        # Prefill interval is from first SCHEDULED to first NEW_TOKEN
+        # Any preemptions during prefill is included in the interval
         prefill_time = req_stats.first_token_ts - req_stats.scheduled_ts
-        inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
+
+        # Decode interval is from first NEW_TOKEN to last NEW_TOKEN
+        # Any preemptions during decode are included
         decode_time = req_stats.last_token_ts - req_stats.first_token_ts
+
+        # Inference interval is from first SCHEDULED to last NEW_TOKEN
+        # Any preemptions during prefill or decode are included
+        inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
 
         finished_req = \
             FinishedRequestStats(finish_reason=finish_reason,
