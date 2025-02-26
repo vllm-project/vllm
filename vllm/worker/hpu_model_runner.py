@@ -31,6 +31,7 @@ from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import DeviceConfig, VllmConfig
+# from vllm.config import ForkedPdb
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import get_world_group
 from vllm.forward_context import set_forward_context
@@ -752,7 +753,14 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     max_position_embeddings=max_pos_embeddings,
                 )
                 self.model = self.lora_manager.create_lora_manager(self.model)
-
+            self_attn = self.model.model.layers[0].self_attn
+            for layer in self.model.model.layers:
+                self_attn = layer.self_attn
+                # delete attrs: q_b_proj, kv_b_proj, o_proj in self_attn
+                delattr(self_attn, "q_b_proj")
+                delattr(self_attn, "kv_b_proj")
+                delattr(self_attn, "o_proj") 
+            # ForkedPdb().set_trace()
             if self.model_config.quantization is not None and "inc" in self.model_config.quantization:
                 logger.info("Preparing model with INC..")
                 with HabanaMemoryProfiler() as m_inc:
@@ -760,6 +768,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         FP8Config, convert, prepare)
                     rank_debug(f"Orig MODEL: \n{self.model}", target_rank=0)
                     rank_debug(f"Orig MODEL: \n{self.model}", target_rank=15)
+
                     quant_method = self.model_config.quantization
                     if quant_method == "inc":
                         config = FP8Config.from_json_file(
