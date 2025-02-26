@@ -88,8 +88,6 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         # token, thus we override placeholder with a reserved special
         # token.
         hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_OVERRIDE
-        # Updating both variables for compatibility with older versions
-
         hf_processor.audio_replacement_token_id = _AUDIO_PLACEHOLDER_TOKEN
         return hf_processor
 
