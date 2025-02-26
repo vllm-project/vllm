@@ -491,7 +491,7 @@ def test_prefill_schedule_max_lora():
                                                lora_path="abc"))
         scheduler.add_seq_group(seq_group)
     # Add two more requests to verify lora is prioritized.
-    # 0: Lora, 1: Lora, 2: regular, 3: regular
+    # 0: LoRA, 1: LoRA, 2: regular, 3: regular
     # In the first iteration, index 0, 2 is scheduled.
     # If a request is not scheduled because it hits max lora, it is
     # prioritized. Verify that.

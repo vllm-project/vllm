@@ -114,8 +114,11 @@ try:
 
         def execute_model_ray(
             self,
-            scheduler_output: "SchedulerOutput",
-        ) -> "ModelRunnerOutput":
+            scheduler_output: Union["SchedulerOutput",
+                                    Tuple["SchedulerOutput",
+                                          "IntermediateTensors"]],
+        ) -> Union["ModelRunnerOutput", Tuple["SchedulerOutput",
+                                              "IntermediateTensors"]]:
             # this method is used to compile ray CG,
             # and it needs a special logic of self.setup_device_if_necessary()
             self.setup_device_if_necessary()
@@ -317,7 +320,7 @@ def initialize_ray_cluster(
         if parallel_config.world_size > device_bundles:
             raise ValueError(
                 f"The number of required {device_str}s exceeds the total "
-                f"number of available {device_str}s in the placement group."
+                f"number of available {device_str}s in the placement group. "
                 f"Required number of devices: {parallel_config.world_size}. "
                 f"Total number of devices: {device_bundles}.")
     else:
