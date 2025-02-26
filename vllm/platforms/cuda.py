@@ -161,15 +161,9 @@ class CudaPlatformBase(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
-        if use_v1:
-            if use_mla:
-                logger.info("Using Triton MLA backend on V1 engine.")
-                return "vllm.v1.attention.backends.triton_mla.TritonMLABackend"
-            else:
-                logger.info("Using Flash Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends.flash_attn."
-                        "FlashAttentionBackend")
         if use_mla:
+            # TODO(lucas): refactor to  be more concise
+            #  we should probably consider factoring out V1 here
             if selected_backend == _Backend.FLASHMLA:
                 from vllm.attention.backends.flashmla import (
                     is_flashmla_supported)
@@ -183,11 +177,26 @@ class CudaPlatformBase(Platform):
                         " (currently only supports block size 64).",
                         block_size)
                 else:
-                    logger.info("Using FlashMLA backend.")
-                    return "vllm.attention.backends.flashmla.FlashMLABackend"
+                    if use_v1:
+                        logger.info("Using FlashMLA backend on V1 engine.")
+                        return ("vllm.v1.attention.backends.mla."
+                                "flashmla.FlashMLABackend")
+                    else:
+                        logger.info("Using FlashMLA backend.")
+                        return ("vllm.attention.backends."
+                                "flashmla.FlashMLABackend")
 
-            logger.info("Using Triton MLA backend.")
-            return "vllm.attention.backends.triton_mla.TritonMLABackend"
+            if use_v1:
+                logger.info("Using Triton MLA backend on V1 engine.")
+                return ("vllm.v1.attention.backends.mla."
+                        "triton_mla.TritonMLABackend")
+            else:
+                logger.info("Using Triton MLA backend.")
+                return "vllm.attention.backends.triton_mla.TritonMLABackend"
+        if use_v1:
+            logger.info("Using Flash Attention backend on V1 engine.")
+            return ("vllm.v1.attention.backends.flash_attn."
+                    "FlashAttentionBackend")
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"

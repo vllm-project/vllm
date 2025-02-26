@@ -333,13 +333,16 @@ class MLACommonMetadata:
 T = TypeVar("T", bound=MLACommonMetadata)
 
 
-class MLACommonMetadataBuilder:
+class MLACommonMetadataBuilder(Generic[T]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
 
-    def __init__(self, runner: "GPUModelRunner"):
+    def __init__(self,
+                 runner: "GPUModelRunner",
+                 cls: Optional[type[T]] = None):
+        self.cls = cls if cls is not None else MLACommonMetadata
         self.runner = runner
         scheduler_config = runner.scheduler_config
         model_config = runner.model_config
@@ -431,7 +434,7 @@ class MLACommonMetadataBuilder:
         self._num_prefill_tokens = num_prefill_tokens
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
+              common_prefix_len: int) -> T:
         device = self.runner.device
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
@@ -485,7 +488,7 @@ class MLACommonMetadataBuilder:
             #  [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512]]
             context_chunk_starts = \
                 torch.arange(num_chunks, device=device, dtype=torch.int32) \
-                .unsqueeze(1).expand(-1, num_reqs) \
+                .unsqueeze(1).expand(-1, self._num_prefills) \
                 * max_context_chunk
             chunk_ends = torch.min(context_lens_tensor[self._num_decodes:] \
                 .unsqueeze(0), context_chunk_starts + max_context_chunk)
@@ -502,7 +505,7 @@ class MLACommonMetadataBuilder:
             assert max(context_chunk_seq_tot) <= \
                 self.chunked_prefill_workspace_size
 
-        return MLACommonMetadata(
+        return self.cls(
             input_positions=input_positions,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -953,6 +956,15 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             # Profiling run.
             return output
 
+        num_actual_toks = attn_metadata.num_actual_tokens
+
+        # Inputs and outputs may be padded for CUDA graphs
+        output_padded = output
+        output = output[:num_actual_toks, ...]
+        hidden_states_or_q_c = hidden_states_or_q_c[:num_actual_toks, ...]
+        k_c_normed = k_c_normed[:num_actual_toks, ...]
+        k_pe = k_pe[:num_actual_toks, ...]
+
         # Restore head dim (for rotary embedding)
         k_pe = k_pe.unsqueeze(1)
         assert hasattr(attn_metadata, "input_positions")
@@ -1010,4 +1022,4 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             output[:num_decode_tokens] = self._forward_decode(
                 decode_q_nope, decode_q_pe, kv_cache, attn_metadata)
 
-        return output
+        return output_padded
