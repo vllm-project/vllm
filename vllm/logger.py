@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Logging configuration for vLLM."""
+
 import datetime
 import inspect
 import json
@@ -53,7 +54,7 @@ DEFAULT_LOGGING_CONFIG = {
         },
     },
     "version": 1,
-    "disable_existing_loggers": False
+    "disable_existing_loggers": False,
 }
 
 
@@ -104,13 +105,14 @@ class InterceptHandler(logging.Handler):
         loglevel_mapping (dict): Mapping of logging level numbers to string
         representations.
     """
+
     loglevel_mapping = {
-        50: 'CRITICAL',
-        40: 'ERROR',
-        30: 'WARNING',
-        20: 'INFO',
-        10: 'DEBUG',
-        0: 'NOTSET',
+        50: "CRITICAL",
+        40: "ERROR",
+        30: "WARNING",
+        20: "INFO",
+        10: "DEBUG",
+        0: "NOTSET",
     }
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -158,21 +160,21 @@ class CustomizeLogger:
             A configured logger instance.
         """
         config = cls.load_logging_config(config_path)
-        logging_config = config.get('logger')
+        logging_config = config.get("logger")
 
         params = {
-            'structured_filepath':
-            logging_config.get('structured_log_file_path'),
-            'unstructured_filepath':
-            logging_config.get('unstructured_log_file_path'),
-            'level':
-            logging_config.get('level'),
-            'retention':
-            logging_config.get('retention'),
-            'rotation':
-            logging_config.get('rotation'),
-            'format':
-            logging_config.get('format'),
+            "structured_filepath":
+            logging_config.get("structured_log_file_path"),
+            "unstructured_filepath":
+            logging_config.get("unstructured_log_file_path"),
+            "level":
+            logging_config.get("level"),
+            "retention":
+            logging_config.get("retention"),
+            "rotation":
+            logging_config.get("rotation"),
+            "format":
+            logging_config.get("format"),
         }
 
         _logger = cls.customize_logging(**params)
@@ -201,7 +203,7 @@ class CustomizeLogger:
                     tb = tb.tb_next
                 ex = ex.__cause__ or ex.__context__
 
-            return ''.join(lines)
+            return "".join(lines)
 
         exception = record["exception"]
         error = ""
@@ -305,7 +307,13 @@ class CustomizeLogger:
                 format=cls.formatter,
             )
 
-        logging.basicConfig(handlers=[InterceptHandler()], level=0)
+        # Only set up a handler for the vllm logger
+        vllm_logger = logging.getLogger("vllm")
+        for handler in vllm_logger.handlers[:]:
+            vllm_logger.removeHandler(handler)
+        vllm_logger.addHandler(InterceptHandler())
+        vllm_logger.setLevel(0)
+        vllm_logger.propagate = False
 
         return logger.bind(name="vllm")
 
@@ -326,7 +334,7 @@ class CustomizeLogger:
 
 
 def _configure_vllm_root_logger() -> None:
-    """Configure the root vLLM logger based on environment variables 
+    """Configure the root vLLM logger based on environment variables
     or JSON config."""
     logging_config = dict[str, Any]()
 
@@ -344,13 +352,16 @@ def _configure_vllm_root_logger() -> None:
         if not path.exists(VLLM_LOGGING_CONFIG_PATH):
             raise RuntimeError(
                 "Could not load logging config. File does not exist: %s",
-                VLLM_LOGGING_CONFIG_PATH)
+                VLLM_LOGGING_CONFIG_PATH,
+            )
         with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
-            raise ValueError("Invalid logging config. Expected Dict, got %s.",
-                             type(custom_config).__name__)
+            raise ValueError(
+                "Invalid logging config. Expected Dict, got %s.",
+                type(custom_config).__name__,
+            )
         logging_config = custom_config
 
     for formatter in logging_config.get("formatters", {}).values():
@@ -367,6 +378,26 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 default_config_path = f"{dir_path}/default_logging_config.json"
 config_path = Path(os.getenv("VLLM_LOGGING_CONFIG_PATH", default_config_path))
 _root_logger = None
+_default_handler = None
+
+
+def _setup_logger():
+    """Configure the vllm logger with basic settings when 
+    VLLM_CONFIGURE_LOGGING is False."""
+    global _default_handler, _root_logger
+    _root_logger.setLevel(logging.DEBUG)
+    if _default_handler is None:
+        _default_handler = logging.StreamHandler(sys.stdout)
+        _default_handler.flush = sys.stdout.flush  # type: ignore
+        _default_handler.setLevel(logging.INFO)
+        _root_logger.addHandler(_default_handler)
+    from vllm.logging_utils import NewLineFormatter
+
+    fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
+    _default_handler.setFormatter(fmt)
+    # Setting this will avoid the message being propagated to the parent logger
+    _root_logger.propagate = False
+
 
 # Initialize the logger based on configuration
 if VLLM_CONFIGURE_LOGGING:
@@ -377,19 +408,20 @@ if VLLM_CONFIGURE_LOGGING:
         _root_logger = None
 else:
     _root_logger = logging.getLogger("vllm")
+    _setup_logger()
 
 
 def init_logger(name: str) -> Union["logger.Logger", _VllmLogger]:
     """Initialize a logger for the given name.
-    
+
     This function supports both standard Python logging and loguru logging
     based on VLLM_CONFIGURE_LOGGING setting.
-    
+
     Args:
         name: The name of the logger.
-        
+
     Returns:
-        A logger instance (either a loguru logger or standard Logger 
+        A logger instance (either a loguru logger or standard Logger
         with custom methods).
     """
     if VLLM_CONFIGURE_LOGGING and _root_logger:
@@ -420,18 +452,18 @@ def _trace_calls(log_path: str,
                  event: str,
                  arg: Any = None) -> Callable:
     """Trace function calls and log them to a file.
-    
+
     Args:
         log_path: Path to the log file.
         root_dir: Root directory to filter traced functions.
         frame: Current frame being executed.
         event: Event type (call or return).
         arg: Additional arguments.
-        
+
     Returns:
         A callable for the next trace call.
     """
-    if event in ['call', 'return']:
+    if event in ["call", "return"]:
         # Extract the filename, line number, function name, and the code object
         filename = frame.f_code.co_filename
         lineno = frame.f_lineno
@@ -451,9 +483,9 @@ def _trace_calls(log_path: str,
                 last_filename = ""
                 last_lineno = 0
                 last_func_name = ""
-            with open(log_path, 'a') as f:
+            with open(log_path, "a") as f:
                 ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-                if event == 'call':
+                if event == "call":
                     f.write(f"{ts} Call to"
                             f" {func_name} in {filename}:{lineno}"
                             f" from {last_func_name} in {last_filename}:"
@@ -481,11 +513,11 @@ def enable_trace_function_call(log_file_path: str,
     Note that this call is thread-level, any threads calling this function
     will have the trace enabled. Other threads will not be affected.
     """
-    logger.warning(
+    module_logger.warning(
         "VLLM_TRACE_FUNCTION is enabled. It will record every"
         " function executed by Python. This will slow down the code. It "
         "is suggested to be used for debugging hang or crashes only.")
-    logger.info("Trace frame log is saved to %s", log_file_path)
+    module_logger.info("Trace frame log is saved to %s", log_file_path)
     if root_dir is None:
         # by default, this is the vllm root directory
         root_dir = os.path.dirname(os.path.dirname(__file__))
