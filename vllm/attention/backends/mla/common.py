@@ -251,6 +251,7 @@ if TYPE_CHECKING:
 
 is_hip = current_platform.is_rocm()
 
+
 class MLACommonBackend(AttentionBackend):
 
     @staticmethod
