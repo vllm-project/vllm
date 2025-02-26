@@ -8,7 +8,7 @@
 #include "dispatch_utils.h"
 
 #ifdef USE_ROCM
-  #include "quantization/fp8/amd/hip_float8.h"
+  #include "quantization/fp8/amd/quant_utils.cuh"
 #endif
 
 namespace vllm {
@@ -48,7 +48,10 @@ __global__ void scaled_act_and_mul_kernel(
     const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
     float r = ACT_FN(x) * y * scale;
     out[token_idx * d + idx] = c10::Float8_e4m3fnuz(
-        hip_fp8(r).data, c10::Float8_e4m3fnuz::from_bits());
+        __hip_cvt_float_to_fp8(__bfloat162float(r),
+                               fp8::fp8_type::__default_saturation,
+                               fp8::fp8_type::__default_interpret),
+        c10::Float8_e4m3fnuz::from_bits());
   }
 }
 #endif

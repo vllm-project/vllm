@@ -41,6 +41,8 @@ We currently support the following OpenAI APIs:
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
   - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
+- [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
+  - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
 
 In addition, we have the following custom APIs:
 
@@ -49,7 +51,7 @@ In addition, we have the following custom APIs:
 - [Pooling API](#pooling-api) (`/pooling`)
   - Applicable to all [pooling models](../models/pooling_models.md).
 - [Score API](#score-api) (`/score`)
-  - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
+  - Applicable to embedding models and [cross-encoder models](../models/pooling_models.md) (`--task score`).
 - [Re-rank API](#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
   - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
   - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
@@ -296,6 +298,17 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 :end-before: end-chat-embedding-extra-params
 :::
 
+(transcriptions-api)=
+
+### Transcriptions API
+
+Our Transcriptions API is compatible with [OpenAI's Transcriptions API](https://platform.openai.com/docs/api-reference/audio/createTranscription);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+
+<!-- TODO: api enforced limits + uploading audios -->
+
+Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
+
 (tokenizer-api)=
 
 ### Tokenizer API
@@ -320,10 +333,10 @@ Code example: <gh-file:examples/online_serving/openai_pooling_client.py>
 
 ### Score API
 
-Our Score API applies a cross-encoder model to predict scores for sentence pairs.
+Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
 Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
 
-You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
 Code example: <gh-file:examples/online_serving/openai_cross_encoder_score.py>
 
@@ -483,11 +496,11 @@ The following extra parameters are supported:
 
 ### Re-rank API
 
-Our Re-rank API applies a cross-encoder model to predict relevant scores between a single query, and
+Our Re-rank API can apply an embedding model or a cross-encoder model to predict relevant scores between a single query, and
 each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences, on
 a scale of 0 to 1.
 
-You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
 The rerank endpoints support popular re-rank models such as `BAAI/bge-reranker-base` and other models supporting the
 `score` task. Additionally, `/rerank`, `/v1/rerank`, and `/v2/rerank`

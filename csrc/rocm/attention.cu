@@ -17,6 +17,7 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <hip/hip_fp8.h>
 #include <hip/hip_bf16.h>
 #include "cuda_compat.h"
 
@@ -24,8 +25,7 @@
 #include "../attention/dtype_fp8.cuh"
 #include "../quantization/fp8/amd/quant_utils.cuh"
 
-#if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx940__) || \
-                           defined(__gfx941__) || defined(__gfx942__))
+#if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx942__))
   #define __HIP__MI300_MI250__
 #endif
 
@@ -1518,7 +1518,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   acc *= out_scale;
   OUTT* out_ptr = out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
   if constexpr (std::is_same<OUTT, bit8_t>::value) {
-    out_ptr[threadIdx.x] = hip_fp8(acc).data;
+    out_ptr[threadIdx.x] =
+        __hip_cvt_float_to_fp8(acc, vllm::fp8::fp8_type::__default_saturation,
+                               vllm::fp8::fp8_type::__default_interpret);
   } else {
     out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
   }

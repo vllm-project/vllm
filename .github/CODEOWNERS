@@ -1,14 +1,14 @@
 # See https://help.github.com/articles/about-codeowners/
 # for more info about CODEOWNERS file
 
-* @shajrawi @gshtras @maleksan85
+* @shajrawi @gshtras @maleksan85 @sunway513
 
-/csrc/ @charlifu @mawong-amd
-/vllm/ @charlifu @mawong-amd
+/csrc/ @charlifu @mawong-amd @shajrawi @gshtras @maleksan85 @sunway513
+/vllm/ @charlifu @mawong-amd @shajrawi @gshtras @maleksan85 @sunway513
 
-fused_moe @divakar-amd
+fused_moe @divakar-amd @shajrawi @gshtras @maleksan85 @sunway513
 
-/tests/ @Alexei-V-Ivanov-AMD
-/.buildkite/ @Alexei-V-Ivanov-AMD
+/tests/ @Alexei-V-Ivanov-AMD @shajrawi @gshtras @maleksan85 @sunway513
+/.buildkite/ @Alexei-V-Ivanov-AMD @shajrawi @gshtras @maleksan85 @sunway513
 
-/benchmarks/profiling @AdrianAbeyta @dllehr-amd
+/benchmarks/profiling @AdrianAbeyta @dllehr-amd @shajrawi @gshtras @maleksan85 @sunway513

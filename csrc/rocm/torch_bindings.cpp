@@ -43,6 +43,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "wvSpltK(Tensor in_a, Tensor in_b, Tensor! out_c, int N_in,"
       "        int CuCount) -> ()");
   rocm_ops.impl("wvSpltK", torch::kCUDA, &wvSpltK);
+  rocm_ops.def(
+      "wvSpltKQ(Tensor in_a, Tensor in_b, Tensor! out_c, Tensor scale_a, "
+      "Tensor scale_b,"
+      "        int N_in,"
+      "        int Otp_in,"
+      "        int CuCount) -> ()");
+  rocm_ops.impl("wvSpltKQ", torch::kCUDA, &wvSpltKQ);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

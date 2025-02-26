@@ -8,7 +8,7 @@
         "num_stages": 2,
         "waves_per_eu": 0,
         "matrix_instr_nonkdim": 16,
-        "kpack": 1
+        "kpack": 2
     },
     "2": {
         "BLOCK_SIZE_M": 16,
@@ -63,7 +63,7 @@
         "num_stages": 2,
         "waves_per_eu": 0,
         "matrix_instr_nonkdim": 16,
-        "kpack": 2
+        "kpack": 1
     },
     "32": {
         "BLOCK_SIZE_M": 16,

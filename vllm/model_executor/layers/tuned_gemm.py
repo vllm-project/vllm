@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
-from vllm.envs import VLLM_USE_ROCM_SKINNY_GEMM
+from vllm import envs
 from vllm.platforms import current_platform
-from vllm.utils import is_navi
+from vllm.utils import is_mi250, is_navi
+
+if envs.VLLM_USE_AITER_LINEAR:
+    from aiter.tuned_gemm import tgemm as aiter_tgemm
 
 support_tuned_gemms = False
 if current_platform.is_rocm():
@@ -41,7 +45,8 @@ class TunedGemm:
             device='cuda').multi_processor_count
 
         self.use_skinny = (current_platform.is_rocm()
-                           and VLLM_USE_ROCM_SKINNY_GEMM and not is_navi())
+                           and envs.VLLM_USE_ROCM_SKINNY_GEMM
+                           and not is_navi())
 
         if (self.save_gemm == 1):
             self.tuned_df = pd.DataFrame(
@@ -90,6 +95,40 @@ class TunedGemm:
             return out
         else:
             return None
+
+    def scaled_mm(
+        self,
+        inp: torch.Tensor,
+        weight: torch.Tensor,
+        out_dtype: torch.dtype,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if envs.VLLM_USE_AITER_LINEAR:
+            return aiter_tgemm.scaled_mm(inp, weight, out_dtype, scale_a,
+                                         scale_b, bias)
+        n = inp.shape[0]
+        if (not envs.VLLM_USE_ROCM_SKINNY_GEMM or n != 1
+                or not current_platform.is_rocm() or is_mi250() or is_navi()):
+            return torch._scaled_mm(inp,
+                                    weight,
+                                    out_dtype=out_dtype,
+                                    scale_a=scale_a,
+                                    scale_b=scale_b,
+                                    bias=bias)
+        weightT = weight.t()
+        out = torch.empty(inp.shape[0],
+                          weightT.shape[0],
+                          dtype=out_dtype,
+                          device='cuda')
+
+        Otp = 1  #default bfloat16
+        if out_dtype == torch.float16:
+            Otp = 0
+        ops.wvSpltKQ(weightT, inp, out, scale_a, scale_b, n, Otp,
+                     self.cu_count)
+        return out
 
     def mm(self, inp, weights, bias=None):
         if not support_tuned_gemms:

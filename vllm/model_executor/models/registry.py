@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 
 from .interfaces import (has_inner_state, is_attention_free, is_hybrid,
                          supports_cross_encoding, supports_multimodal,
-                         supports_pp)
+                         supports_pp, supports_transcription)
 from .interfaces_base import is_text_generation_model
 
 logger = init_logger(__name__)
@@ -39,7 +39,7 @@ _TEXT_GENERATION_MODELS = {
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
-    # ChatGLMModel supports multimodal
+    "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
@@ -71,6 +71,7 @@ _TEXT_GENERATION_MODELS = {
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
+    "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -91,7 +92,7 @@ _TEXT_GENERATION_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
-    # QWenLMHeadModel supports multimodal
+    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
@@ -138,6 +139,10 @@ _EMBEDDING_MODELS = {
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     # [Auto-converted (see adapters.py)]
     "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForCausalLM"),
+    # Technically PrithviGeoSpatialMAE is a model that works on images, both in
+    # input and output. I am adding it here because it piggy-backs on embedding
+    # models for the time being.
+    "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
 }
 
 _CROSS_ENCODER_MODELS = {
@@ -153,10 +158,9 @@ _MULTIMODAL_MODELS = {
     "AriaForConditionalGeneration": ("aria", "AriaForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
-    "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
-    "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
+    "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
@@ -172,7 +176,7 @@ _MULTIMODAL_MODELS = {
     "PaliGemmaForConditionalGeneration": ("paligemma", "PaliGemmaForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
-    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
+    "QwenVLForConditionalGeneration": ("qwen_vl", "QwenVLForConditionalGeneration"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": ("qwen2_5_vl", "Qwen2_5_VLForConditionalGeneration"),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
@@ -184,6 +188,7 @@ _MULTIMODAL_MODELS = {
 
 _SPECULATIVE_DECODING_MODELS = {
     "EAGLEModel": ("eagle", "EAGLE"),
+    "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "MedusaModel": ("medusa", "Medusa"),
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
@@ -202,6 +207,14 @@ _VLLM_MODELS = {
     **_FALLBACK_MODEL,
 }
 
+# This variable is used as the args for subprocess.run(). We
+# can modify  this variable to alter the args if needed. e.g.
+# when we use par format to pack things together, sys.executable
+# might not be the target we want to run.
+_SUBPROCESS_COMMAND = [
+    sys.executable, "-m", "vllm.model_executor.models.registry"
+]
+
 
 @dataclass(frozen=True)
 class _ModelInfo:
@@ -214,6 +227,7 @@ class _ModelInfo:
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
+    supports_transcription: bool
 
     @staticmethod
     def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
@@ -227,7 +241,7 @@ class _ModelInfo:
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
-        )
+            supports_transcription=supports_transcription(model))
 
 
 class _BaseRegisteredModel(ABC):
@@ -334,6 +348,10 @@ class _ModelRegistry:
           when importing the model and thus the related error
           :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
         """
+        if not isinstance(model_arch, str):
+            msg = f"`model_arch` should be a string, not a {type(model_arch)}"
+            raise TypeError(msg)
+
         if model_arch in self.models:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
@@ -347,8 +365,12 @@ class _ModelRegistry:
                 raise ValueError(msg)
 
             model = _LazyRegisteredModel(*split_str)
-        else:
+        elif isinstance(model_cls, type) and issubclass(model_cls, nn.Module):
             model = _RegisteredModel.from_model_cls(model_cls)
+        else:
+            msg = ("`model_cls` should be a string or PyTorch model class, "
+                   f"not a {type(model_arch)}")
+            raise TypeError(msg)
 
         self.models[model_arch] = model
 
@@ -475,6 +497,13 @@ class _ModelRegistry:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_hybrid
 
+    def is_transcription_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.supports_transcription
+
 
 ModelRegistry = _ModelRegistry({
     model_arch:
@@ -499,10 +528,9 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
 
         # cannot use `sys.executable __file__` here because the script
         # contains relative imports
-        returned = subprocess.run(
-            [sys.executable, "-m", "vllm.model_executor.models.registry"],
-            input=input_bytes,
-            capture_output=True)
+        returned = subprocess.run(_SUBPROCESS_COMMAND,
+                                  input=input_bytes,
+                                  capture_output=True)
 
         # check if the subprocess is successful
         try:

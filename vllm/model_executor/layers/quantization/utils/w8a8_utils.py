@@ -5,15 +5,12 @@ from typing import List, Optional, Tuple, Union
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.envs import VLLM_USE_AITER_LINEAR
+from vllm.model_executor.layers.tuned_gemm import tgemm
 from vllm.platforms import current_platform
-
-if VLLM_USE_AITER_LINEAR:
-    from aiter.tuned_gemm import tgemm
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
-TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
+TORCH_DEVICE_IDENTITY = None
 
 # The condition to determine if it is on a platform that supports
 # torch._scaled_mm rowwise feature.
@@ -117,6 +114,13 @@ def requantize_with_max_scale(
     return max_w_scale, weight
 
 
+def maybe_create_device_identity():
+    # Allocate dummy ones tensor for torch._scaled_mm
+    global TORCH_DEVICE_IDENTITY
+    if TORCH_DEVICE_IDENTITY is None:
+        TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
+
+
 def apply_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -176,20 +180,12 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
-            if VLLM_USE_AITER_LINEAR:
-                output = tgemm.mm(qinput,
-                                  weight.t(),
-                                  otype=out_dtype,
-                                  scale_a=x_scale,
-                                  scale_b=weight_scale,
-                                  bias=bias)
-            else:
-                output = torch._scaled_mm(qinput,
-                                          weight,
-                                          out_dtype=out_dtype,
-                                          scale_a=x_scale,
-                                          scale_b=weight_scale,
-                                          bias=bias)
+            output = tgemm.scaled_mm(qinput,
+                                     weight,
+                                     out_dtype=out_dtype,
+                                     scale_a=x_scale,
+                                     scale_b=weight_scale,
+                                     bias=bias)
             # A fix for discrepancy in scaled_mm which returns tuple
             # for torch < 2.5 and a single value in torch >= 2.5
             if type(output) is tuple and len(output) == 2:
@@ -233,11 +229,6 @@ def apply_fp8_linear(
             #
             # For the scaled_mm fallback case, we break this down, since it
             # does not support s_w being a vector.
-
-            # Making sure the dummy tensor is on the same device as the weight
-            global TORCH_DEVICE_IDENTITY
-            if TORCH_DEVICE_IDENTITY.device != weight.device:
-                TORCH_DEVICE_IDENTITY = TORCH_DEVICE_IDENTITY.to(weight.device)
 
             # GEMM
             # This computes C = (X * W).

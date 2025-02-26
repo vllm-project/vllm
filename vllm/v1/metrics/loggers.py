@@ -2,12 +2,12 @@
 
 import time
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import prometheus_client
 
-from vllm.config import ModelConfig
+from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
@@ -92,13 +92,18 @@ class LoggingStatLogger(StatLoggerBase):
 
 class PrometheusStatLogger(StatLoggerBase):
 
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self, vllm_config: VllmConfig):
         self._unregister_vllm_metrics()
 
-        labelnames = ["model_name"]
-        labelvalues = [model_config.served_model_name]
+        # Use this flag to hide metrics that were deprecated in
+        # a previous release and which will be removed future
+        self.show_hidden_metrics = \
+            vllm_config.observability_config.show_hidden_metrics
 
-        max_model_len = model_config.max_model_len
+        labelnames = ["model_name"]
+        labelvalues = [vllm_config.model_config.served_model_name]
+
+        max_model_len = vllm_config.model_config.max_model_len
 
         self.gauge_scheduler_running = prometheus_client.Gauge(
             name="vllm:num_requests_running",
@@ -162,6 +167,13 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=build_1_2_5_buckets(max_model_len),
                 labelnames=labelnames).labels(*labelvalues)
 
+        self.histogram_iteration_tokens = \
+            prometheus_client.Histogram(
+                name="vllm:iteration_tokens_total",
+                documentation="Histogram of number of tokens per engine_step.",
+                buckets=build_cudagraph_buckets(vllm_config),
+                labelnames=labelnames).labels(*labelvalues)
+
         self.histogram_time_to_first_token = \
             prometheus_client.Histogram(
                 name="vllm:time_to_first_token_seconds",
@@ -221,6 +233,42 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
 
+        self.gauge_lora_info: Optional[prometheus_client.Gauge] = None
+        if vllm_config.lora_config is not None:
+            self.labelname_max_lora = "max_lora"
+            self.labelname_waiting_lora_adapters = "waiting_lora_adapters"
+            self.labelname_running_lora_adapters = "running_lora_adapters"
+            self.max_lora = vllm_config.lora_config.max_loras
+            self.gauge_lora_info = \
+                prometheus_client.Gauge(
+                    name="vllm:lora_requests_info",
+                    documentation="Running stats on lora requests.",
+                    labelnames=[
+                        self.labelname_max_lora,
+                        self.labelname_waiting_lora_adapters,
+                        self.labelname_running_lora_adapters,
+                    ])
+
+        self.log_metrics_info("cache_config", vllm_config.cache_config)
+
+    def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
+        metrics_info = config_obj.metrics_info()
+
+        name, documentation = None, None
+        if type == "cache_config":
+            name = "vllm:cache_config_info"
+            documentation = "Information of the LLMEngine CacheConfig"
+        assert name is not None, f"Unknown metrics info type {type}"
+
+        # Info type metrics are syntactic sugar for a gauge permanently set to 1
+        # Since prometheus multiprocessing mode does not support Info, emulate
+        # info here with a gauge.
+        info_gauge = prometheus_client.Gauge(
+            name=name,
+            documentation=documentation,
+            labelnames=metrics_info.keys()).labels(**metrics_info)
+        info_gauge.set(1)
+
     def log(self, scheduler_stats: SchedulerStats,
             iteration_stats: IterationStats):
         """Log to prometheus."""
@@ -236,6 +284,9 @@ class PrometheusStatLogger(StatLoggerBase):
 
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(
+            iteration_stats.num_generation_tokens)
+        self.histogram_iteration_tokens.observe(
+            iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)
 
         for finished_request in iteration_stats.finished_requests:
@@ -259,6 +310,19 @@ class PrometheusStatLogger(StatLoggerBase):
             self.histogram_queue_time_request.observe(queue_time)
         for prefill_time in iteration_stats.prefill_times_iter:
             self.histogram_prefill_time_request.observe(prefill_time)
+
+        if self.gauge_lora_info is not None:
+            running_lora_adapters = \
+                ",".join(iteration_stats.running_lora_adapters.keys())
+            waiting_lora_adapters = \
+                ",".join(iteration_stats.waiting_lora_adapters.keys())
+            lora_info_labels = {
+                self.labelname_running_lora_adapters: running_lora_adapters,
+                self.labelname_waiting_lora_adapters: waiting_lora_adapters,
+                self.labelname_max_lora: self.max_lora,
+            }
+            self.gauge_lora_info.labels(**lora_info_labels)\
+                                .set_to_current_time()
 
     @staticmethod
     def _unregister_vllm_metrics():
@@ -293,3 +357,13 @@ def build_1_2_5_buckets(max_value: int) -> List[int]:
     [1, 2, 5, 10, 20, 50, 100]
     """
     return build_buckets([1, 2, 5], max_value)
+
+
+def build_cudagraph_buckets(vllm_config: VllmConfig) -> List[int]:
+    if not vllm_config.model_config.enforce_eager:
+        buckets = vllm_config.compilation_config.\
+            cudagraph_capture_sizes.copy()
+        buckets.sort()
+        return buckets
+    else:
+        return [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
