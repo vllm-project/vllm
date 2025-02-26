@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.topk_topp_sampler import random_sample
 
 try:
     import flashinfer.sampling as fs
@@ -54,19 +55,22 @@ class RejectionSampler(nn.Module):
         else:
             self.forward_method = self.forward_native
 
-    def forward(self, draft_token_ids: List[List[int]],
-                target_probs: torch.Tensor,
-                sampling_metadata: SamplingMetadata) -> SamplerOutput:
-        if not sampling_metadata.all_greedy:
-            raise NotImplementedError(
-                "Currently, only greedy sampling is supported by "
-                "rejection sampler.")
-        return self.forward_method(draft_token_ids, target_probs,
+    def forward(
+        self,
+        draft_token_ids: List[List[int]],
+        draft_probs: Optional[
+            torch.Tensor],  # [batch_size, max_spec_len, vocab_size]
+        target_probs: torch.
+        Tensor,  # [batch_size, max_spec_len + 1, vocab_size]
+        sampling_metadata: SamplingMetadata
+    ) -> SamplerOutput:
+        return self.forward_method(draft_token_ids, draft_probs, target_probs,
                                    sampling_metadata)
 
     def flashinfer_sample(
         self,
         draft_token_ids: List[List[int]],
+        draft_probs: Optional[torch.Tensor],
         target_probs: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
@@ -82,6 +86,8 @@ class RejectionSampler(nn.Module):
                                               batch_first=True,
                                               padding_value=INVALID_TOKEN_ID)
 
+        batch_size = draft_token_ids_tensor.size(0)
+        max_spec_len = draft_token_ids_tensor.size(1)
         if sampling_metadata.all_greedy:
             target_token_ids = target_probs.argmax(dim=-1).view(-1)
             target_token_ids = target_token_ids.split(sample_lens)
@@ -99,13 +105,16 @@ class RejectionSampler(nn.Module):
             target_probs = _create_greedy_token_probs(target_token_ids,
                                                       vocab_size,
                                                       target_probs.device)
-            uniform_samples = torch.zeros(draft_token_ids_tensor.size(0),
-                                          draft_token_ids_tensor.size(1) + 1,
+            uniform_samples = torch.zeros(batch_size,
+                                          max_spec_len + 1,
                                           device=target_probs.device)
         else:
-            raise NotImplementedError(
-                "Currently, only greedy sampling is supported by "
-                "rejection sampler.")
+            # NOTE: CPU <-> GPU synchronization happens here.
+            draft_token_ids_tensor = draft_token_ids_tensor.to(
+                target_probs.device)
+            uniform_samples = _create_uniform_samples(
+                sampling_metadata.generators, batch_size, max_spec_len + 1,
+                target_probs.device)
 
         sampled_token_ids, _, _ = fs.chain_speculative_sampling(
             draft_probs,
@@ -120,7 +129,10 @@ class RejectionSampler(nn.Module):
     def forward_native(
         self,
         draft_token_ids: List[List[int]],
-        target_probs: torch.Tensor,
+        draft_probs: Optional[
+            torch.Tensor],  # [batch_size, max_spec_len, vocab_size]
+        target_probs: torch.
+        Tensor,  # [batch_size, max_spec_len + 1, vocab_size]
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
         sample_lens = [len(x) + 1 for x in draft_token_ids]
@@ -144,26 +156,82 @@ class RejectionSampler(nn.Module):
             accept_mask = (
                 output_token_ids[:, :-1] == draft_token_ids_tensor).cumprod(
                     dim=1)
-        else:
-            raise NotImplementedError(
-                "Currently, only greedy sampling is supported by "
-                "rejection sampler.")
-        # Identify valid positions (non-padding).
-        valid_mask = output_token_ids != INVALID_TOKEN_ID
-        # Generate mask with bonus token.
-        generate_mask = torch.cat([
-            accept_mask,
-            torch.zeros(accept_mask.size(0), 1, device=accept_mask.device)
-        ],
-                                  dim=1).to(torch.bool) & valid_mask
-        zeros_mask = (generate_mask == 0)
-        first_zero_idx = zeros_mask.float().argmax(dim=1)
-        # Figure out which rows actually contain at least one zero.
-        rows_with_zero = zeros_mask.any(dim=1)
-        # Use indexing to set the first zero in each of those rows to 1.
-        generate_mask[rows_with_zero, first_zero_idx[rows_with_zero]] = 1
 
-        output_token_ids[~generate_mask] = INVALID_TOKEN_ID
+            # Identify valid positions (non-padding).
+            valid_mask = output_token_ids != INVALID_TOKEN_ID
+            # Generate mask with bonus token.
+            generate_mask = torch.cat([
+                accept_mask,
+                torch.zeros(accept_mask.size(0), 1, device=accept_mask.device)
+            ],
+                                      dim=1).to(torch.bool) & valid_mask
+            zeros_mask = (generate_mask == 0)
+            first_zero_idx = zeros_mask.float().argmax(dim=1)
+            # Figure out which rows actually contain at least one zero.
+            rows_with_zero = zeros_mask.any(dim=1)
+            # Use indexing to set the first zero in each of those rows to 1.
+            generate_mask[rows_with_zero, first_zero_idx[rows_with_zero]] = 1
+
+            output_token_ids[~generate_mask] = INVALID_TOKEN_ID
+
+        else:
+            # Reference: https://arxiv.org/pdf/2211.17192
+            # 1. Extract the probabilities of the draft tokens.
+            # [batch_size, max_spec_len]
+            assert draft_probs is not None
+            batch_size = draft_token_ids_tensor.size(0)
+            max_spec_len = draft_token_ids_tensor.size(1)
+            draft_token_probs = draft_probs.gather(
+                dim=-1, index=draft_token_ids_tensor.unsqueeze(-1)).squeeze(-1)
+            target_token_probs = target_probs.gather(
+                dim=-1, index=draft_token_ids_tensor.unsqueeze(-1)).squeeze(-1)
+            # 2. Generate uniform samples.
+            # [batch_size, max_spec_len + 1]
+            uniform_samples = _create_uniform_samples(
+                sampling_metadata.generators, batch_size, max_spec_len,
+                target_probs.device)
+
+            # 3. Accept or reject the samples.
+            # [batch_size, max_spec_len]
+            accepted = uniform_samples <= draft_token_probs / target_token_probs
+            accept_mask = accepted.cumprod(dim=1)
+            accepted_token_ids = draft_token_ids_tensor & accept_mask
+
+            # 4. Adjust the distribution for the bonus token.
+            bonus_prob = torch.clamp(target_probs[:, :-1, :] - draft_probs,
+                                     min=0)
+            normalized_bonus_prob = bonus_prob / bonus_prob.sum(dim=-1,
+                                                                keepdim=True)
+            # Concatenate normalized prob with the prob of last target token.
+            sample_prob = torch.cat(
+                [normalized_bonus_prob, target_probs[:, -1, :].unsqueeze(1)],
+                dim=1)
+
+            # 5. Sample bonus token.
+            # [batch_size, max_spec_len + 1]
+            bonus_token_ids = random_sample(sample_prob,
+                                            sampling_metadata.generators)
+
+            # 6. Concatenate the bonus tokens with accepted tokens to get the
+            # output token ids.
+            # Generate mask with bonus token.
+            generate_mask = torch.cat([
+                accept_mask,
+                torch.zeros(batch_size, 1, device=accept_mask.device)
+            ],
+                                      dim=1).to(torch.bool)
+            zeros_mask = (generate_mask == 0)
+            first_zero_idx = zeros_mask.float().argmax(dim=1)
+            output_token_ids = torch.cat([
+                accepted_token_ids,
+                torch.full((batch_size, 1),
+                           fill_value=INVALID_TOKEN_ID,
+                           device=accept_mask.device)
+            ],
+                                         dim=1)
+            output_token_ids[:,
+                             first_zero_idx] = bonus_token_ids[first_zero_idx]
+
         return SamplerOutput(sampled_token_ids=output_token_ids,
                              logprobs_tensors=None)
 
@@ -191,3 +259,56 @@ def _create_greedy_token_probs(
                          src=valid_mask.unsqueeze(-1).float())
 
     return token_probs
+
+
+def _create_uniform_samples(seeded_seqs: Optional[Dict[int, torch.Generator]],
+                            batch_size: int, k: int,
+                            device: torch.device) -> torch.Tensor:
+    """
+        Generates a batch of uniform random samples, with optional seeding 
+        for specific sequences.
+
+        This method creates a tensor of shape `(batch_size, k)` filled 
+        with uniform random values in the range [0, 1). If `seeded_seqs` 
+        is provided, the sequences corresponding to specific indices 
+        will be generated using the provided `torch.Generator` for 
+        reproducibility. The other sequences will be generated without 
+        a seed.
+
+        Args:
+            seeded_seqs : Optional[Dict[int, torch.Generator]]
+                A dictionary mapping indices in the batch to 
+                `torch.Generator` objects. If `None`, all samples are 
+                generated without a seed.
+            batch_size : int
+                The number of sequences to generate.
+            k : int
+                The number of random samples per sequence.
+            device : torch.device
+                The device on which to allocate the tensor.
+
+        Returns:
+            uniform_rand : torch.Tensor
+                A tensor of shape `(batch_size, k)` containing uniform 
+                random values in the range [0, 1).
+        """
+    if not seeded_seqs:
+        return torch.rand(batch_size, k + 1, device=device)
+
+    uniform_rand = torch.empty(batch_size, k + 1, device=device)
+
+    non_seeded_indices = []
+    for idx in range(batch_size):
+        generator = seeded_seqs.get(idx)
+        if generator is None:
+            non_seeded_indices.append(idx)
+        else:
+            uniform_rand[idx, :] = torch.rand(1,
+                                              k,
+                                              dtype=torch.float,
+                                              device=device,
+                                              generator=generator)
+    if non_seeded_indices:
+        uniform_rand[non_seeded_indices, :] = torch.rand(
+            len(non_seeded_indices), k, dtype=torch.float, device=device)
+    return uniform_rand
