@@ -170,7 +170,7 @@ def apply_fp8_linear(
             qinput, x_scale = ops.scaled_fp8_quant(
                 input_2d,
                 input_scale,
-                num_token_padding=17,
+                num_token_padding=17 if current_platform.is_cuda() else None,
                 use_per_token_if_dynamic=use_per_token_if_dynamic)
         else:
             qinput, x_scale = input_2d, input_scale
