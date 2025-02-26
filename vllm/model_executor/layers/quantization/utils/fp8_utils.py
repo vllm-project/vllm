@@ -90,7 +90,7 @@ def apply_w8a8_block_fp8_linear_fake(
     input_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     output_shape = [*input.shape[:-1], weight.shape[0]]
-    return torch.empty_like(input, shape=output_shape)
+    return torch.empty(output_shape, dtype=input.dtype, device=input.device)
 
 
 direct_register_custom_op(
