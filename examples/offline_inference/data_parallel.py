@@ -46,7 +46,6 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
     # since we are doing data parallel, every rank can have different
     # sampling params. here we set different max_tokens for different
     # ranks for demonstration.
-    # Set the same max_tokens for each rank, otherwise it fails.
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      max_tokens=16 * (dp_rank + 1))
