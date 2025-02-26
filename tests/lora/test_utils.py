@@ -48,7 +48,14 @@ def test_parse_fine_tuned_lora_name_valid():
         ),
         (
             "base_model.model.lm_head.lora_magnitude_vector",
-            "model.lm_head",
+            "lm_head",
+            False,
+            False,
+            True,
+        ),
+        (
+            "base_model.model.model.layers.10.self_attn.q_proj.lora_magnitude_vector",
+            "model.layers.10.self_attn.q_proj",
             False,
             False,
             True,
