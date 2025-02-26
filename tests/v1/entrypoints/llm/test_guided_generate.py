@@ -197,7 +197,9 @@ def test_guided_grammar_ebnf_invalid(monkeypatch,
                                      guided_decoding=GuidedDecodingParams(
                                          grammar="not a grammar",
                                          backend=guided_decoding_backend))
-    with pytest.raises(ValueError, match="Invalid grammar specification."):
+    with pytest.raises(ValueError,
+                       match="Failed to convert the grammar "
+                       "from Lark to EBNF."):
         llm.generate(
             prompts=("Generate a sql statement that selects col_1 from "
                      "table_1 where it is equal to 1"),

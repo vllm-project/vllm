@@ -954,6 +954,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply guided decoding bitmasks if present
         grammar_bitmask = scheduler_output.grammar_bitmask
         if grammar_bitmask is not None:
+            # We receive the guided decoding bitmask from the scheduler, but the
+            # indices of the requests in the batch may not match the indices of
+            # the bitmask since the scheduler doesn't know how the gpu runner is
+            # ordering the requests in the batch. We need to sort the bitmask to
+            # match the order of the requests used here.
+            req_id_indices: Dict[str, int] = {}
+            indices_match = True
+            for req_id in self.input_batch.req_ids:
+                batch_index = self.input_batch.req_id_to_index[req_id]
+                if batch_index != scheduler_output.guided_decoding_request_ids[
+                        req_id]:
+                    indices_match = False
+                req_id_indices[req_id] = batch_index
+
+            sorted_bitmask: Optional[torch.Tensor] = None
+            if not indices_match:
+                # Sort the bitmask to match the order of the requests
+                sorted_bitmask = torch.zeros_like(grammar_bitmask)
+                for req_id, batch_index in req_id_indices.items():
+                    orig_index = scheduler_output.guided_decoding_request_ids[
+                        req_id]
+                    sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
+                grammar_bitmask = sorted_bitmask
+
             # TODO: compatibility with spec decode
             apply_bitmask(
                 logits,
