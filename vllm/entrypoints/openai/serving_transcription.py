@@ -325,7 +325,6 @@ class OpenAIServingTranscription(OpenAIServing):
         created_time = int(time.time())
         model_name = request.model
         chunk_object_type: Final = "transcription.chunk"
-        first_iteration = True
 
         completion_tokens = 0
         num_prompt_tokens = 0
@@ -352,30 +351,9 @@ class OpenAIServingTranscription(OpenAIServing):
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
-                if first_iteration:
-                    # Fist delta message.
-                    choice_data = TranscriptionResponseStreamChoice(
-                        delta=DeltaMessage(content="", ), finish_reason=None)
-                    chunk = TranscriptionStreamResponse(
-                        id=request_id,
-                        object=chunk_object_type,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=model_name)
-
-                    # if continuous usage stats are requested, add it
-                    if include_continuous_usage:
-                        chunk.usage = UsageInfo(
-                            prompt_tokens=num_prompt_tokens,
-                            completion_tokens=0,
-                            total_tokens=num_prompt_tokens)
-
-                    data = chunk.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
-
-                    first_iteration = False
 
                 # Just one output (n=1) supported.
+                assert len(res.outputs) == 1
                 output = res.outputs[0]
 
                 delta_message = DeltaMessage(content=output.text)
