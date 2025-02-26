@@ -338,6 +338,8 @@ class XGrammarLogitsProcessor:
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
 
+        # Skip the structured logits processing if reasoning is not finished.
+        # reasoner_config is not None only when `--enable-reasoning` is set.
         if self.reasoner_config is not None and \
         not self.reasoner_config.is_reasoning_end(
                 input_ids):

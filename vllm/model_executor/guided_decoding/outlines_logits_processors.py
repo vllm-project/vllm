@@ -52,6 +52,9 @@ class BaseLogitsProcessor:
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
+
+        # Skip the structured logits processing if reasoning is not finished.
+        # reasoner_config is not None only when `--enable-reasoning` is set.
         if self._reasoner_config is not None and \
         not self._reasoner_config.is_reasoning_end(
                 input_ids):

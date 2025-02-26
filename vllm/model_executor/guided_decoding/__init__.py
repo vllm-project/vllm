@@ -105,9 +105,10 @@ def maybe_backend_fallback(
 
 
 async def get_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizer,
+        guided_params: GuidedDecodingParams,
+        tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
-        reasoning_backend: str | None) -> LogitsProcessor | None:
+        reasoning_backend: str | None = None) -> LogitsProcessor | None:
 
     reasoner_config = None
     if reasoning_backend is not None:
@@ -139,11 +140,13 @@ async def get_guided_decoding_logits_processor(
 
 
 def get_local_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizer,
+        guided_params: GuidedDecodingParams,
+        tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
-        reasoning_backend: str | None) -> LogitsProcessor | None:
+        reasoning_backend: str | None = None) -> LogitsProcessor | None:
     guided_params = maybe_backend_fallback(guided_params)
 
+    # Get the reasoner config if a reasoning backend is specified
     reasoner_config = None
     if reasoning_backend is not None:
         reasoner = get_reasoner(reasoning_backend, tokenizer)

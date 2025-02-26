@@ -18,19 +18,21 @@ MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 GUIDED_DECODING_BACKENDS_WITH_REASONING_SUPPORT = ["outlines", "xgrammar"]
 
+# Load the tokenizer for the model to speed up the tests
+zephyr_7B_tokenzer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
 
 def test_guided_logits_processors(sample_regex, sample_json_schema):
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
-    tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
     regex_LP = RegexLogitsProcessor(sample_regex,
-                                    tokenizer,
+                                    zephyr_7B_tokenzer,
                                     reasoner_config=None)
     json_LP = JSONLogitsProcessor(sample_json_schema,
-                                  tokenizer,
+                                  zephyr_7B_tokenzer,
                                   whitespace_pattern=None,
                                   reasoner_config=None)
 
-    token_ids = tokenizer.encode(
+    token_ids = zephyr_7B_tokenzer.encode(
         f"Give an example IPv4 address with this regex: {sample_regex}")
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
@@ -38,7 +40,7 @@ def test_guided_logits_processors(sample_regex, sample_json_schema):
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
-    token_ids = tokenizer.encode(
+    token_ids = zephyr_7B_tokenzer.encode(
         f"Give an employee profile that fits this schema: {sample_json_schema}"
     )
     tensor = torch.rand(32000)
@@ -64,7 +66,7 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
         seed=0,
         dtype="bfloat16",
     )
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = zephyr_7B_tokenzer
     token_ids = tokenizer.encode(
         f"Give an example IPv4 address with this regex: {sample_regex}")
     regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
