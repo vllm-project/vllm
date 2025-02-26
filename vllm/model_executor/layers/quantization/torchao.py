@@ -19,11 +19,11 @@ class TorchAOConfig(QuantizationConfig):
 
     """
 
-    def __init__(self, quant_type: str = "int4wo-128") -> None:
-        self.quant_type = quant_type
+    def __init__(self, torchao_config: str = "int4wo-128") -> None:
+        self.torchao_config = torchao_config
 
     def __repr__(self) -> str:
-        return f"TorchAOConfig({self.quant_type})"
+        return f"TorchAOConfig({self.torchao_config})"
 
     def get_name(self) -> str:
         return "torchao"
@@ -43,8 +43,8 @@ class TorchAOConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "TorchAOConfig":
-        quant_type = cls.get_from_keys_or(config, ["quant_type"], "int4wo-128")
-        return cls(quant_type)
+        torchao_config = cls.get_from_keys_or(config, ["torchao_config"], "int4wo-128")
+        return cls(torchao_config)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["TorchAOLinearMethod"]:
@@ -60,7 +60,7 @@ class TorchAOLinearMethod(LinearMethodBase):
     """Linear method for torchao.
 
     Args:
-        quant_config: The torchao quantization config.
+        torchao_config: The torchao quantization config, a string that encodes the type of quantization and all relevant arguments.
     """
 
     def __init__(self, quant_config: TorchAOConfig):
@@ -81,7 +81,7 @@ class TorchAOLinearMethod(LinearMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        torchao_config = self.quant_config.quant_type
+        torchao_config = self.quant_config.torchao_config
         layer.weight = torchao_quantize_param_data(layer.weight,
                                                    torchao_config)
 

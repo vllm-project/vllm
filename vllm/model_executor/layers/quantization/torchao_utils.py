@@ -13,9 +13,9 @@ def torchao_quantize_param_data(param: torch.Tensor, torchao_config: str):
 
     Args:
        `param`: weight parameter of the linear module
-       `torchao_config`: type of quantization and their arguments we want to use to
-        quantize the Tensor, e.g. int4wo-128 means int4 weight only quantization with group_size
-        128
+       `torchao_config`: type of quantization and their arguments we want to
+        use to quantize the Tensor, e.g. int4wo-128 means int4 weight only
+        quantization with group_size 128
     """
     # Lazy import to suppress some warnings
     from torchao.quantization import (float8_dynamic_activation_float8_weight,
@@ -37,13 +37,15 @@ def torchao_quantize_param_data(param: torch.Tensor, torchao_config: str):
             64,
             128,
             256,
-        ], f"int4wo groupsize needs to be one of [32, 64, 128, 256] but got {group_size}"
+        ], f"int4wo groupsize needs to be one of [32, 64, 128, 256] but "
+        "got {group_size}"
         quantize_(dummy_linear, int4_weight_only(group_size=group_size))
     elif "fp8wo" in torchao_config:
         from torchao.quantization import float8_weight_only
 
         # this requires newer hardware
-        # [rank0]: AssertionError: fp8e4nv data type is not supported on CUDA arch < 89
+        # [rank0]: AssertionError: fp8e4nv data type is not supported on
+        # CUDA arch < 89
         quantize_(dummy_linear, float8_weight_only())
     elif "fp8dq" in torchao_config:
         granularity = torchao_config.split("-")[-1]
@@ -53,7 +55,8 @@ def torchao_quantize_param_data(param: torch.Tensor, torchao_config: str):
         }
         assert (
             granularity in GRANULARITY_MAP
-        ), f"Supported granularity are: {GRANULARITY_MAP.keys()}, got {granularity}"
+        ), f"Supported granularity are: {GRANULARITY_MAP.keys()}, "
+        f"got {granularity}"
         quantize_(
             dummy_linear,
             float8_dynamic_activation_float8_weight(
@@ -68,16 +71,18 @@ def apply_torchao_config_(
     params_dict: Dict[str, torch.Tensor],
     param_suffixes: Set[str],
 ) -> None:
-    """A util function used for quantizing the weight parameters after they are loaded if
-       self.torchao_config is specified
+    """A util function used for quantizing the weight parameters after they are
+       loaded if self.torchao_config is specified
 
     Args:
       `self`: the model we want to quantize
       `params_dict`: dictionary mapping from param_name to the parameter Tensor
-      `param_suffixes`: a set of suffixes, we'll quantize the Tensor matching these suffixes
+      `param_suffixes`: a set of suffixes, we'll quantize the Tensor matching these
+       suffixes
 
     Returns:
-       None, the `params_dict` is modified inplace and the weights of `self` model are quantized
+       None, the `params_dict` is modified inplace and the weights of `self` model
+       are quantized
     """
     if self.torchao_config:
         for param_suffix in param_suffixes:
