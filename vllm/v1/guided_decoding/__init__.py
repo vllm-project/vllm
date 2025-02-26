@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import copy
 import enum
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -130,12 +131,12 @@ class GuidedDecodingManager:
     def should_cache(self, request: Request):
         if not request.use_guided_decoding:
             return False
-        request.grammar = self.request_key_to_grammar.get(
-            request.guided_decoding_key)
-        if not request.grammar:
-            request.grammar = self.cache(request)
-            return True
-        return False
+        grammar = self.request_key_to_grammar.get(request.guided_decoding_key)
+        if grammar:
+            request.grammar = copy.copy(grammar)
+            return False
+        request.grammar = self.cache(request)
+        return True
 
     def cache(self, request: Request):
         return self.executor.submit(self._executor_loop, request)
@@ -145,10 +146,11 @@ class GuidedDecodingManager:
         with self._requests_lock:
             self.requests.add(request)
         if key in self.request_key_to_grammar:
-            return self.request_key_to_grammar[key]
-
-        self.request_key_to_grammar[key] = self.initialize_grammar(key)
-        return self.request_key_to_grammar[key]
+            grammar = self.request_key_to_grammar[key]
+            return copy.copy(grammar)
+        grammar = self.initialize_grammar(key)
+        self.request_key_to_grammar[key] = grammar
+        return copy.copy(grammar)
 
     def initialize_grammar(self, key: GuidedDecodingKey) -> Grammar:
         # Note that the request was validated in the engine core client,
@@ -189,5 +191,5 @@ class GuidedDecodingManager:
                 # Check if grammar is ready in cache
                 grammar = self[req.guided_decoding_key]
                 if grammar is not None:
-                    req.grammar = grammar
+                    req.grammar = copy.copy(grammar)
                     continue
