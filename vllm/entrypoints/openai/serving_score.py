@@ -17,7 +17,8 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, RerankDocument,
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.score_utils import (_cosine_similarity,
-                                          _validate_score_input_lens)
+                                          _validate_score_input_lens,
+                                          _validate_truncatation_size)
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -242,16 +243,8 @@ class ServingScores(OpenAIServing):
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-        if truncate_prompt_tokens is not None and \
-                                truncate_prompt_tokens == -1:
-            truncate_prompt_tokens = self.max_model_len
-
-        if truncate_prompt_tokens is not None and \
-                truncate_prompt_tokens > self.max_model_len:
-            raise ValueError(
-                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
-                f"is greater than max_model_len ({self.max_model_len})."
-                f" Please, select a smaller truncation size.")
+        truncate_prompt_tokens = _validate_truncatation_size(
+            self.max_model_len, truncate_prompt_tokens)
 
         tokenization_kwargs: Dict[str, Any] = {}
         if truncate_prompt_tokens is not None:

@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               PoolingResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.score_utils import _validate_truncatation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils import merge_async_iterators
@@ -84,20 +85,8 @@ class OpenAIServingPooling(OpenAIServing):
         request_id = f"pool-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        truncate_prompt_tokens = None
-
-        if request.truncate_prompt_tokens is not None and \
-                                request.truncate_prompt_tokens == -1:
-            truncate_prompt_tokens = self.max_model_len
-
-        if request.truncate_prompt_tokens is not None:
-            if request.truncate_prompt_tokens <= self.max_model_len:
-                truncate_prompt_tokens = request.truncate_prompt_tokens
-            else:
-                return self.create_error_response(
-                    "truncate_prompt_tokens value is "
-                    "greater than max_model_len."
-                    " Please, select a smaller truncation size.")
+        truncate_prompt_tokens = _validate_truncatation_size(
+            self.max_model_len, request.truncate_prompt_tokens)
 
         try:
             (
