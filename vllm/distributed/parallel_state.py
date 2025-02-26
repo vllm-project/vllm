@@ -708,10 +708,10 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
-def init_world_group(ranks: List[int], local_rank: int,
+def init_world_group(ranks: List[List[int]], local_rank: int,
                      backend: str) -> GroupCoordinator:
     return GroupCoordinator(
-        group_ranks=[ranks],
+        group_ranks=ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
         use_device_communicator=False,
@@ -855,7 +855,15 @@ def init_distributed_environment(
             local_rank = rank
     global _WORLD
     if _WORLD is None:
-        ranks = list(range(torch.distributed.get_world_size()))
+        world_size = torch.distributed.get_world_size()
+        world_size_actual = config.parallel_config.world_size_across_dp
+
+        assert world_size_actual < world_size, "Need to increase world_size"
+        ranks = [
+            list(range(i*world_size_actual, (i+1)*world_size_actual)) 
+            for i in range(world_size // world_size_actual )
+        ]
+
         _WORLD = init_world_group(ranks, local_rank, backend)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
@@ -906,6 +914,7 @@ def initialize_model_parallel(
     # to get group_ranks for each dimension, transpose that dimension to the
     # last dimension, then reshape to 2D, then unbind the last dimension
     all_ranks = torch.arange(world_size).reshape(
+        -1,
         data_parallel_size, pipeline_model_parallel_size,
         tensor_model_parallel_size)  # noqa
 
