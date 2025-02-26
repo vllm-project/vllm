@@ -233,8 +233,6 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
-is_hip = current_platform.is_rocm()
-
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 
 try:
@@ -251,6 +249,7 @@ if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
 
+is_hip = current_platform.is_rocm()
 
 class MLACommonBackend(AttentionBackend):
 
