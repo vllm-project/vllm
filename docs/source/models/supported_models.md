@@ -898,10 +898,6 @@ Currently the PaliGemma model series is implemented without PrefixLM attention m
 `mistral-community/pixtral-12b` does not support V1 yet.
 :::
 
-:::{note}
-To use Qwen2.5-VL series models, you have to install Huggingface `transformers` library from source via `pip install git+https://github.com/huggingface/transformers`.
-:::
-
 ### Pooling Models
 
 See [this page](pooling-models) for more information on how to use pooling models.
