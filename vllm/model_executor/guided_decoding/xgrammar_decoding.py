@@ -435,10 +435,18 @@ class XGrammarLogitsProcessor:
         # Share the compiled grammar context (immutable after compilation)
         new_processor.ctx = self.ctx
 
-        # Create fresh matchers for the new sequence
+        # Create fresh matchers for the new sequence and reset
+        # num_processed_tokens for new sequence
         if self.ctx is not None:
+            max_rollback_tokens = (self.config.num_lookahead_slots
+                                   if self.config.num_lookahead_slots else 0)
             new_processor.matchers = [
-                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
+                xgr.GrammarMatcher(self.ctx,
+                                   max_rollback_tokens=max_rollback_tokens)
+                for _ in range(self.batch_size)
+            ]
+            new_processor.num_processed_tokens = [
+                0 for _ in range(self.batch_size)
             ]
 
         # Create a new token bitmask with the same size
@@ -447,7 +455,5 @@ class XGrammarLogitsProcessor:
 
         # Copy simple attributes
         new_processor.batch_size = self.batch_size
-        # Reset prefilled state for new sequence
-        new_processor.prefilled = False
 
         return new_processor
