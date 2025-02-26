@@ -211,28 +211,9 @@ And the calculated intervals are:
 
 Put another way:
 
-```text
-<< queued timestamp >>
-  [ queue interval ]
-    |
-    | (possible preemptions)
-    | << scheduled timestamp >>
-    | << preempted timestamp >>
-    | << scheduled timestamp >>
-    | << new token timestamp (FIRST) >>
-    | << new token timestamp >>
-    | << new token timestamp >>
-    | << preempted timestamp >>
-    v
-<< scheduled timestamp >>
-  [ prefill interval ]
-<< new token timestamp (FIRST) >>
-  [ inter-token interval ]
-<< new token timestamp >>
-  [ decode interval (relative to most recent first token time) ]
-  [ inference interval (relative to most recent scheduled time) ]
-<< new token timestamp (FINISHED) >>
-```
+:::{image} /assets/design/v1/metrics/intervals-1.png
+:alt: Interval calculations - common case
+:::
 
 We explored the possibility of having the frontend calculate these
 intervals using the timing of events visible by the frontend. However,
@@ -240,6 +221,24 @@ the frontend does not have visibility into the timing of the `QUEUED`
 and `SCHEDULED` events and, since we need to calculate intervals based
 on monotonic timestamps from the same process ... we need the engine
 core to record timestamps for all of these events.
+
+#### Interval Calculations vs Preemptions
+
+When a preemption occurs during decode, since any already generated
+tokens are reused, we consider the preemption as affecting the
+inter-token, decode, and inference intervals.
+
+:::{image} /assets/design/v1/metrics/intervals-2.png
+:alt: Interval calculations - preempted decode
+:::
+
+When a preemption occurs during prefill (assuming such an event
+is possible), we consider the preemption as affecting the
+time-to-first-token and prefill intervals.
+
+:::{image} /assets/design/v1/metrics/intervals-2.png
+:alt: Interval calculations - preempted prefill
+:::
 
 ### Frontend Stats Collection
 
