@@ -1,13 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+import aiter
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import is_navi
-import aiter
 
 if HAS_TRITON:
     from vllm.attention.ops.prefix_prefill import context_attention_fwd
@@ -83,49 +84,33 @@ class PagedAttention:
                 key_cache = key_cache.view(torch.int8)
                 value_cache = value_cache.view(torch.int8)
             aiter.reshape_and_cache_with_pertoken_quant(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                k_scale,
-                v_scale,
-                slot_mapping.flatten(),
-                True
-            )
+                key, value, key_cache, value_cache, k_scale, v_scale,
+                slot_mapping.flatten(), True)
         else:
-            aiter.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping.flatten(),
-                kv_cache_dtype,
-                k_scale.view(-1)[0].item(),
-                v_scale.view(-1)[0].item(),
-                True
-            )
+            aiter.reshape_and_cache(key, value, key_cache, value_cache,
+                                    slot_mapping.flatten(), kv_cache_dtype,
+                                    k_scale.view(-1)[0].item(),
+                                    v_scale.view(-1)[0].item(), True)
 
     @staticmethod
-    def forward_decode(
-        query: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        block_tables: torch.Tensor,
-        seq_lens: torch.Tensor,
-        max_seq_len: int,
-        kv_cache_dtype: str,
-        num_kv_heads: int,
-        scale: float,
-        alibi_slopes: Optional[torch.Tensor],
-        k_scale: torch.Tensor,
-        v_scale: torch.Tensor,
-        tp_rank: int = 0,
-        blocksparse_local_blocks: int = 0,
-        blocksparse_vert_stride: int = 0,
-        blocksparse_block_size: int = 64,
-        blocksparse_head_sliding_step: int = 0,
-        out=None
-    ) -> torch.Tensor:
+    def forward_decode(query: torch.Tensor,
+                       key_cache: torch.Tensor,
+                       value_cache: torch.Tensor,
+                       block_tables: torch.Tensor,
+                       seq_lens: torch.Tensor,
+                       max_seq_len: int,
+                       kv_cache_dtype: str,
+                       num_kv_heads: int,
+                       scale: float,
+                       alibi_slopes: Optional[torch.Tensor],
+                       k_scale: torch.Tensor,
+                       v_scale: torch.Tensor,
+                       tp_rank: int = 0,
+                       blocksparse_local_blocks: int = 0,
+                       blocksparse_vert_stride: int = 0,
+                       blocksparse_block_size: int = 64,
+                       blocksparse_head_sliding_step: int = 0,
+                       out=None) -> torch.Tensor:
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
             block_size = value_cache.size(-1)
@@ -135,9 +120,6 @@ class PagedAttention:
                  f"{block_size=} used in block_tables.")
 
         block_size = value_cache.shape[3]
-        num_seqs, num_heads, head_size = query.shape
-        max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
-                              _PARTITION_SIZE)
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
         # V1 to avoid the overhead of reduction. Also, if the number of
@@ -154,7 +136,7 @@ class PagedAttention:
             key_cache = key_cache.view(torch.float8_e4m3fnuz)
             value_cache = value_cache.view(torch.float8_e4m3fnuz)
         aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables, seq_lens,
-                         max_num_blocks_per_seq, k_scale, v_scale,out)
+                         max_num_blocks_per_seq, k_scale, v_scale, out)
         return out
 
     @staticmethod

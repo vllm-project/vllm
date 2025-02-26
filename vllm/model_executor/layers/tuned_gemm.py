@@ -106,8 +106,12 @@ class TunedGemm:
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
         if envs.VLLM_USE_AITER_LINEAR:
-            return aiter_tgemm.scaled_mm(inp, weight, out_dtype, scale_a,
-                                         scale_b, bias)
+            return aiter_tgemm.mm(inp,
+                                  weight.t(),
+                                  otype=out_dtype,
+                                  scale_a=scale_a,
+                                  scale_b=scale_b,
+                                  bias=bias)
         n = inp.shape[0]
         if (not envs.VLLM_USE_ROCM_SKINNY_GEMM or n != 1
                 or not current_platform.is_rocm() or is_mi250() or is_navi()):

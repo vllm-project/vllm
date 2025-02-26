@@ -7,17 +7,17 @@ from typing import Optional
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+from vllm import envs
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.envs import VLLM_USE_AITER_LINEAR
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
-if VLLM_USE_AITER_LINEAR:
+if envs.VLLM_USE_AITER_LINEAR:
     from aiter.tuned_gemm import tgemm
 else:
     from vllm.model_executor.layers.tuned_gemm import tgemm
@@ -142,14 +142,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None,
-              out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        if VLLM_USE_AITER_LINEAR:
-            return tgemm.mm(x, layer.weight, bias, out_dtype)
-        elif out_dtype:
-            return tgemm.mm(x, layer.weight, bias).to(out_dtype)
-        else:
-            return tgemm.mm(x, layer.weight, bias)
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return tgemm.mm(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
@@ -208,14 +202,17 @@ class ReplicatedLinear(LinearBase):
                         (e.g. model.layers.0.qkv_proj)
     """
 
-    def __init__(self,
-                 input_size: int,
-                 output_size: int,
-                 bias: bool = True,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        out_dtype: Optional[torch.dtype] = None,
+    ):
         super().__init__(input_size,
                          output_size,
                          skip_bias_add,
@@ -223,6 +220,7 @@ class ReplicatedLinear(LinearBase):
                          quant_config,
                          prefix=prefix)
 
+        self.out_dtype = out_dtype
         # All the linear layer supports quant method.
         assert self.quant_method is not None
         self.quant_method.create_weights(self,
@@ -254,12 +252,12 @@ class ReplicatedLinear(LinearBase):
     def forward(
         self,
         x: torch.Tensor,
-        out_dtype: Optional[torch.dtype] = None
     ) -> tuple[torch.Tensor, Optional[Parameter]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
-        if type(self.quant_method) == UnquantizedLinearMethod:
-            output = self.quant_method.apply(self, x, bias, out_dtype)
+        if type(self.quant_method
+                ) is UnquantizedLinearMethod and envs.VLLM_USE_AITER_LINEAR:
+            output = tgemm.mm(x, self.weight, bias, self.out_dtype)
         else:
             output = self.quant_method.apply(self, x, bias)
         output_bias = self.bias if self.skip_bias_add else None
