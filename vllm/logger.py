@@ -18,6 +18,7 @@ from types import MethodType
 from typing import Any, Callable, Dict, Optional, Union, cast
 
 from loguru import logger
+from loguru._logger import Logger as LoguruLogger
 
 import vllm.envs as envs
 
@@ -150,7 +151,7 @@ class CustomizeLogger:
     """
 
     @classmethod
-    def make_logger(cls, config_path: Path) -> "logger.Logger":
+    def make_logger(cls, config_path: Path) -> LoguruLogger:
         """Create and configure a logger based on a config file.
 
         Args:
@@ -249,7 +250,7 @@ class CustomizeLogger:
         rotation: Optional[str],
         retention: Optional[str],
         format: Optional[str],
-    ) -> "logger.Logger":
+    ) -> LoguruLogger:
         """Customize logging setup based on configuration options.
 
         Configures logging with options for both structured and unstructured
@@ -411,7 +412,7 @@ else:
     _setup_logger()
 
 
-def init_logger(name: str) -> Union["logger.Logger", _VllmLogger]:
+def init_logger(name: str) -> Union[LoguruLogger, _VllmLogger]:
     """Initialize a logger for the given name.
 
     This function supports both standard Python logging and loguru logging
