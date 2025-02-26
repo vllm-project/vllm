@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """A Neuron worker class."""
-import enum
 import os
-from functools import cache
 from typing import List, Optional, Tuple
 
-import torch
 import torch.distributed
 
 from vllm.config import VllmConfig
@@ -13,8 +10,9 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest
+from vllm.worker.neuron_model_runner import NeuronModelRunner
+from vllm.worker.utils import NeuronFramework, get_neuron_framework_to_use
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
@@ -26,69 +24,11 @@ DEFAULT_NEURON_RANK_ID = "0"
 DEFAULT_ENABLE_NEURON_MULTI_NODE = "False"
 
 
-class NeuronFramework(enum.Enum):
-    TRANSFORMERS_NEURONX = "transformers-neuronx"
-    NEURONX_DISTRIBUTED_INFERENCE = "neuronx-distributed-inference"
-
-
-@cache
-def get_neuron_framework_to_use():
-    """Return the specified framework if corresponding installations are
-    available.
-
-    If no framework is specified, use neuronx-distributed-inference by default.
-    If that's unavailable, check and switch to transformers-neuronx.
-    """
-    if not current_platform.is_neuron():
-        raise AssertionError(
-            f"Neuron Framework unavailable for platform: {current_platform}")
-
-    tnx_installed = current_platform.is_transformers_neuronx()
-    nxd_installed = current_platform.is_neuronx_distributed_inference()
-
-    specified_framework = os.environ.get("VLLM_NEURON_FRAMEWORK")
-    tnx_framework = NeuronFramework.TRANSFORMERS_NEURONX.value
-    nxd_framework = NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE.value
-    if (specified_framework == tnx_framework and tnx_installed):
-        return NeuronFramework.TRANSFORMERS_NEURONX
-
-    if ((specified_framework == nxd_framework and nxd_installed)
-            or (specified_framework is None and nxd_installed)):
-        return NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
-
-    if specified_framework is None and tnx_installed:
-        return NeuronFramework.TRANSFORMERS_NEURONX
-
-    return None
-
-
-@cache
-def use_neuronx_distributed():
-    """
-    Return True if the framework determined in get_neuron_framework_to_use() is
-    NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE, False otherwise. This is used
-    to select the Neuron model framework and framework-specific configuration to
-    apply during model compilation.
-    """
-    nxd_framework = NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
-    return get_neuron_framework_to_use() == nxd_framework
-
-
-@cache
-def use_transformers_neuronx():
-    """
-    Return True if the framework determined in get_neuron_framework_to_use() is
-    NeuronFramework.TRANSFORMERS_NEURONX, False otherwise. This is used to
-    select the Neuron model framework and framework-specific configuration to
-    apply during model compilation.
-    """
-    return get_neuron_framework_to_use(
-    ) == NeuronFramework.TRANSFORMERS_NEURONX
-
-
 class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
     """
+
+    model_runner: NeuronModelRunner
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -144,7 +84,6 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def get_tnx_model_runner(self, vllm_config):
         from vllm.worker.multi_step_neuron_model_runner import (
             MultiStepNeuronModelRunner)
-        from vllm.worker.neuron_model_runner import NeuronModelRunner
         if self.speculative_config is not None:
             return MultiStepNeuronModelRunner(vllm_config=vllm_config)
         else:

@@ -7,7 +7,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import NeuronModelRunner
-from vllm.worker.neuron_worker import NeuronFramework, use_transformers_neuronx
+from vllm.worker.utils import NeuronFramework, use_transformers_neuronx
 
 os.environ[
     'VLLM_NEURON_FRAMEWORK'] = NeuronFramework.TRANSFORMERS_NEURONX.value

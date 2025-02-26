@@ -18,8 +18,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad, is_transformers_neuronx, is_neuronx_distributed_inference
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
-from vllm.worker.neuron_worker import (use_neuronx_distributed,
-                                       use_transformers_neuronx)
+from vllm.worker.utils import use_neuronx_distributed, use_transformers_neuronx
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -35,8 +34,8 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     input_block_ids: Optional[torch.Tensor] = None
-    sampling_metadata: Optional["SamplingMetadata"] = None
-    multi_modal_kwargs: Optional[BatchedTensorInputs] = None
+    sampling_metadata: SamplingMetadata = None
+    multi_modal_kwargs: BatchedTensorInputs = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:

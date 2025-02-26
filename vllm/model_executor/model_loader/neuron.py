@@ -298,10 +298,10 @@ def get_neuron_model(model_config: ModelConfig,
     return model.eval()
 
 
-def get_neuron_speculation_model(
-        model_config: ModelConfig, parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        speculation_config: SpeculativeConfig) -> None:
+def get_neuron_speculation_model(model_config: ModelConfig,
+                                 parallel_config: ParallelConfig,
+                                 scheduler_config: SchedulerConfig,
+                                 speculation_config: SpeculativeConfig):
     """Initializes a neuron-optimized speculation model for inference.
     
     This method is only applicable for speculation with a standalone draft model
