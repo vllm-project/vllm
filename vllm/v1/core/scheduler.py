@@ -603,20 +603,17 @@ class Scheduler:
             if request.use_guided_decoding:
                 grammar = request.grammar
                 assert grammar is not None
+                if len(generated_token_ids) > 1:
+                    logger.error(
+                        "Structured output does not currently support "
+                        "more than one token at a time. Only the first "
+                        "token will be used.")
                 # accept_token advances the FSM
-                has_accept_tokens = [
-                    grammar.accept_token(token_id)
-                    for token_id in generated_token_ids
-                ]
-                accepted = any(has_accept_tokens)
+                accepted = grammar.accept_token(generated_token_ids[0])
                 if not accepted:
                     logger.error(
                         "Failed to advance FSM for request %s "
-                        "for all draft "
-                        "tokens %s", req_id, generated_token_ids)
-                    stopped = True
-                else:
-                    grammar.rollback(len(has_accept_tokens) - 1)
+                        "for tokens %s", req_id, generated_token_ids[0])
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
