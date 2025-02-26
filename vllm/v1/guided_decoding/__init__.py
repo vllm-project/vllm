@@ -77,8 +77,9 @@ class Grammar:
 
     def rollback(self, num_tokens: int):
         with self._matcher_lock:
-            self.num_processed_tokens -= num_tokens
-            self.matcher.rollback(num_tokens)
+            if self.num_processed_tokens > 0:
+                self.num_processed_tokens -= num_tokens
+                self.matcher.rollback(num_tokens)
 
     def reset(self):
         self.num_processed_tokens = 0
