@@ -96,7 +96,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
-
+    VLLM_USE_TRITON_NON_ATTN: bool = False
 
 def get_default_cache_root():
     return os.getenv(
@@ -630,6 +630,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+
+    # Flag to control if vllm should use triton operators except for attention
+    "VLLM_USE_TRITON_NON_ATTN":
+    lambda: (os.environ.get("VLLM_USE_TRITON_NON_ATTN", "False").lower() in
+                ("true", "1")),
 }
 
 # end-env-vars-definition
