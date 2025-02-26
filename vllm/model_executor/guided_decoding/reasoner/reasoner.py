@@ -6,11 +6,11 @@ from dataclasses import dataclass
 class Reasoner(ABC):
 
     @abstractmethod
-    def get_start_token_id(self) -> int:
+    def get_start_token_id(self) -> int | None:
         pass
 
     @abstractmethod
-    def get_end_token_id(self) -> int:
+    def get_end_token_id(self) -> int | None:
         pass
 
 
@@ -21,8 +21,11 @@ class ReasonerConfig:
 
     @classmethod
     def from_reasoner(cls, reasoner: Reasoner) -> 'ReasonerConfig':
-        return cls(start_token_id=reasoner.get_start_token_id(),
-                   end_token_id=reasoner.get_end_token_id())
+        if reasoner is None or reasoner.get_start_token_id() is None or \
+              reasoner.get_end_token_id() is None:
+            raise ValueError("The reasoner must have token IDs.")
+        return cls(start_token_id=int(reasoner.get_start_token_id()),
+                   end_token_id=int(reasoner.get_end_token_id()))
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.end_token_id in input_ids

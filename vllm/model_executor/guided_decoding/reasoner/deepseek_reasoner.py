@@ -35,8 +35,8 @@ class DeepSeekReasoner(Reasoner):
         self.start_token_id = self.__class__._start_token_id
         self.end_token_id = self.__class__._end_token_id
 
-    def get_start_token_id(self) -> int:
+    def get_start_token_id(self) -> int | None:
         return self.start_token_id
 
-    def get_end_token_id(self) -> int:
+    def get_end_token_id(self) -> int | None:
         return self.end_token_id
