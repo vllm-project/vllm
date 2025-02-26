@@ -240,7 +240,8 @@ class Metrics:
             name="vllm:max_token_capacity_per_batch",
             documentation=
             "Maximum tokens processed by the model server at max batch size",
-            labelnames=labelnames)
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent")
         self.gauge_total_tokens_in_queue = self._gauge_cls(
             name="vllm:total_tokens_in_queue",
             documentation="Total number of tokens in queue (prefill + decode).",
@@ -536,6 +537,13 @@ class PrometheusStatLogger(StatLoggerBase):
         self.show_hidden_metrics = \
             vllm_config.observability_config.show_hidden_metrics
 
+        max_token_capacity = min(
+            vllm_config.model_config.max_model_len *
+            vllm_config.scheduler_config.max_num_seqs,
+            vllm_config.scheduler_config.max_num_batched_tokens)
+        self._log_gauge(self.metrics.gauge_max_token_capacity_per_batch,
+                        max_token_capacity)
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
@@ -648,8 +656,6 @@ class PrometheusStatLogger(StatLoggerBase):
             stats.max_num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_max_tokens_request,
                             stats.max_tokens_requests)
-        self._log_gauge(self.metrics.gauge_max_token_capacity_per_batch,
-                        stats.max_token_capacity_per_batch)
 
     def log(self, stats: Stats):
         """Logs to prometheus and tracked stats every iteration."""

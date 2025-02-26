@@ -1638,10 +1638,6 @@ class LLMEngine:
         n_requests: List[int] = []
         max_num_generation_tokens_requests: List[int] = []
         max_tokens_requests: List[int] = []
-        max_token_capacity_per_batch: int = min(
-            self.model_config.max_model_len *
-            self.scheduler_config.max_num_seqs,
-            self.scheduler_config.max_num_batched_tokens)
         total_tokens_in_queue = sum(scheduler.get_num_tokens_in_queue()
                                     for scheduler in self.scheduler)
         total_evicted_tokens_requests: List[int] = []
@@ -1841,7 +1837,6 @@ class LLMEngine:
             max_num_generation_tokens_requests,
             n_requests=n_requests,
             max_tokens_requests=max_tokens_requests,
-            max_token_capacity_per_batch=max_token_capacity_per_batch,
             total_tokens_in_queue=total_tokens_in_queue,
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
