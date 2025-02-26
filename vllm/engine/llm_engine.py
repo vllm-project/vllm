@@ -1629,7 +1629,7 @@ class LLMEngine:
         max_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
-        # Lora requests
+        # LoRA requests
         running_lora_adapters = dict(
             collectionsCounter([
                 running_request.lora_request.lora_name

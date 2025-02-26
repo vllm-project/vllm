@@ -89,7 +89,7 @@ def make_prompt_lora_mapping(num_prompts: int, num_active_loras: int,
                              sort_by_lora_id: bool,
                              device: str) -> torch.Tensor:
     """
-    All prompts are mapped to a Lora ID in range [0, num_active_loras).
+    All prompts are mapped to a LoRA ID in range [0, num_active_loras).
     where 0 refers to first lora, 1 refers to second lora and so on.
     """
     assert num_active_loras > 0

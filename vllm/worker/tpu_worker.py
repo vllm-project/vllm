@@ -17,13 +17,13 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, bind_kv_cache, get_dtype_size
 from vllm.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerBase,
+                                     LoRANotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 logger = init_logger(__name__)
 
 
-class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
+class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
