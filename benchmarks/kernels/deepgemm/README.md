@@ -16,155 +16,100 @@ uv pip install -e DeepGEMM
 ## Usage
 
 ```
-python benchmark_fp8_block_dense_gemm.py
-INFO 02-26 19:45:44 [__init__.py:207] Automatically detected platform cuda.
+python benchmark_fp8_block_dense_gemm_table.py
+INFO 02-26 21:35:35 [__init__.py:207] Automatically detected platform cuda.
 ===== STARTING FP8 GEMM BENCHMARK =====
+PyTorch version: 2.5.1+cu124
+CUDA version: 12.4
+Triton version: 3.1.0
 Using device: NVIDIA H100 80GB HBM3
 
-=== Benchmarking shape: m=8, n=4096, k=7168 ===
-Running correctness check...
-WARNING 02-26 19:45:47 [fp8_utils.py:458] Using default W8A8 Block FP8 kernel config. Performance might be sub-optimal! Config file not found at /home/mgoin/code/vllm/vllm/model_executor/layers/quantization/utils/configs/N=4096,K=7168,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=[128,128].json
-DeepGEMM vs Reference difference: 0.000689
-vLLM Triton vs Reference difference: 0.000691
-vLLM CUTLASS vs Reference difference: 0.000691
-vLLM Triton vs DeepGEMM difference: 0.000011
-vLLM CUTLASS vs DeepGEMM difference: 0.000011
-DeepGEMM: 0.111 ms, 4.25 TFLOPS
-vLLM Triton: 0.074 ms, 6.39 TFLOPS
-vLLM CUTLASS: 0.034 ms, 13.71 TFLOPS
-DeepGEMM is 0.66x slower than vLLM Triton
-DeepGEMM is 0.31x slower than vLLM CUTLASS
-vLLM CUTLASS is 2.15x faster than vLLM Triton
+===== PERFORMANCE COMPARISON =====
 
-=== Benchmarking shape: m=8, n=7168, k=18432 ===
-Running correctness check...
-INFO 02-26 19:45:47 [fp8_utils.py:449] Using configuration from /home/mgoin/code/vllm/vllm/model_executor/layers/quantization/utils/configs/N=7168,K=18432,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=[128,128].json for W8A8 Block FP8 kernel.
-DeepGEMM vs Reference difference: 0.000680
-vLLM Triton vs Reference difference: 0.000680
-vLLM CUTLASS vs Reference difference: 0.000680
-vLLM Triton vs DeepGEMM difference: 0.000010
-vLLM CUTLASS vs DeepGEMM difference: 0.000010
-DeepGEMM: 0.112 ms, 18.83 TFLOPS
-vLLM Triton: 0.092 ms, 22.86 TFLOPS
-vLLM CUTLASS: 0.081 ms, 26.15 TFLOPS
-DeepGEMM is 0.82x slower than vLLM Triton
-DeepGEMM is 0.72x slower than vLLM CUTLASS
-vLLM CUTLASS is 1.14x faster than vLLM Triton
+DeepGEMM Implementation:
++------+-------+-------+-----------+--------+--------+
+| m    | n     | k     | Time (μs) | TFLOPS | GB/s   |
++------+-------+-------+-----------+--------+--------+
+|    8 |  4096 |  7168 | 85.1      | 5.5    | 346.3  |
+|    8 |  7168 | 18432 | 83.9      | 25.2   | 1577.3 |
+|    8 | 18432 |  7168 | 84.1      | 25.1   | 1576.0 |
+|   64 | 24576 |  1536 | 86.1      | 56.1   | 476.0  |
+|   64 | 32768 |   512 | 84.0      | 25.6   | 250.1  |
+|   64 |  7168 | 16384 | 120.3     | 124.9  | 992.5  |
+|   64 |  4096 |  7168 | 84.5      | 44.5   | 359.3  |
+|  128 |  4096 |  7168 | 85.0      | 88.4   | 368.5  |
+|  128 |  7168 | 18432 | 88.3      | 383.0  | 1543.5 |
+|  128 | 18432 |  7168 | 86.4      | 391.4  | 1594.3 |
+| 1024 |  4096 |  7168 | 91.7      | 655.5  | 491.5  |
+| 1024 | 18432 |  7168 | 283.3     | 955.0  | 625.4  |
+| 2048 |  4096 |  7168 | 177.6     | 677.1  | 342.4  |
+| 4096 |  4096 |  7168 | 338.9     | 709.6  | 272.2  |
++------+-------+-------+-----------+--------+--------+
 
-=== Benchmarking shape: m=8, n=18432, k=7168 ===
-Running correctness check...
-WARNING 02-26 19:45:47 [fp8_utils.py:458] Using default W8A8 Block FP8 kernel config. Performance might be sub-optimal! Config file not found at /home/mgoin/code/vllm/vllm/model_executor/layers/quantization/utils/configs/N=18432,K=7168,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=[128,128].json
-DeepGEMM vs Reference difference: 0.000682
-vLLM Triton vs Reference difference: 0.000682
-vLLM CUTLASS vs Reference difference: 0.000682
-vLLM Triton vs DeepGEMM difference: 0.000005
-vLLM CUTLASS vs DeepGEMM difference: 0.000005
-DeepGEMM: 0.109 ms, 19.35 TFLOPS
-vLLM Triton: 0.117 ms, 18.06 TFLOPS
-vLLM CUTLASS: 0.081 ms, 26.21 TFLOPS
-DeepGEMM is 1.07x faster than vLLM Triton
-DeepGEMM is 0.74x slower than vLLM CUTLASS
-vLLM CUTLASS is 1.45x faster than vLLM Triton
+vLLM Triton Implementation:
++------+-------+-------+-----------+--------+--------+--------------+
+| m    | n     | k     | Time (μs) | TFLOPS | GB/s   | vs DeepGEMM  |
++------+-------+-------+-----------+--------+--------+--------------+
+|    8 |  4096 |  7168 | 74.4      | 6.3    | 396.4  | 1.14x faster |
+|    8 |  7168 | 18432 | 89.6      | 23.6   | 1476.7 | 0.94x slower |
+|    8 | 18432 |  7168 | 116.5     | 18.1   | 1137.3 | 0.72x slower |
+|   64 | 24576 |  1536 | 37.2      | 129.9  | 1101.8 | 2.31x faster |
+|   64 | 32768 |   512 | 38.7      | 55.5   | 542.4  | 2.17x faster |
+|   64 |  7168 | 16384 | 86.7      | 173.3  | 1376.5 | 1.39x faster |
+|   64 |  4096 |  7168 | 76.9      | 48.8   | 394.4  | 1.10x faster |
+|  128 |  4096 |  7168 | 89.2      | 84.2   | 351.0  | 0.95x slower |
+|  128 |  7168 | 18432 | 142.9     | 236.8  | 954.2  | 0.62x slower |
+|  128 | 18432 |  7168 | 227.5     | 148.7  | 605.5  | 0.38x slower |
+| 1024 |  4096 |  7168 | 240.7     | 249.8  | 187.3  | 0.38x slower |
+| 1024 | 18432 |  7168 | 901.9     | 300.0  | 196.5  | 0.31x slower |
+| 2048 |  4096 |  7168 | 462.6     | 260.0  | 131.5  | 0.38x slower |
+| 4096 |  4096 |  7168 | 901.6     | 266.8  | 102.3  | 0.38x slower |
++------+-------+-------+-----------+--------+--------+--------------+
 
-=== Benchmarking shape: m=128, n=4096, k=7168 ===
-Running correctness check...
-DeepGEMM vs Reference difference: 0.000682
-vLLM Triton vs Reference difference: 0.000682
-vLLM CUTLASS vs Reference difference: 0.000682
-vLLM Triton vs DeepGEMM difference: 0.000007
-vLLM CUTLASS vs DeepGEMM difference: 0.000007
-DeepGEMM: 0.109 ms, 68.76 TFLOPS
-vLLM Triton: 0.091 ms, 82.65 TFLOPS
-vLLM CUTLASS: 0.039 ms, 190.49 TFLOPS
-DeepGEMM is 0.83x slower than vLLM Triton
-DeepGEMM is 0.36x slower than vLLM CUTLASS
-vLLM CUTLASS is 2.30x faster than vLLM Triton
+vLLM CUTLASS Implementation:
++------+-------+-------+-----------+--------+--------+--------------+--------------+
+| m    | n     | k     | Time (μs) | TFLOPS | GB/s   | vs DeepGEMM  | vs Triton    |
++------+-------+-------+-----------+--------+--------+--------------+--------------+
+|    8 |  4096 |  7168 | 33.9      | 13.9   | 869.7  | 2.51x faster | 2.19x faster |
+|    8 |  7168 | 18432 | 78.9      | 26.8   | 1677.7 | 1.06x faster | 1.14x faster |
+|    8 | 18432 |  7168 | 80.3      | 26.3   | 1649.8 | 1.05x faster | 1.45x faster |
+|   64 | 24576 |  1536 | 28.3      | 170.9  | 1449.8 | 3.05x faster | 1.32x faster |
+|   64 | 32768 |   512 | 27.8      | 77.2   | 754.8  | 3.02x faster | 1.39x faster |
+|   64 |  7168 | 16384 | 78.5      | 191.6  | 1522.1 | 1.53x faster | 1.11x faster |
+|   64 |  4096 |  7168 | 36.4      | 103.2  | 833.4  | 2.32x faster | 2.11x faster |
+|  128 |  4096 |  7168 | 39.1      | 192.3  | 801.4  | 2.17x faster | 2.28x faster |
+|  128 |  7168 | 18432 | 92.9      | 364.0  | 1467.1 | 0.95x slower | 1.54x faster |
+|  128 | 18432 |  7168 | 85.6      | 395.1  | 1609.2 | 1.01x faster | 2.66x faster |
+| 1024 |  4096 |  7168 | 100.6     | 597.7  | 448.2  | 0.91x slower | 2.39x faster |
+| 1024 | 18432 |  7168 | 329.8     | 820.5  | 537.4  | 0.86x slower | 2.73x faster |
+| 2048 |  4096 |  7168 | 198.7     | 605.1  | 306.0  | 0.89x slower | 2.33x faster |
+| 4096 |  4096 |  7168 | 393.0     | 612.0  | 234.8  | 0.86x slower | 2.29x faster |
++------+-------+-------+-----------+--------+--------+--------------+--------------+
 
-=== Benchmarking shape: m=128, n=7168, k=18432 ===
-Running correctness check...
-DeepGEMM vs Reference difference: 0.000683
-vLLM Triton vs Reference difference: 0.000683
-vLLM CUTLASS vs Reference difference: 0.000683
-vLLM Triton vs DeepGEMM difference: 0.000008
-vLLM CUTLASS vs DeepGEMM difference: 0.000008
-DeepGEMM: 0.115 ms, 294.42 TFLOPS
-vLLM Triton: 0.142 ms, 237.38 TFLOPS
-vLLM CUTLASS: 0.093 ms, 361.90 TFLOPS
-DeepGEMM is 1.24x faster than vLLM Triton
-DeepGEMM is 0.81x slower than vLLM CUTLASS
-vLLM CUTLASS is 1.52x faster than vLLM Triton
+===== AVERAGE PERFORMANCE =====
++----------------+------------+----------+---------------+
+| Implementation | Avg TFLOPS | Avg GB/s | Avg Time (ms) |
++----------------+------------+----------+---------------+
+| DeepGEMM       | 297.65     | 772.53   | 0.13          |
+| vLLM Triton    | 142.98     | 639.56   | 0.25          |
+| vLLM CUTLASS   | 299.75     | 1011.51  | 0.11          |
++----------------+------------+----------+---------------+
 
-=== Benchmarking shape: m=128, n=18432, k=7168 ===
-Running correctness check...
-DeepGEMM vs Reference difference: 0.000684
-vLLM Triton vs Reference difference: 0.000684
-vLLM CUTLASS vs Reference difference: 0.000684
-vLLM Triton vs DeepGEMM difference: 0.000007
-vLLM CUTLASS vs DeepGEMM difference: 0.000007
-DeepGEMM: 0.110 ms, 308.47 TFLOPS
-vLLM Triton: 0.228 ms, 148.56 TFLOPS
-vLLM CUTLASS: 0.086 ms, 394.22 TFLOPS
-DeepGEMM is 2.08x faster than vLLM Triton
-DeepGEMM is 0.78x slower than vLLM CUTLASS
-vLLM CUTLASS is 2.65x faster than vLLM Triton
+===== AVERAGE SPEEDUPS =====
++-----------------------------+--------------+
+| Comparison                  | Speedup      |
++-----------------------------+--------------+
+| DeepGEMM vs vLLM Triton     | 1.59x faster |
+| DeepGEMM vs vLLM CUTLASS    | 0.79x slower |
+| vLLM CUTLASS vs vLLM Triton | 1.92x faster |
++-----------------------------+--------------+
 
-=== Benchmarking shape: m=1024, n=4096, k=7168 ===
-Running correctness check...
-DeepGEMM vs Reference difference: 0.000683
-vLLM Triton vs Reference difference: 0.000683
-vLLM CUTLASS vs Reference difference: 0.000683
-vLLM Triton vs DeepGEMM difference: 0.000007
-vLLM CUTLASS vs DeepGEMM difference: 0.000007
-DeepGEMM: 0.169 ms, 356.31 TFLOPS
-vLLM Triton: 0.241 ms, 249.85 TFLOPS
-vLLM CUTLASS: 0.101 ms, 592.45 TFLOPS
-DeepGEMM is 1.43x faster than vLLM Triton
-DeepGEMM is 0.60x slower than vLLM CUTLASS
-vLLM CUTLASS is 2.37x faster than vLLM Triton
-
-=== Benchmarking shape: m=1024, n=18432, k=7168 ===
-Running correctness check...
-DeepGEMM vs Reference difference: 0.000684
-vLLM Triton vs Reference difference: 0.000684
-vLLM CUTLASS vs Reference difference: 0.000684
-vLLM Triton vs DeepGEMM difference: 0.000007
-vLLM CUTLASS vs DeepGEMM difference: 0.000007
-DeepGEMM: 0.347 ms, 779.63 TFLOPS
-vLLM Triton: 0.898 ms, 301.41 TFLOPS
-vLLM CUTLASS: 0.331 ms, 818.21 TFLOPS
-DeepGEMM is 2.59x faster than vLLM Triton
-DeepGEMM is 0.95x slower than vLLM CUTLASS
-vLLM CUTLASS is 2.71x faster than vLLM Triton
-
-=== Benchmarking shape: m=2048, n=4096, k=7168 ===
-Running correctness check...
-DeepGEMM vs Reference difference: 0.000683
-vLLM Triton vs Reference difference: 0.000683
-vLLM CUTLASS vs Reference difference: 0.000683
-vLLM Triton vs DeepGEMM difference: 0.000007
-vLLM CUTLASS vs DeepGEMM difference: 0.000007
-DeepGEMM: 0.320 ms, 376.32 TFLOPS
-vLLM Triton: 0.460 ms, 261.25 TFLOPS
-vLLM CUTLASS: 0.200 ms, 602.18 TFLOPS
-DeepGEMM is 1.44x faster than vLLM Triton
-DeepGEMM is 0.62x slower than vLLM CUTLASS
-vLLM CUTLASS is 2.30x faster than vLLM Triton
-
-===== BENCHMARK SUMMARY =====
-Matrix multiplication: C[m,n] = A[m,k] @ B[n,k].T
-
-Average speedups:
-DeepGEMM vs vLLM Triton: 1.35x faster
-DeepGEMM vs vLLM CUTLASS: 0.66x slower
-vLLM CUTLASS vs vLLM Triton: 2.07x faster
-
-Average TFLOPS:
-DeepGEMM: 247.37 TFLOPS
-vLLM Triton: 147.60 TFLOPS
-vLLM CUTLASS: 336.17 TFLOPS
-
-Average accuracy difference vs reference:
-DeepGEMM: 0.000683
-vLLM Triton: 0.000684
-vLLM CUTLASS: 0.000684
+===== ACCURACY COMPARISON =====
++----------------+-----------------------+
+| Implementation | Avg Diff vs Reference |
++----------------+-----------------------+
+| DeepGEMM       | 0.000685              |
+| vLLM Triton    | 0.000685              |
+| vLLM CUTLASS   | 0.000685              |
++----------------+-----------------------+
 ```

@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# fmt: off
+# ruff: noqa: E501
 import time
 from typing import Dict, Tuple
 
@@ -144,12 +146,13 @@ def benchmark_shape(m: int,
 
         # Calculate timing and TFLOPS
         avg_time_ms = (end - start) / repeat * 1000
-        flops = 2 * m * n * k  # multiply-adds
-        tflops = flops / (avg_time_ms * 1e-3) / 1e12
+        tflops = 2 * m * n * k / (avg_time_ms * 1e-3) / 1e12
+        mem_bw = (m * k + k * n + m * n * 2) / 1e9 / (avg_time_ms * 1e-3)
 
         results[name] = {
             "time_ms": avg_time_ms,
             "tflops": tflops,
+            "mem_bw": mem_bw,
             "diff": {
                 "DeepGEMM":
                 deepgemm_diff if name == "DeepGEMM" else calc_diff(
@@ -161,7 +164,9 @@ def benchmark_shape(m: int,
             }
         }
 
-        print(f"{name}: {avg_time_ms:.3f} ms, {tflops:.2f} TFLOPS")
+        print(
+            f"{name}: {avg_time_ms:.3f} ms, {tflops:.2f} TFLOPS, {mem_bw:.2f} GB/s"
+        )
 
     # Calculate speedups
     baseline = results["DeepGEMM"]["time_ms"]
@@ -202,16 +207,45 @@ def run_benchmarks():
 
     # Define benchmark shapes (m, n, k)
     shapes = [
-        (8, 4096, 7168),  # Small batch
-        (8, 7168, 18432),  # Small batch MLP up-proj
-        (8, 18432, 7168),  # Small batch MLP down-proj
-        (128, 4096, 7168),  # Typical batch
-        (128, 7168, 18432),  # MLP up-projection
-        (128, 18432, 7168),  # MLP down-projection
-        (1024, 4096, 7168),  # Larger batch
-        (1024, 18432, 7168),  # Larger batch with MLP down-proj
-        (2048, 4096, 7168),  # Very large batch 
+        (8, 4096, 7168),
+        (8, 7168, 18432),
+        (8, 18432, 7168),
+        (64, 24576, 1536),
+        (64, 32768, 512),
+        (64, 7168, 16384),
+        (64, 4096, 7168),
+        (128, 4096, 7168),
+        (128, 7168, 18432),
+        (128, 18432, 7168),
+        (1024, 4096, 7168),
+        (1024, 18432, 7168),
+        (2048, 4096, 7168),
     ]
+
+    # # Taken from
+    # # https://github.com/deepseek-ai/DeepGEMM?tab=readme-ov-file#normal-gemms-for-dense-models
+    # shapes = [
+    #     # (64, 2112, 7168), # Unsupported by CUTLASS
+    #     (64, 24576, 1536),
+    #     (64, 32768, 512),
+    #     (64, 7168, 16384),
+    #     (64, 4096, 7168),
+    #     # (64, 7168, 2048), # Unsupported by DeepGEMM
+
+    #     # (128, 2112, 7168), # Unsupported by CUTLASS
+    #     # (128, 24576, 1536), # Unsupported by DeepGEMM
+    #     (128, 32768, 512),
+    #     (128, 7168, 16384),
+    #     (128, 4096, 7168),
+    #     # (128, 7168, 2048), # Unsupported by DeepGEMM
+
+    #     # (4096, 2112, 7168), # Unsupported by CUTLASS
+    #     (4096, 24576, 1536),
+    #     (4096, 32768, 512),
+    #     (4096, 7168, 16384),
+    #     (4096, 4096, 7168),
+    #     # (4096, 7168, 2048), # Unsupported by DeepGEMM
+    # ]
 
     all_results = {}
     for m, n, k in shapes:
@@ -253,6 +287,14 @@ def run_benchmarks():
             results[impl]["tflops"]
             for results in all_results.values()) / len(all_results)
         print(f"{impl}: {avg_tflops:.2f} TFLOPS")
+
+    print("\nAverage GB/s:")
+    implementations = ["DeepGEMM", "vLLM Triton", "vLLM CUTLASS"]
+    for impl in implementations:
+        avg_mem_bw = sum(
+            results[impl]["mem_bw"]
+            for results in all_results.values()) / len(all_results)
+        print(f"{impl}: {avg_mem_bw:.2f} GB/s")
 
     print("\nAverage accuracy difference vs reference:")
     for impl in implementations:
