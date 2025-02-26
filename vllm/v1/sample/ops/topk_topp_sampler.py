@@ -48,6 +48,8 @@ class TopKTopPSampler(nn.Module):
                     "native implementation of top-p & top-k sampling. For the "
                     "best performance, please install FlashInfer.")
                 self.forward = self.forward_native
+        elif current_platform.is_tpu():
+            self.forward = self.forward_tpu
         else:
             self.forward = self.forward_native
 
@@ -78,6 +80,16 @@ class TopKTopPSampler(nn.Module):
             # CPU-GPU synchronization while `flashinfer_sample` does.
             return random_sample(probs, generators)
         return flashinfer_sample(probs, k, p, generators)
+
+    def forward_tpu(
+        self,
+        logits: torch.Tensor,
+        generators: Dict[int, torch.Generator],
+        k: Optional[torch.Tensor],
+        p: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        # TODO Placeholder for TPU optimized topk/p kernel
+        return self.forward_cuda(logits, generators, k, p)
 
 
 def apply_top_k_top_p(
