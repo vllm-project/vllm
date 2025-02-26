@@ -286,6 +286,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `parasail-ai/GritLM-7B-vllm`.
   * ✅︎
   * ✅︎
+- * `Grok1ModelForCausalLM`
+  * Grok1
+  * `hpcai-tech/grok-1`.
+  * ✅︎
+  * ✅︎
 - * `InternLMForCausalLM`
   * InternLM
   * `internlm/internlm-7b`, `internlm/internlm-chat-7b`, etc.

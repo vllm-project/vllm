@@ -590,7 +590,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
+        assert activation == "silu", "Only SiLU activation is supported."
+
         # The input must currently be float16
         orig_dtype = x.dtype
         x = x.half()
