@@ -166,10 +166,9 @@ class NeuronCausalLM(nn.Module):
             self.model.load(compiled_model_path)
             return
         except (FileNotFoundError, ValueError) as e:
-            logger.warning("Exception: ", e)
-            logger.warning(
-                "Failed to load the model from path, Recompiling...",
-                extra={"compiled_model_path": compiled_model_path})
+            logger.warning("Exception: %s", e)
+            logger.warning("Failed to load the model from %s, Recompiling...",
+                           compiled_model_path)
         if not os.path.exists(model_name_or_path):
             hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
             saved_path = os.path.join("local-models", model_name_or_path)
@@ -259,8 +258,8 @@ class NeuronMllamaForCausalLM(nn.Module):
         neuron_config = neuronx_model_cls.get_neuron_config_cls()(
             **kwargs['neuron_config'])
         self.config.neuron_config = neuron_config
-        logger.info("neuron_config buckets: ",
-                    extra={"buckets": self.config.neuron_config.buckets})
+        logger.info("neuron_config buckets: %s",
+                    self.config.neuron_config.buckets)
         config = neuronx_model_cls.get_config_cls()(
             neuron_config,
             load_config=load_pretrained_config(model_name_or_path))
@@ -285,9 +284,8 @@ class NeuronMllamaForCausalLM(nn.Module):
             self.model.load(compiled_model_path)
             return
         except (FileNotFoundError, ValueError):
-            logger.warning(
-                "Failed to load the model from path, Recompiling...",
-                extra={"compiled_model_path": compiled_model_path})
+            logger.warning("Failed to load the model from %s, Recompiling...",
+                           compiled_model_path)
         if not os.path.exists(model_name_or_path):
             hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
             saved_path = os.path.join("local-models", model_name_or_path)
@@ -295,8 +293,7 @@ class NeuronMllamaForCausalLM(nn.Module):
             model_name_or_path = saved_path
         self.model = neuronx_model_cls(model_name_or_path, config)
 
-        logger.info("\nCompiling and saving model to path",
-                    extra={"model_name_or_path": model_name_or_path})
+        logger.info("\nCompiling and saving model to %s", model_name_or_path)
 
         p = multiprocessing.Process(target=compile_model,
                                     args=(self, compiled_model_path))
@@ -305,8 +302,8 @@ class NeuronMllamaForCausalLM(nn.Module):
 
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
         tokenizer.save_pretrained(compiled_model_path)
-        logger.info("Successfully compiled and saved the model",
-                    extra={"compiled_model_path": compiled_model_path})
+        logger.info("Successfully compiled and saved the model in %s",
+                    compiled_model_path)
 
         # Read "<|image|>" token_id from the tokenizer
         self.vision_token_id = tokenizer("<|image|>",
@@ -452,9 +449,9 @@ class NeuronSpeculationCausalLM(nn.Module):
             self.model.load(compiled_model_path)
             return
         except (FileNotFoundError, ValueError) as e:
-            logger.warning("Exception: ", extra={"exception": e})
-            logger.warning("Failed to load the model Recompiling...",
-                           extra={"compiled_model_path": compiled_model_path})
+            logger.warning("Exception: %s", e)
+            logger.warning("Failed to load the model from %s Recompiling...",
+                           compiled_model_path)
         if not os.path.exists(model_name_or_path):
             hf_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
             saved_path = os.path.join("local-models", model_name_or_path)

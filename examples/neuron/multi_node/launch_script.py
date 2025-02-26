@@ -122,13 +122,13 @@ def main() -> None:
             f"--max-model-len={args.max_model_len}",
             f"--override-neuron-config={json.dumps(override_config)}"
         ]
-        logger.debug("Command ran", extra={"command": cmd})
+        logger.debug("Command ran: %s", cmd)
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError:
             error_exit(f"Failed to start vLLM API server on rank {rank}")
     else:
-        logger.info("Starting worker on rank", extra={"rank": rank})
+        logger.info("Starting worker on rank: %s", rank)
         current_script_dir = os.path.dirname(os.path.abspath(__file__))
         worker_file_path = os.path.join(current_script_dir, "worker.py")
         cmd = [
@@ -137,7 +137,7 @@ def main() -> None:
             f"--max-model-len={args.max_model_len}",
             f"--override-neuron-config={json.dumps(override_config)}"
         ]
-        logger.debug("Command ran", extra={"command": cmd})
+        logger.debug("Command ran: %s", cmd)
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError:
