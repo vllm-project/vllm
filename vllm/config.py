@@ -35,7 +35,7 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
     try_get_generation_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
-from vllm.transformers_utils.utils import check_gguf_file, is_s3
+from vllm.transformers_utils.utils import is_s3
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, random_uuid, resolve_obj_by_qualname)
 
@@ -326,13 +326,6 @@ class ModelConfig:
         hf_config = get_config(self.hf_config_path or self.model,
                                trust_remote_code, revision, code_revision,
                                config_format)
-        if check_gguf_file(model) and hf_config.torch_dtype != torch.float16:
-            logger.warning(
-                "GGUF requires model dtype to be float16,"
-                " you are trying to run with %s"
-                " the dtype will be automatically changed to float16",
-                hf_config.torch_dtype)
-            hf_config.torch_dtype = torch.float16
 
         if hf_overrides_kw:
             logger.info("Overriding HF config with %s", hf_overrides_kw)

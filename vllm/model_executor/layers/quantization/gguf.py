@@ -32,7 +32,7 @@ class GGUFConfig(QuantizationConfig):
         return "gguf"
 
     def get_supported_act_dtypes(self) -> List[torch.dtype]:
-        return [torch.half, torch.bfloat16]
+        return [torch.half]
 
     @classmethod
     def get_min_capability(cls) -> int:
