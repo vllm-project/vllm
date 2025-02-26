@@ -205,7 +205,10 @@ class CustomizeLogger:
                 while tb:
                     lines.extend(traceback.format_tb(tb))
                     tb = tb.tb_next
-                ex = ex.__cause__ or ex.__context__
+                next_ex = ex.__cause__ or ex.__context__
+                if next_ex is None:
+                    break
+                ex = cast(Exception, next_ex)
 
             return "".join(lines)
 
