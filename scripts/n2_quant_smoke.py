@@ -221,7 +221,7 @@ if __name__ == "__main__":
     )
     model = args.model
     if args.fp8_inc:
-        print(f"Using FP8 KV cache.")
+        print(f">>>>>>>>>>>>>> Using FP8 KV cache.")
         llm = LLM(
             model=model, 
             tokenizer=args.tokenizer,
@@ -243,7 +243,6 @@ if __name__ == "__main__":
             trust_remote_code=True,
             quantization='inc_q',
             weights_load_device="cpu",
-            kv_cache_dtype="fp8_inc",
             max_model_len=16384,
             dtype="bfloat16",
         )

@@ -27,6 +27,7 @@ parser.add_argument("--isl", type=int, default=1024, help="input sequence length
 parser.add_argument("--osl", type=int, default=128, help="output sequence length.")
 parser.add_argument("--nprompts", type=int, default=4, help="The number of prompts.")
 parser.add_argument("--random", action="store_true", help="Randomly sample prompts.")
+parser.add_argument("--fp8_inc", action="store_true", help="Using FP8 KV cache.")
 args = parser.parse_args()
 
 # os.environ["VLLM_SKIP_WARMUP"] = "true"
@@ -208,19 +209,32 @@ if __name__ == "__main__":
         truncate_prompt_tokens=least_tokens,
     )
     model = args.model
-
-    llm = LLM(
-        model=model, 
-        tokenizer=args.tokenizer,
-        tensor_parallel_size=args.tp_size,
-        distributed_executor_backend='ray',
-        trust_remote_code=True,
-        quantization='inc_q',
-        weights_load_device="cpu",
-        max_model_len=16384,
-        max_num_seqs=1,
-        dtype="bfloat16",
-    )
+    if args.fp8_inc:
+        print(f">>>>>>>>>>>>>> Using FP8 KV cache.")
+        llm = LLM(
+            model=model, 
+            tokenizer=args.tokenizer,
+            tensor_parallel_size=args.tp_size,
+            distributed_executor_backend='ray',
+            trust_remote_code=True,
+            quantization='inc_q',
+            weights_load_device="cpu",
+            kv_cache_dtype="fp8_inc",
+            max_model_len=16384,
+            dtype="bfloat16",
+        )
+    else:
+        llm = LLM(
+            model=model, 
+            tokenizer=args.tokenizer,
+            tensor_parallel_size=args.tp_size,
+            distributed_executor_backend='ray',
+            trust_remote_code=True,
+            quantization='inc_q',
+            weights_load_device="cpu",
+            max_model_len=16384,
+            dtype="bfloat16",
+        )
 
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
