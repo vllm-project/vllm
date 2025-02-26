@@ -12,10 +12,7 @@ import pytest
 from tests.quantization.utils import is_quant_method_supported
 from tests.utils import fork_new_process_for_each_test
 
-
-MODELS = [
-    "facebook/opt-125m"
-]
+MODELS = ["facebook/opt-125m"]
 DTYPE = ["bfloat16"]
 
 

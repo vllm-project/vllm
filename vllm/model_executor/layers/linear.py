@@ -1022,6 +1022,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
 

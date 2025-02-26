@@ -103,8 +103,8 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
-    from .tpu_int8 import Int8TpuConfig
     from .torchao import TorchAOConfig
+    from .tpu_int8 import Int8TpuConfig
 
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,

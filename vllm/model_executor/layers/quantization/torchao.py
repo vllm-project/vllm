@@ -1,32 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+from typing import Any, Dict, List, Optional
+
 import torch
+import torch.nn.functional as F
+from torch.nn import Module
+from torch.nn.parameter import Parameter
+
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from torch.nn.parameter import Parameter
-from torchao.quantization import (
-    int4_weight_only,
-    int8_dynamic_activation_int4_weight,
-    int8_dynamic_activation_int8_semi_sparse_weight,
-    int8_dynamic_activation_int8_weight,
-    int8_weight_only,
-    quantize_,
-)
+from vllm.model_executor.layers.quantization.torchao_utils import (
+    torchao_quantize_param_data)
 from vllm.model_executor.utils import set_weight_attrs
-from typing import List, Dict, Any, Optional
-import torch.nn.functional as F
-from torch.nn import Module
-from vllm.model_executor.layers.quantization.torchao_utils import torchao_quantize_param_data
 
 
 class TorchAOConfig(QuantizationConfig):
     """Config class for torchao.
+
     """
 
     def __init__(self, quant_type: str = "int4wo-128") -> None:
         self.quant_type = quant_type
 
     def __repr__(self) -> str:
-        return f"TorchAOConfig({quant_type})"
+        return f"TorchAOConfig({self.quant_type})"
 
     def get_name(self) -> str:
         return "torchao"
@@ -58,6 +55,7 @@ class TorchAOConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+
 class TorchAOLinearMethod(LinearMethodBase):
     """Linear method for torchao.
 
@@ -84,7 +82,8 @@ class TorchAOLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: Module) -> None:
         torchao_config = self.quant_config.quant_type
-        layer.weight = torchao_quantize_param_data(layer.weight, torchao_config)
+        layer.weight = torchao_quantize_param_data(layer.weight,
+                                                   torchao_config)
 
     def apply(self,
               layer: torch.nn.Module,

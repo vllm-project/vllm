@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Common utilities for torchao.
 """
@@ -17,13 +18,10 @@ def torchao_quantize_param_data(param: torch.Tensor, torchao_config: str):
         128
     """
     # Lazy import to suppress some warnings
-    from torchao.quantization import (
-        float8_dynamic_activation_float8_weight,
-        int4_weight_only,
-        int8_dynamic_activation_int8_weight,
-        int8_weight_only,
-        quantize_,
-    )
+    from torchao.quantization import (float8_dynamic_activation_float8_weight,
+                                      int4_weight_only,
+                                      int8_dynamic_activation_int8_weight,
+                                      int8_weight_only, quantize_)
     from torchao.quantization.observer import PerRow, PerTensor
 
     dummy_linear = torch.nn.Linear(param.shape[1], param.shape[0], bias=False)
@@ -59,8 +57,7 @@ def torchao_quantize_param_data(param: torch.Tensor, torchao_config: str):
         quantize_(
             dummy_linear,
             float8_dynamic_activation_float8_weight(
-                granularity=GRANULARITY_MAP[granularity]
-            ),
+                granularity=GRANULARITY_MAP[granularity]),
         )
 
     return dummy_linear.weight
@@ -88,6 +85,5 @@ def apply_torchao_config_(
                 param = params_dict[name]
                 if param_suffix in name and param.ndim == 2:
                     params_dict[name] = torchao_quantize_param_data(
-                        param, self.torchao_config
-                    )
+                        param, self.torchao_config)
         self.load_state_dict(params_dict, assign=True)
