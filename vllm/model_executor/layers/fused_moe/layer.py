@@ -729,7 +729,7 @@ class FusedMoE(torch.nn.Module):
         )
 
         if self.dp_size > 1:
-            if False:
+            if True:
                 all_hidden_states = get_dp_group().all_reduce(
                     final_hidden_states)
                 all_hidden_states = all_hidden_states.view(
