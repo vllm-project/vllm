@@ -206,6 +206,7 @@ class BackgroundResources:
     output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
     input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
     proc_handle: Optional[BackgroundProcHandle] = None
+    output_queue_thread: Optional[Thread] = None
 
     def __call__(self):
         """Clean up background resources."""
@@ -218,6 +219,8 @@ class BackgroundResources:
             self.output_socket.close(linger=0)
         if self.input_socket is not None:
             self.input_socket.close(linger=0)
+        if self.output_queue_thread is not None:
+            self.output_queue_thread.join()
         if self.ctx is not None:
             self.ctx.destroy(linger=0)
 
@@ -268,19 +271,19 @@ class MPClient(EngineCoreClient):
         # This will ensure resources created so far are closed
         # when the client is garbage collected,  even if an
         # exception is raised mid-construction.
-        resources = BackgroundResources(ctx=self.ctx)
-        self._finalizer = weakref.finalize(self, resources)
+        self.resources = BackgroundResources(ctx=self.ctx)
+        self._finalizer = weakref.finalize(self, self.resources)
 
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
-        resources.output_socket = make_zmq_socket(self.ctx, output_path,
-                                                  zmq.constants.PULL)
-        resources.input_socket = make_zmq_socket(self.ctx, input_path,
-                                                 zmq.constants.PUSH)
+        self.resources.output_socket = make_zmq_socket(self.ctx, output_path,
+                                                       zmq.constants.PULL)
+        self.resources.input_socket = make_zmq_socket(self.ctx, input_path,
+                                                      zmq.constants.PUSH)
 
         # Start EngineCore in background process.
-        resources.proc_handle = BackgroundProcHandle(
+        self.resources.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
             process_name="EngineCore",
@@ -291,8 +294,7 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
-        self.output_socket = resources.output_socket
-        self.input_socket = resources.input_socket
+        self.input_socket = self.resources.input_socket
         self.utility_results: Dict[int, AnyFuture] = {}
 
     def shutdown(self):
@@ -325,7 +327,7 @@ class SyncMPClient(MPClient):
 
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
-        output_socket = self.output_socket
+        output_socket = self.resources.output_socket
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
@@ -333,6 +335,7 @@ class SyncMPClient(MPClient):
         def process_outputs_socket():
             try:
                 while True:
+                    output_socket.poll()
                     (frame, ) = output_socket.recv_multipart(copy=False)
                     outputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
@@ -340,12 +343,14 @@ class SyncMPClient(MPClient):
                                                 utility_results)
                     else:
                         outputs_queue.put_nowait(outputs)
-            except zmq.error.ContextTerminated:
+            except zmq.error.ZMQError:
                 # Expected when the class is GC'd / during process termination.
                 pass
 
         # Process outputs from engine in separate thread.
-        Thread(target=process_outputs_socket, daemon=True).start()
+        self.resources.output_queue_thread = Thread(
+            target=process_outputs_socket, name="EngineCoreOutputQueueThread")
+        self.resources.output_queue_thread.start()
 
     def get_output(self) -> EngineCoreOutputs:
         return self.outputs_queue.get()
@@ -424,7 +429,7 @@ class AsyncMPClient(MPClient):
         # Perform IO in separate task to parallelize as much as possible.
         # Avoid task having direct reference back to the client.
         self.outputs_queue = asyncio.Queue()
-        output_socket = self.output_socket
+        output_socket = self.resources.output_socket
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
@@ -439,7 +444,8 @@ class AsyncMPClient(MPClient):
                 else:
                     outputs_queue.put_nowait(outputs)
 
-        self.queue_task = asyncio.create_task(process_outputs_socket())
+        self.queue_task = asyncio.create_task(process_outputs_socket(),
+                                              name="EngineCoreOutputQueueTask")
 
     async def get_output_async(self) -> EngineCoreOutputs:
         if self.outputs_queue is None:
