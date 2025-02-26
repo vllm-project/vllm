@@ -75,7 +75,9 @@ def benchmark_shape(m: int,
     # === DeepGEMM Implementation ===
     def deepgemm_gemm():
         # A quantization is inside the loop as it depends on activations
-        A_deepgemm, A_scale_deepgemm = per_token_cast_to_fp8(A)
+        # A_deepgemm, A_scale_deepgemm = per_token_cast_to_fp8(A)
+        A_deepgemm, A_scale_deepgemm = per_token_group_quant_fp8(
+            A, block_size[1])
         A_scale_aligned = get_col_major_tma_aligned_tensor(A_scale_deepgemm)
         C_deepgemm = torch.empty((m, n), device='cuda', dtype=torch.bfloat16)
         deep_gemm.gemm_fp8_fp8_bf16_nt((A_deepgemm, A_scale_aligned),
