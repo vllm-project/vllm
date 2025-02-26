@@ -479,8 +479,8 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
 
         # Regression tests for https://github.com/vllm-project/vllm/issues/10648
 
-        # Number of image tags is greater than the number of images provided
-        prompt = "<|begin_of_text|><|image|><|image|> Compare the two images"  # noqa: E501
+        # Number of image groups is greater than the number of images provided
+        prompt = "<|begin_of_text|><|image|> <|image|> Compare the two images"  # noqa: E501
         image = stop_sign
         with pytest.raises(ValueError):
             vllm_model.generate_greedy_logprobs([prompt],
