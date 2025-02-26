@@ -13,8 +13,7 @@ if current_platform.is_cuda():
     try:
         import vllm._flashmla_C  # noqa: F401
         _flashmla_C_AVAILABLE = True
-    except ImportError as e:
-        logger.warning("Failed to import from vllm._flashmla_C with %r", e)
+    except ImportError:
         _flashmla_C_AVAILABLE = False
 else:
     _flashmla_C_AVAILABLE = False
@@ -30,8 +29,9 @@ def is_flashmla_supported() -> Tuple[bool, Optional[str]]:
         return False, "FlashMLA is only supported on Hopper devices."
     if not _flashmla_C_AVAILABLE:
         return False, "vllm._flashmla_C is not available, likely was not "\
-            "compiled due to insufficient nvcc version or a supported arch"\
-            "was not in the list of target arches to compile for."
+            "compiled due to insufficient nvcc version or a supported arch "\
+            "(only sm90a currently) was not in the list of target arches to "\
+            "compile for."
     return True, None
 
 
