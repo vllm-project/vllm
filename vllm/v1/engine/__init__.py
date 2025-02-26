@@ -133,6 +133,7 @@ class EngineCoreOutputs(
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None
+    finished_requests: List[str] = []
 
     def __post_init__(self):
         if self.timestamp == 0.0:

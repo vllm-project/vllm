@@ -8,18 +8,21 @@ import uuid
 import weakref
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Thread
 from typing import Any, Dict, List, Optional, Set, Type, Union
 
 import zmq
 import zmq.asyncio
+from sampling_params import RequestOutputKind
 
+from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
+from vllm.v1.core.scheduler import DUMMY_REQ_ID
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
@@ -197,27 +200,68 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.pin_lora(lora_id)
 
 
+class CoreEngine:
+    """One per data parallel rank."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: Type[Executor],
+        log_stats: bool,
+        ctx: Union[zmq.Context, zmq.asyncio.Context],
+        output_path: str,
+        index: int = 0,
+    ):
+        # Paths and sockets for IPC.
+        input_path = get_open_zmq_ipc_path()
+        self.input_socket = make_zmq_socket(ctx, input_path,
+                                            zmq.constants.PUSH)
+        try:
+            # Start EngineCore in background process.
+            self.proc_handle = BackgroundProcHandle(
+                input_path=input_path,
+                output_path=output_path,
+                process_name=f"EngineCore_{index}",
+                target_fn=EngineCoreProc.run_engine_core,
+                process_kwargs={
+                    "vllm_config": vllm_config,
+                    "dp_rank": index,
+                    "executor_class": executor_class,
+                    "log_stats": log_stats,
+                })
+
+            self.num_reqs_in_flight = 0
+        finally:
+            if not hasattr(self, "num_reqs_in_flight"):
+                # Ensure socket is closed if process fails to start.
+                self.close()
+
+    def close(self):
+        if proc_handle := getattr(self, "proc_handle", None):
+            proc_handle.shutdown()
+        if socket := getattr(self, "input_socket", None):
+            socket.close(linger=0)
+
+
 @dataclass
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
     circular reference back to the client object."""
 
+    core_engines: List[CoreEngine] = field(default_factory=list)
     ctx: Union[zmq.Context, zmq.asyncio.Context] = None
     output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
     input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
-    proc_handle: Optional[BackgroundProcHandle] = None
 
     def __call__(self):
         """Clean up background resources."""
 
-        if self.proc_handle is not None:
-            self.proc_handle.shutdown()
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.
         if self.output_socket is not None:
             self.output_socket.close(linger=0)
-        if self.input_socket is not None:
-            self.input_socket.close(linger=0)
+        for core_engine in self.core_engines:
+            core_engine.close()
         if self.ctx is not None:
             self.ctx.destroy(linger=0)
 
@@ -271,29 +315,18 @@ class MPClient(EngineCoreClient):
         resources = BackgroundResources(ctx=self.ctx)
         self._finalizer = weakref.finalize(self, resources)
 
-        # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
-        input_path = get_open_zmq_ipc_path()
         resources.output_socket = make_zmq_socket(self.ctx, output_path,
                                                   zmq.constants.PULL)
-        resources.input_socket = make_zmq_socket(self.ctx, input_path,
-                                                 zmq.constants.PUSH)
-
-        # Start EngineCore in background process.
-        resources.proc_handle = BackgroundProcHandle(
-            input_path=input_path,
-            output_path=output_path,
-            process_name="EngineCore",
-            target_fn=EngineCoreProc.run_engine_core,
-            process_kwargs={
-                "vllm_config": vllm_config,
-                "executor_class": executor_class,
-                "log_stats": log_stats,
-            })
+        for i in range(vllm_config.parallel_config.data_parallel_size):
+            resources.core_engines.append(
+                CoreEngine(vllm_config, executor_class, log_stats, self.ctx,
+                           output_path, i))
 
         self.output_socket = resources.output_socket
-        self.input_socket = resources.input_socket
+        self.core_engines = resources.core_engines
         self.utility_results: Dict[int, AnyFuture] = {}
+        self.reqs_in_flight: Dict[str, CoreEngine] = {}
 
     def shutdown(self):
         self._finalizer()
@@ -322,6 +355,8 @@ class SyncMPClient(MPClient):
         )
 
         self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
+
+        self.input_socket = self.core_engines[0].input_socket
 
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
@@ -417,6 +452,28 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
+        # Single-token request used for triggering idle mode loop.
+        self.dummy_request_msg = (
+            EngineCoreRequestType.ADD,
+            self.encoder.encode(
+                EngineCoreRequest(
+                    request_id=DUMMY_REQ_ID,
+                    prompt_token_ids=[1],
+                    sampling_params=SamplingParams(
+                        temperature=0.0,
+                        max_tokens=1,
+                        output_kind=RequestOutputKind.FINAL_ONLY,
+                    ),
+                    #TODO add defaults to EngineCoreRequest for these
+                    prompt=None,
+                    mm_inputs=None,
+                    mm_hashes=None,
+                    mm_placeholders=None,
+                    eos_token_id=None,
+                    lora_request=None,
+                    arrival_time=0.0,
+                )))
+
         self.outputs_queue: Optional[asyncio.Queue[EngineCoreOutputs]] = None
         self.queue_task: Optional[asyncio.Task] = None
 
@@ -436,8 +493,14 @@ class AsyncMPClient(MPClient):
                 if outputs.utility_output:
                     _process_utility_output(outputs.utility_output,
                                             utility_results)
-                else:
-                    outputs_queue.put_nowait(outputs)
+                    continue
+                outputs_queue.put_nowait(outputs)
+                for req_id in outputs.finished_requests:
+                    if engine := self.reqs_in_flight.pop(req_id, None):
+                        engine.num_reqs_in_flight -= 1
+                        if not self.reqs_in_flight:
+                            # TODO pause engines here
+                            pass
 
         self.queue_task = asyncio.create_task(process_outputs_socket())
 
@@ -448,20 +511,30 @@ class AsyncMPClient(MPClient):
         return await self.outputs_queue.get()
 
     async def _send_input(self, request_type: EngineCoreRequestType,
-                          request: Any) -> None:
-
+                          request: Any,
+                          core_engine: Optional[CoreEngine]) -> None:
         msg = (request_type.value, self.encoder.encode(request))
-        await self.input_socket.send_multipart(msg, copy=False)
+        for engine in (core_engine, ) if core_engine else self.core_engines:
+            await engine.input_socket.send_multipart(msg, copy=False)
 
         if self.outputs_queue is None:
             await self._start_output_queue_task()
 
-    async def _call_utility_async(self, method: str, *args) -> Any:
+    def get_core_engine_for_request(self) -> CoreEngine:
+        engine = min(self.core_engines, key=lambda e: e.num_reqs_in_flight)
+        return engine
+
+    async def _call_utility_async(
+        self,
+        method: str,
+        *args,
+        core_engine: Optional[CoreEngine] = None,
+    ) -> Any:
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
         await self._send_input(EngineCoreRequestType.UTILITY,
-                               (call_id, method, args))
+                               (call_id, method, args), core_engine)
 
         return await future
 
@@ -469,11 +542,46 @@ class AsyncMPClient(MPClient):
         # NOTE: text prompt is not needed in the core engine as it has been
         # tokenized.
         request.prompt = None
-        await self._send_input(EngineCoreRequestType.ADD, request)
+
+        if self.outputs_queue is None:
+            await self._start_output_queue_task()
+
+        msg = (EngineCoreRequestType.ADD, self.encoder.encode(request))
+        chosen_engine = self.get_core_engine_for_request()
+        first_request = len(self.reqs_in_flight) == 0
+        self.reqs_in_flight[request.request_id] = chosen_engine
+        chosen_engine.num_reqs_in_flight += 1
+        await chosen_engine.input_socket.send_multipart(msg, copy=False)
+
+        if first_request and len(self.core_engines) > 1:
+            # Send a dummy request to initiate idle forward loop
+            # in other engines.
+            for engine in self.core_engines:
+                if engine is not chosen_engine:
+                    await engine.input_socket.send_multipart(
+                        self.dummy_request_msg, copy=False)
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
-        if len(request_ids) > 0:
-            await self._send_input(EngineCoreRequestType.ABORT, request_ids)
+        if not request_ids:
+            return
+
+        if len(request_ids) == 1 or len(self.core_engines) == 1:
+            # Fast-path common case.
+            if engine := self.reqs_in_flight.get(request_ids[0]):
+                await self._abort_requests(request_ids, engine)
+            return
+
+        by_engine: Dict[CoreEngine, List[str]] = {}
+        for req_id in request_ids:
+            if engine := self.reqs_in_flight.get(req_id):
+                by_engine.setdefault(engine, []).append(req_id)
+        for engine, req_ids in by_engine.items():
+            await self._abort_requests(req_ids, engine)
+
+    async def _abort_requests(self, request_ids: List[str],
+                              engine: CoreEngine) -> None:
+        msg = (EngineCoreRequestType.ABORT, self.encoder.encode(request_ids))
+        await engine.input_socket.send_multipart(msg, copy=False)
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self._call_utility_async("profile", is_start)

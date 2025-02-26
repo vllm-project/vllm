@@ -268,7 +268,10 @@ class EngineCoreProc(EngineCore):
         ready_pipe.send({"status": "READY"})
 
     @staticmethod
-    def run_engine_core(*args, **kwargs):
+    def run_engine_core(*args,
+                        vllm_config: VllmConfig,
+                        dp_rank: int = 0,
+                        **kwargs):
         """Launch EngineCore busy loop in background process."""
 
         # Signal handler used for graceful termination.
@@ -288,6 +291,9 @@ class EngineCoreProc(EngineCore):
         # Either SIGTERM or SIGINT will terminate the engine_core
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
+
+        # Set data parallel rank for this engine process.
+        vllm_config.parallel_config.data_parallel_rank = dp_rank
 
         parent_process = psutil.Process().parent()
         engine_core = None
@@ -313,11 +319,17 @@ class EngineCoreProc(EngineCore):
         step_fn = (self.step
                    if self.batch_queue is None else self.step_with_batch_queue)
 
+        dp_idle_mode = False
+
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while True:
+                    if dp_idle_mode and self.input_queue.empty():
+                        # TODO if time has passed here, break to log stats
+                        self.execute_dummy_batch()
+                        continue
                     try:
                         req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
                         self._handle_client_request(*req)
@@ -327,13 +339,15 @@ class EngineCoreProc(EngineCore):
                         # Break out the loop so we can log_stats in step().
                         if self.log_stats:
                             break
-                    except BaseException:
-                        raise
 
             # 2) Handle any new client requests.
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
                 self._handle_client_request(*req)
+
+            if self.scheduler.has_unfinished_requests():
+                # TODO client to reset this in coordinated way
+                dp_idle_mode = True
 
             # 3) Step the engine core.
             outputs = step_fn()
