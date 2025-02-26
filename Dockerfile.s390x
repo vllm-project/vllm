@@ -22,10 +22,6 @@ RUN microdnf install -y \
     openssl-devel openblas openblas-devel wget autoconf automake libtool cmake && \
     microdnf clean all
 
-# Install Rust
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
-    . "$HOME/.cargo/env"
-
 # Python Installation
 FROM base AS python-install
 ARG PYTHON_VERSION
@@ -70,12 +66,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     export PYARROW_PARALLEL=4 && \
     export ARROW_BUILD_TYPE=release && \
     python -m pip install -r requirements-build.txt && \
-    python setup.py build_ext --build-type=$ARROW_BUILD_TYPE --bundle-arrow-cpp bdist_wheel && \
-    mkdir -p /tmp/arrow_wheels/ && \
-    cp dist/*.whl /tmp/arrow_wheels/
+    python setup.py build_ext --build-type=$ARROW_BUILD_TYPE --bundle-arrow-cpp bdist_wheel
 
-FROM python-install AS python-dependencies
-
+FROM python-install AS numa-build
 # Install numactl (needed for numa.h dependency)
 WORKDIR /tmp
 RUN curl -LO https://github.com/numactl/numactl/archive/refs/tags/v2.0.16.tar.gz && \
@@ -89,6 +82,18 @@ RUN curl -LO https://github.com/numactl/numactl/archive/refs/tags/v2.0.16.tar.gz
 # Set include path
 ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 
+FROM python-install AS rust
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
+
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
+    . "$CARGO_HOME/env" && \
+    rustup default stable && \
+    rustup show
+
+FROM python-install AS python-dependencies
+
 # Copy vLLM source
 COPY . /workspace/vllm
 WORKDIR /workspace/vllm
@@ -98,16 +103,19 @@ ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
-# Copy built PyArrow wheels from pyarrow stage
-COPY --from=pyarrow /tmp/arrow_wheels/*.whl /tmp/arrow_wheels/
-
-ENV PATH="/root/.cargo/bin:$PATH"
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
 
 # Install dependencies, including PyTorch and Apache Arrow
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=rust,source=/root/.cargo,target=/root/.cargo,rw \
+    --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
+    --mount=type=bind,from=pyarrow,source=/tmp/arrow/python/dist,target=/tmp/arrow-wheels \
+     WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl | head -n 1) && \
     pip install -v \
-        'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 /tmp/arrow_wheels/*.whl \
+        'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 $WHL_FILE  \
         --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
         -r requirements-cpu.txt
 
@@ -123,12 +131,20 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     uv pip install dist/*.whl
 
 # Final build stage
-FROM python-dependencies AS vllm-cpu
+FROM python-install AS vllm-cpu
 ARG PYTHON_VERSION
 
 # Set correct library path for torch and numactl
 ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:$LD_LIBRARY_PATH"
 WORKDIR /workspace/vllm
+ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
+ENV UV_LINK_MODE=copy
+
+COPY --from=numa-build /usr/local/lib /usr/local/lib
+COPY --from=numa-build /usr/local/include /usr/local/include
+
+COPY --from=python-dependencies /opt/vllm /opt/vllm
+COPY --from=python-dependencies /workspace/vllm /workspace/vllm
 
 # Build and install vllm
 RUN --mount=type=cache,target=/root/.cache/pip \
