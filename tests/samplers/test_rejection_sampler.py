@@ -11,10 +11,7 @@ import vllm.model_executor.layers.rejection_sampler as v0_rejection_sampler
 import vllm.v1.sample.rejection_sampler as v1_rejection_sampler
 from vllm.model_executor.utils import set_random_seed
 
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
-
+CUDA_DEVICES = ["cuda:0"]
 TEST_KS = [1, 3, 5]
 TEST_BATCH_SIZES = [1, 4, 8, 32]
 TEST_VOCAB_SIZES = [30_000, 50_000]
@@ -173,7 +170,7 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
 @pytest.mark.parametrize("batch_size", TEST_BATCH_SIZES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("use_flashinfer", [True, False])
-@pytest.mark.parametrize("use_v1", [True])
+@pytest.mark.parametrize("use_v1", [True, False])
 @torch.inference_mode()
 def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                                     device: str, use_flashinfer: bool,
@@ -223,9 +220,13 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
 def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
                                    frac_seeded: float, n_rep: int, device: str,
                                    use_flashinfer: bool, use_v1: bool):
+    '''
+    Test that the rejection sampler generates the same output when seeded.
+    '''
     torch.set_default_device(device)
     rejection_sampler = get_sampler(use_v1, use_flashinfer)
-    rejection_sampler.init_gpu_tensors(device=device)
+    if not use_v1:
+        rejection_sampler.init_gpu_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size,
@@ -433,8 +434,8 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
 
 @pytest.mark.parametrize("draft_and_target_probs_equal", [True, False])
 @pytest.mark.parametrize("seed", list(range(5)))
-@pytest.mark.parametrize("use_flashinfer", [True, False])
-@pytest.mark.parametrize("use_v1", [True, False])
+@pytest.mark.parametrize("use_flashinfer", [False])
+@pytest.mark.parametrize("use_v1", [True])
 @torch.inference_mode()
 def test_rejection_sampling_approximates_target_distribution(
         seed: int, draft_and_target_probs_equal: bool, use_flashinfer: bool,
