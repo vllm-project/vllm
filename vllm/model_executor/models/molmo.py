@@ -13,7 +13,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import (BatchFeature, PretrainedConfig, ProcessorMixin,
                           TensorType)
-from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.attention import Attention
@@ -978,6 +977,9 @@ class MolmoProcessorWrapper:
     The original definition can be found here:
     https://huggingface.co/allenai/Molmo-7B-D-0924/blob/main/preprocessing_molmo.py
     """
+    # lazy import ImageInput because huggingface/transformers#34275 adds a
+    # non-lazy cv2 import. TODO: move this back if this is fixed
+    from transformers.image_utils import ImageInput
 
     def __init__(self, processor: ProcessorMixin):
         super().__init__()

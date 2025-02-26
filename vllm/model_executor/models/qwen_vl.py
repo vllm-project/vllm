@@ -19,7 +19,6 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from transformers import (BatchFeature, PretrainedConfig, PreTrainedTokenizer,
                           TensorType)
-from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import VllmConfig
@@ -440,6 +439,9 @@ class QwenVLProcessor:
     The image processor is defined here:
     https://huggingface.co/Qwen/Qwen-VL/blob/main/visual.py#L354
     """
+    # lazy import ImageInput because huggingface/transformers#34275 adds a
+    # non-lazy cv2 import. TODO: move this back if this is fixed
+    from transformers.image_utils import ImageInput
 
     def __init__(
         self,
