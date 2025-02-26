@@ -199,16 +199,17 @@ class PaliGemmaMultiModalProcessor(
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputs:
-        multimodelinputs = super().apply(prompt, mm_data,
-                                         hf_processor_mm_kwargs)
-        # Force to add newline at the end of prompt according to paligemma's format
-        prompt_token_ids = multimodelinputs["prompt_token_ids"]
-        if len(prompt_token_ids) and prompt_token_ids[-1] != 108:
-            prompt_token_ids.append(108)
-            multimodelinputs["prompt_token_ids"] = prompt_token_ids
-            multimodelinputs["prompt"] += "\n"
-        return multimodelinputs
+        mm_inputs = super().apply(prompt, mm_data,hf_processor_mm_kwargs)
+        prompt_token_ids = mm_inputs["prompt_token_ids"]
 
+        newline_prompt = "\n"   
+        newline_token_id = self.info.get_tokenizer().encode(newline_prompt)[-1] # 108
+        # Force to add newline at the end of prompt according to paligemma's format
+        if len(prompt_token_ids) and prompt_token_ids[-1] != newline_token_id:
+            prompt_token_ids.append(newline_token_id)
+            mm_inputs["prompt_token_ids"] = prompt_token_ids
+            mm_inputs["prompt"] += newline_prompt
+        return mm_inputs
 
 @MULTIMODAL_REGISTRY.register_processor(
     PaliGemmaMultiModalProcessor,
