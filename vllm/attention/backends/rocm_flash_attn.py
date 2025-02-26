@@ -14,8 +14,8 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 
 if envs.VLLM_USE_AITER_PAGED_ATTN:
-    from vllm.attention.ops.paged_attn_ater import (PagedAttention,
-                                                    PagedAttentionMetadata)
+    from vllm.attention.ops.paged_attn_aiter import (PagedAttention,
+                                                     PagedAttentionMetadata)
 else:
     from vllm.attention.ops.paged_attn import (PagedAttention,
                                                PagedAttentionMetadata)
