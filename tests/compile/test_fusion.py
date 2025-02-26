@@ -13,7 +13,7 @@ from vllm.compilation.reshapes import RedundantReshapesPass
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear)
+    apply_fp8_linear, maybe_create_device_identity)
 
 from .backend import TestBackend
 
@@ -73,6 +73,7 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
+    maybe_create_device_identity()  # needed for certain non-cutlass fp8 paths
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm"]))
