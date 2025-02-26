@@ -985,7 +985,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             apply_bitmask(
                 logits,
                 grammar_bitmask.to(self.device, non_blocking=True),
-                list(scheduler_output.guided_decoding_request_ids.values()),
+                list(req_id_indices.values()),
             )
 
         # Sample the next token and get logprobs if needed.
