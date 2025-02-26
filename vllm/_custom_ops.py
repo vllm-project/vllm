@@ -414,8 +414,8 @@ if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
                                   sm_count: torch.SymInt,
                                   sm_version: torch.SymInt,
                                   CUBLAS_M_THRESHOLD: torch.SymInt,
-                                  has_zp: bool, n32k16_reorder: bool,
-                                  weight_name_pattern: str) -> torch.Tensor:
+                                  has_zp: bool,
+                                  n32k16_reorder: bool) -> torch.Tensor:
         m = a.size(0)
         return torch.empty((m, n), device=a.device, dtype=a.dtype)
 
@@ -950,14 +950,12 @@ def allspark_w8a16_gemm(a: torch.Tensor, b_qweight: torch.Tensor,
                         b_qzeros: Optional[torch.Tensor], n: int,
                         group_size: int, sm_count: int, sm_version: int,
                         CUBLAS_M_THRESHOLD: int, has_zp: bool,
-                        n32k16_reorder: bool,
-                        weight_name_pattern: str) -> torch.Tensor:
+                        n32k16_reorder: bool) -> torch.Tensor:
 
     return torch.ops._C.allspark_w8a16_gemm(a, b_qweight, b_scales, b_qzeros,
                                             n, group_size, sm_count,
                                             sm_version, CUBLAS_M_THRESHOLD,
-                                            has_zp, n32k16_reorder,
-                                            weight_name_pattern)
+                                            has_zp, n32k16_reorder)
 
 
 # int8

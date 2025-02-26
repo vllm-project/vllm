@@ -140,8 +140,6 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         "sm_version": sm_version if as_supported_case else None,
         "CUBLAS_M_THRESHOLD":
         CUBLAS_M_THRESHOLD if as_supported_case else None,
-        "weight_name_pattern":
-        f'model.layers.k{size_k}.m{size_m}.n{size_n}.qweight',
         # Kernels
         "gptq_marlin_gemm": ops.gptq_marlin_gemm,
         "gptq_marlin_24_gemm": ops.gptq_marlin_24_gemm,
@@ -210,7 +208,7 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         results.append(
             benchmark.Timer(
                 stmt=
-                "output = allspark_w8a16_gemm(a, qw_reorder, s_reorder, zp_reorder, size_n, group_size, sm_count, sm_version, CUBLAS_M_THRESHOLD, False, True, weight_name_pattern)",  # noqa: E501
+                "output = allspark_w8a16_gemm(a, qw_reorder, s_reorder, zp_reorder, size_n, group_size, sm_count, sm_version, CUBLAS_M_THRESHOLD, False, True)",  # noqa: E501
                 globals=globals,
                 label=label,
                 sub_label=sub_label,

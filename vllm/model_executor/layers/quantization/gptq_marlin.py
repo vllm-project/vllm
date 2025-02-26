@@ -217,7 +217,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
         weight_loader = extra_weight_attrs.get("weight_loader")
-        prefix = extra_weight_attrs.get("prefix")
 
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
@@ -328,8 +327,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                                   w_q_param_name="qweight",
                                   w_s_param_name="scales",
                                   w_zp_param_name="qzeros",
-                                  w_gidx_param_name="g_idx",
-                                  prefix=prefix)
+                                  w_gidx_param_name="g_idx")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.kernel.process_weights_after_loading(layer)

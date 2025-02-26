@@ -148,13 +148,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                             weight_loader=weight_loader)
             layer.register_parameter("weight_g_idx", weight_g_idx)
 
-        prefix = kwargs.get("prefix")
         self.kernel = kernel_type(mp_linear_kernel_config,
                                   w_q_param_name="weight_packed",
                                   w_s_param_name="weight_scale",
                                   w_zp_param_name=None,
-                                  w_gidx_param_name="weight_g_idx",
-                                  prefix=prefix)
+                                  w_gidx_param_name="weight_g_idx")
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from the format the kernel may want. Handle repacking here.

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from typing import Optional, Tuple
 
 import torch
@@ -97,14 +96,6 @@ class AllSparkLinearKernel(MPLinearKernel):
         reshaped_x = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1], )
 
-        assert self.prefix is not None
-        weight_name = self.prefix if self.prefix is not None else ""
-
-        if re.search(r'\.\d+\.', weight_name):
-            weight_name_pattern = re.sub(r'\.\d+\.', '.', weight_name, count=1)
-        else:
-            weight_name_pattern = weight_name
-
         output = ops.allspark_w8a16_gemm(
             a=reshaped_x,
             b_qweight=w_q,
@@ -116,8 +107,7 @@ class AllSparkLinearKernel(MPLinearKernel):
             sm_version=gemm_args['sm_version'],
             CUBLAS_M_THRESHOLD=ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD,
             has_zp=c.zero_points,
-            n32k16_reorder=True,
-            weight_name_pattern=weight_name_pattern)
+            n32k16_reorder=True)
 
         if bias is not None:
             output.add_(bias)  # In-place add

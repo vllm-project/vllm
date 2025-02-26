@@ -3,7 +3,6 @@
 #include "core/registration.h"
 #include <cublas_v2.h>
 
-std::map<std::string, at::Tensor> as_g_output_map;  // cache for 1 layer
 at::Tensor as_g_workspace;
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
@@ -12,8 +11,7 @@ torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
     torch::Tensor const& b_scales, c10::optional<torch::Tensor> const& b_qzeros,
     int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
-    int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder,
-    std::string const& weight_name_pattern) {
+    int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
   TORCH_CHECK_NOT_IMPLEMENTED(
       false, "allspark_w8a16_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
@@ -919,8 +917,7 @@ torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
     torch::Tensor const& b_scales, c10::optional<torch::Tensor> const& b_qzeros,
     int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
-    int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder,
-    std::string const& weight_name_pattern) {
+    int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
   // Verify device and strides
   TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
   TORCH_CHECK(a.is_contiguous(), "A is not contiguous");
@@ -960,17 +957,7 @@ torch::Tensor allspark_w8a16_gemm(
   }
 
   auto c_options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  if (as_g_output_map.count(weight_name_pattern) == 0 or
-      as_g_output_map.at(weight_name_pattern).numel() < m * n) {
-    as_g_output_map[weight_name_pattern] = torch::empty({m, n}, c_options);
-  }
-  torch::Tensor tensor_to_reuse = as_g_output_map[weight_name_pattern];
-  std::vector<int64_t> new_shape = {m, n};
-  int64_t dim1_step = tensor_to_reuse.stride(1);
-  int64_t dim0_step = dim1_step * n;
-  std::vector<int64_t> new_stride = {dim0_step, dim1_step};
-  torch::Tensor c =
-      tensor_to_reuse.as_strided(new_shape, new_stride).to(a.dtype());
+  torch::Tensor c = torch::empty({m, n}, c_options);
   void* c_ptr = reinterpret_cast<void*>(c.data_ptr());
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();

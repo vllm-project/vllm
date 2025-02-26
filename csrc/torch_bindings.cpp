@@ -463,8 +463,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
       "Tensor? b_qzeros, "
       "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
-      "CUBLAS_M_THRESHOLD, "
-      "bool has_zp, bool n32k16_reorder, str weight_name_pattern) -> Tensor");
+      "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
   //  conditionally compiled so impl in source file
 #endif
 }

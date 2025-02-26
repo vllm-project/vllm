@@ -84,17 +84,14 @@ def test_gptq_allspark_gemm_ampere(mnk_factors, group_size, has_zp, dtype):
             (qw, s, zp, has_zp, qw_reorder, s_reorder, zp_reorder, k, n,
              n_32align))
 
-    weight_name_pattern = f'model.layers.k{k}.m{m}.n{n}.qweight'
-
     opcheck(torch.ops._C.allspark_w8a16_gemm,
             (input, qw_reorder, s_reorder, zp_reorder, n, group_size, sm_count,
-             sm_version, ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD, has_zp, True,
-             weight_name_pattern),
+             sm_version, ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD, has_zp, True),
             test_utils=DEFAULT_OPCHECK_TEST_UTILS)
     output = ops.allspark_w8a16_gemm(input, qw_reorder, s_reorder, zp_reorder,
                                      n, group_size, sm_count, sm_version,
                                      ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD,
-                                     has_zp, True, weight_name_pattern)
+                                     has_zp, True)
 
     output_ref = torch.matmul(input, w_ref)
     torch.cuda.synchronize()
