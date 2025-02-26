@@ -1,42 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
-from threading import Lock
+from dataclasses import dataclass
 
 from transformers import PreTrainedTokenizer
 
 from vllm.model_executor.guided_decoding.reasoner.reasoner import Reasoner
 
 
+@dataclass
 class DeepSeekReasoner(Reasoner):
     """
-    Reasoner for DeepSeek.
-
-    This class is a singleton and should be instantiated with the tokenizer
-    to ensure that the start and end token IDs are initialized only once.
+    Reasoner for DeepSeek R series models.
     """
-    _instance = None
-    _start_token_id = None
-    _end_token_id = None
-    _lock = Lock()
+    start_token_id: int
+    end_token_id: int
 
-    def __new__(cls, tokenizer: PreTrainedTokenizer):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                # Initialize token IDs in __new__
-                cls._start_token_id = tokenizer.encode(
-                    "<think>", add_special_tokens=False)[0]
-                cls._end_token_id = tokenizer.encode(
-                    "</think>", add_special_tokens=False)[0]
-        return cls._instance
+    start_token: str = "<think>"
+    end_token: str = "</think>"
 
-    def __init__(self, tokenizer: PreTrainedTokenizer):
-        self.tokenizer = tokenizer
-        # Use class variables to avoid reinitializing the token IDs
-        self.start_token_id = self.__class__._start_token_id
-        self.end_token_id = self.__class__._end_token_id
+    @classmethod
+    def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
+        return cls(start_token_id=tokenizer.encode(
+            "<think>", add_special_tokens=False)[0],
+                   end_token_id=tokenizer.encode("</think>",
+                                                 add_special_tokens=False)[0])
 
-    def get_start_token_id(self) -> int | None:
-        return self.start_token_id
-
-    def get_end_token_id(self) -> int | None:
-        return self.end_token_id
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        return self.end_token_id in input_ids

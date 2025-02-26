@@ -1,31 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-
-class Reasoner(ABC):
-
-    @abstractmethod
-    def get_start_token_id(self) -> int | None:
-        pass
-
-    @abstractmethod
-    def get_end_token_id(self) -> int | None:
-        pass
+from transformers import PreTrainedTokenizer
 
 
 @dataclass
-class ReasonerConfig:
-    start_token_id: int
-    end_token_id: int
+class Reasoner(ABC):
 
-    @classmethod
-    def from_reasoner(cls, reasoner: Reasoner) -> 'ReasonerConfig':
-        if reasoner is None or reasoner.get_start_token_id() is None or \
-              reasoner.get_end_token_id() is None:
-            raise ValueError("The reasoner must have token IDs.")
-        return cls(start_token_id=int(reasoner.get_start_token_id()),
-                   end_token_id=int(reasoner.get_end_token_id()))
+    @abstractmethod
+    def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
+        pass
 
+    @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        return self.end_token_id in input_ids
+        pass

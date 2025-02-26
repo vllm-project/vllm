@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
     from vllm.config import ModelConfig
-    from vllm.model_executor.guided_decoding.reasoner import ReasonerConfig
+    from vllm.model_executor.guided_decoding.reasoner import Reasoner
     from vllm.sampling_params import GuidedDecodingParams
 
 logger = init_logger(__name__)
@@ -41,13 +41,13 @@ def get_local_xgrammar_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
-        reasoner_config: ReasonerConfig | None,
+        reasoner: Reasoner | None,
         max_threads: int = 8):
     config = GrammarConfig.from_guided_params(guided_params=guided_params,
                                               model_config=model_config,
                                               tokenizer=tokenizer,
                                               max_threads=max_threads)
-    return XGrammarLogitsProcessor(config, reasoner_config)
+    return XGrammarLogitsProcessor(config, reasoner)
 
 
 @dataclass(frozen=True)
@@ -297,7 +297,7 @@ class GrammarConfig:
 class XGrammarLogitsProcessor:
     """Wrapper class to support pickle protocol"""
     config: GrammarConfig
-    reasoner_config: ReasonerConfig | None = None
+    reasoner: Reasoner | None = None
 
     ctx: xgr.CompiledGrammar | None = None
     token_bitmask: torch.Tensor = None  # type: ignore[assignment]
@@ -306,11 +306,11 @@ class XGrammarLogitsProcessor:
     prefilled: bool = field(default=False)
 
     def __getstate__(self) -> dict[str, Any]:
-        return {'config': self.config, 'reasoner_config': self.reasoner_config}
+        return {'config': self.config, 'reasoner': self.reasoner}
 
     def __setstate__(self, state: dict[str, Any]):
         self.config = state['config']
-        self.reasoner_config = state['reasoner_config']
+        self.reasoner = state['reasoner']
 
         self.ctx = None
         self.matchers = []
@@ -339,9 +339,9 @@ class XGrammarLogitsProcessor:
                  scores: torch.Tensor) -> torch.Tensor:
 
         # Skip the structured logits processing if reasoning is not finished.
-        # reasoner_config is not None only when `--enable-reasoning` is set.
-        if self.reasoner_config is not None and \
-        not self.reasoner_config.is_reasoning_end(
+        # reasoner is not None only when `--enable-reasoning` is set.
+        if self.reasoner is not None and \
+        not self.reasoner.is_reasoning_end(
                 input_ids):
             return scores
 

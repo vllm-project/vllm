@@ -33,7 +33,7 @@ from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding.reasoner import ReasonerConfig
+from vllm.model_executor.guided_decoding.reasoner import Reasoner
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -41,10 +41,9 @@ logger = init_logger(__name__)
 
 class BaseLogitsProcessor:
 
-    def __init__(self, guide: Guide,
-                 reasoner_config: Optional[ReasonerConfig]):
+    def __init__(self, guide: Guide, reasoner: Optional[Reasoner]):
         self._guide: Guide = guide
-        self._reasoner_config = reasoner_config
+        self._reasoner = reasoner
         # CFGState is used for the FSM state for CFGGuide
         self._fsm_state: DefaultDict[int, Union[int,
                                                 CFGState]] = defaultdict(int)
@@ -54,9 +53,9 @@ class BaseLogitsProcessor:
         """Use the FSM to bias the logits before sampling the next token."""
 
         # Skip the structured logits processing if reasoning is not finished.
-        # reasoner_config is not None only when `--enable-reasoning` is set.
-        if self._reasoner_config is not None and \
-        not self._reasoner_config.is_reasoning_end(
+        # reasoner is not None only when `--enable-reasoning` is set.
+        if self._reasoner is not None and \
+        not self._reasoner.is_reasoning_end(
                 input_ids):
             return scores
 
@@ -128,7 +127,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
         return RegexGuide.from_regex(regex_string, tokenizer)
 
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase,
-                 reasoner_config: Optional[ReasonerConfig]):
+                 reasoner: Optional[Reasoner]):
         """Compile the FSM that drives the regex-structured generation.
 
         Parameters
@@ -140,8 +139,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
         """
         super().__init__(
-            RegexLogitsProcessor._get_guide(regex_string, tokenizer),
-            reasoner_config)
+            RegexLogitsProcessor._get_guide(regex_string, tokenizer), reasoner)
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
@@ -149,7 +147,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
     def __init__(self, schema: Union[str, Dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Union[str, None],
-                 reasoner_config: Optional[ReasonerConfig]):
+                 reasoner: Optional[Reasoner]):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
@@ -177,7 +175,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
                 f"a Pydantic object, a dictionary or a string that contains "
                 f"the JSON Schema specification")
         regex_string = build_regex_from_schema(schema_str, whitespace_pattern)
-        super().__init__(regex_string, tokenizer, reasoner_config)
+        super().__init__(regex_string, tokenizer, reasoner)
 
 
 class CFGLogitsProcessor(BaseLogitsProcessor):
@@ -189,7 +187,7 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         return CFGGuide(cfg, tokenizer)
 
     def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase,
-                 reasoner_config: Optional[ReasonerConfig]):
+                 reasoner: Optional[Reasoner]):
         """Compile the FSM that drives the context free grammar generation.
 
         Parameters
@@ -201,7 +199,7 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
 
         """
         super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer),
-                         reasoner_config)
+                         reasoner)
         self._guide = self._guide.copy()
 
 

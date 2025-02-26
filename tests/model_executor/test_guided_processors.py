@@ -36,11 +36,11 @@ def test_guided_logits_processors(zephyr_7B_tokenzer, sample_regex,
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
     regex_LP = RegexLogitsProcessor(sample_regex,
                                     zephyr_7B_tokenzer,
-                                    reasoner_config=None)
+                                    reasoner=None)
     json_LP = JSONLogitsProcessor(sample_json_schema,
                                   zephyr_7B_tokenzer,
                                   whitespace_pattern=None,
-                                  reasoner_config=None)
+                                  reasoner=None)
 
     token_ids = zephyr_7B_tokenzer.encode(
         f"Give an example IPv4 address with this regex: {sample_regex}")

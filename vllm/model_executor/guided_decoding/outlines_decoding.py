@@ -12,7 +12,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
-from vllm.model_executor.guided_decoding.reasoner import ReasonerConfig
+from vllm.model_executor.guided_decoding.reasoner import Reasoner
 from vllm.sampling_params import GuidedDecodingParams
 
 
@@ -61,7 +61,7 @@ _MAX_THREADPOOL_WORKERS = 16
 async def get_outlines_guided_decoding_logits_processor(
     guided_params: GuidedDecodingParams,
     tokenizer: PreTrainedTokenizerBase,
-    reasoner_config: Optional[ReasonerConfig],
+    reasoner: Optional[Reasoner],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
            None]:
     """
@@ -86,13 +86,13 @@ async def get_outlines_guided_decoding_logits_processor(
     return await loop.run_in_executor(global_thread_pool,
                                       _get_logits_processor, guide, tokenizer,
                                       mode, guided_params.whitespace_pattern,
-                                      reasoner_config)
+                                      reasoner)
 
 
 def get_local_outlines_guided_decoding_logits_processor(
     guided_params: GuidedDecodingParams,
     tokenizer: PreTrainedTokenizerBase,
-    reasoner_config: Optional[ReasonerConfig],
+    reasoner: Optional[Reasoner],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
            None]:
     """
@@ -106,8 +106,7 @@ def get_local_outlines_guided_decoding_logits_processor(
         return None
 
     return _get_logits_processor(guide, tokenizer, mode,
-                                 guided_params.whitespace_pattern,
-                                 reasoner_config)
+                                 guided_params.whitespace_pattern, reasoner)
 
 
 def _get_guide_and_mode(
@@ -142,14 +141,14 @@ def _get_logits_processor(
     tokenizer: PreTrainedTokenizerBase,
     mode: GuidedDecodingMode,
     whitespace_pattern: Union[str, None],
-    reasoner_config: Optional[ReasonerConfig],
+    reasoner: Optional[Reasoner],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor]:
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern,
-                                   reasoner_config)
+                                   reasoner)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
-        return RegexLogitsProcessor(guide, tokenizer, reasoner_config)
+        return RegexLogitsProcessor(guide, tokenizer, reasoner)
     elif mode == GuidedDecodingMode.GRAMMAR:
-        return CFGLogitsProcessor(guide, tokenizer, reasoner_config)
+        return CFGLogitsProcessor(guide, tokenizer, reasoner)
     else:
         raise ValueError(f"Unknown guided decoding mode {mode}")
