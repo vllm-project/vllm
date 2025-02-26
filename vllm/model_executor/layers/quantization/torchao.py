@@ -14,19 +14,19 @@ from torchao.quantization import (
 from vllm.model_executor.utils import set_weight_attrs
 from typing import List, Dict, Any, Optional
 import torch.nn.functional as F
+from torch.nn import Module
+from vllm.model_executor.layers.quantization.torchao_utils import torchao_quantize_param_data
 
 
 class TorchAOConfig(QuantizationConfig):
     """Config class for torchao.
     """
 
-    # TODO
-    def __init__(self) -> None:
-        print("in torchao config init")
-        pass
+    def __init__(self, quant_type: str = "int4wo-128") -> None:
+        self.quant_type = quant_type
 
     def __repr__(self) -> str:
-        return "TorchAOConfig()"
+        return f"TorchAOConfig({quant_type})"
 
     def get_name(self) -> str:
         return "torchao"
@@ -36,19 +36,18 @@ class TorchAOConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # The AWQ kernel only supports Turing or newer GPUs.
         return 75
 
     @staticmethod
     def get_config_filenames() -> List[str]:
         # TODO
-        print("get config file names in torchao")
-        return ["quant_config.json"]
+        # return ["quant_config.json"]
+        return []
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "TorchAOConfig":
-        # TODO
-        return cls()
+        quant_type = cls.get_from_keys_or(config, ["quant_type"], "int4wo-128")
+        return cls(quant_type)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["TorchAOLinearMethod"]:
@@ -74,7 +73,6 @@ class TorchAOLinearMethod(LinearMethodBase):
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        # unquantized weights
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        dtype=params_dtype),
@@ -83,14 +81,13 @@ class TorchAOLinearMethod(LinearMethodBase):
 
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
-        # print("quantized weights:", weight)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        torchao_config = self.quant_config.quant_type
+        layer.weight = torchao_quantize_param_data(layer.weight, torchao_config)
 
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # dummy_linear = torch.nn.Linear(layer.weight.shape[1], layer.weight.shape[0], bias=False)
-        # dummy_linear.weight = layer.weight
-        # quantize_(dummy_linear, int4_weight_only())
-        # layer.weight = dummy_linear.weight
         return F.linear(x, layer.weight, bias)
