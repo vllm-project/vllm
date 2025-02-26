@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch_xla.core.xla_model as xm
+import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
@@ -92,6 +93,20 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
                                      f"tp{world_size}_rank{rank}")
         xr.initialize_cache(per_rank_path, readonly=False)
+
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        self.profile_dir)
+            self.profiler = xp.start_server(9012)
+        else:
+            self.profiler = None
+
+    def start_profile(self):
+        xp.start_trace(self.profile_dir)
+
+    def stop_profile(self):
+        xp.stop_trace()
 
     def load_model(self):
         self.model_runner.load_model()
