@@ -322,6 +322,18 @@ class GroupCoordinator:
 
         return self.device_communicator.all_gather(input_, dim)
 
+    def reduce_scatter(self,
+                       input_: torch.Tensor,
+                       dim: int = -1) -> torch.Tensor:
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input_
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+
+        return self.device_communicator.reduce_scatter(input_, dim)
+
     def gather(self,
                input_: torch.Tensor,
                dst: int = 0,

@@ -729,12 +729,18 @@ class FusedMoE(torch.nn.Module):
         )
 
         if self.dp_size > 1:
-            # TODO: reduce-scatter
-            all_hidden_states = get_dp_group().all_reduce(final_hidden_states)
-            all_hidden_states = all_hidden_states.view(
-                self.dp_size, -1, all_hidden_states.size(-1))
-            final_hidden_states = all_hidden_states[
-                self.dp_rank, :num_tokens, :]
+            if False:
+                all_hidden_states = get_dp_group().all_reduce(
+                    final_hidden_states)
+                all_hidden_states = all_hidden_states.view(
+                    self.dp_size, -1, all_hidden_states.size(-1))
+                final_hidden_states = all_hidden_states[
+                    self.dp_rank, :num_tokens, :]
+            else:
+                final_hidden_states = get_dp_group().reduce_scatter(
+                    final_hidden_states, 0)
+                final_hidden_states = final_hidden_states[:num_tokens, :]
+
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.)
             final_hidden_states = tensor_model_parallel_all_reduce(
