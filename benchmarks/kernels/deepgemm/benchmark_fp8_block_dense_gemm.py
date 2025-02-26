@@ -167,7 +167,7 @@ def benchmark_shape(m: int,
     baseline = results["DeepGEMM"]["time_ms"]
     for name, data in results.items():
         if name != "DeepGEMM":
-            speedup = baseline / data["time_ms"]
+            speedup = data["time_ms"] / baseline
             print(f"DeepGEMM is {speedup:.2f}x "
                   f"{'faster' if speedup > 1 else 'slower'} than {name}")
 
@@ -201,9 +201,7 @@ def run_benchmarks():
     torch.cuda.manual_seed(42)
 
     # Define benchmark shapes (m, n, k)
-    # Common matrix shapes from LLM inference
     shapes = [
-        # Batch sizes x hidden dim, output dim, hidden dim
         (8, 4096, 7168),  # Small batch
         (8, 7168, 18432),  # Small batch MLP up-proj
         (8, 18432, 7168),  # Small batch MLP down-proj
