@@ -424,7 +424,8 @@ def init_logger(name: str) -> Union["logger.Logger", _VllmLogger]:
         A logger instance (either a loguru logger or standard Logger
         with custom methods).
     """
-    if VLLM_CONFIGURE_LOGGING and _root_logger:
+    if VLLM_CONFIGURE_LOGGING and _root_logger and hasattr(
+            _root_logger, 'bind'):
         return _root_logger.bind(name=name)
 
     logger = logging.getLogger(name)
