@@ -47,7 +47,7 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.utils import resolve_obj_by_qualname
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
 
@@ -118,7 +118,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
 
 # Reminder: Please update docs/source/features/compatibility_matrix.md
 # If the feature combo become valid
-class SpecDecodeWorker(LoraNotSupportedWorkerBase):
+class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     """Worker which implements speculative decoding.
 
     Speculative decoding reduces decoding per-token latency by using a proposal

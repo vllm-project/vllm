@@ -14,16 +14,16 @@ from vllm.config import LoRAConfig
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora, QKVParallelLinearWithShardedLora,
+    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLora,
+                              LinearScalingRotaryEmbeddingWithLoRA,
                               LogitsProcessorWithLoRA, LoRAMapping,
                               MergedColumnParallelLinearWithLoRA,
-                              MergedQKVParallelLinearWithLora,
-                              QKVParallelLinearWithLora,
+                              MergedQKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
@@ -866,9 +866,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                        bias=False,
                                        params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = (MergedQKVParallelLinearWithLora(linear)
+            lora_linear = (MergedQKVParallelLinearWithLoRA(linear)
                            if not fully_shard else
-                           MergedQKVParallelLinearWithShardedLora(linear))
+                           MergedQKVParallelLinearWithShardedLoRA(linear))
         else:
             linear = QKVParallelLinear(4096,
                                        64,
@@ -876,9 +876,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                        bias=False,
                                        params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = QKVParallelLinearWithLora(
+            lora_linear = QKVParallelLinearWithLoRA(
                 linear
-            ) if not fully_shard else QKVParallelLinearWithShardedLora(linear)
+            ) if not fully_shard else QKVParallelLinearWithShardedLoRA(linear)
 
         @dataclass
         class FakeConfig:
@@ -1024,7 +1024,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
         base,
         is_neox_style,
     )
-    lora_rope = LinearScalingRotaryEmbeddingWithLora(rope)
+    lora_rope = LinearScalingRotaryEmbeddingWithLoRA(rope)
     lora_rope.set_mapping(punica_wrapper)
     lora_rope.create_lora_weights(max_loras, lora_config)
     linear_rope = get_rope(head_size, rotary_dim, max_position, base,

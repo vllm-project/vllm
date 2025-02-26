@@ -189,7 +189,7 @@ class DelegateWorkerBase(WorkerBase):
         return getattr(self.worker, attr)
 
 
-class LoraNotSupportedWorkerBase(WorkerBase):
+class LoRANotSupportedWorkerBase(WorkerBase):
     """Partial implementation of WorkerBase that raises exceptions when LoRA
     methods are invoked.
     """
