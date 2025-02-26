@@ -17,8 +17,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
-USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE and current_platform.is_rocm(
-)
+USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE \
+    and current_platform.is_rocm()
 if USE_ROCM_AITER_FMOE:
     import aiter
     import aiter.fused_moe_bf16_asm as aiter_fmoe_asm

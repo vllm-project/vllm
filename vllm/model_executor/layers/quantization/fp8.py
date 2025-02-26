@@ -33,8 +33,8 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
-USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE and current_platform.is_rocm(
-)
+USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE \
+    and current_platform.is_rocm()
 if USE_ROCM_AITER_FMOE:
     import aiter.ops as aiter_ops
 

@@ -4,11 +4,11 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.envs import VLLM_ROCM_USE_AITER_LINEAR
 from vllm.platforms import current_platform
 
-USE_ROCM_AITER_LINEAR = VLLM_ROCM_USE_AITER_LINEAR \
+USE_ROCM_AITER_LINEAR = envs.VLLM_ROCM_USE_AITER_LINEAR \
     and current_platform.is_rocm()
 if USE_ROCM_AITER_LINEAR:
     from aiter.tuned_gemm import tgemm as aiter_tgemm

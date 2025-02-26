@@ -8,12 +8,12 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+import vllm.envs as envs
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.envs import VLLM_ROCM_USE_AITER_LINEAR
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -28,7 +28,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
-USE_ROCM_AITER_LINEAR = VLLM_ROCM_USE_AITER_LINEAR \
+USE_ROCM_AITER_LINEAR = envs.VLLM_ROCM_USE_AITER_LINEAR \
     and current_platform.is_rocm()
 if USE_ROCM_AITER_LINEAR:
     from aiter.tuned_gemm import tgemm as aiter_tgemm

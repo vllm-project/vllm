@@ -5,11 +5,11 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm.envs import VLLM_ROCM_USE_AITER_NORM
+import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
-USE_ROCM_AITER_NORM = VLLM_ROCM_USE_AITER_NORM \
+USE_ROCM_AITER_NORM = envs.VLLM_ROCM_USE_AITER_NORM \
     and current_platform.is_rocm()
 if USE_ROCM_AITER_NORM:
     import aiter
