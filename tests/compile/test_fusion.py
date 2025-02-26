@@ -13,7 +13,7 @@ from vllm.compilation.reshapes import RedundantReshapesPass
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, maybe_create_device_identity)
+    CUTLASS_FP8_SUPPORTED, apply_fp8_linear, maybe_create_device_identity)
 
 from .backend import TestBackend
 
@@ -63,9 +63,8 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("static", [True, False])
-@pytest.mark.parametrize(
-    "cutlass_fp8",
-    [True, False] if envs.VLLM_TARGET_DEVICE == "cuda" else [False])
+@pytest.mark.parametrize("cutlass_fp8",
+                         [True, False] if CUTLASS_FP8_SUPPORTED else [False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
                     reason="Only test on CUDA")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
