@@ -85,6 +85,7 @@ class TorchAOLinearMethod(LinearMethodBase):
         layer.weight = torchao_quantize_param_data(layer.weight,
                                                    torchao_config)
 
+    @torch.compile
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
