@@ -28,8 +28,10 @@ from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
-                             parse_fine_tuned_lora_name, replace_submodule)
+                             parse_fine_tuned_lora_name, pooling_model_process,
+                             replace_submodule)
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
+from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
 from vllm.utils import is_pin_memory_available
@@ -333,6 +335,7 @@ class LoRAModelManager(AdapterModelManager):
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
         super().__init__(model)
+
         self.supported_lora_modules = get_supported_lora_modules(self.model)
         assert self.supported_lora_modules, "No supported LoRA modules found in"
         f"{self.model.__class__.__name__}."
@@ -348,6 +351,7 @@ class LoRAModelManager(AdapterModelManager):
             # In case the model only supports LoRA for
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping"))
+        self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: Dict[str, List[str]] = {}
         self.modules: Dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a Set for compatibility with LRUCache.
@@ -387,6 +391,8 @@ class LoRAModelManager(AdapterModelManager):
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
+            if self.is_pooling_model:
+                module_name = pooling_model_process(module_name)
             module_lora = lora_model.get_lora(module_name)
             if module_lora:
                 module_lora.optimize()
@@ -624,6 +630,8 @@ class LoRAModelManager(AdapterModelManager):
             replaced_module: Set[str] = set()
             has_replacement = False
             for r in new_module_names:
+                if self.is_pooling_model:
+                    r = pooling_model_process(r)
                 lora = lora_model.get_lora(r)
                 replacement_loras.append(lora)
                 if lora:
@@ -635,6 +643,8 @@ class LoRAModelManager(AdapterModelManager):
                 if replacement_loras[i]:
                     continue
                 replacement_loras[i] = None
+            if self.is_pooling_model:
+                module_name = pooling_model_process(module_name)
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
             # Remove the modules that have been replaced.

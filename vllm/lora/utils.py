@@ -196,6 +196,11 @@ def get_supported_lora_modules(model: nn.Module) -> List[str]:
     return list(supported_lora_modules)
 
 
+def pooling_model_process(org_module_name) -> str:
+    # HACK: this is a temporary solution to handle pool models
+    return org_module_name.replace("model.", "")
+
+
 def get_adapter_absolute_path(lora_path: str) -> str:
     """
     Resolves the given lora_path to an absolute local path.
