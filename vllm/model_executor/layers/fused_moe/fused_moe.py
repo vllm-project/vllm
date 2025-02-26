@@ -1158,13 +1158,12 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                              topk_weights: torch.Tensor,
                              topk_ids: torch.Tensor,
                              use_fp8_w8a8: bool = False,
-                             use_fp8_blockscale: bool = False,
                              w1_scale: Optional[torch.Tensor] = None,
                              w2_scale: Optional[torch.Tensor] = None,
                              block_shape: Optional[List[int]] = None,
                              expert_mask: Optional[torch.Tensor] = None):
 
-    if use_fp8_blockscale:
+    if envs.VLLM_ROCM_USE_AITER_BSCALED_MOE and use_fp8_w8a8:
         local_E = E = w1.shape[0]
         if expert_mask is not None:
             E = expert_mask.numel()
@@ -1236,7 +1235,6 @@ def fused_experts(hidden_states: torch.Tensor,
                   use_fp8_w8a8: bool = False,
                   use_int8_w8a16: bool = False,
                   use_int4_w4a16: bool = False,
-                  use_fp8_blockscale: bool = False,
                   global_num_experts: int = -1,
                   expert_map: Optional[torch.Tensor] = None,
                   w1_scale: Optional[torch.Tensor] = None,
@@ -1249,8 +1247,8 @@ def fused_experts(hidden_states: torch.Tensor,
                   expert_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     if USE_ROCM_AITER_FMOE:
         rocm_aiter_fused_experts(hidden_states, w1, w2, topk_weights, topk_ids,
-                                 use_fp8_w8a8, use_fp8_blockscale, w1_scale,
-                                 w2_scale, block_shape, expert_mask)
+                                 use_fp8_w8a8, w1_scale, w2_scale, block_shape,
+                                 expert_mask)
     if inplace:
         torch.ops.vllm.inplace_fused_experts(
             hidden_states, w1, w2, topk_weights, topk_ids, use_fp8_w8a8,
