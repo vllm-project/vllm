@@ -333,7 +333,7 @@ class VPTQConfig(QuantizationConfig):
         return cls(config_for_layers, shared_layer_config)
 
     def get_config_for_key(self, prefix, key):
-        merged_name = '.'.join([prefix,key])
+        merged_name = '.'.join([prefix, key])
         if merged_name in self.config_for_layers:
             return self.config_for_layers[merged_name]
         elif key in self.shared_layer_config:
@@ -354,7 +354,8 @@ class VPTQConfig(QuantizationConfig):
                 }
             elif linear_name == "gate_up_proj":
                 quant_config = {
-                    "gate_proj": self.get_config_for_key(base_name, "gate_proj"),
+                    "gate_proj": 
+                    self.get_config_for_key(base_name, "gate_proj"),
                     "up_proj": self.get_config_for_key(base_name, "up_proj"),
                 }
             else:
