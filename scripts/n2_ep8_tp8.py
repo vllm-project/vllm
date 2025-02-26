@@ -29,6 +29,7 @@ parser.add_argument("--nprompts", type=int, default=4, help="The number of promp
 parser.add_argument("--random", action="store_true", help="Randomly sample prompts.")
 # add mode
 parser.add_argument("--mode", type=str, default=None, required=False, help="The mode.")
+parser.add_argument("--fp8_inc", action="store_true", help="Using FP8 KV cache.")
 args = parser.parse_args()
 
 # os.environ["VLLM_SKIP_WARMUP"] = "true"
@@ -238,17 +239,32 @@ if __name__ == "__main__":
     else:
         quantization = "inc_q" if args.mode == "q" else "inc_p"
         if quantization == "inc_q":
-            llm = LLM(
-                model=model, 
-                tokenizer=args.tokenizer,
-                tensor_parallel_size=args.tp_size,
-                distributed_executor_backend='mp',
-                trust_remote_code=True,
-                quantization=quantization,
-                weights_load_device="cpu",
-                max_model_len=2048,
-                dtype="bfloat16",
-            )
+            if args.fp8_inc:
+                print(f">>>>>>>>>>>>>> Using FP8 KV cache.")
+                llm = LLM(
+                    model=model, 
+                    tokenizer=args.tokenizer,
+                    tensor_parallel_size=args.tp_size,
+                    distributed_executor_backend='mp',
+                    trust_remote_code=True,
+                    quantization=quantization,
+                    weights_load_device="cpu",
+                    kv_cache_dtype="fp8_inc",
+                    max_model_len=2048,
+                    dtype="bfloat16",
+                )
+            else:
+                llm = LLM(
+                    model=model, 
+                    tokenizer=args.tokenizer,
+                    tensor_parallel_size=args.tp_size,
+                    distributed_executor_backend='mp',
+                    trust_remote_code=True,
+                    quantization=quantization,
+                    weights_load_device="cpu",
+                    max_model_len=2048,
+                    dtype="bfloat16",
+                )
         else:
             llm = LLM(
                 model=model, 
