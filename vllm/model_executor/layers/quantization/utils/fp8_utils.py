@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -79,6 +80,25 @@ def apply_w8a8_block_fp8_linear(
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)
+
+
+def apply_w8a8_block_fp8_linear_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+    return torch.empty(output_shape, dtype=input.dtype, device=input.device)
+
+
+direct_register_custom_op(
+    op_name="apply_w8a8_block_fp8_linear",
+    op_func=apply_w8a8_block_fp8_linear,
+    mutates_args=[],
+    fake_impl=apply_w8a8_block_fp8_linear_fake,
+)
 
 
 # Unify the interface between `apply_w8a8_block_fp8_linear` and
