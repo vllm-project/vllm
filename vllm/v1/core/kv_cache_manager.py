@@ -71,7 +71,8 @@ class KVCacheManager:
             int, KVCacheBlock]] = defaultdict(dict)
 
         # NOTE: this is used in `self._get_cached_block` for better performance
-        self.cached_block_hash_to_block_get = self.cached_block_hash_to_block.get
+        self.cached_block_hash_to_block_get = \
+            self.cached_block_hash_to_block.get
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -312,7 +313,8 @@ class KVCacheManager:
 
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = defaultdict(dict)
-        self.cached_block_hash_to_block_get = self.cached_block_hash_to_block.get
+        self.cached_block_hash_to_block_get = \
+            self.cached_block_hash_to_block.get
 
         # Remove all hashes from all blocks.
         for block in self.block_pool:
