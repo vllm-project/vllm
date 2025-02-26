@@ -1408,7 +1408,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
-                    head_size=self.head_size,
+                    head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
                 )
             elif attn_module.attn_type in (AttentionType.ENCODER,
