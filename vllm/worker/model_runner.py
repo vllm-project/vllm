@@ -53,8 +53,8 @@ from vllm.utils import (DeviceMemoryProfiler, GiB_bytes, PyObjectCache,
                         is_pin_memory_available, supports_dynamo,
                         weak_ref_tensor)
 from vllm.worker.model_runner_base import (
-    ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
-    _add_attn_metadata_broadcastable_dict,
+    InputProcessingError, ModelRunnerBase, ModelRunnerInputBase,
+    ModelRunnerInputBuilderBase, _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
@@ -1216,7 +1216,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         """
         self.builder.prepare(finished_requests_ids)
         for seq_group_metadata in seq_group_metadata_list:
-            self.builder.add_seq_group(seq_group_metadata)
+            try:
+                self.builder.add_seq_group(seq_group_metadata)
+            except Exception as e:
+                # Raise an exception that tracks the ID of the bad request
+                raise InputProcessingError(seq_group_metadata.request_id,
+                                           str(e)) from e
 
         self.builder.reset_cached_inter_data()
 
