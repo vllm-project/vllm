@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Sequence
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
@@ -14,22 +13,15 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputs, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo,
-                                        BoundPromptReplacement,
-                                        PlaceholderFeaturesInfo,
-                                        PromptReplacement,
-                                        PromptReplacementDetails,
-                                        decode_tokens, encode_tokens,
-                                        find_text_matches, find_token_matches,
-                                        replace_text_matches,
-                                        replace_token_matches)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptReplacementDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel, get_max_siglip_image_tokens
@@ -132,11 +124,11 @@ class PaliGemmaMultiModalProcessor(
             tokenizer = self.info.get_tokenizer()
             prompt_ids = tokenizer.encode(prompt)
             # Paligemma2 is NOT adding <bos> token at the beginning of the prompt
-            # Adding <bos> token (value 2) to adapt with prompt replacement
+            # Adding <bos> token (tokenizer.bos_token_id) to adapt with prompt replacement
             if len(prompt_ids) == 0:
-                prompt_ids = [2]
-            elif prompt_ids[0] != 2:
-                prompt_ids = [2] + prompt_ids
+                prompt_ids = [tokenizer.bos_token_id]
+            elif prompt_ids[0] != tokenizer.bos_token_id:
+                prompt_ids = [tokenizer.bos_token_id] + prompt_ids
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         return super()._call_hf_processor(
@@ -151,6 +143,20 @@ class PaliGemmaMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        tokenizer = self.info.get_tokenizer()
+        # Adding <bos> token (tokenizer.bos_token_id) to match with _call_hf_processor
+        if len(prompt_tokens) == 0:
+            tokens_with_bos = [tokenizer.bos_token_id]
+        elif prompt_tokens[0] != tokenizer.bos_token_id:
+            tokens_with_bos = [tokenizer.bos_token_id] + prompt_tokens
+        else:
+            tokens_with_bos = prompt_tokens
+        return tokens_with_bos
 
     def _get_prompt_replacements(
         self,
@@ -168,92 +174,40 @@ class PaliGemmaMultiModalProcessor(
         bos_token_id = tokenizer.bos_token_id
         assert isinstance(bos_token_id, int)
 
+        # Adding <bos> token at the beginning based on add_bos_token variable.
+        # Always adding <bos> token at the end of the images tokens and before the text prompt
+        # according to Paligemma's format
+        if tokenizer.add_bos_token:
+            replacement_tokens = [bos_token_id] + image_tokens + [bos_token_id]
+        else:
+            replacement_tokens = image_tokens + [bos_token_id]
+
         return [
             PromptReplacement(
                 modality="image",
                 target=[bos_token_id],
                 replacement=PromptReplacementDetails(
-                    full=image_tokens + [bos_token_id],
+                    full=replacement_tokens,
                     features=image_tokens,
                 ),
             )
         ]
 
-    def _apply_prompt_replacements(
+    def apply(
         self,
-        token_ids: list[int],
-        mm_prompt_repls: Mapping[str, Sequence[BoundPromptReplacement]],
-        mm_item_counts: Mapping[str, int],
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        tokenizer = self.info.get_tokenizer()
-
-        mm_token_matches = {
-            modality: find_token_matches(token_ids, prompt_repls)
-            for modality, prompt_repls in mm_prompt_repls.items()
-        }
-        mm_match_counts = {
-            modality: len(matches)
-            for modality, matches in mm_token_matches.items()
-        }
-
-        # If the search text does not represent a special token,
-        # it may have different token IDs in the prompt, because
-        # the tokens may go across the boundaries of the search text.
-        # ----
-        # e.g. when searching for "foo" in "food", if "food" itself makes
-        # up a token, then the token ID of "foo" will not appear at all
-        # ----
-        # Since it is inefficient to search for all possible tokenizations
-        # of the search text in the prompt, we instead perform string
-        # replacement on the decoded token IDs, then encode them back.
-        if all(
-            mm_match_counts.get(modality, 0) >= item_count
-            for modality, item_count in mm_item_counts.items()
-        ):  # yapf: disable
-            token_ids = replace_token_matches(
-                token_ids,
-                mm_token_matches,
-                mm_item_counts,
-            )
-
-            text = decode_tokens(tokenizer, token_ids)
-            matched_repls = {
-                modality: [match.prompt_repl for match in token_matches]
-                for modality, token_matches in mm_token_matches.items()
-            }
-        else:
-            text = decode_tokens(tokenizer, token_ids)
-
-            mm_text_matches = {
-                modality: find_text_matches(text, prompt_repls)
-                for modality, prompt_repls in mm_prompt_repls.items()
-            }
-            text = replace_text_matches(
-                text,
-                mm_text_matches,
-                mm_item_counts,
-            )
-
-            token_ids = encode_tokens(tokenizer,
-                                      text,
-                                      add_special_tokens=False)
-            matched_repls = {
-                modality: [match.prompt_repl for match in token_matches]
-                for modality, token_matches in mm_text_matches.items()
-            }
-
-        placeholders = self._find_mm_placeholders(
-            matched_repls,
-            token_ids,
-            mm_item_counts,
-        )
-
-        # Force to add newline at the end of prompt due to paligemma's format
-        if len(token_ids) and token_ids[-1] != 109:
-            token_ids.append(109)
-            text += "\n"
-
-        return token_ids, text, placeholders
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalInputs:
+        multimodelinputs = super().apply(prompt, mm_data,
+                                         hf_processor_mm_kwargs)
+        # Force to add newline at the end of prompt according to paligemma's format
+        prompt_token_ids = multimodelinputs["prompt_token_ids"]
+        if len(prompt_token_ids) and prompt_token_ids[-1] != 108:
+            prompt_token_ids.append(108)
+            multimodelinputs["prompt_token_ids"] = prompt_token_ids
+            multimodelinputs["prompt"] += "\n"
+        return multimodelinputs
 
 
 @MULTIMODAL_REGISTRY.register_processor(
