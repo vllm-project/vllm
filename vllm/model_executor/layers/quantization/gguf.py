@@ -203,11 +203,6 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
-        assert intermediate_size_per_partition % 512 == 0, \
-                "GGUF requires a block size of 512, you are running with " \
-                f"{intermediate_size_per_partition}, please " \
-                "adjust your tensor parallel size"
-
         tensor_shape = (num_experts, 2 * intermediate_size_per_partition,
                         hidden_size)
         #gate up proj
