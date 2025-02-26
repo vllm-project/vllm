@@ -533,7 +533,7 @@ class MLACommonMetadata(AttentionMetadata):
                 not in supported_head_sizes:
             raise ValueError(
                 f"Only {supported_head_sizes} are supported for head_dim,",
-                f"received {self.head_dim}.")
+                f" received {self.head_dim}.")
 
     @property
     def prefill_metadata(self) -> Optional["MLACommonMetadata"]:
@@ -1130,13 +1130,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 )
 
         def get_layer_weight(layer):
-            if hasattr(layer, "weight"):
-                return layer.weight
-            elif hasattr(layer, "qweight"):
-                return layer.qweight
-            else:
-                raise AttributeError(
-                    f"Layer '{layer}' has neither weight nor qweight")
+            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
+            for attr in WEIGHT_NAMES:
+                if hasattr(layer, attr):
+                    return getattr(layer, attr)
+            raise AttributeError(
+                f"Layer '{layer}' has no recognized weight attribute:"
+                f" {WEIGHT_NAMES}.")
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
