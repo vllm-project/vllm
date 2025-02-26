@@ -517,33 +517,33 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # use aiter ops unless specifically disabled
     "VLLM_ROCM_USE_AITER":
-    lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1")),
 
     # use aiter moe op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_MOE":
     lambda:
-    (os.getenv("VLLM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_USE_AITER_MOE", "True").lower() in
+    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
      ("true", "1")),
 
     # use aiter block scaled moe op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_BSCALED_MOE":
-    lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in
+    lambda: (os.getenv("LLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_BSCALED_MOE",
                                          "True").lower() in ("true", "1")),
 
     # use aiter linear op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_LINEAR":
-    lambda:
-    (os.getenv("VLLM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_USE_AITER_LINEAR", "True").lower() in
-     ("true", "1")),
+    lambda: (os.getenv("LLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True"
+                                         ).lower() in ("true", "1")),
 
     # use aiter rms norm op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_NORM":
     lambda:
     (os.getenv("VLLM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_USE_AITER_NORM", "True").lower() in
+     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_NORM", "True").lower() in
      ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm

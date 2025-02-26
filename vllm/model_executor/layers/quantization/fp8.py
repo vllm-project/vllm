@@ -36,7 +36,7 @@ from vllm.platforms import current_platform
 USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE \
     and current_platform.is_rocm()
 if USE_ROCM_AITER_FMOE:
-    import aiter.ops as aiter_ops
+    from aiter.ops.shuffle import aiter_shuffle_weight
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -668,10 +668,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     -1).expand((-1, layer.w2_weight.shape[1], -1))
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
-                layer.w13_weight = torch.nn.Parameter(aiter_ops.shuffle_weight(
+                layer.w13_weight = torch.nn.Parameter(aiter_shuffle_weight(
                     layer.w13_weight),
                                                       requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(aiter_ops.shuffle_weight(
+                layer.w2_weight = torch.nn.Parameter(aiter_shuffle_weight(
                     layer.w2_weight),
                                                      requires_grad=False)
 

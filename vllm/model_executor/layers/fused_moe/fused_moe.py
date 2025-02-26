@@ -21,7 +21,7 @@ USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE \
     and current_platform.is_rocm()
 if USE_ROCM_AITER_FMOE:
     import aiter
-    import aiter.fused_moe_bf16_asm as aiter_fmoe_asm
+    import aiter.fused_moe_bf16_asm as aiter_asm_fmoe
 
 logger = init_logger(__name__)
 
@@ -1179,7 +1179,7 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
             sorted_expert_ids,
             num_valid_ids,
             out_asm,
-        ) = aiter_fmoe_asm.moe_sorting_ck(topk_ids,
+        ) = aiter_asm_fmoe.moe_sorting_ck(topk_ids,
                                           topk_weights,
                                           E,
                                           model_dim,
@@ -1207,7 +1207,7 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
         return out_asm
 
     if use_fp8_w8a8:
-        return aiter_fmoe_asm.asm_moe(hidden_states=hidden_states,
+        return aiter_asm_fmoe.asm_moe(hidden_states=hidden_states,
                                       w1=w1,
                                       w2=w2,
                                       topk_weight=topk_weights,
@@ -1222,8 +1222,7 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                             w1=w1,
                             w2=w2,
                             topk_weights=topk_weights,
-                            topk_ids=topk_ids,
-                            expert_mask=expert_mask)
+                            topk_ids=topk_ids)
 
 
 def fused_experts(hidden_states: torch.Tensor,
@@ -1246,9 +1245,9 @@ def fused_experts(hidden_states: torch.Tensor,
                   block_shape: Optional[List[int]] = None,
                   expert_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     if USE_ROCM_AITER_FMOE:
-        rocm_aiter_fused_experts(hidden_states, w1, w2, topk_weights, topk_ids,
-                                 use_fp8_w8a8, w1_scale, w2_scale, block_shape,
-                                 expert_mask)
+        return rocm_aiter_fused_experts(hidden_states, w1, w2, topk_weights,
+                                        topk_ids, use_fp8_w8a8, w1_scale,
+                                        w2_scale, block_shape, expert_mask)
     if inplace:
         torch.ops.vllm.inplace_fused_experts(
             hidden_states, w1, w2, topk_weights, topk_ids, use_fp8_w8a8,
