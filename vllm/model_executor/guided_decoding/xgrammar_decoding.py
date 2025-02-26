@@ -3,7 +3,6 @@
 # noqa: UP007
 from __future__ import annotations
 
-import copy
 import json
 import re
 from dataclasses import dataclass, field
@@ -348,5 +347,26 @@ class XGrammarLogitsProcessor:
         return scores
 
     def clone(self) -> XGrammarLogitsProcessor:
-        """Deepcopy due to per-sequence state in the matchers"""
-        return copy.deepcopy(self)
+        """Create a new instance with shared compiled grammar
+          but separate state"""
+        new_processor = XGrammarLogitsProcessor(self.config)
+
+        # Share the compiled grammar context (immutable after compilation)
+        new_processor.ctx = self.ctx
+
+        # Create fresh matchers for the new sequence
+        if self.ctx is not None:
+            new_processor.matchers = [
+                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
+            ]
+
+        # Create a new token bitmask with the same size
+        if hasattr(self, 'token_bitmask') and self.token_bitmask is not None:
+            new_processor.token_bitmask = self.token_bitmask
+
+        # Copy simple attributes
+        new_processor.batch_size = self.batch_size
+        # Reset prefilled state for new sequence
+        new_processor.prefilled = False
+
+        return new_processor
