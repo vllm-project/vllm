@@ -1040,6 +1040,7 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           w2: torch.Tensor,
                           topk_weights: torch.Tensor,
                           topk_ids: torch.Tensor,
+                          activation: str = "silu",
                           use_fp8_w8a8: bool = False,
                           use_int8_w8a16: bool = False,
                           use_int4_w4a16: bool = False,
@@ -1053,9 +1054,10 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           a2_scale: Optional[torch.Tensor] = None,
                           block_shape: Optional[List[int]] = None) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
-                       use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16,
-                       global_num_experts, expert_map, w1_scale, w2_scale,
-                       w1_zp, w2_zp, a1_scale, a2_scale, block_shape)
+                       activation, use_fp8_w8a8, use_int8_w8a16,
+                       use_int4_w4a16, global_num_experts, expert_map,
+                       w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
+                       block_shape)
 
 
 def inplace_fused_experts_fake(
@@ -1064,6 +1066,7 @@ def inplace_fused_experts_fake(
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        activation: str = "silu",
         use_fp8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
@@ -1093,6 +1096,7 @@ def outplace_fused_experts(
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        activation: str = "silu",
         use_fp8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
@@ -1106,7 +1110,7 @@ def outplace_fused_experts(
         a2_scale: Optional[torch.Tensor] = None,
         block_shape: Optional[List[int]] = None) -> torch.Tensor:
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
-                              False, use_fp8_w8a8, use_int8_w8a16,
+                              False, activation, use_fp8_w8a8, use_int8_w8a16,
                               use_int4_w4a16, global_num_experts, expert_map,
                               w1_scale, w2_scale, w1_zp, w2_zp, a1_scale,
                               a2_scale, block_shape)
@@ -1118,6 +1122,7 @@ def outplace_fused_experts_fake(
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        activation: str = "silu",
         use_fp8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
@@ -1147,6 +1152,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   topk_weights: torch.Tensor,
                   topk_ids: torch.Tensor,
                   inplace: bool = False,
+                  activation: str = "silu",
                   use_fp8_w8a8: bool = False,
                   use_int8_w8a16: bool = False,
                   use_int4_w4a16: bool = False,
@@ -1162,15 +1168,17 @@ def fused_experts(hidden_states: torch.Tensor,
 
     if inplace:
         torch.ops.vllm.inplace_fused_experts(
-            hidden_states, w1, w2, topk_weights, topk_ids, use_fp8_w8a8,
-            use_int8_w8a16, use_int4_w4a16, global_num_experts, expert_map,
-            w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale, block_shape)
+            hidden_states, w1, w2, topk_weights, topk_ids, activation,
+            use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16, global_num_experts,
+            expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
+            block_shape)
         return hidden_states
     else:
         return torch.ops.vllm.outplace_fused_experts(
-            hidden_states, w1, w2, topk_weights, topk_ids, use_fp8_w8a8,
-            use_int8_w8a16, use_int4_w4a16, global_num_experts, expert_map,
-            w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale, block_shape)
+            hidden_states, w1, w2, topk_weights, topk_ids, activation,
+            use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16, global_num_experts,
+            expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
+            block_shape)
 
 
 def fused_experts_impl(hidden_states: torch.Tensor,
@@ -1179,6 +1187,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
                        inplace: bool = False,
+                       activation: str = "silu",
                        use_fp8_w8a8: bool = False,
                        use_int8_w8a16: bool = False,
                        use_int4_w4a16: bool = False,
@@ -1303,8 +1312,14 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int4_w4a16=use_int4_w4a16,
                                 block_shape=block_shape)
 
-        torch.ops._C.silu_and_mul(intermediate_cache2,
-                                  intermediate_cache1.view(-1, N))
+        if activation == "silu":
+            torch.ops._C.silu_and_mul(intermediate_cache2,
+                                      intermediate_cache1.view(-1, N))
+        elif activation == "gelu":
+            torch.ops._C.gelu_and_mul(intermediate_cache2,
+                                      intermediate_cache1.view(-1, N))
+        else:
+            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
         invoke_fused_moe_kernel(intermediate_cache2,
                                 w2,
@@ -1339,6 +1354,7 @@ def fused_moe(
     topk: int,
     renormalize: bool,
     inplace: bool = False,
+    activation: str = "silu",
     use_grouped_topk: bool = False,
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
@@ -1370,6 +1386,8 @@ def fused_moe(
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     - inplace (bool): If True, perform the operation in-place.
         Defaults to False.
+    - activation (str): The activation function to apply after the first
+        MoE layer.
     - num_expert_group: Optional[int]: additional parameter for grouped_topk
     - topk_group: Optional[int]: additional parameter for grouped_topk
     - use_grouped_topk: If True, use grouped_topk instead of fused_topk
@@ -1420,6 +1438,7 @@ def fused_moe(
                          topk_weights,
                          topk_ids,
                          inplace=inplace,
+                         activation=activation,
                          use_fp8_w8a8=use_fp8_w8a8,
                          use_int8_w8a16=use_int8_w8a16,
                          use_int4_w4a16=use_int4_w4a16,
