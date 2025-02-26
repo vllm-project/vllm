@@ -54,13 +54,10 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self.distributed_init_method = "env://"
             self.is_driver_worker = self.rank == 0
 
-            logger.info("Neuron multi-node parameters",
-                        extra={
-                            "Rank": self.rank,
-                            "distributed_init_method":
-                            self.distributed_init_method,
-                            "is_driver_worker": self.is_driver_worker
-                        })
+            logger.info(
+                "Neuron multi-node parameters: Rank: %s, "
+                "distributed_init_method: %s, is_driver_worker: %s", self.rank,
+                self.distributed_init_method, self.is_driver_worker)
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing

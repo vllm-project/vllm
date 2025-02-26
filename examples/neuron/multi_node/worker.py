@@ -35,7 +35,7 @@ def main():
     try:
         start_worker()
     except Exception as e:
-        logger.error("Failed starting worker", extra={"error": e})
+        logger.error("Failed starting worker %s", e)
         exit(1)
 
 
