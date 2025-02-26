@@ -5,7 +5,8 @@ from vllm import LLM
 llm = LLM(
     model="Qwen/Qwen2-1.5B",
     task="generate",
-    tensor_parallel_size=8
+    tensor_parallel_size=8,
+    enforce_eager=True,
 )
 
 # Use a chat-style prompt that includes the system and user messages.
