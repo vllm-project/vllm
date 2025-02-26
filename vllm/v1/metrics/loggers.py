@@ -2,7 +2,7 @@
 
 import time
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import prometheus_client
@@ -233,6 +233,22 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
 
+        self.gauge_lora_info: Optional[prometheus_client.Gauge] = None
+        if vllm_config.lora_config is not None:
+            self.labelname_max_lora = "max_lora"
+            self.labelname_waiting_lora_adapters = "waiting_lora_adapters"
+            self.labelname_running_lora_adapters = "running_lora_adapters"
+            self.max_lora = vllm_config.lora_config.max_loras
+            self.gauge_lora_info = \
+                prometheus_client.Gauge(
+                    name="vllm:lora_requests_info",
+                    documentation="Running stats on lora requests.",
+                    labelnames=[
+                        self.labelname_max_lora,
+                        self.labelname_waiting_lora_adapters,
+                        self.labelname_running_lora_adapters,
+                    ])
+
         self.log_metrics_info("cache_config", vllm_config.cache_config)
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
@@ -294,6 +310,19 @@ class PrometheusStatLogger(StatLoggerBase):
             self.histogram_queue_time_request.observe(queue_time)
         for prefill_time in iteration_stats.prefill_times_iter:
             self.histogram_prefill_time_request.observe(prefill_time)
+
+        if self.gauge_lora_info is not None:
+            running_lora_adapters = \
+                ",".join(iteration_stats.running_lora_adapters.keys())
+            waiting_lora_adapters = \
+                ",".join(iteration_stats.waiting_lora_adapters.keys())
+            lora_info_labels = {
+                self.labelname_running_lora_adapters: running_lora_adapters,
+                self.labelname_waiting_lora_adapters: waiting_lora_adapters,
+                self.labelname_max_lora: self.max_lora,
+            }
+            self.gauge_lora_info.labels(**lora_info_labels)\
+                                .set_to_current_time()
 
     @staticmethod
     def _unregister_vllm_metrics():

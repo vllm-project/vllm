@@ -37,7 +37,6 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 from typing_extensions import TypeVar
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
@@ -674,7 +673,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         for modality, count in counts.items():
             if modality not in inputs or not inputs[modality]:
                 raise ValueError(f"None input data of {modality}."
-                                 "But prompt requires.")
+                                 " But prompt requires.")
             counter_key = self.get_modality_num_counter(modality)
             if len(inputs[modality][counter_key]) != count:
                 raise ValueError(f"The prompt requires {count} "
@@ -1030,8 +1029,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
@@ -1051,8 +1048,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         output = self.llm.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=vlm_embeddings,
         )
