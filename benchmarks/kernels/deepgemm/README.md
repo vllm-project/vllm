@@ -17,12 +17,18 @@ uv pip install -e DeepGEMM
 
 ```
 python benchmark_fp8_block_dense_gemm_table.py
-INFO 02-26 21:35:35 [__init__.py:207] Automatically detected platform cuda.
+INFO 02-26 21:55:13 [__init__.py:207] Automatically detected platform cuda.
 ===== STARTING FP8 GEMM BENCHMARK =====
 PyTorch version: 2.5.1+cu124
 CUDA version: 12.4
 Triton version: 3.1.0
 Using device: NVIDIA H100 80GB HBM3
+WARNING 02-26 21:55:15 [fp8_utils.py:458] Using default W8A8 Block FP8 kernel config. Performance might be sub-optimal! Config file not found at /home/mgoin/code/vllm/vllm/model_executor/layers/quantization/utils/configs/N=4096,K=7168,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=[128,128].json
+INFO 02-26 21:55:15 [fp8_utils.py:449] Using configuration from /home/mgoin/code/vllm/vllm/model_executor/layers/quantization/utils/configs/N=7168,K=18432,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=[128,128].json for W8A8 Block FP8 kernel.
+WARNING 02-26 21:55:16 [fp8_utils.py:458] Using default W8A8 Block FP8 kernel config. Performance might be sub-optimal! Config file not found at /home/mgoin/code/vllm/vllm/model_executor/layers/quantization/utils/configs/N=18432,K=7168,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=[128,128].json
+WARNING 02-26 21:55:17 [fp8_utils.py:458] Using default W8A8 Block FP8 kernel config. Performance might be sub-optimal! Config file not found at /home/mgoin/code/vllm/vllm/model_executor/layers/quantization/utils/configs/N=24576,K=1536,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=[128,128].json
+INFO 02-26 21:55:17 [fp8_utils.py:449] Using configuration from /home/mgoin/code/vllm/vllm/model_executor/layers/quantization/utils/configs/N=32768,K=512,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=[128,128].json for W8A8 Block FP8 kernel.
+INFO 02-26 21:55:17 [fp8_utils.py:449] Using configuration from /home/mgoin/code/vllm/vllm/model_executor/layers/quantization/utils/configs/N=7168,K=16384,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=[128,128].json for W8A8 Block FP8 kernel.
 
 ===== PERFORMANCE COMPARISON =====
 
@@ -30,86 +36,92 @@ DeepGEMM Implementation:
 +------+-------+-------+-----------+--------+--------+
 | m    | n     | k     | Time (μs) | TFLOPS | GB/s   |
 +------+-------+-------+-----------+--------+--------+
-|    8 |  4096 |  7168 | 85.1      | 5.5    | 346.3  |
-|    8 |  7168 | 18432 | 83.9      | 25.2   | 1577.3 |
-|    8 | 18432 |  7168 | 84.1      | 25.1   | 1576.0 |
-|   64 | 24576 |  1536 | 86.1      | 56.1   | 476.0  |
-|   64 | 32768 |   512 | 84.0      | 25.6   | 250.1  |
-|   64 |  7168 | 16384 | 120.3     | 124.9  | 992.5  |
-|   64 |  4096 |  7168 | 84.5      | 44.5   | 359.3  |
-|  128 |  4096 |  7168 | 85.0      | 88.4   | 368.5  |
-|  128 |  7168 | 18432 | 88.3      | 383.0  | 1543.5 |
-|  128 | 18432 |  7168 | 86.4      | 391.4  | 1594.3 |
-| 1024 |  4096 |  7168 | 91.7      | 655.5  | 491.5  |
-| 1024 | 18432 |  7168 | 283.3     | 955.0  | 625.4  |
-| 2048 |  4096 |  7168 | 177.6     | 677.1  | 342.4  |
-| 4096 |  4096 |  7168 | 338.9     | 709.6  | 272.2  |
+|    8 |  4096 |  7168 | 102.9     | 4.6    | 286.4  |
+|    8 |  7168 | 18432 | 70.8      | 29.8   | 1868.8 |
+|    8 | 18432 |  7168 | 69.3      | 30.5   | 1911.8 |
+|   64 |  4096 |  7168 | 69.1      | 54.4   | 439.0  |
+|   64 |  7168 | 18432 | 69.4      | 243.6  | 1933.6 |
+|   64 | 18432 |  7168 | 70.4      | 240.3  | 1917.2 |
+|   64 | 24576 |  1536 | 70.1      | 68.9   | 584.6  |
+|   64 | 32768 |   512 | 68.4      | 31.4   | 307.1  |
+|   64 |  7168 | 16384 | 69.5      | 216.3  | 1718.5 |
+|  128 |  4096 |  7168 | 141.1     | 53.3   | 222.1  |
+|  128 |  7168 | 18432 | 71.9      | 470.5  | 1896.1 |
+|  128 | 18432 |  7168 | 69.3      | 488.2  | 1988.2 |
+| 1024 |  4096 |  7168 | 89.7      | 670.1  | 502.5  |
+| 1024 | 18432 |  7168 | 279.0     | 969.8  | 635.2  |
+| 2048 |  4096 |  7168 | 175.1     | 687.0  | 347.4  |
+| 4096 |  4096 |  7168 | 335.4     | 717.0  | 275.1  |
 +------+-------+-------+-----------+--------+--------+
 
 vLLM Triton Implementation:
 +------+-------+-------+-----------+--------+--------+--------------+
 | m    | n     | k     | Time (μs) | TFLOPS | GB/s   | vs DeepGEMM  |
 +------+-------+-------+-----------+--------+--------+--------------+
-|    8 |  4096 |  7168 | 74.4      | 6.3    | 396.4  | 1.14x faster |
-|    8 |  7168 | 18432 | 89.6      | 23.6   | 1476.7 | 0.94x slower |
-|    8 | 18432 |  7168 | 116.5     | 18.1   | 1137.3 | 0.72x slower |
-|   64 | 24576 |  1536 | 37.2      | 129.9  | 1101.8 | 2.31x faster |
-|   64 | 32768 |   512 | 38.7      | 55.5   | 542.4  | 2.17x faster |
-|   64 |  7168 | 16384 | 86.7      | 173.3  | 1376.5 | 1.39x faster |
-|   64 |  4096 |  7168 | 76.9      | 48.8   | 394.4  | 1.10x faster |
-|  128 |  4096 |  7168 | 89.2      | 84.2   | 351.0  | 0.95x slower |
-|  128 |  7168 | 18432 | 142.9     | 236.8  | 954.2  | 0.62x slower |
-|  128 | 18432 |  7168 | 227.5     | 148.7  | 605.5  | 0.38x slower |
-| 1024 |  4096 |  7168 | 240.7     | 249.8  | 187.3  | 0.38x slower |
-| 1024 | 18432 |  7168 | 901.9     | 300.0  | 196.5  | 0.31x slower |
-| 2048 |  4096 |  7168 | 462.6     | 260.0  | 131.5  | 0.38x slower |
-| 4096 |  4096 |  7168 | 901.6     | 266.8  | 102.3  | 0.38x slower |
+|    8 |  4096 |  7168 | 74.0      | 6.3    | 398.2  | 1.39x faster |
+|    8 |  7168 | 18432 | 89.6      | 23.6   | 1478.1 | 0.79x slower |
+|    8 | 18432 |  7168 | 113.2     | 18.7   | 1170.4 | 0.61x slower |
+|   64 |  4096 |  7168 | 79.4      | 47.3   | 382.2  | 0.87x slower |
+|   64 |  7168 | 18432 | 98.5      | 171.7  | 1363.0 | 0.70x slower |
+|   64 | 18432 |  7168 | 119.5     | 141.5  | 1129.4 | 0.59x slower |
+|   64 | 24576 |  1536 | 37.6      | 128.4  | 1089.7 | 1.86x faster |
+|   64 | 32768 |   512 | 38.7      | 55.5   | 542.6  | 1.77x faster |
+|   64 |  7168 | 16384 | 86.1      | 174.5  | 1386.4 | 0.81x slower |
+|  128 |  4096 |  7168 | 90.7      | 82.9   | 345.4  | 1.56x faster |
+|  128 |  7168 | 18432 | 144.0     | 234.9  | 946.9  | 0.50x slower |
+|  128 | 18432 |  7168 | 229.5     | 147.4  | 600.1  | 0.30x slower |
+| 1024 |  4096 |  7168 | 242.3     | 248.2  | 186.1  | 0.37x slower |
+| 1024 | 18432 |  7168 | 897.8     | 301.4  | 197.4  | 0.31x slower |
+| 2048 |  4096 |  7168 | 463.0     | 259.7  | 131.4  | 0.38x slower |
+| 4096 |  4096 |  7168 | 901.8     | 266.7  | 102.3  | 0.37x slower |
 +------+-------+-------+-----------+--------+--------+--------------+
 
 vLLM CUTLASS Implementation:
 +------+-------+-------+-----------+--------+--------+--------------+--------------+
 | m    | n     | k     | Time (μs) | TFLOPS | GB/s   | vs DeepGEMM  | vs Triton    |
 +------+-------+-------+-----------+--------+--------+--------------+--------------+
-|    8 |  4096 |  7168 | 33.9      | 13.9   | 869.7  | 2.51x faster | 2.19x faster |
-|    8 |  7168 | 18432 | 78.9      | 26.8   | 1677.7 | 1.06x faster | 1.14x faster |
-|    8 | 18432 |  7168 | 80.3      | 26.3   | 1649.8 | 1.05x faster | 1.45x faster |
-|   64 | 24576 |  1536 | 28.3      | 170.9  | 1449.8 | 3.05x faster | 1.32x faster |
-|   64 | 32768 |   512 | 27.8      | 77.2   | 754.8  | 3.02x faster | 1.39x faster |
-|   64 |  7168 | 16384 | 78.5      | 191.6  | 1522.1 | 1.53x faster | 1.11x faster |
-|   64 |  4096 |  7168 | 36.4      | 103.2  | 833.4  | 2.32x faster | 2.11x faster |
-|  128 |  4096 |  7168 | 39.1      | 192.3  | 801.4  | 2.17x faster | 2.28x faster |
-|  128 |  7168 | 18432 | 92.9      | 364.0  | 1467.1 | 0.95x slower | 1.54x faster |
-|  128 | 18432 |  7168 | 85.6      | 395.1  | 1609.2 | 1.01x faster | 2.66x faster |
-| 1024 |  4096 |  7168 | 100.6     | 597.7  | 448.2  | 0.91x slower | 2.39x faster |
-| 1024 | 18432 |  7168 | 329.8     | 820.5  | 537.4  | 0.86x slower | 2.73x faster |
-| 2048 |  4096 |  7168 | 198.7     | 605.1  | 306.0  | 0.89x slower | 2.33x faster |
-| 4096 |  4096 |  7168 | 393.0     | 612.0  | 234.8  | 0.86x slower | 2.29x faster |
+|    8 |  4096 |  7168 | 34.6      | 13.6   | 852.3  | 2.98x faster | 2.14x faster |
+|    8 |  7168 | 18432 | 78.9      | 26.8   | 1677.3 | 0.90x slower | 1.13x faster |
+|    8 | 18432 |  7168 | 81.2      | 26.0   | 1631.1 | 0.85x slower | 1.39x faster |
+|   64 |  4096 |  7168 | 36.9      | 101.9  | 822.9  | 1.87x faster | 2.15x faster |
+|   64 |  7168 | 18432 | 87.4      | 193.4  | 1535.2 | 0.79x slower | 1.13x faster |
+|   64 | 18432 |  7168 | 85.0      | 199.0  | 1587.6 | 0.83x slower | 1.41x faster |
+|   64 | 24576 |  1536 | 28.0      | 172.8  | 1465.8 | 2.51x faster | 1.35x faster |
+|   64 | 32768 |   512 | 28.8      | 74.5   | 728.5  | 2.37x faster | 1.34x faster |
+|   64 |  7168 | 16384 | 77.9      | 193.0  | 1532.8 | 0.89x slower | 1.11x faster |
+|  128 |  4096 |  7168 | 39.1      | 192.4  | 802.0  | 3.61x faster | 2.32x faster |
+|  128 |  7168 | 18432 | 93.7      | 360.8  | 1454.2 | 0.77x slower | 1.54x faster |
+|  128 | 18432 |  7168 | 85.7      | 394.8  | 1608.0 | 0.81x slower | 2.68x faster |
+| 1024 |  4096 |  7168 | 99.7      | 603.1  | 452.2  | 0.90x slower | 2.43x faster |
+| 1024 | 18432 |  7168 | 331.3     | 816.7  | 534.9  | 0.84x slower | 2.71x faster |
+| 2048 |  4096 |  7168 | 198.3     | 606.6  | 306.7  | 0.88x slower | 2.34x faster |
+| 4096 |  4096 |  7168 | 392.2     | 613.2  | 235.3  | 0.86x slower | 2.30x faster |
 +------+-------+-------+-----------+--------+--------+--------------+--------------+
 
 ===== AVERAGE PERFORMANCE =====
 +----------------+------------+----------+---------------+
 | Implementation | Avg TFLOPS | Avg GB/s | Avg Time (ms) |
 +----------------+------------+----------+---------------+
-| DeepGEMM       | 297.65     | 772.53   | 0.13          |
-| vLLM Triton    | 142.98     | 639.56   | 0.25          |
-| vLLM CUTLASS   | 299.75     | 1011.51  | 0.11          |
+| DeepGEMM       | 310.98     | 1052.10  | 0.11          |
+| vLLM Triton    | 144.30     | 715.60   | 0.23          |
+| vLLM CUTLASS   | 286.78     | 1076.67  | 0.11          |
 +----------------+------------+----------+---------------+
 
 ===== AVERAGE SPEEDUPS =====
 +-----------------------------+--------------+
 | Comparison                  | Speedup      |
 +-----------------------------+--------------+
-| DeepGEMM vs vLLM Triton     | 1.59x faster |
-| DeepGEMM vs vLLM CUTLASS    | 0.79x slower |
-| vLLM CUTLASS vs vLLM Triton | 1.92x faster |
+| DeepGEMM vs vLLM Triton     | 1.71x faster |
+| DeepGEMM vs vLLM CUTLASS    | 0.94x slower |
+| vLLM CUTLASS vs vLLM Triton | 1.84x faster |
 +-----------------------------+--------------+
 
 ===== ACCURACY COMPARISON =====
 +----------------+-----------------------+
 | Implementation | Avg Diff vs Reference |
 +----------------+-----------------------+
-| DeepGEMM       | 0.000685              |
-| vLLM Triton    | 0.000685              |
-| vLLM CUTLASS   | 0.000685              |
+| DeepGEMM       | 0.000684              |
+| vLLM Triton    | 0.000684              |
+| vLLM CUTLASS   | 0.000684              |
 +----------------+-----------------------+
 ```

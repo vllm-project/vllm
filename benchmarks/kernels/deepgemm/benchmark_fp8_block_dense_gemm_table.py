@@ -8,7 +8,7 @@ from typing import Dict, Tuple
 import deep_gemm
 import torch
 import triton
-from deep_gemm import calc_diff, cell_div, get_col_major_tma_aligned_tensor
+from deep_gemm import calc_diff, cell_div
 
 # Import vLLM functions
 from vllm import _custom_ops as ops
@@ -79,9 +79,9 @@ def benchmark_shape(m: int,
         # A_deepgemm, A_scale_deepgemm = per_token_cast_to_fp8(A)
         A_deepgemm, A_scale_deepgemm = per_token_group_quant_fp8(
             A, block_size[1])
-        A_scale_aligned = get_col_major_tma_aligned_tensor(A_scale_deepgemm)
+        # A_scale_aligned = get_col_major_tma_aligned_tensor(A_scale_deepgemm)
         C_deepgemm = torch.empty((m, n), device='cuda', dtype=torch.bfloat16)
-        deep_gemm.gemm_fp8_fp8_bf16_nt((A_deepgemm, A_scale_aligned),
+        deep_gemm.gemm_fp8_fp8_bf16_nt((A_deepgemm, A_scale_deepgemm),
                                        (B_deepgemm, B_scale_deepgemm),
                                        C_deepgemm)
         return C_deepgemm
@@ -273,10 +273,12 @@ def run_benchmarks(verbose: bool = False):
         (8, 4096, 7168),
         (8, 7168, 18432),
         (8, 18432, 7168),
+        (64, 4096, 7168),
+        (64, 7168, 18432),
+        (64, 18432, 7168),
         (64, 24576, 1536),
         (64, 32768, 512),
         (64, 7168, 16384),
-        (64, 4096, 7168),
         (128, 4096, 7168),
         (128, 7168, 18432),
         (128, 18432, 7168),
