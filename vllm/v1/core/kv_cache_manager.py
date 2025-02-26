@@ -432,10 +432,9 @@ class KVCacheManager:
         Returns:
             The cached block if it exists, or None.
         """
-        if block_hash in self.cached_block_hash_to_block:
-            first_block_id = list(
-                self.cached_block_hash_to_block[block_hash].keys())[0]
-            return self.cached_block_hash_to_block[block_hash][first_block_id]
+        cached_block_dict = self.cached_block_hash_to_block.get(block_hash, None)
+        if cached_block_dict:
+            return next(iter(cached_block_dict.values()))
         return None
 
     def _touch(self, blocks: List[KVCacheBlock]) -> None:
