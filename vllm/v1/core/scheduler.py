@@ -603,26 +603,20 @@ class Scheduler:
             if request.use_guided_decoding:
                 grammar = request.grammar
                 assert grammar is not None
-                index = model_runner_output.req_id_to_index.get(req_id)
-                if index is not None:
-                    # accept_token advances the FSM
-                    has_accept_tokens = [
-                        grammar.accept_token(token_id)
-                        for token_id in generated_token_ids
-                    ]
-                    accepted = any(has_accept_tokens)
-                    if not accepted:
-                        grammar.rollback(len(has_accept_tokens))
-                        logger.error(
-                            "Failed to advance FSM for request %s "
-                            "for all draft "
-                            "tokens %s", req_id, generated_token_ids)
-                        stopped = True
-                    else:
-                        grammar.rollback(len(has_accept_tokens) - 1)
-                if stopped:
-                    self._free_request(request)
-                    continue
+                # accept_token advances the FSM
+                has_accept_tokens = [
+                    grammar.accept_token(token_id)
+                    for token_id in generated_token_ids
+                ]
+                accepted = any(has_accept_tokens)
+                if not accepted:
+                    logger.error(
+                        "Failed to advance FSM for request %s "
+                        "for all draft "
+                        "tokens %s", req_id, generated_token_ids)
+                    stopped = True
+                else:
+                    grammar.rollback(len(has_accept_tokens) - 1)
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
