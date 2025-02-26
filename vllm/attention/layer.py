@@ -163,8 +163,10 @@ class Attention(nn.Module):
         The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
 
-        Attention metadata (`attn_metadata`) is accessed via forward context
-        using `vllm.forward_context.get_forward_context().attn_metadata`.
+        Attention metadata (`attn_metadata`) is set using a context manager in
+        the model runner's `execute_model` method. It is accessed via forward
+        context using
+        `vllm.forward_context.get_forward_context().attn_metadata`.
         """
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
