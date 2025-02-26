@@ -32,7 +32,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
+from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -122,7 +122,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
-
+            self.rejection_sampler = RejectionSampler()
             # TODO: find a better way to check if we are using ngram.
             assert self.speculative_config.ngram_prompt_lookup_min, \
                     "Currently, only ngram spec decode is supported in V1."
@@ -939,8 +939,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
-                kv_caches=self.kv_caches,
-                attn_metadata=None,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
@@ -953,12 +951,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
-        sampling_metadata = self.input_batch.get_sampling_metadata(
-            scheduler_output.scheduled_spec_decode_tokens)
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+        sampling_metadata = self.input_batch.sampling_metadata
+        if not self.use_spec_decode:
+            sampler_output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+        else:
+            target_probs = self.model.sampler.compute_probs(
+                logits, sampling_metadata)
+            scheduled_request_ids = scheduler_output.num_scheduled_tokens.keys(
+            )
+            draft_token_ids = [
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+                for req_id in scheduled_request_ids
+            ]
+            sampler_output = self.rejection_sampler(draft_token_ids,
+                                                    target_probs,
+                                                    sampling_metadata)
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1137,11 +1147,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
-        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> torch.Tensor:
         model = self.model
-        if kv_caches is None:
-            kv_caches = self.kv_caches
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -1172,26 +1179,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
-                kv_caches=kv_caches,
-                attn_metadata=None,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
         return hidden_states
 
     def profile_run(self) -> None:
-        # use an empty tensor instead of `None`` to force Dynamo to pass
-        # it by reference, rather by specializing on the value `None`.
-        # the `dtype` argument does not matter, and we use `float32` as
-        # a placeholder (it has wide hardware support).
-        # it is important to create tensors inside the loop, rather than
-        # multiplying the list, to avoid Dynamo from treating them as
-        # tensor aliasing.
-        dummy_kv_caches = [
-            torch.tensor((), dtype=torch.float32, device=self.device)
-            for _ in range(self.num_attn_layers)
-        ]
-
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
         if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
@@ -1302,8 +1295,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with self.maybe_profile_with_lora(self.lora_config,
                                           num_scheduled_tokens):
             # Trigger compilation for general shape.
-            hidden_states = self._dummy_run(self.max_num_tokens,
-                                            dummy_kv_caches)
+            hidden_states = self._dummy_run(self.max_num_tokens)
             if get_pp_group().is_last_rank:
                 hidden_states = hidden_states[logit_indices]
                 logits = self.model.compute_logits(hidden_states, None)
@@ -1313,7 +1305,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     temperature=dummy_tensors(0.5),
                     all_greedy=False,
                     all_random=False,
-                    spec_token_ids=None,
                     top_p=dummy_tensors(0.9),
                     top_k=dummy_tensors(logits.size(1) - 1),
                     min_p=None,

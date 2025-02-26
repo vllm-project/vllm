@@ -23,7 +23,7 @@ from torch import nn
 from transformers import AutoModel, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.config import CacheConfig, DeviceConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide, get_pp_indices
@@ -62,7 +62,6 @@ def vllm_flash_attention_forward(
         # Transformers kwargs
         scaling: Optional[float] = None,
         # vLLM kwargs
-        attn_metadata: Optional[AttentionMetadata] = None,
         attention_instances: Optional[dict[Attention]] = None,
         **kwargs):
     self_attn = attention_instances[module.layer_idx]
@@ -71,12 +70,7 @@ def vllm_flash_attention_forward(
     hidden = query.shape[-2]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    return self_attn.forward(
-        query,
-        key,
-        value,
-        kv_cache=None,  # argument not used
-        attn_metadata=attn_metadata), None
+    return self_attn.forward(query, key, value), None
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
@@ -382,8 +376,6 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: list[torch.Tensor],  # argument not used
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -402,7 +394,6 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
             inputs_embeds=inputs_embeds,
             use_cache=False,
             position_ids=positions[None, ...],
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             attention_instances=self.attention_instances,
             return_dict=False)[0][0, ...]  # we remove batch dimension for now

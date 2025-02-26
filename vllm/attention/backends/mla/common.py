@@ -232,6 +232,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
+from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 
 try:
@@ -533,7 +534,7 @@ class MLACommonMetadata(AttentionMetadata):
                 not in supported_head_sizes:
             raise ValueError(
                 f"Only {supported_head_sizes} are supported for head_dim,",
-                f"received {self.head_dim}.")
+                f" received {self.head_dim}.")
 
     @property
     def prefill_metadata(self) -> Optional["MLACommonMetadata"]:
@@ -1130,13 +1131,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 )
 
         def get_layer_weight(layer):
-            if hasattr(layer, "weight"):
-                return layer.weight
-            elif hasattr(layer, "qweight"):
-                return layer.qweight
-            else:
-                raise AttributeError(
-                    f"Layer '{layer}' has neither weight nor qweight")
+            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
+            for attr in WEIGHT_NAMES:
+                if hasattr(layer, attr):
+                    return getattr(layer, attr)
+            raise AttributeError(
+                f"Layer '{layer}' has no recognized weight attribute:"
+                f" {WEIGHT_NAMES}.")
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
@@ -1371,18 +1372,35 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
 
-        output = self.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v_padded,
-            cu_seqlens_q=prefill_metadata.query_start_loc,
-            cu_seqlens_k=prefill_metadata.query_start_loc,
-            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_softmax_lse=has_context,
-        )
+        if has_context:
+            if not current_platform.is_cuda():
+                raise NotImplementedError(
+                    "Chunked Prefill for MLA is not currently supported on"
+                    "non-cuda platforms")
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=True,
+            )
+        else:
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+            )
 
         if has_context:
             suffix_output, suffix_lse = output
