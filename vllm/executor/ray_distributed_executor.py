@@ -229,9 +229,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
         logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
         if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
             raise ValueError(
-                "Ray does not allocate any GPUs on the driver node. Consider "
-                "adjusting the Ray placement group or running the driver on a "
-                "GPU node.")
+                "Ray does not allocate any GPUs on the driver node."
+                f"Driver IP: {driver_ip}, worker IPs: {worker_ips}."
+                "Consider adjusting the Ray placement group or running "
+                "the driver on a GPU node.")
 
         ip_counts: Dict[str, int] = {}
         for ip in worker_ips:
