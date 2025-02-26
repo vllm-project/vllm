@@ -312,7 +312,7 @@ class MLACommonMetadata:
     # New for MLA (compared to FlashAttention)
     # For chunked prefill
     num_decodes: Optional[int] = None
-    num_decodes_tokens: Optional[int] = None
+    num_decode_tokens: Optional[int] = None
     num_prefills: Optional[int] = None
     has_context: bool = False
     context_chunk_cu_seq_lens: Optional[torch.Tensor] = None
@@ -385,7 +385,7 @@ class MLACommonMetadataBuilder(Generic[T]):
         # better naming here)
         decodes = []
         prefills = []
-        num_decodes_tokens = 0
+        num_decode_tokens = 0
         num_prefill_tokens = 0
 
         for i, req_id in enumerate(input_batch.req_ids):
@@ -396,7 +396,7 @@ class MLACommonMetadataBuilder(Generic[T]):
             # num_tokens = 1
             if num_tokens == 1:
                 decodes.append(i)
-                num_decodes_tokens += num_tokens
+                num_decode_tokens += num_tokens
             else:
                 prefills.append(i)
                 num_prefill_tokens += num_tokens
@@ -430,7 +430,7 @@ class MLACommonMetadataBuilder(Generic[T]):
         # better way of doing this
         self._num_decodes = num_decodes
         self._num_prefills = num_prefills
-        self._num_decodes_tokens = num_decodes_tokens
+        self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
@@ -517,7 +517,7 @@ class MLACommonMetadataBuilder(Generic[T]):
             head_dim=self.runner.model_config.get_head_size(),
             # MLACommonMetadata Chunk prefill specific
             num_decodes=self._num_decodes,
-            num_decodes_tokens=self._num_decodes_tokens,
+            num_decode_tokens=self._num_decode_tokens,
             num_prefills=self._num_prefills,
             context_chunk_cu_seq_lens=context_chunk_cu_seq_lens,
             context_chunk_starts=context_chunk_starts,
@@ -971,11 +971,11 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         assert attn_metadata.num_decodes is not None and \
             attn_metadata.num_prefills is not None and \
-            attn_metadata.num_decodes_tokens is not None
+            attn_metadata.num_decode_tokens is not None
 
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
-        num_decode_tokens = attn_metadata.num_decodes_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
 
         decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
         decode_k_pe = k_pe[:num_decode_tokens]

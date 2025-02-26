@@ -57,10 +57,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         m = super().build(num_reqs, num_actual_tokens, max_query_len,
                           common_prefix_len)
 
-        if m.num_decodes_tokens is not None and m.num_decodes_tokens > 0:
+        if m.num_decode_tokens is not None and m.num_decode_tokens > 0:
             m.decode_tile_scheduler_metadata, m.decode_num_splits = \
                 get_mla_metadata(
-                m.seq_lens[:m.num_decodes_tokens],
+                m.seq_lens[:m.num_decode_tokens],
                 self.num_q_heads,
                 1, # MQA for the decode path
             )
@@ -127,7 +127,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             block_table=attn_metadata.block_table[:attn_metadata.num_decodes,
                                                   ...],
             cache_seqlens=attn_metadata.seq_lens[:attn_metadata.
-                                                 num_decodes_tokens],
+                                                 num_decode_tokens],
             head_dim_v=self.kv_lora_rank,
             tile_scheduler_metadata=attn_metadata.
             decode_tile_scheduler_metadata,

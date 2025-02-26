@@ -85,6 +85,7 @@ class Attention(nn.Module):
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
 
+        self.use_mla = use_mla
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
