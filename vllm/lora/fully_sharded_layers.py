@@ -12,15 +12,10 @@ from vllm.distributed.communication_op import (
     tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
-                              HFCompatibleLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
                               QKVParallelLinearWithLora,
-                              ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA)
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
 
 if TYPE_CHECKING:
     pass
@@ -320,51 +315,6 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         )
         output = output.view(*out_orig_shape)
         return output
-
-    @classmethod
-    @_fully_sharded_can_replace
-    def can_replace_layer(
-        cls,
-        source_layer: nn.Module,
-        lora_config: LoRAConfig,
-        packed_modules_list: List,
-        model_config: Optional[PretrainedConfig],
-    ) -> bool:
-        # specifying kwargs so they can be easily accessed in decorator
-        return super().can_replace_layer(
-            source_layer=source_layer,
-            lora_config=lora_config,
-            packed_modules_list=packed_modules_list,
-            model_config=model_config,
-            decorate=False,
-        )
-
-
-class HFCompatibleLinearWithShardedLoRA(HFCompatibleLinearWithLoRA):
-
-    def __new__(cls, base_layer: nn.Module):
-        assert base_layer.__class__.__name__ == "HFCompatibleLinear"
-        if isinstance(base_layer, ReplicatedLinear):
-            instance_cls = ReplicatedLinearWithLoRA
-        elif isinstance(base_layer, ColumnParallelLinear):
-            instance_cls = ColumnParallelLinearWithShardedLoRA
-        elif isinstance(base_layer, RowParallelLinear):
-            instance_cls = RowParallelLinearWithShardedLoRA
-        else:
-            raise NotImplementedError
-
-        instance_layer = instance_cls(base_layer)
-        # HACK:  Make the forward method compatible with the original forward
-        # method of the instance_layer.
-        original_forward = instance_layer.forward
-
-        def new_forward(input):
-            input = input.squeeze(0)
-            return original_forward(input)[0]
-
-        instance_layer.forward = new_forward
-
-        return instance_layer
 
     @classmethod
     @_fully_sharded_can_replace

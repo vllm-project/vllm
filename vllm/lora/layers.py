@@ -74,6 +74,11 @@ def _not_fully_sharded_can_replace(can_replace):
     return dec
 
 
+def _is_hf_linear(layer: nn.Module, fater_cls: type) -> bool:
+    return layer.__class__.__name__ == "HFCompatibleLinear" and isinstance(
+        layer, fater_cls)
+
+
 @dataclass
 class LoRAMapping(AdapterMapping):
     is_prefill: bool = False
@@ -443,7 +448,8 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return type(source_layer) is ReplicatedLinear
+        return type(source_layer) is ReplicatedLinear or _is_hf_linear(
+            source_layer, ReplicatedLinear)
 
 
 class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
@@ -541,7 +547,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     ) -> bool:
         return type(source_layer) is ColumnParallelLinear or (
             type(source_layer) is MergedColumnParallelLinear
-            and len(packed_modules_list) == 1)
+            and len(packed_modules_list) == 1) or _is_hf_linear(
+                source_layer, ColumnParallelLinear)
 
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -896,7 +903,8 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return type(source_layer) is RowParallelLinear
+        return type(source_layer) is RowParallelLinear or _is_hf_linear(
+            source_layer, RowParallelLinear)
 
 
 class HFCompatibleLinearWithLoRA(BaseLinearLayerWithLoRA):
