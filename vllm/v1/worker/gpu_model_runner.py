@@ -962,6 +962,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_indices: Dict[str, int] = {}
             indices_match = True
             for req_id in self.input_batch.req_ids:
+                if req_id not in scheduler_output.guided_decoding_request_ids:
+                    # not a guided decoding request
+                    continue
                 batch_index = self.input_batch.req_id_to_index[req_id]
                 if batch_index != scheduler_output.guided_decoding_request_ids[
                         req_id]:
