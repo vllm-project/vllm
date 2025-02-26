@@ -43,7 +43,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|reserved_special_token_0|>"
 _AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
-_MAX_AUDIO_CHUNKS = 1
+_MAX_ENCODER_BATCH_SIZE = 16
 
 
 class UltravoxAudioFeatureInputs(TypedDict):
@@ -117,7 +117,7 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         max_audio_tokens = math.ceil(feature_extractor.chunk_length *
                                      _AUDIO_TOKENS_PER_SECOND)
 
-        return {"audio": max_audio_tokens * _MAX_AUDIO_CHUNKS}
+        return {"audio": max_audio_tokens * _MAX_ENCODER_BATCH_SIZE}
 
 
 class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo]
@@ -132,7 +132,7 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo]
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = (feature_extractor.chunk_length * sampling_rate *
-                     _MAX_AUDIO_CHUNKS)
+                     _MAX_ENCODER_BATCH_SIZE)
         num_audios = mm_counts.get("audio", 0)
 
         mm_data = {
@@ -482,11 +482,25 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
     def _audio_features_to_embeddings(
             self, input_features: torch.Tensor,
-            audio_lens: Optional[torch.Tensor]) -> torch.Tensor:
-        audio_input = input_features.to(self.audio_tower.dtype)
-        audio_features = self.audio_tower(audio_input, audio_lens)
-        audio_features = audio_features.to(self.audio_tower.dtype)
-        audio_embeddings = self.multi_modal_projector(audio_features)
+            audio_lens: torch.Tensor) -> torch.Tensor:
+        audio_features = input_features.to(self.audio_tower.dtype)
+        batch_size = audio_features.size(0)
+        audio_embeddings = []
+
+        # Process audio features in batches to keep memory usage predictable
+        for start in range(0, batch_size, _MAX_ENCODER_BATCH_SIZE):
+            end = min(start + _MAX_ENCODER_BATCH_SIZE, batch_size)
+            # Process through audio tower
+            batch_features = self.audio_tower(audio_features[start:end],
+                                              audio_lens[start:end])
+            batch_features = batch_features.to(self.audio_tower.dtype)
+
+            # Process through projector
+            batch_embeddings = self.multi_modal_projector(batch_features)
+            audio_embeddings.append(batch_embeddings)
+
+        # Concatenate results
+        audio_embeddings = torch.cat(audio_embeddings, dim=0)
         return audio_embeddings
 
     def _parse_and_validate_audio_input(
