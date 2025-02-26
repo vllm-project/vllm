@@ -129,7 +129,7 @@ async def test_new_requests_event():
     assert engine.get_decoding_config() is not None
 
 
-def start_engine():
+def start_engine(enforce_eager: bool):
     wait_for_gpu_memory_to_clear(
         devices=list(range(torch.cuda.device_count())),
         threshold_bytes=2 * 2**30,
@@ -141,7 +141,7 @@ def start_engine():
 
     return AsyncLLMEngine.from_engine_args(
         AsyncEngineArgs(model="facebook/opt-125m",
-                        enforce_eager=True,
+                        enforce_eager=enforce_eager,
                         num_scheduler_steps=num_scheduler_steps))
 
 
@@ -149,10 +149,16 @@ def uid() -> str:
     return str(uuid.uuid4())
 
 
-@pytest_asyncio.fixture(scope="module")
-async def async_engine():
-    engine = await asyncio.get_event_loop().run_in_executor(executor=None,
-                                                            func=start_engine)
+@pytest_asyncio.fixture(scope="module",
+                        params=[{
+                            "enforce_eager": False
+                        }, {
+                            "enforce_eager": True
+                        }])
+async def async_engine(request):
+    engine = await asyncio.get_event_loop().run_in_executor(
+        executor=None,
+        func=lambda: start_engine(request.param["enforce_eager"]))
     try:
         yield engine
     finally:
