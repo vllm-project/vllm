@@ -8,6 +8,7 @@ from vllm import CompletionOutput
 
 
 class BatchLogprobsComposition(Enum):
+    """Types of logprobs configs to include in test batch"""
     NONE = 0
     SAMPLE = 1
     PROMPT = 2
