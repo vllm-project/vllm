@@ -14,20 +14,22 @@ Previous blog post [vLLM V1: A Major Upgrade to vLLM's Core Architecture](https:
 - The team is actively working on implementing logprobs that include post-sampling adjustments.
 
 ### Encoder-Decoder
-- vLLM v1 is currently limited to decoder-only Transformers. Please check out our [documentation](https://docs.vllm.ai/en/latest/models/supported_models.html) for a more detailed list of the supported models. 
+- vLLM v1 is currently limited to decoder-only Transformers. Please check out our 
+  [documentation](https://docs.vllm.ai/en/latest/models/supported_models.html) for a 
+  more detailed list of the supported models. Encoder-decoder models support is not 
+  happending soon. 
 
 ## Unsupported features
 
 
 ### LoRA
 - LoRA works for V1 on the main branch, but its performance is inferior to that of V0.
-  The team is actively working on improving the performance on going [PR](https://github.com/vllm-project/vllm/pull/13096).
+  The team is actively working on improving the performance [PR](https://github.com/vllm-project/vllm/pull/13096).
 
 ### Spec decode other than ngram
-- Currently, only ngram spec decode is supported in V1 after this [PR]
-  (https://github.com/vllm-project/vllm/pull/12193).
+- Currently, only ngram spec decode is supported in V1 after this [PR](https://github.com/vllm-project/vllm/pull/12193).
 
-### KV Cache Swapping & Offloading & FP8
+### KV Cache Swapping & Offloading & FP8 KV Cache
 - vLLM v1 does not support KV Cache swapping, offloading, and FP8 KV Cache yet. The 
   team is working actively on it.
 
