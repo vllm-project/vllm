@@ -313,11 +313,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
             # some carry-over env vars from the driver
             # TODO: refactor platform-specific env vars
             for name in [
-                    "VLLM_ATTENTION_BACKEND",
-                    "TPU_CHIPS_PER_HOST_BOUNDS",
-                    "TPU_HOST_BOUNDS",
-                    "VLLM_USE_V1",
-                    "VLLM_TRACE_FUNCTION",
+                    "VLLM_ATTENTION_BACKEND", "TPU_CHIPS_PER_HOST_BOUNDS",
+                    "TPU_HOST_BOUNDS", "VLLM_USE_V1", "VLLM_TRACE_FUNCTION",
+                    "VLLM_TORCH_PROFILER_DIR"
             ]:
                 if name in os.environ:
                     args[name] = os.environ[name]
