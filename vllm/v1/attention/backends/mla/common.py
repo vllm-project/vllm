@@ -333,13 +333,16 @@ class MLACommonMetadata:
 T = TypeVar("T", bound=MLACommonMetadata)
 
 
-class MLACommonMetadataBuilder:
+class MLACommonMetadataBuilder(Generic[T]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
 
-    def __init__(self, runner: "GPUModelRunner"):
+    def __init__(self,
+                 runner: "GPUModelRunner",
+                 cls: Optional[type[T]] = None):
+        self.cls = cls if cls is not None else MLACommonMetadata
         self.runner = runner
         scheduler_config = runner.scheduler_config
         model_config = runner.model_config
@@ -431,7 +434,7 @@ class MLACommonMetadataBuilder:
         self._num_prefill_tokens = num_prefill_tokens
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
+              common_prefix_len: int) -> T:
         device = self.runner.device
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
@@ -502,7 +505,7 @@ class MLACommonMetadataBuilder:
             assert max(context_chunk_seq_tot) <= \
                 self.chunked_prefill_workspace_size
 
-        return MLACommonMetadata(
+        return self.cls(
             input_positions=input_positions,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
