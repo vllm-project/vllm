@@ -83,9 +83,9 @@ try:
 
             execute_model_req = self.input_decoder.decode(serialized_req)
 
-            # TODO(swang): This is needed right now because Ray aDAG executes
-            # on a background thread, so we need to reset torch's current
-            # device.
+            # TODO(swang): This is needed right now because Ray Compiled Graph
+            # executes on a background thread, so we need to reset torch's
+            # current device.
             import torch
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
@@ -112,10 +112,15 @@ try:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-        def execute_model(
+        def execute_model_ray(
             self,
-            scheduler_output: "SchedulerOutput",
-        ) -> "ModelRunnerOutput":
+            scheduler_output: Union["SchedulerOutput",
+                                    Tuple["SchedulerOutput",
+                                          "IntermediateTensors"]],
+        ) -> Union["ModelRunnerOutput", Tuple["SchedulerOutput",
+                                              "IntermediateTensors"]]:
+            # This method is used by Ray Compiled Graph to execute the model,
+            # and it needs a special logic of self.setup_device_if_necessary()
             self.setup_device_if_necessary()
             assert self.worker is not None, "Worker is not initialized"
             if isinstance(scheduler_output, tuple):
@@ -315,7 +320,7 @@ def initialize_ray_cluster(
         if parallel_config.world_size > device_bundles:
             raise ValueError(
                 f"The number of required {device_str}s exceeds the total "
-                f"number of available {device_str}s in the placement group."
+                f"number of available {device_str}s in the placement group. "
                 f"Required number of devices: {parallel_config.world_size}. "
                 f"Total number of devices: {device_bundles}.")
     else:

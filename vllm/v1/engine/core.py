@@ -7,7 +7,7 @@ import time
 from concurrent.futures import Future
 from inspect import isclass, signature
 from multiprocessing.connection import Connection
-from typing import Any, List, Optional, Tuple, Type
+from typing import Any, List, Optional, Set, Tuple, Type
 
 import msgspec
 import psutil
@@ -110,7 +110,7 @@ class EngineCore:
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution
-        self.model_executor.initialize(kv_cache_configs)
+        self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
@@ -213,8 +213,26 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self.model_executor.add_lora(lora_request)
+    def sleep(self, level: int = 1):
+        self.model_executor.sleep(level)
+
+    def wake_up(self):
+        self.model_executor.wake_up()
+
+    def execute_dummy_batch(self):
+        self.model_executor.collective_rpc("execute_dummy_batch")
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_executor.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_executor.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.model_executor.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_executor.pin_lora(lora_id)
 
 
 class EngineCoreProc(EngineCore):

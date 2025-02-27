@@ -286,6 +286,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `parasail-ai/GritLM-7B-vllm`.
   * ✅︎
   * ✅︎
+- * `Grok1ModelForCausalLM`
+  * Grok1
+  * `hpcai-tech/grok-1`.
+  * ✅︎
+  * ✅︎
 - * `InternLMForCausalLM`
   * InternLM
   * `internlm/internlm-7b`, `internlm/internlm-chat-7b`, etc.
@@ -710,6 +715,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Florence2ForConditionalGeneration`
+  * Florence-2
+  * T + I
+  * `microsoft/Florence-2-base`, `microsoft/Florence-2-large` etc.
+  *
+  *
+  *
 - * `FuyuForCausalLM`
   * Fuyu
   * T + I
@@ -854,7 +866,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * Qwen2.5-VL
   * T + I<sup>E+</sup> + V<sup>E+</sup>
   * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
-  *
+  * ✅︎
   * ✅︎
   * ✅︎
 - * `UltravoxModel`

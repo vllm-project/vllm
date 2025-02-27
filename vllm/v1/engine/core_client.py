@@ -8,8 +8,9 @@ import uuid
 import weakref
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
+from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Set, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -81,10 +82,31 @@ class EngineCoreClient(ABC):
     def reset_prefix_cache(self) -> None:
         raise NotImplementedError
 
+    def sleep(self, level: int = 1) -> None:
+        raise NotImplementedError
+
+    def wake_up(self) -> None:
+        raise NotImplementedError
+
+    def execute_dummy_batch(self) -> None:
+        raise NotImplementedError
+
+    async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError
+
+    def remove_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    def list_loras(self) -> Set[int]:
+        raise NotImplementedError
+
+    def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -99,10 +121,25 @@ class EngineCoreClient(ABC):
     async def reset_prefix_cache_async(self) -> None:
         raise NotImplementedError
 
+    async def sleep_async(self, level: int = 1) -> None:
+        raise NotImplementedError
+
+    async def wake_up_async(self) -> None:
+        raise NotImplementedError
+
     async def abort_requests_async(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
-    async def add_lora_async(self, lora_request: LoRARequest) -> None:
+    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError
+
+    async def remove_lora_async(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    async def list_loras_async(self) -> Set[int]:
+        raise NotImplementedError
+
+    async def pin_lora_async(self, lora_id: int) -> bool:
         raise NotImplementedError
 
 
@@ -138,8 +175,51 @@ class InprocClient(EngineCoreClient):
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self.engine_core.add_lora(lora_request)
+    def sleep(self, level: int = 1) -> None:
+        self.engine_core.sleep(level)
+
+    def wake_up(self) -> None:
+        self.engine_core.wake_up()
+
+    def execute_dummy_batch(self) -> None:
+        self.engine_core.execute_dummy_batch()
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.engine_core.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.engine_core.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.engine_core.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.engine_core.pin_lora(lora_id)
+
+
+@dataclass
+class BackgroundResources:
+    """Used as a finalizer for clean shutdown, avoiding
+    circular reference back to the client object."""
+
+    ctx: Union[zmq.Context, zmq.asyncio.Context] = None
+    output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    proc_handle: Optional[BackgroundProcHandle] = None
+
+    def __call__(self):
+        """Clean up background resources."""
+
+        if self.proc_handle is not None:
+            self.proc_handle.shutdown()
+        # ZMQ context termination can hang if the sockets
+        # aren't explicitly closed first.
+        if self.output_socket is not None:
+            self.output_socket.close(linger=0)
+        if self.input_socket is not None:
+            self.input_socket.close(linger=0)
+        if self.ctx is not None:
+            self.ctx.destroy(linger=0)
 
 
 class MPClient(EngineCoreClient):
@@ -185,21 +265,22 @@ class MPClient(EngineCoreClient):
             zmq.asyncio.Context()  # type: ignore[attr-defined]
             if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
 
-        # Note(rob): shutdown function cannot be a bound method,
-        # else the gc cannot collect the object.
-        self._finalizer = weakref.finalize(self, lambda x: x.destroy(linger=0),
-                                           self.ctx)
+        # This will ensure resources created so far are closed
+        # when the client is garbage collected,  even if an
+        # exception is raised mid-construction.
+        resources = BackgroundResources(ctx=self.ctx)
+        self._finalizer = weakref.finalize(self, resources)
 
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
-        self.output_socket = make_zmq_socket(self.ctx, output_path,
-                                             zmq.constants.PULL)
-        self.input_socket = make_zmq_socket(self.ctx, input_path,
-                                            zmq.constants.PUSH)
+        resources.output_socket = make_zmq_socket(self.ctx, output_path,
+                                                  zmq.constants.PULL)
+        resources.input_socket = make_zmq_socket(self.ctx, input_path,
+                                                 zmq.constants.PUSH)
 
         # Start EngineCore in background process.
-        self.proc_handle = BackgroundProcHandle(
+        resources.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
             process_name="EngineCore",
@@ -210,13 +291,11 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
+        self.output_socket = resources.output_socket
+        self.input_socket = resources.input_socket
         self.utility_results: Dict[int, AnyFuture] = {}
 
     def shutdown(self):
-        """Clean up background resources."""
-        if hasattr(self, "proc_handle"):
-            self.proc_handle.shutdown()
-
         self._finalizer()
 
 
@@ -252,14 +331,18 @@ class SyncMPClient(MPClient):
         outputs_queue = self.outputs_queue
 
         def process_outputs_socket():
-            while True:
-                (frame, ) = output_socket.recv_multipart(copy=False)
-                outputs = decoder.decode(frame.buffer)
-                if outputs.utility_output:
-                    _process_utility_output(outputs.utility_output,
-                                            utility_results)
-                else:
-                    outputs_queue.put_nowait(outputs)
+            try:
+                while True:
+                    (frame, ) = output_socket.recv_multipart(copy=False)
+                    outputs = decoder.decode(frame.buffer)
+                    if outputs.utility_output:
+                        _process_utility_output(outputs.utility_output,
+                                                utility_results)
+                    else:
+                        outputs_queue.put_nowait(outputs)
+            except zmq.error.ContextTerminated:
+                # Expected when the class is GC'd / during process termination.
+                pass
 
         # Process outputs from engine in separate thread.
         Thread(target=process_outputs_socket, daemon=True).start()
@@ -300,8 +383,26 @@ class SyncMPClient(MPClient):
     def reset_prefix_cache(self) -> None:
         self._call_utility("reset_prefix_cache")
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self._call_utility("add_lora", lora_request)
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self._call_utility("add_lora", lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self._call_utility("remove_lora", lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self._call_utility("list_loras")
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self._call_utility("pin_lora", lora_id)
+
+    def sleep(self, level: int = 1) -> None:
+        self._call_utility("sleep", level)
+
+    def wake_up(self) -> None:
+        self._call_utility("wake_up")
+
+    def execute_dummy_batch(self) -> None:
+        self._call_utility("execute_dummy_batch")
 
 
 class AsyncMPClient(MPClient):
@@ -380,5 +481,23 @@ class AsyncMPClient(MPClient):
     async def reset_prefix_cache_async(self) -> None:
         await self._call_utility_async("reset_prefix_cache")
 
-    async def add_lora_async(self, lora_request: LoRARequest) -> None:
-        await self._call_utility_async("add_lora", lora_request)
+    async def sleep_async(self, level: int = 1) -> None:
+        await self._call_utility_async("sleep", level)
+
+    async def wake_up_async(self) -> None:
+        await self._call_utility_async("wake_up")
+
+    async def execute_dummy_batch_async(self) -> None:
+        await self._call_utility_async("execute_dummy_batch")
+
+    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        return await self._call_utility_async("add_lora", lora_request)
+
+    async def remove_lora_async(self, lora_id: int) -> bool:
+        return await self._call_utility_async("remove_lora", lora_id)
+
+    async def list_loras_async(self) -> Set[int]:
+        return await self._call_utility_async("list_loras")
+
+    async def pin_lora_async(self, lora_id: int) -> bool:
+        return await self._call_utility_async("pin_lora", lora_id)
