@@ -34,6 +34,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 if envs.VLLM_ROCM_USE_AITER_MOE:
+    from aiter.fused_moe_bf16_asm import asm_moe
     from aiter.ops.shuffle import shuffle_weight
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -710,6 +711,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
         )
+        if envs.VLLM_ROCM_USE_AITER_MOE:
+            return asm_moe(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weight=topk_weights,
+                topk_ids=topk_ids,
+                fc1_scale=(layer.w13_weight_scale_inv
+                           if self.block_quant else layer.w13_weight_scale),
+                fc2_scale=(layer.w2_weight_scale_inv
+                           if self.block_quant else layer.w2_weight_scale),
+                fc1_smooth_scale=None,
+                fc2_smooth_scale=None,
+                a16=False)
 
         return fused_experts(
             x,

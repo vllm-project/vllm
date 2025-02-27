@@ -469,6 +469,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         if blocksparse_params is not None:
             raise ValueError(
                 "ROCmFlashAttention does not support blocksparse attention.")
+        self.aiter_kv_scales_initialized = False
 
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -616,25 +617,22 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         if (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
                 and kv_cache.dtype.itemsize == 1
-                and self.init_kv_scales is False
+                and not self.aiter_kv_scales_initialized
                 and kv_cache.shape != torch.Size([0])):
             num_blocks = kv_cache.shape[1]
             block_size = kv_cache.shape[2] // (self.num_kv_heads *
                                                self.head_size)
-            self.k_scale = torch.empty(
-                (self.num_kv_heads, num_blocks * block_size),
-                dtype=torch.float32,
-                device=kv_cache.device)
-            self.v_scale = torch.empty(
-                (self.num_kv_heads, num_blocks * block_size),
-                dtype=torch.float32,
-                device=kv_cache.device)
-            self.init_kv_scales = True
-            self.k_scale.fill_(layer._k_scale_float)
-            self.v_scale.fill_(layer._v_scale_float)
-            # if self.init_kv_scales:
-            layer._k_scale = self.k_scale
-            layer._v_scale = self.v_scale
+            k_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
+                                  dtype=torch.float32,
+                                  device=kv_cache.device)
+            v_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
+                                  dtype=torch.float32,
+                                  device=kv_cache.device)
+            self.aiter_kv_scales_initialized = True
+            k_scale.fill_(layer._k_scale.item())
+            v_scale.fill_(layer._v_scale.item())
+            layer._k_scale = k_scale
+            layer._v_scale = v_scale
 
         if self.attn_type != AttentionType.ENCODER and kv_cache.numel() > 0:
             key_cache, value_cache = PagedAttention.split_kv_cache(

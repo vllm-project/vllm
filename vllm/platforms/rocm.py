@@ -198,7 +198,7 @@ class RocmPlatform(Platform):
                 envs.VLLM_ROCM_USE_AITER_LINEAR or envs.VLLM_ROCM_USE_AITER_MOE
                 or envs.VLLM_ROCM_USE_AITER_NORM
                 or envs.VLLM_ROCM_USE_AITER_PAGED_ATTN):
-            logger.info("Aiter main switch - VLLM_ROCM_USE_AITER is not set,"
+            logger.info("Aiter main switch (VLLM_ROCM_USE_AITER) is not set."
                         " Disabling individual Aiter components")
             envs.VLLM_ROCM_USE_AITER_LINEAR = False
             envs.VLLM_ROCM_USE_AITER_MOE = False
