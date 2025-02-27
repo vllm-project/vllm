@@ -53,7 +53,8 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
     # Create an LLM.
     llm = LLM(model="neuralmagic/Mixtral-8x7B-Instruct-v0.1-FP8",
               tensor_parallel_size=GPUs_per_dp_rank,
-              enforce_eager=True)
+              enforce_eager=False,
+              max_num_batched_tokens=1024)
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
     for output in outputs:

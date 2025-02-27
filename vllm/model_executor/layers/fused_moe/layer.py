@@ -348,6 +348,9 @@ class FusedMoE(torch.nn.Module):
         self.layer_name = prefix
         self.use_direct_call = not envs.VLLM_TEST_ENABLE_EP
 
+        self.max_num_batched_tokens = get_current_vllm_config(
+        ).scheduler_config.max_num_batched_tokens
+
         self.tp_size = (tp_size if tp_size is not None else
                         get_tensor_model_parallel_world_size())
         self.dp_size = get_dp_group().world_size
@@ -694,12 +697,13 @@ class FusedMoE(torch.nn.Module):
 
         return topk_weights, topk_ids
 
-    def naive_multicast(self, x: torch.Tensor, max_num_tokens: int):
+    def naive_multicast(self, x: torch.Tensor):
         assert (len(x.shape) == 2)
         num_tokens = x.size(0)
-        buffer = torch.zeros((self.dp_size, max_num_tokens, x.size(1)),
-                             device=x.device,
-                             dtype=x.dtype)
+        buffer = torch.zeros(
+            (self.dp_size, self.max_num_batched_tokens, x.size(1)),
+            device=x.device,
+            dtype=x.dtype)
 
         buffer[self.dp_rank, :num_tokens, :].copy_(x)
 
@@ -720,13 +724,10 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
 
         if self.dp_size > 1:
-            num_tokens_across_dp = get_forward_context().num_tokens_across_dp
-            max_num_tokens = max(num_tokens_across_dp)
             num_tokens = hidden_states.size(0)
 
-            assert num_tokens_across_dp is not None
-            hidden_states = self.naive_multicast(hidden_states, max_num_tokens)
-            router_logits = self.naive_multicast(router_logits, max_num_tokens)
+            hidden_states = self.naive_multicast(hidden_states)
+            router_logits = self.naive_multicast(router_logits)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
