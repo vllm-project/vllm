@@ -313,7 +313,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         env_vars_to_copy = [
             "VLLM_ATTENTION_BACKEND", "TPU_CHIPS_PER_HOST_BOUNDS",
             "TPU_HOST_BOUNDS", "VLLM_USE_V1", "VLLM_TRACE_FUNCTION",
-            "VLLM_TORCH_PROFILER_DIR"
+            "VLLM_TORCH_PROFILER_DIR", "VLLM_TEST_ENABLE_EP"
         ]
 
         # Copy existing env vars to each worker's args
