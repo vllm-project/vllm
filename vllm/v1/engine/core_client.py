@@ -479,9 +479,10 @@ class AsyncMPClient(MPClient):
                                             utility_results)
                     continue
                 outputs_queue.put_nowait(outputs)
-                for req_id in outputs.finished_requests:
-                    if engine := self.reqs_in_flight.pop(req_id, None):
-                        engine.num_reqs_in_flight -= 1
+                if self.reqs_in_flight:
+                    for req_id in outputs.finished_requests:
+                        if engine := self.reqs_in_flight.pop(req_id, None):
+                            engine.num_reqs_in_flight -= 1
 
         self.queue_task = asyncio.create_task(process_outputs_socket())
 
@@ -502,8 +503,7 @@ class AsyncMPClient(MPClient):
             await self._start_output_queue_task()
 
     def get_core_engine_for_request(self) -> CoreEngine:
-        engine = min(self.core_engines, key=lambda e: e.num_reqs_in_flight)
-        return engine
+        return min(self.core_engines, key=lambda e: e.num_reqs_in_flight)
 
     async def _call_utility_async(
         self,
@@ -528,12 +528,18 @@ class AsyncMPClient(MPClient):
             await self._start_output_queue_task()
 
         msg = (EngineCoreRequestType.ADD, self.encoder.encode(request))
+
+        if len(self.core_engines) == 1:
+            engine = self.core_engines[0]
+            await engine.input_socket.send_multipart(msg, copy=False)
+            return
+
+        # Data-parallel case.
         chosen_engine = self.get_core_engine_for_request()
         first_request = len(self.reqs_in_flight) == 0
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1
-
-        if not first_request or len(self.core_engines) == 1:
+        if not first_request:
             await chosen_engine.input_socket.send_multipart(msg, copy=False)
         else:
             # Send request to chosen engine and dp start loop
@@ -547,7 +553,12 @@ class AsyncMPClient(MPClient):
         if not request_ids:
             return
 
-        if len(request_ids) == 1 or len(self.core_engines) == 1:
+        if len(self.core_engines) == 1:
+            # Non-DP case.
+            await self._abort_requests(request_ids, self.core_engines[0])
+            return
+
+        if len(request_ids) == 1:
             # Fast-path common case.
             if engine := self.reqs_in_flight.get(request_ids[0]):
                 await self._abort_requests(request_ids, engine)

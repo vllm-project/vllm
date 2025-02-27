@@ -298,8 +298,18 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        # Set data parallel rank for this engine process.
-        vllm_config.parallel_config.data_parallel_rank = dp_rank
+        if vllm_config.parallel_config.data_parallel_size > 1:
+            # Set data parallel rank for this engine process.
+            vllm_config.parallel_config.data_parallel_rank = dp_rank
+            tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+            # TODO CUDA agnostic here
+            import os
+
+            from vllm.platforms.cuda import device_id_to_physical_device_id
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                str(device_id_to_physical_device_id(i))
+                for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
 
         parent_process = psutil.Process().parent()
         engine_core = None
