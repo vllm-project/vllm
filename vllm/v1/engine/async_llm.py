@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
+from typing import AsyncGenerator, List, Mapping, Optional, Set, Type, Union
 
 import numpy as np
 
@@ -24,6 +24,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import generate_parallel_sampling_async
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
@@ -170,7 +171,7 @@ class AsyncLLM(EngineClient):
     # requests we don't need to send multiple messages to core proc,
     # and so we don't need multiple streams which then get
     # re-multiplexed in the API server anyhow.
-    async def generate(
+    async def _generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -240,6 +241,30 @@ class AsyncLLM(EngineClient):
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
+
+    def generate(
+        self,
+        prompt: PromptType,
+        sampling_params: SamplingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        kwargs = dict(prompt=prompt,
+                      sampling_params=sampling_params,
+                      request_id=request_id,
+                      lora_request=lora_request,
+                      trace_headers=trace_headers,
+                      prompt_adapter_request=prompt_adapter_request,
+                      priority=priority)
+        if sampling_params.n is None or sampling_params.n == 1:
+            return self._generate(**kwargs)
+        else:
+            # Special handling for parallel sampling requests
+            return generate_parallel_sampling_async(generate=self._generate,
+                                                    **kwargs)
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
@@ -367,9 +392,21 @@ class AsyncLLM(EngineClient):
     async def wake_up(self) -> None:
         await self.engine_core.wake_up_async()
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
-        await self.engine_core.add_lora_async(lora_request)
+        return await self.engine_core.add_lora_async(lora_request)
+
+    async def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter."""
+        return await self.engine_core.remove_lora_async(lora_id)
+
+    async def list_loras(self) -> Set[int]:
+        """List all registered adapters."""
+        return await self.engine_core.list_loras_async()
+
+    async def pin_lora(self, lora_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return await self.engine_core.pin_lora_async(lora_id)
 
     @property
     def is_running(self) -> bool:

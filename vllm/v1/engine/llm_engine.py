@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Mapping, Optional, Type, Union
+from typing import Dict, List, Mapping, Optional, Set, Type, Union
 
 from typing_extensions import TypeVar
 
-from vllm.config import VllmConfig
+import vllm.envs as envs
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -21,6 +21,7 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import SyncParallelSamplingManager
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
@@ -44,8 +45,19 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
+
+        # Bookkeeping for parallel sampling requests
+        self.parallel_manager = SyncParallelSamplingManager()
+
+        # important: init dp group before init the engine_core
+        self.parallel_config = vllm_config.parallel_config
+        self.dp_enabled = self.parallel_config.data_parallel_size > 1  # noqa
+        self.should_execute_dummy_batch = False
+        if self.dp_enabled:
+            self.dp_group = self.parallel_config.stateless_init_dp_group()
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -76,6 +88,10 @@ class LLMEngine:
             log_stats=False,  # FIXME: implement
         )
 
+        if not multiprocess_mode:
+            # for v0 compatibility
+            self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+
     @classmethod
     def from_engine_args(
         cls,
@@ -90,7 +106,7 @@ class LLMEngine:
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
 
-        if VLLM_ENABLE_V1_MULTIPROCESSING:
+        if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.debug("Enabling multiprocessing for LLMEngine.")
             enable_multiprocessing = True
 
@@ -103,10 +119,21 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     def get_num_unfinished_requests(self) -> int:
-        return self.output_processor.get_num_unfinished_requests()
+        return self.parallel_manager.get_num_unfinished_requests(
+            self.output_processor.get_num_unfinished_requests())
 
     def has_unfinished_requests(self) -> bool:
-        return self.output_processor.has_unfinished_requests()
+        has_unfinished = self.output_processor.has_unfinished_requests()
+        if not self.dp_enabled:
+            return has_unfinished
+        return self.has_unfinished_requests_dp(has_unfinished)
+
+    def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
+        aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(
+            self.dp_group, has_unfinished)
+        if not has_unfinished and aggregated_has_unfinished:
+            self.should_execute_dummy_batch = True
+        return aggregated_has_unfinished
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
@@ -129,7 +156,36 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        """Add request."""
+        kwargs = dict(request_id=request_id,
+                      prompt=prompt,
+                      params=params,
+                      arrival_time=arrival_time,
+                      lora_request=lora_request,
+                      trace_headers=trace_headers,
+                      prompt_adapter_request=prompt_adapter_request,
+                      priority=priority)
+        # Handle parallel sampling requests differently.
+        if params is None or isinstance(params,
+                                        PoolingParams) or params.n == 1:
+            self._add_request(**kwargs)
+        else:
+            # Special handling for parallel sampling requests
+            self.parallel_manager.add_request_parallel_sampling(
+                add_request=self._add_request, **kwargs)
 
+    def _add_request(
+        self,
+        request_id: str,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> None:
+        """Add request, `n=1`"""
         # 1) Process raw inputs into the request.
         request = self.processor.process_inputs(request_id, prompt, params,
                                                 arrival_time, lora_request,
@@ -145,6 +201,11 @@ class LLMEngine:
 
     def step(self) -> List[RequestOutput]:
 
+        if self.should_execute_dummy_batch:
+            self.should_execute_dummy_batch = False
+            self.engine_core.execute_dummy_batch()
+            return []
+
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()
 
@@ -155,7 +216,10 @@ class LLMEngine:
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
-        return processed_outputs.request_outputs
+        request_outputs = processed_outputs.request_outputs
+
+        # 4) Process unfinished parallel sampling requests
+        return self.parallel_manager.step(request_outputs)
 
     def get_model_config(self):
         return self.model_config
@@ -190,3 +254,19 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        """Load a new LoRA adapter into the engine for future requests."""
+        return self.engine_core.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter."""
+        return self.engine_core.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        """List all registered adapters."""
+        return self.engine_core.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return self.engine_core.pin_lora(lora_id)

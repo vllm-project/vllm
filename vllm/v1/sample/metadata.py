@@ -13,9 +13,6 @@ class SamplingMetadata:
     all_greedy: bool
     all_random: bool
 
-    # None when there are no speculated tokens.
-    spec_token_ids: Optional[List[List[int]]]
-
     top_p: Optional[torch.Tensor]
     top_k: Optional[torch.Tensor]
     min_p: Optional[torch.Tensor]
@@ -37,3 +34,7 @@ class SamplingMetadata:
     min_tokens: Dict[int, Tuple[int, Set[int]]]
 
     logit_bias: List[Optional[Dict[int, float]]]
+
+    # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,
+    # vocab size).
+    allowed_token_ids_mask: Optional[torch.Tensor]

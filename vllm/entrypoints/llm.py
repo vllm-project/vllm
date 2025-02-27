@@ -1342,7 +1342,7 @@ class LLM:
             return params
 
         if params.guided_decoding is not None:
-            raise ValueError("Cannot set both guided_options_request and"
+            raise ValueError("Cannot set both guided_options_request and "
                              "params.guided_decoding.")
 
         params.guided_decoding = GuidedDecodingParams(
