@@ -11,6 +11,7 @@ import triton
 import triton.language as tl
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     _normalize_quant_group_shape, scaled_dequantize)
@@ -57,6 +58,16 @@ def apply_w8a8_block_fp8_linear(
         if (ac > 1 or bc > 1 or ar not in (1, input_2d.shape[0])
                 or br not in (1, weight.shape[0])):
             shape_supported_by_cutlass = False
+
+    if envs.VLLM_USE_DEEPGEMM and block_size == [128, 128]:
+        import deep_gemm
+        q_input, x_scale = per_token_group_quant_fp8(input_2d, block_size[1])
+        output = torch.empty((input_2d.shape[0], weight.shape[0]),
+                             device='cuda',
+                             dtype=input.dtype)
+        deep_gemm.gemm_fp8_fp8_bf16_nt((q_input, x_scale),
+                                       (weight, weight_scale), output)
+
     if cutlass_block_fp8_supported and shape_supported_by_cutlass:
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
