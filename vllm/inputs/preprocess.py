@@ -236,11 +236,15 @@ class InputPreprocessor:
         # updated to use the new multi-modal processor
         can_process_multimodal = self.mm_registry.has_processor(model_config)
         if not can_process_multimodal:
-            logger.info_once(
-                "Your model uses the legacy input pipeline instead of the new "
-                "multi-modal processor. Please note that the legacy pipeline "
-                "will be removed in a future release. For more details, see: "
-                "https://github.com/vllm-project/vllm/issues/10114")
+            from vllm.model_executor.models.registry import _VLLM_MODELS
+            if not any(arch in _VLLM_MODELS
+                       for arch in model_config.architectures):
+                logger.warning_once(
+                    "Your model uses the legacy input pipeline, which will be "
+                    "removed in an upcoming release. "
+                    "Please upgrade to the new multi-modal processing pipeline "
+                    "(https://docs.vllm.ai/en/latest/design/mm_processing.html)"
+                )
 
         return can_process_multimodal
 
