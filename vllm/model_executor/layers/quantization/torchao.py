@@ -63,7 +63,8 @@ class TorchAOLinearMethod(LinearMethodBase):
     """Linear method for torchao.
 
     Args:
-        torchao_config: The torchao quantization config, a string that encodes the type of quantization and all relevant arguments.
+        torchao_config: The torchao quantization config, a string
+        that encodes the type of quantization and all relevant arguments.
     """
 
     def __init__(self, quant_config: TorchAOConfig):
@@ -78,8 +79,8 @@ class TorchAOLinearMethod(LinearMethodBase):
                                        input_size_per_partition,
                                        dtype=params_dtype),
                            requires_grad=False)
-        # we load quantized model in versions after 0.9.0 and do on the fly quantization in torchao
-        # versions before 0.9.0
+        # we load quantized model in versions after 0.9.0 and do on the fly
+        # quantization in torchao versions before 0.9.0
         if version.parse(importlib.metadata.version(
                 "torchao")) > version.parse("0.9.0"):
             torchao_config = self.quant_config.torchao_config

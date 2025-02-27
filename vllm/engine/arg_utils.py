@@ -589,7 +589,7 @@ class EngineArgs:
         parser.add_argument('--torchao-config',
                             type=nullable_str,
                             default=EngineArgs.torchao_config,
-                            help='string configration for torchao, encodes '
+                            help='string configuration for torchao, encodes '
                             'the type of quantization and all relevant '
                             'arguments, for example: int4wo-128.')
         parser.add_argument(

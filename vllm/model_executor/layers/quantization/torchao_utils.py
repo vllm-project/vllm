@@ -76,12 +76,12 @@ def apply_torchao_config_(
     Args:
       `self`: the model we want to quantize
       `params_dict`: dictionary mapping from param_name to the parameter Tensor
-      `param_suffixes`: a set of suffixes, we'll quantize the Tensor matching these
-       suffixes
+      `param_suffixes`: a set of suffixes, we'll quantize the Tensor matching
+       these suffixes
 
     Returns:
-       None, the `params_dict` is modified inplace and the weights of `self` model
-       are quantized
+       None, the `params_dict` is modified inplace and the weights of `self`
+       model are quantized
     """
     if self.torchao_config:
         for param_suffix in param_suffixes:
