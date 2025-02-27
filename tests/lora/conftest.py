@@ -241,6 +241,12 @@ def baichuan_regex_lora_files():
 
 
 @pytest.fixture(scope="session")
+def ilama_lora_files():
+    return "jeeejeee/ilama-text2sql-spider"
+    return "/home/sobey/Models/llm_models/LoraModel/illama-lora-spider"
+
+
+@pytest.fixture(scope="session")
 def minicpmv_lora_files():
     return snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon")
 
