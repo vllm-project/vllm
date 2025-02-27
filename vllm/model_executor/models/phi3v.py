@@ -38,11 +38,10 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo,
-                                        BoundPromptReplacement,
+                                        BaseProcessingInfo, BoundPromptUpdate,
                                         PlaceholderFeaturesInfo,
-                                        PromptReplacement,
-                                        PromptReplacementDetails)
+                                        PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -420,12 +419,12 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
 
@@ -449,7 +448,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
             image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
 
-            return PromptReplacementDetails(
+            return PromptUpdateDetails(
                 full=image_tokens + [bos_token_id],
                 features=image_tokens,
             )
@@ -464,15 +463,15 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             ) for image_token in image_tokens[:num_images]
         ]
 
-    def _apply_prompt_replacements(
+    def _apply_prompt_updates(
         self,
         token_ids: list[int],
-        mm_prompt_repls: Mapping[str, Sequence[BoundPromptReplacement]],
+        mm_prompt_updates: Mapping[str, Sequence[BoundPromptUpdate]],
         mm_item_counts: Mapping[str, int],
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        token_ids, text, placeholders = super()._apply_prompt_replacements(
+        token_ids, text, placeholders = super()._apply_prompt_updates(
             token_ids=token_ids,
-            mm_prompt_repls=mm_prompt_repls,
+            mm_prompt_updates=mm_prompt_updates,
             mm_item_counts=mm_item_counts,
         )
 

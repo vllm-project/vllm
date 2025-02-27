@@ -22,9 +22,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
+from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Set, Tuple, TypedDict, Union)
+from typing import (Any, Callable, Dict, List, Literal, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 from torch import nn
@@ -356,10 +357,10 @@ class MiniCPMOMultiModalProcessor(
                 inputs["audio"]["audio_lens"][index])
         return super().get_prompt_texts_by_modality(inputs, modality, index)
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
             self, mm_items: MultiModalDataItems,
             hf_processor_mm_kwargs: Mapping[str, Any],
-            out_mm_kwargs: MultiModalKwargs) -> List[PromptReplacement]:
+            out_mm_kwargs: MultiModalKwargs) -> Sequence[PromptReplacement]:
         placeholder = {
             "image": self.info.image_pattern,
             "video": self.info.video_pattern,

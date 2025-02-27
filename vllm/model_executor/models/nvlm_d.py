@@ -6,7 +6,8 @@
 # Copyright (c) 2024 NVIDIA
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from typing import Mapping, Optional
+from collections.abc import Mapping, Sequence
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -17,8 +18,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (PromptReplacement,
-                                        PromptReplacementDetails)
+from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
 from vllm.multimodal.profiling import ProcessorInputs
 
 from .intern_vit import InternVisionModel
@@ -142,12 +143,12 @@ class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
 
 class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         if "image_num_patches" in out_mm_kwargs:
@@ -179,7 +180,7 @@ class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return PromptReplacementDetails(
+            return PromptUpdateDetails(
                 full=hf_processor.get_image_repl_full(feature_size,
                                                       num_patches) + "\n",
                 features=hf_processor.get_image_repl_features(

@@ -23,9 +23,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property, partial
-from typing import (Any, Callable, Iterable, Literal, Mapping, Optional, Set,
-                    Tuple, Type, TypedDict, Union)
+from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -61,7 +62,8 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageSize,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
@@ -169,7 +171,7 @@ class Qwen2VisionMLP(nn.Module):
         self,
         in_features: int,
         hidden_features: int,
-        act_layer: Type[nn.Module] = QuickGELU,
+        act_layer: type[nn.Module] = QuickGELU,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -383,7 +385,7 @@ class Qwen2VisionBlock(nn.Module):
         dim: int,
         num_heads: int,
         mlp_ratio: float,
-        act_layer: Type[nn.Module] = QuickGELU,
+        act_layer: type[nn.Module] = QuickGELU,
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -987,12 +989,12 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
             self.info._get_image_processor_kwargs(**mm_kwargs),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(
             **hf_processor_mm_kwargs)
