@@ -231,7 +231,7 @@ class SamplingParams(
     guided_decoding: Optional[GuidedDecodingParams] = None
     logit_bias: Optional[Dict[int, float]] = None
     allowed_token_ids: Optional[List[int]] = None
-    extra_args: Any = None
+    extra_args: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def from_optional(
@@ -264,7 +264,7 @@ class SamplingParams(
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None,
         allowed_token_ids: Optional[List[int]] = None,
-        extra_args: Any = None,
+        extra_args: Optional[Dict[str, Any]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
