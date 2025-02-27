@@ -8,7 +8,8 @@ import torch
 import triton
 
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
-                                         get_mla_metadata)
+                                         get_mla_metadata,
+                                         is_flashmla_supported)
 
 
 def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str) -> None:
@@ -17,7 +18,12 @@ def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str) -> None:
         (x * x + y * y).sum().item(), 1e-12)
     assert cos_diff < 1e-5
 
+FLASH_MLA_UNSUPPORTED_REASON = is_flashmla_supported()[1] \
+    if not is_flashmla_supported()[0] else "FlashMLA is supported"
 
+
+@pytest.mark.skipif(not is_flashmla_supported()[0],
+                    reason=FLASH_MLA_UNSUPPORTED_REASON)
 @pytest.mark.parametrize("b", [128])
 @pytest.mark.parametrize("s_q", [1, 2])
 @pytest.mark.parametrize("mean_sk", [4096, 8192])

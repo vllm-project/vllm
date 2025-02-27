@@ -202,6 +202,22 @@ class CudaPlatformBase(Platform):
                 return ("vllm.v1.attention.backends.flash_attn."
                         "FlashAttentionBackend")
         if use_mla:
+            if selected_backend == _Backend.FLASHMLA:
+                from vllm.attention.backends.flashmla import (
+                    is_flashmla_supported)
+                if not is_flashmla_supported()[0]:
+                    logger.warning(
+                        "FlashMLA backend is not supported due to %s",
+                        is_flashmla_supported()[1])
+                elif block_size != 64:
+                    logger.warning(
+                        "FlashMLA backend is not supported for block size %d"
+                        " (currently only supports block size 64).",
+                        block_size)
+                else:
+                    logger.info("Using FlashMLA backend.")
+                    return "vllm.attention.backends.flashmla.FlashMLABackend"
+
             logger.info("Using Triton MLA backend.")
             return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if selected_backend == _Backend.FLASHINFER:
