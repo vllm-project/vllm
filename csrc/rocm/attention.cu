@@ -467,13 +467,13 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
       const int vlocal_token_idx =
           vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
           rowid * VTOKENS_PER_LANE + vblock_depth * BLOCK_SIZE;
-      // Use int64_t for arithmetic to prevent overflow
-      const int64_t vglobal_token_idx =
-          static_cast<int64_t>(partition_start_token_idx) + vlocal_token_idx;
-      const int vblock_idx =
-          (vglobal_token_idx < context_len)
-              ? static_cast<int>(vglobal_token_idx / BLOCK_SIZE)
-              : last_ctx_block;
+      // Safe to use an int32_t here assuming we are working with < 2 billion
+      // tokens
+      const int vglobal_token_idx =
+          partition_start_token_idx + vlocal_token_idx;
+      const int vblock_idx = (vglobal_token_idx < context_len)
+                                 ? vglobal_token_idx / BLOCK_SIZE
+                                 : last_ctx_block;
       vphysical_block_number[vtoken_depth][vblock_depth] =
           block_table_seq[vblock_idx];
     }
