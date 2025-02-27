@@ -179,6 +179,14 @@ class Metrics:
             "Histogram of time spent in PREFILL phase for request.",
             labelnames=labelnames,
             buckets=request_latency_buckets)
+        self.histogram_time_per_prefill_token_request = self._histogram_cls(
+            name="vllm:time_per_prefill_token_request_seconds",
+            documentation=
+            "Time spent per token during prefill phase in seconds",
+            labelnames=labelnames,
+            buckets=[
+                0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0
+            ])
         self.histogram_decode_time_request = self._histogram_cls(
             name="vllm:request_decode_time_seconds",
             documentation=
@@ -623,6 +631,9 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.time_inference_requests)
         self._log_histogram(self.metrics.histogram_prefill_time_request,
                             stats.time_prefill_requests)
+        self._log_histogram(
+            self.metrics.histogram_time_per_prefill_token_request,
+            stats.time_per_prefill_token_requests)
         self._log_histogram(self.metrics.histogram_decode_time_request,
                             stats.time_decode_requests)
         self._log_histogram(self.metrics.histogram_time_in_queue_request,

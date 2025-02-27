@@ -52,6 +52,7 @@ class Stats:
     time_queue_requests: List[float]
     time_inference_requests: List[float]
     time_prefill_requests: List[float]
+    time_per_prefill_token_requests: List[float]
     time_decode_requests: List[float]
     time_in_queue_requests: List[float]
     model_forward_time_requests: List[float]

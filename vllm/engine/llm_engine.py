@@ -62,6 +62,7 @@ from vllm.utils import (Counter, Device, deprecate_kwargs,
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
@@ -437,6 +438,7 @@ class LLMEngine:
                      "warmup model) took %.2f seconds"), elapsed)
         if self.device_config.device_type == "cuda":
             driver_worker = getattr(self.model_executor, "driver_worker", None)
+
             if driver_worker:
                 model_runner = getattr(driver_worker, "model_runner", None)
                 profile_time = getattr(driver_worker, "profile_time", 0.0)
@@ -447,10 +449,11 @@ class LLMEngine:
                     cuda_graph_time = getattr(model_runner,
                                               "cuda_graph_capture_time", 0.0)
 
-            total_gpu_load_time = (elapsed + model_gpu_load_time +
-                                   profile_time + cuda_graph_time)
+                    total_gpu_load_time = (elapsed + model_gpu_load_time +
+                                           profile_time + cuda_graph_time)
 
-            logger.info(("GPU model loading (loading model weights, "
+                    logger.info(
+                        ("GPU model loading (loading model weights, "
                          "memory profiling, capturing graphs, init engine) "
                          " %.2f seconds"), total_gpu_load_time)
 
@@ -1635,6 +1638,7 @@ class LLMEngine:
         time_queue_requests: List[float] = []
         time_inference_requests: List[float] = []
         time_prefill_requests: List[float] = []
+        time_per_prefill_token_requests: List[float] = []
         time_decode_requests: List[float] = []
         time_in_queue_requests: List[float] = []
         model_forward_time_requests: List[float] = []
@@ -1747,6 +1751,12 @@ class LLMEngine:
                         time_prefill_requests.append(
                             seq_group.metrics.first_token_time -
                             seq_group.metrics.first_scheduled_time)
+                        num_prompt_tokens = len(seq_group.prompt_token_ids)
+                        if num_prompt_tokens > 0:
+                            time_per_prefill_token = time_prefill_requests[
+                                -1] / num_prompt_tokens
+                            time_per_prefill_token_requests.append(
+                                time_per_prefill_token)
                         time_decode_requests.append(
                             now - seq_group.metrics.first_token_time)
                         time_inference_requests.append(
@@ -1760,6 +1770,7 @@ class LLMEngine:
                     if seq_group.metrics.model_execute_time is not None:
                         model_execute_time_requests.append(
                             seq_group.metrics.model_execute_time * 1000)
+
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
@@ -1833,6 +1844,7 @@ class LLMEngine:
             time_queue_requests=time_queue_requests,
             time_inference_requests=time_inference_requests,
             time_prefill_requests=time_prefill_requests,
+            time_per_prefill_token_requests=time_per_prefill_token_requests,
             time_decode_requests=time_decode_requests,
             time_in_queue_requests=time_in_queue_requests,
             model_forward_time_requests=model_forward_time_requests,
