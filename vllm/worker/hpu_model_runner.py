@@ -17,8 +17,8 @@ import time
 from array import array
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
-                    Optional, Set, Tuple, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
+                    TypeVar, Union)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -70,7 +70,7 @@ LORA_WARMUP_RANK = 8
 
 
 class Singleton(type):
-    _instances: Dict[type, object] = {}
+    _instances: dict[type, object] = {}
 
     def __call__(cls, *args, **kwargs):
         if cls not in cls._instances:
@@ -80,18 +80,18 @@ class Singleton(type):
 
 @dataclass
 class HPUBucketingGlobalState(metaclass=Singleton):
-    prompt_bs_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    decode_bs_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    prompt_seq_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    decode_block_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    prompt_buckets: List[Tuple[int, int]] = field(init=False)
-    decode_buckets: List[Tuple[int, int]] = field(init=False)
+    prompt_bs_bucket_cfg: tuple[int, int, int] = field(init=False)
+    decode_bs_bucket_cfg: tuple[int, int, int] = field(init=False)
+    prompt_seq_bucket_cfg: tuple[int, int, int] = field(init=False)
+    decode_block_bucket_cfg: tuple[int, int, int] = field(init=False)
+    prompt_buckets: list[tuple[int, int]] = field(init=False)
+    decode_buckets: list[tuple[int, int]] = field(init=False)
 
 
 def subtuple(obj: object,
              typename: str,
-             to_copy: List[str],
-             to_override: Optional[Dict[str, object]] = None):
+             to_copy: list[str],
+             to_override: Optional[dict[str, object]] = None):
     if obj is None:
         return None
     if to_override is None:
@@ -123,7 +123,7 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
     return values
 
 
-def warmup_range(config: Tuple[int, int, int]):
+def warmup_range(config: tuple[int, int, int]):
     """Generate a warmup range.
 
     Start from bmin and multiply by 2 until you reach bstep.
@@ -225,7 +225,7 @@ def round_up(value: int, k: int):
     return (value + k - 1) // k * k
 
 
-def find_bucket(value: int, config: Tuple[int, int, int]):
+def find_bucket(value: int, config: tuple[int, int, int]):
     bmin, bstep, _ = config
     next_step = round_up(value, bstep)
     next_pow = next_pow2(value, bmin)
@@ -406,16 +406,16 @@ class HpuModelAdapter:
 
 class PreparePromptMetadata(NamedTuple):
     input_tokens: torch.Tensor
-    input_positions: List[List[int]]
+    input_positions: list[list[int]]
     attn_metadata: Optional[AttentionMetadata]
-    seq_lens: List[int]
-    query_lens: List[int]
-    lora_index_mapping: List[List[int]]
-    lora_prompt_mapping: List[List[int]]
-    lora_requests: Set[LoRARequest]
-    multi_modal_kwargs: Optional[Dict[str, BatchedTensorInputs]]
-    slot_mapping: List[List[int]]
-    lora_ids: List[int]
+    seq_lens: list[int]
+    query_lens: list[int]
+    lora_index_mapping: list[list[int]]
+    lora_prompt_mapping: list[list[int]]
+    lora_requests: set[LoRARequest]
+    multi_modal_kwargs: Optional[dict[str, BatchedTensorInputs]]
+    slot_mapping: list[list[int]]
+    lora_ids: list[int]
 
     @classmethod
     def empty(cls):
@@ -434,13 +434,13 @@ class PreparePromptMetadata(NamedTuple):
 
 class PrepareDecodeMetadata(NamedTuple):
     input_tokens: torch.Tensor
-    input_positions: List[List[int]]
+    input_positions: list[list[int]]
     attn_metadata: Optional[AttentionMetadata]
-    lora_index_mapping: List[List[int]]
-    lora_prompt_mapping: List[List[int]]
-    lora_requests: Set[LoRARequest]
-    slot_mapping: List[List[int]]
-    lora_ids: List[int]
+    lora_index_mapping: list[list[int]]
+    lora_prompt_mapping: list[list[int]]
+    lora_requests: set[LoRARequest]
+    slot_mapping: list[list[int]]
+    lora_ids: list[int]
 
     @classmethod
     def empty(cls):
@@ -477,19 +477,19 @@ class ModelInputForHPU(ModelRunnerInputBase):
     """
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
-    seq_lens: Optional[List[int]] = None
-    query_lens: Optional[List[int]] = None
+    seq_lens: Optional[list[int]] = None
+    query_lens: Optional[list[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
-    lora_requests: Optional[Set[LoRARequest]] = None
+    lora_requests: Optional[set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
-    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+    multi_modal_kwargs: Optional[dict[str, torch.Tensor]] = None
     real_batch_size: Optional[int] = None
     batch_size_padded: Optional[int] = None
     virtual_engine: int = 0
-    lora_ids: Optional[List[int]] = None
+    lora_ids: Optional[list[int]] = None
     async_callback: Optional[Callable] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -506,8 +506,8 @@ class ModelInputForHPU(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: Type[TModelInputForHPU],
-        tensor_dict: Dict[str, Any],
+        cls: type[TModelInputForHPU],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> TModelInputForHPU:
         if attn_backend is not None:
@@ -526,7 +526,7 @@ class ModelInputForHPUWithSamplingMetadata(ModelInputForHPU):
     # used by the driver worker.
     is_prompt: Optional[bool] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -543,7 +543,7 @@ class ModelInputForHPUWithSamplingMetadata(ModelInputForHPU):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForHPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -558,7 +558,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     """
     Helper class for shared methods between GPU model runners.
     """
-    _model_input_cls: Type[TModelInputForHPU]
+    _model_input_cls: type[TModelInputForHPU]
 
     def __init__(
         self,
@@ -754,7 +754,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             step=self.block_size,
             max=max(self.block_size,
                     self.max_num_seqs * max_decode_seq // self.block_size))
-        self.graphed_buckets: Set[Any] = set()
+        self.graphed_buckets: set[Any] = set()
 
         msg = ("Prompt bucket config (min, step, max_warmup) "
                f"bs:{self.bucketing_global_state.prompt_bs_bucket_cfg}, "
@@ -768,20 +768,20 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def _prepare_prompt(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
     ) -> PreparePromptMetadata:
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
-        lora_index_mapping: List[List[int]] = []
-        lora_prompt_mapping: List[List[int]] = []
-        lora_requests: Set[LoRARequest] = set()
+        input_tokens: list[list[int]] = []
+        input_positions: list[list[int]] = []
+        slot_mapping: list[list[int]] = []
+        lora_index_mapping: list[list[int]] = []
+        lora_prompt_mapping: list[list[int]] = []
+        lora_requests: set[LoRARequest] = set()
 
-        seq_lens: List[int] = []
-        context_lens: List[int] = []
-        query_lens: List[int] = []
-        prefix_block_tables: List[List[int]] = []
-        multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        seq_lens: list[int] = []
+        context_lens: list[int] = []
+        query_lens: list[int] = []
+        prefix_block_tables: list[list[int]] = []
+        multi_modal_kwargs_list: list[MultiModalKwargs] = []
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
@@ -885,7 +885,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         self.bucketing_global_state.prompt_seq_bucket_cfg),
             self.block_size)
 
-        lora_ids: List[int] = []
+        lora_ids: list[int] = []
         for seq_group_metadata, context_len in zip(seq_group_metadata_list,
                                                    context_lens):
             lora_id = seq_group_metadata.lora_int_id
@@ -959,20 +959,20 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def _prepare_decode(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
     ) -> PrepareDecodeMetadata:
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
-        seq_lens: List[int] = []
-        block_tables: List[List[int]] = []
-        lora_index_mapping: List[List[int]] = []
-        lora_prompt_mapping: List[List[int]] = []
-        lora_requests: Set[LoRARequest] = set()
+        input_tokens: list[list[int]] = []
+        input_positions: list[list[int]] = []
+        slot_mapping: list[list[int]] = []
+        seq_lens: list[int] = []
+        block_tables: list[list[int]] = []
+        lora_index_mapping: list[list[int]] = []
+        lora_prompt_mapping: list[list[int]] = []
+        lora_requests: set[LoRARequest] = set()
 
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
-        lora_ids: List[int] = []
+        lora_ids: list[int] = []
 
         dummy_slots = itertools.cycle(
             range(_PAD_SLOT_ID, _PAD_SLOT_ID + self.block_size))
@@ -1051,7 +1051,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_bucket_size = find_bucket(
                 block_bucket_size,
                 self.bucketing_global_state.decode_block_bucket_cfg)
-            indices: List[Any]
+            indices: list[Any]
             indices = [None] * block_bucket_size
             for i, bid in enumerate(block_list):
                 indices[bid] = i
@@ -1113,8 +1113,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def prepare_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[TModelInputForHPU, SamplingMetadata]:
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+    ) -> tuple[TModelInputForHPU, SamplingMetadata]:
         if len(seq_group_metadata_list) == 0:
             return self._model_input_cls(), None
 
@@ -1366,8 +1366,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # that will have unique loras, an therefore the max amount of memory
         # consumption create dummy lora request copies from the lora request
         # passed in, which contains a lora from the lora warmup path.
-        dummy_lora_requests: List[LoRARequest] = []
-        dummy_lora_requests_per_seq: List[LoRARequest] = []
+        dummy_lora_requests: list[LoRARequest] = []
+        dummy_lora_requests_per_seq: list[LoRARequest] = []
         if self.lora_config and is_lora_profile_run:
             assert self.lora_manager is not None
             with self.lora_manager.dummy_lora_cache():
@@ -1431,7 +1431,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.remove_all_adapters()
 
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
+    def set_active_loras(self, lora_requests: set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
@@ -1452,7 +1452,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.pin_adapter(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()
@@ -1486,8 +1486,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         idx = 0
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
         num_candidates = len(buckets)
-        ordering : Union[Callable[[Any], Tuple[Any, Any]], \
-            Callable[[Any], Tuple[Any, Any, Any]]]
+        ordering : Union[Callable[[Any], tuple[Any, Any]], \
+            Callable[[Any], tuple[Any, Any, Any]]]
         if strategy == 'min_tokens':
             ordering = lambda b: (b[0] * b[1], b[1], b[0])
         elif strategy == 'max_bs':
@@ -1533,7 +1533,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         logger.info(msg)
 
     @torch.inference_mode()
-    def warmup_model(self, kv_caches: List[torch.Tensor]) -> None:
+    def warmup_model(self, kv_caches: list[torch.Tensor]) -> None:
         if profile := os.environ.get('VLLM_PT_PROFILE', None):
             phase, bs, seq_len, graph = profile.split('_')
             is_prompt = phase == 'prompt'
@@ -1805,12 +1805,12 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     """
     GPU model runner with sampling step.
     """
-    _model_input_cls: Type[ModelInputForHPUWithSamplingMetadata] = (
+    _model_input_cls: type[ModelInputForHPUWithSamplingMetadata] = (
         ModelInputForHPUWithSamplingMetadata)
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> ModelInputForHPUWithSamplingMetadata:
         return (
             ModelInputForHPUWithSamplingMetadata.from_broadcasted_tensor_dict(
@@ -1821,9 +1821,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     @torch.inference_mode()
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> ModelInputForHPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1862,7 +1862,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             logger.warning("Configuration: (%s, %s, %s) was not warmed-up!",
                            phase, batch_size, seq_len)
 
-    def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: List[int],
+    def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int],
                          is_prompt: bool):
         '''
         This is a helper function to create the mask for lora computations.
@@ -1936,11 +1936,11 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     def execute_model(
         self,
         model_input: ModelInputForHPUWithSamplingMetadata,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         warmup_mode=False,
-    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
+    ) -> Optional[Union[list[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(
                 "num_steps > 1 is not supported in HPUModelRunner")

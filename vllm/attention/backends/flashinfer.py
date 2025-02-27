@@ -4,7 +4,7 @@ import dataclasses
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
+from typing import TYPE_CHECKING, Any, Optional
 
 from vllm.multimodal import MultiModalPlaceholderMap
 
@@ -53,19 +53,19 @@ class FlashInferBackend(AttentionBackend):
         return "FLASHINFER"
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashInferImpl"]:
+    def get_impl_cls() -> type["FlashInferImpl"]:
         return FlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return FlashInferMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["FlashInferMetadataBuilder"]:
+    def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
         return FlashInferMetadataBuilder
 
     @staticmethod
-    def get_state_cls() -> Type["FlashInferState"]:
+    def get_state_cls() -> type["FlashInferState"]:
         return FlashInferState
 
     @staticmethod
@@ -74,7 +74,7 @@ class FlashInferBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -87,13 +87,13 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [64, 128, 256]
 
     @staticmethod
@@ -119,14 +119,14 @@ class PerLayerParameters:
 
 
 def get_per_layer_parameters(
-        vllm_config: VllmConfig) -> Dict[str, PerLayerParameters]:
+        vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
     """
     Scan all attention layers and determine some hyperparameters
     to use during `plan`.
     """
 
     layers = vllm_config.compilation_config.static_forward_context
-    per_layer_params: Dict[str, PerLayerParameters] = {}
+    per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
         assert isinstance(layer, Attention)
@@ -147,7 +147,7 @@ def get_per_layer_parameters(
 
 
 def infer_global_hyperparameters(
-        per_layer_params: Dict[str, PerLayerParameters]) -> PerLayerParameters:
+        per_layer_params: dict[str, PerLayerParameters]) -> PerLayerParameters:
     """
     Currently, FlashInfer backend only support models in which all layers share
     the same values for the following hyperparameters:
@@ -514,8 +514,8 @@ class FlashInferMetadata(AttentionMetadata):
                 q_data_type=self.q_data_type)
 
     def asdict_zerocopy(self,
-                        skip_fields: Optional[Set[str]] = None
-                        ) -> Dict[str, Any]:
+                        skip_fields: Optional[set[str]] = None
+                        ) -> dict[str, Any]:
         if skip_fields is None:
             skip_fields = set()
         # We need to skip the prefill/decode_wrapper field since it cannot be
@@ -613,12 +613,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.vllm_config = get_current_vllm_config()
 
     def prepare(self):
-        self.slot_mapping: List[int] = []
-        self.prefill_seq_lens: List[int] = []
-        self.context_lens: List[int] = []
-        self.block_tables: List[List[int]] = []
-        self.curr_seq_lens: List[int] = []
-        self.multimodal_placeholder_maps: Dict[
+        self.slot_mapping: list[int] = []
+        self.prefill_seq_lens: list[int] = []
+        self.context_lens: list[int] = []
+        self.block_tables: list[list[int]] = []
+        self.curr_seq_lens: list[int] = []
+        self.multimodal_placeholder_maps: dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
@@ -635,12 +635,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # [0, 5, 8, 1, 6, 7, 3, 4]
         # paged_kv_indptr is used to index into paged_kv_indices:
         # [0, 3, 6, 8]
-        self.paged_kv_indices: List[int] = []
+        self.paged_kv_indices: list[int] = []
         # 0 at the beginning of paged_kv_indptr indicates the start of the
         # first request’s page indices in the paged_kv_indices list.
-        self.paged_kv_indptr: List[int] = [0]
+        self.paged_kv_indptr: list[int] = [0]
         # paged_kv_last_page_len is the length of the last page of each request
-        self.paged_kv_last_page_len: List[int] = []
+        self.paged_kv_last_page_len: list[int] = []
         self.total_blocks = 0
         self.is_profile_run: bool = False
 
@@ -725,7 +725,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             block_table = block_tables[seq_id]
             self._update_paged_kv_tensors(block_table, seq_len)
 
-    def _update_paged_kv_tensors(self, block_table: List[int], seq_len: int):
+    def _update_paged_kv_tensors(self, block_table: list[int], seq_len: int):
         # Get the number of valid blocks based on sequence length.
         # If seq_len = 16, block_size = 16,
         # block_table_bound is 1 with 1 valid block.
@@ -744,7 +744,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             last_page_len = self.block_size
         self.paged_kv_last_page_len.append(last_page_len)
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
+    def build(self, seq_lens: list[int], query_lens: list[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
 
@@ -901,10 +901,10 @@ class FlashInferImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
     ) -> None:

@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from torch import nn
@@ -39,13 +39,13 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
 
     def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+            self) -> dict[str, Union[int, torch.Tensor]]:
         raise NotImplementedError("ModelInputForNeuron cannot be broadcast.")
 
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForNeuron":
         assert attn_backend is None
@@ -85,7 +85,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         # NEURON needs to update sampling parameters when request IDs change
         # across batches. This variable stores the previous batch's request IDs
         # to determine if an update is needed.
-        self._previous_batch_request_ids: List[str] = []
+        self._previous_batch_request_ids: list[str] = []
 
         if not self._on_device_sampling_disabled:
             logger.warning(
@@ -120,16 +120,16 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
     def _prepare_prompt(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[int],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int],
                BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        input_block_ids: List[int] = []
+        input_tokens: list[list[int]] = []
+        input_positions: list[list[int]] = []
+        input_block_ids: list[int] = []
 
-        seq_lens: List[int] = []
-        multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        seq_lens: list[int] = []
+        multi_modal_kwargs_list: list[MultiModalKwargs] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -184,13 +184,13 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
     def _prepare_decode(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        input_block_ids: List[int] = []
-        context_lens: List[int] = []
+        input_tokens: list[list[int]] = []
+        input_positions: list[list[int]] = []
+        input_block_ids: list[int] = []
+        context_lens: list[int] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
@@ -232,14 +232,14 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         return input_tokens, input_positions, input_block_ids
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> ModelInputForNeuron:
+            self, tensor_dict: dict[str, Any]) -> ModelInputForNeuron:
         return ModelInputForNeuron.from_broadcasted_tensor_dict(tensor_dict)
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> ModelInputForNeuron:
         multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
@@ -312,10 +312,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def execute_model(
         self,
         model_input: ModelInputForNeuron,
-        kv_caches: Optional[List[torch.Tensor]] = None,
+        kv_caches: Optional[list[torch.Tensor]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")

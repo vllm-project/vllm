@@ -19,7 +19,7 @@ import copy
 import json
 from collections import defaultdict
 from functools import lru_cache
-from typing import Callable, DefaultDict, Dict, List, Union
+from typing import Callable, Union
 
 import numpy as np
 import torch
@@ -40,10 +40,10 @@ class BaseLogitsProcessor:
     def __init__(self, guide: Guide):
         self._guide: Guide = guide
         # CFGState is used for the FSM state for CFGGuide
-        self._fsm_state: DefaultDict[int, Union[int,
+        self._fsm_state: defaultdict[int, Union[int,
                                                 CFGState]] = defaultdict(int)
 
-    def __call__(self, input_ids: List[int],
+    def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
         seq_id = hash(tuple(input_ids))
@@ -130,7 +130,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
-    def __init__(self, schema: Union[str, Dict, BaseModel],
+    def __init__(self, schema: Union[str, dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Union[str, None]):
         """Compile the FSM that drives the JSON-guided generation.
@@ -150,7 +150,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
         """
         if isinstance(schema, type(BaseModel)):
             schema_str = json.dumps(schema.model_json_schema())
-        elif isinstance(schema, Dict):
+        elif isinstance(schema, dict):
             schema_str = json.dumps(schema)
         elif isinstance(schema, str):
             schema_str = schema
@@ -219,11 +219,11 @@ def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
         return string
 
     def change_decoder(
-        decoder: Callable[[List[int]],
-                          str]) -> Callable[[List[int]], List[str]]:
+        decoder: Callable[[list[int]],
+                          str]) -> Callable[[list[int]], list[str]]:
         """Sync vLLM's decoder with the outlines by returning list."""
 
-        def new_decoder(inp_tokens: List[int]) -> List[str]:
+        def new_decoder(inp_tokens: list[int]) -> list[str]:
             if (isinstance(inp_tokens, list) and len(inp_tokens) == 1
                     and isinstance(inp_tokens[0], list)):
                 inp_tokens = inp_tokens[0]

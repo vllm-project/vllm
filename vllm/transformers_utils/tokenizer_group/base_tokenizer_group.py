@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Optional
 
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
@@ -35,7 +35,7 @@ class BaseTokenizerGroup(ABC):
                prompt: str,
                request_id: Optional[str] = None,
                lora_request: Optional[LoRARequest] = None,
-               add_special_tokens: Optional[bool] = None) -> List[int]:
+               add_special_tokens: Optional[bool] = None) -> list[int]:
         """Encode a prompt using the tokenizer group."""
         pass
 
@@ -45,7 +45,7 @@ class BaseTokenizerGroup(ABC):
             prompt: str,
             request_id: Optional[str] = None,
             lora_request: Optional[LoRARequest] = None,
-            add_special_tokens: Optional[bool] = None) -> List[int]:
+            add_special_tokens: Optional[bool] = None) -> list[int]:
         """Encode a prompt using the tokenizer group."""
         pass
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Set, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -48,12 +48,12 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         logger.info("Wrapping {%s} in {%s}", type(worker), cls)
         return cls(worker, draft_ranks)
 
-    def __init__(self, worker: MultiStepWorker, draft_ranks: List[int]):
+    def __init__(self, worker: MultiStepWorker, draft_ranks: list[int]):
         """Create a SmallerTpProposerWorker.
 
         Args:
             worker (MultiStepWorker): an actual worker wrapped with this class
-            draft_ranks (List[int]): if this value is given, only the GPU ranks
+            draft_ranks (list[int]): if this value is given, only the GPU ranks
             written in this value participate in draft generation
         """
         self._worker = worker
@@ -105,7 +105,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         with self._patch_tensor_parallel_group():
             self._worker.load_model()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         if self._is_dummy:
             # this case is not used now
             return -1, -1
@@ -125,8 +125,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-        seq_ids_with_bonus_token_in_last_step: Set[int],
-    ) -> Tuple[List[SamplerOutput], bool]:
+        seq_ids_with_bonus_token_in_last_step: set[int],
+    ) -> tuple[list[SamplerOutput], bool]:
         # Do not check _is_dummy, as it's always called by get_spec_proposals
         return self._worker.sampler_output(
             execute_model_req, sample_len,
@@ -135,7 +135,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
-        seq_ids_with_bonus_token_in_last_step: Set[int],
+        seq_ids_with_bonus_token_in_last_step: set[int],
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
@@ -157,7 +157,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         if self._is_dummy:
             return []
 

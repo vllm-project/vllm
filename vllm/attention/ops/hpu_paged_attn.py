@@ -5,7 +5,7 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import torch
 from vllm_hpu_extension import cache_ops, ops
@@ -29,7 +29,7 @@ class HPUPagedAttentionMetadata:
 class HPUPagedAttention:
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [64, 80, 96, 112, 128, 256]
 
     @staticmethod
@@ -38,7 +38,7 @@ class HPUPagedAttention:
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -46,7 +46,7 @@ class HPUPagedAttention:
         kv_cache: torch.Tensor,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         key_cache = kv_cache[0]
         value_cache = kv_cache[1]
         return key_cache, value_cache
@@ -86,7 +86,7 @@ class HPUPagedAttention:
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: dict[int, int],
     ) -> None:
         src_key_cache = src_kv_cache[0]
         dst_key_cache = dst_kv_cache[0]
@@ -98,8 +98,8 @@ class HPUPagedAttention:
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        kv_caches: list[torch.Tensor],
+        src_to_dists: dict[int, list[int]],
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]

@@ -7,9 +7,9 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Mapping
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, TypeVar, Union)
+from typing import Literal, Optional, TypedDict, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -55,7 +55,7 @@ class InternVLImagePixelInputs(TypedDict):
     Shape:
     `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
     """
-    patches_per_image: List[int]
+    patches_per_image: list[int]
     """
     List of number of total patches for each image in the batch.
     """
@@ -976,7 +976,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

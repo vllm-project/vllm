@@ -3,7 +3,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -30,19 +30,19 @@ class PlaceholderAttentionBackend(AttentionBackend):
         return "NO_ATTENTION"
 
     @staticmethod
-    def get_impl_cls() -> Type["PlaceholderAttentionImpl"]:
+    def get_impl_cls() -> type["PlaceholderAttentionImpl"]:
         return PlaceholderAttentionImpl
 
     @staticmethod
-    def get_builder_cls() -> Type["PlaceholderAttentionMetadataBuilder"]:
+    def get_builder_cls() -> type["PlaceholderAttentionMetadataBuilder"]:
         return PlaceholderAttentionMetadataBuilder
 
     @staticmethod
-    def get_metadata_cls() -> Type["PlaceholderAttentionMetadata"]:
+    def get_metadata_cls() -> type["PlaceholderAttentionMetadata"]:
         return PlaceholderAttentionMetadata
 
     @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
+    def get_state_cls() -> type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -51,7 +51,7 @@ class PlaceholderAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (1, 1, 1, 1, 1)
 
     @staticmethod
@@ -64,7 +64,7 @@ class PlaceholderAttentionBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         return
@@ -75,7 +75,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
     """Attention metadata for prefill and decode batched together."""
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    seq_lens: Optional[List[int]]
+    seq_lens: Optional[list[int]]
     # seq_lens stored as a tensor.
     seq_lens_tensor: Optional[torch.Tensor]
 
@@ -269,10 +269,10 @@ class PlaceholderAttentionMetadataBuilder(
         self.runner = input_builder.runner
 
     def prepare(self):
-        self.prefill_seq_lens: List[int] = []
-        self.context_lens: List[int] = []
-        self.curr_seq_lens: List[int] = []
-        self.multimodal_placeholder_maps: Dict[
+        self.prefill_seq_lens: list[int] = []
+        self.context_lens: list[int] = []
+        self.curr_seq_lens: list[int] = []
+        self.multimodal_placeholder_maps: dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
@@ -309,7 +309,7 @@ class PlaceholderAttentionMetadataBuilder(
                 self.num_decode_tokens += query_len
                 self.curr_seq_lens.append(curr_seq_len)
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
+    def build(self, seq_lens: list[int], query_lens: list[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
 

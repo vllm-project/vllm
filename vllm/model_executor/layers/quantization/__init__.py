@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Type
-
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-QUANTIZATION_METHODS: List[str] = [
+QUANTIZATION_METHODS: list[str] = [
     "aqlm",
     "awq",
     "deepspeedfp",
@@ -73,7 +71,7 @@ def register_quantization_config(quantization: str):
     return _wrapper
 
 
-def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
+def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     if quantization not in QUANTIZATION_METHODS:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
@@ -104,7 +102,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
 
-    method_to_config: Dict[str, Type[QuantizationConfig]] = {
+    method_to_config: dict[str, type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
         "awq": AWQConfig,
         "deepspeedfp": DeepSpeedFPConfig,

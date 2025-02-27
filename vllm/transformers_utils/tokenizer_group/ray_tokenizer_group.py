@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from typing import List, Optional
+from typing import Optional
 
 try:
     from ray.exceptions import ActorDiedError  # type: ignore
@@ -115,7 +115,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                prompt: str,
                request_id: Optional[str] = None,
                lora_request: Optional[LoRARequest] = None,
-               add_special_tokens: Optional[bool] = None) -> List[int]:
+               add_special_tokens: Optional[bool] = None) -> list[int]:
         """Encode a prompt using the tokenizer group.
 
         We pick an idle actor and use it to encode the prompt.
@@ -166,7 +166,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             prompt: str,
             request_id: Optional[str] = None,
             lora_request: Optional[LoRARequest] = None,
-            add_special_tokens: Optional[bool] = None) -> List[int]:
+            add_special_tokens: Optional[bool] = None) -> list[int]:
         """Encode a prompt using the tokenizer group.
 
         We pick an idle actor and use it to encode the prompt.

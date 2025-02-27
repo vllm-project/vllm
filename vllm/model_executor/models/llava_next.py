@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import abstractmethod
+from collections.abc import Iterable, Mapping
 from functools import cached_property
-from typing import (Final, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, TypedDict, TypeVar, Union)
+from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -32,7 +33,7 @@ from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
 
 class LlavaNextImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: Union[torch.Tensor, list[torch.Tensor]]
     """
     Shape:
     `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
@@ -275,8 +276,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         return data
 
     def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        self, data: Union[torch.Tensor, list[torch.Tensor]]
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
 
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
@@ -458,7 +459,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _process_image_input(
         self,
         image_input: LlavaNextImageInputs,
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
         if image_input["type"] == "image_embeds":
             return [image_input["data"]]
 
@@ -587,7 +588,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

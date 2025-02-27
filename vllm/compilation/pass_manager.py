@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List
+from typing import Any
 
 import torch
 from torch import fx as fx
@@ -43,7 +43,7 @@ class PostGradPassManager(Parent):
     """
 
     def __init__(self):
-        self.passes: List[InductorPass] = []
+        self.passes: list[InductorPass] = []
 
     def __call__(self, graph: fx.Graph):
         for pass_ in self.passes:
@@ -69,7 +69,7 @@ class PostGradPassManager(Parent):
     def uuid(self):
         return self.__getstate__()
 
-    def __getstate__(self) -> Dict[str, List[Any]]:
+    def __getstate__(self) -> dict[str, list[Any]]:
         """
         Custom pickling for the pass manager, as some passes cannot be pickled.
         Pickling occurs because the pass manager is set as the value of

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from typing import Iterable, List, Mapping, Optional
+from typing import Optional
 
 from compressed_tensors import CompressionFormat
 from torch.nn import Module
@@ -20,7 +21,7 @@ def is_activation_quantization_format(format: str) -> bool:
 def should_ignore_layer(
     layer_name: Optional[str],
     ignore: Iterable[str] = tuple(),
-    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({})
 ) -> bool:
     if layer_name is None:
         return False
@@ -84,7 +85,7 @@ def find_matched_target(
     layer_name: Optional[str],
     module: Module,
     targets: Iterable[str],
-    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({})
 ) -> str:
     """
     Helper function to look up which "target" in the compressed-tensors
@@ -171,7 +172,7 @@ def _is_equal_or_regex_match(value: str,
 
 def _match_fused_layer(
         layer_name: str, target_layers: Iterable[str],
-        fused_mapping: Mapping[str, List[str]]) -> Optional[str]:
+        fused_mapping: Mapping[str, list[str]]) -> Optional[str]:
     """
     Match a fused layer name to its corresponding individual layer in 
     target_layers. Returns first value in fused_mapping which matches targets
@@ -201,7 +202,7 @@ def _match_fused_layer(
     ]
 
     # for each unfused component, find a match in targets
-    unfused_matches: List[Optional[str]] = []
+    unfused_matches: list[Optional[str]] = []
     for unfused in unfused_paths:
         for target in target_layers:
             if _is_equal_or_regex_match(unfused, target):

@@ -4,7 +4,7 @@ import base64
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -39,7 +39,7 @@ class VideoPlugin(ImagePlugin):
     def _get_hf_video_processor(
         self,
         model_config: "ModelConfig",
-        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ):
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}

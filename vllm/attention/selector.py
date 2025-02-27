@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from collections.abc import Generator
 from contextlib import contextmanager
 from functools import cache
-from typing import Generator, Optional, Type
+from typing import Optional
 
 import torch
 
@@ -86,7 +87,7 @@ def get_attn_backend(
     is_attention_free: bool,
     is_blocksparse: bool = False,
     use_mla: bool = False,
-) -> Type[AttentionBackend]:
+) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     # Accessing envs.* behind an @lru_cache decorator can cause the wrong
     # value to be returned from the cache if the value changes between calls.
@@ -114,7 +115,7 @@ def _cached_get_attn_backend(
     is_blocksparse: bool = False,
     use_v1: bool = False,
     use_mla: bool = False,
-) -> Type[AttentionBackend]:
+) -> type[AttentionBackend]:
     if is_blocksparse:
         logger.info("Using BlocksparseFlashAttention backend.")
         from vllm.attention.backends.blocksparse_attn import (

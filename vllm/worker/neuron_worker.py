@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A Neuron worker class."""
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.distributed
@@ -45,7 +45,7 @@ class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         assert execute_model_req is not None
         assert (not execute_model_req.blocks_to_swap_in
                 and not execute_model_req.blocks_to_swap_out
@@ -66,7 +66,7 @@ class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available KV blocks.
 
         Swapping is not yet supported, so always return num_cpu_blocks=0.
@@ -100,7 +100,7 @@ class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return False
 
     @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
         return None
 
     @torch.inference_mode()

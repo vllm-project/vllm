@@ -2,7 +2,7 @@
 
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 import torch
@@ -114,9 +114,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
+        self.kv_caches: list[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+        self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
         # Set up speculative decoding.
         self.use_spec_decode = False
@@ -137,7 +137,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
+        self.requests: dict[str, CachedRequestState] = {}
         # Persistent batch.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
@@ -253,7 +253,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # then resubmitted with the same ID. In this case, we treat them as two
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
-        removed_req_indices: List[int] = []
+        removed_req_indices: list[int] = []
         for req_id in scheduler_output.finished_req_ids:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
@@ -284,7 +284,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert req_index is not None
             removed_req_indices.append(req_index)
 
-        req_ids_to_add: List[str] = []
+        req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
@@ -427,7 +427,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Tuple[FlashAttentionMetadata, torch.Tensor]:
+    ) -> tuple[FlashAttentionMetadata, torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -782,8 +782,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return
 
         # Batch the multi-modal inputs.
-        mm_inputs: List[MultiModalKwargs] = []
-        req_input_ids: List[Tuple[str, int]] = []
+        mm_inputs: list[MultiModalKwargs] = []
+        req_input_ids: list[tuple[str, int]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
             for input_id in encoder_input_ids:
@@ -827,8 +827,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _gather_encoder_outputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> List[torch.Tensor]:
-        encoder_outputs: List[torch.Tensor] = []
+    ) -> list[torch.Tensor]:
+        encoder_outputs: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -1030,10 +1030,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def generate_draft_token_ids(
         self,
-        sampled_token_ids: List[List[int]],
-    ) -> List[List[int]]:
+        sampled_token_ids: list[list[int]],
+    ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
-        draft_token_ids: List[List[int]] = []
+        draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
@@ -1077,12 +1077,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
         scheduler_output: "SchedulerOutput",
-    ) -> Dict[str, LogprobsTensors]:
+    ) -> dict[str, LogprobsTensors]:
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
             return {}
 
-        prompt_logprobs_dict: Dict[str, LogprobsTensors] = {}
+        prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
@@ -1283,7 +1283,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens = self.max_num_tokens
         min_tokens_per_req: int = num_tokens // num_reqs
 
-        num_scheduled_tokens_list: List[int] = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list: list[int] = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
@@ -1372,7 +1372,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
-        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
 
         for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
             tensor_config = kv_cache_config.tensors[layer_name]

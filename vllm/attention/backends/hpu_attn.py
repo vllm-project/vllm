@@ -6,7 +6,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Optional
 
 import torch
 import vllm_hpu_extension.ops as ops
@@ -31,15 +31,15 @@ class HPUAttentionBackend(AttentionBackend):
         return "HPU_ATTN"
 
     @staticmethod
-    def get_impl_cls() -> Type["HPUAttentionImpl"]:
+    def get_impl_cls() -> type["HPUAttentionImpl"]:
         return HPUAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return HPUAttentionMetadata
 
     @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
+    def get_state_cls() -> type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -48,7 +48,7 @@ class HPUAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return HPUPagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                     num_kv_heads, head_size)
 
@@ -56,14 +56,14 @@ class HPUAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: dict[int, int],
     ) -> None:
         HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        kv_caches: list[torch.Tensor],
+        src_to_dists: dict[int, list[int]],
     ) -> None:
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
 
@@ -101,10 +101,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         max_seq_len: int = 4096,
         attn_type: str = AttentionType.DECODER,
     ) -> None:

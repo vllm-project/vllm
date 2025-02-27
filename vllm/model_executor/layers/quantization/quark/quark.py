@@ -2,7 +2,7 @@
 
 import fnmatch
 import re
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Optional, cast
 
 import torch
 
@@ -26,9 +26,9 @@ __all__ = ["QuarkLinearMethod"]
 class QuarkConfig(QuantizationConfig):
 
     def __init__(self,
-                 quant_config: Dict[str, Any],
-                 kv_cache_group: Optional[List[str]] = None,
-                 kv_cache_config: Optional[Dict[str, Any]] = None,
+                 quant_config: dict[str, Any],
+                 kv_cache_group: Optional[list[str]] = None,
+                 kv_cache_config: Optional[dict[str, Any]] = None,
                  pack_method: str = "reorder"):
         super().__init__()
         if kv_cache_group is None:
@@ -41,7 +41,7 @@ class QuarkConfig(QuantizationConfig):
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
 
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.float16, torch.bfloat16]
 
     @classmethod
@@ -56,7 +56,7 @@ class QuarkConfig(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
 
         # Check if the layer is skipped for quantization.
-        exclude_layers = cast(List[str], self.quant_config.get("exclude"))
+        exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         if should_ignore_layer(prefix,
                                ignore=exclude_layers,
                                fused_mapping=self.packed_modules_mapping):
@@ -74,12 +74,12 @@ class QuarkConfig(QuantizationConfig):
         return None
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "QuarkConfig":
+    def from_config(cls, config: dict[str, Any]) -> "QuarkConfig":
         export_config = config.get("export")
         if export_config is None:
             raise ValueError("The export key should be included in "
                              "the configurations of Quark quantized model")
-        kv_cache_group = cast(List[str], export_config.get("kv_cache_group"))
+        kv_cache_group = cast(list[str], export_config.get("kv_cache_group"))
         pack_method = cast(str, export_config.get("pack_method"))
 
         # In the export model of quark, the quantization configuration
@@ -91,7 +91,7 @@ class QuarkConfig(QuantizationConfig):
             kv_cache_config = None
         else:
             kv_cache_set = set(kv_cache_group)
-            layer_quant_config = cast(Dict[str, Any],
+            layer_quant_config = cast(dict[str, Any],
                                       config.get("layer_quant_config"))
             layer_quant_names = list(layer_quant_config.keys())
             layer_quant_set = set(layer_quant_names)
@@ -104,7 +104,7 @@ class QuarkConfig(QuantizationConfig):
                                  "configuration.")
 
             q_configs = [
-                cast(Dict[str, Any], layer_quant_config.get(name))
+                cast(dict[str, Any], layer_quant_config.get(name))
                 for name in kv_cache_group
             ]
             if not all(
@@ -131,7 +131,7 @@ class QuarkConfig(QuantizationConfig):
                    pack_method=pack_method)
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return []
 
     def _check_scheme_supported(self,
@@ -151,8 +151,8 @@ class QuarkConfig(QuantizationConfig):
         else:
             return False
 
-    def _is_fp8_w8a8(self, weight_quant: Optional[Dict[str, Any]],
-                     input_quant: Optional[Dict[str, Any]]) -> bool:
+    def _is_fp8_w8a8(self, weight_quant: Optional[dict[str, Any]],
+                     input_quant: Optional[dict[str, Any]]) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
             return False
@@ -176,8 +176,8 @@ class QuarkConfig(QuantizationConfig):
         is_per_tensor_activation = (input_quant.get("qscheme") == "per_tensor")
         return is_per_tensor_activation
 
-    def _is_static_tensor_w8a8(self, weight_quant: Optional[Dict[str, Any]],
-                               input_quant: Optional[Dict[str, Any]]) -> bool:
+    def _is_static_tensor_w8a8(self, weight_quant: Optional[dict[str, Any]],
+                               input_quant: Optional[dict[str, Any]]) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
             return False
@@ -199,7 +199,7 @@ class QuarkConfig(QuantizationConfig):
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
 
     def _find_matched_config(self, layer_name: str,
-                             module: torch.nn.Module) -> Dict[str, Any]:
+                             module: torch.nn.Module) -> dict[str, Any]:
 
         proj_name = layer_name.split(".")[-1]
         if proj_name in self.packed_modules_mapping:
@@ -224,29 +224,29 @@ class QuarkConfig(QuantizationConfig):
             return shard_configs[0]
         else:
             layer_quant_config = cast(
-                Dict[str, Any], self.quant_config.get("layer_quant_config"))
+                dict[str, Any], self.quant_config.get("layer_quant_config"))
             for name_pattern in layer_quant_config:
                 if fnmatch.fnmatch(layer_name, name_pattern):
                     return layer_quant_config[name_pattern]
 
             layer_type = cast(str, type(module))
             layer_type_quant_config = cast(
-                Dict[str, Any],
+                dict[str, Any],
                 self.quant_config.get("layer_type_quant_config"))
             if layer_type in layer_type_quant_config:
                 return layer_type_quant_config[layer_type]
 
             global_quant_config = cast(
-                Dict[str, Any], self.quant_config.get("global_quant_config"))
+                dict[str, Any], self.quant_config.get("global_quant_config"))
             return global_quant_config
 
-    def _get_scheme_from_config(self, config: Dict[str, Any]) -> "QuarkScheme":
+    def _get_scheme_from_config(self, config: dict[str, Any]) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
             raise NotImplementedError(
                 "Currently, Quark models with output_tensors "
                 "and bias quantized are not supported")
-        weight_config = cast(Dict[str, Any], config.get("weight"))
-        input_config = cast(Dict[str, Any], config.get("input_tensors"))
+        weight_config = cast(dict[str, Any], config.get("weight"))
+        input_config = cast(dict[str, Any], config.get("input_tensors"))
 
         if self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
@@ -323,7 +323,7 @@ class QuarkLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         """
@@ -367,7 +367,7 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
         super().__init__(quant_config)
 
     @staticmethod
-    def validate_kv_cache_config(kv_cache_config: Optional[Dict[str, Any]]):
+    def validate_kv_cache_config(kv_cache_config: Optional[dict[str, Any]]):
         """
         Validator for the kv cache configuration. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM

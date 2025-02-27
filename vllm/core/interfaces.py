@@ -2,9 +2,7 @@
 
 import enum
 from abc import ABC, abstractmethod
-from typing import List
-from typing import Sequence as GenericSequence
-from typing import Tuple
+from collections.abc import Sequence as GenericSequence
 
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.utils import Device
@@ -61,7 +59,7 @@ class BlockSpaceManager(ABC):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> List[Tuple[int, int]]:
+    ) -> list[tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -74,7 +72,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_in(self, seq_group: SequenceGroup) -> list[tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -82,7 +80,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_out(self, seq_group: SequenceGroup) -> list[tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -90,7 +88,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def get_block_table(self, seq: Sequence) -> List[int]:
+    def get_block_table(self, seq: Sequence) -> list[int]:
         pass
 
     @abstractmethod
@@ -111,7 +109,7 @@ class BlockSpaceManager(ABC):
 
     @abstractmethod
     def get_common_computed_block_ids(
-            self, seqs: List[Sequence]) -> GenericSequence[int]:
+            self, seqs: list[Sequence]) -> GenericSequence[int]:
         pass
 
     @abstractmethod

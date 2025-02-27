@@ -2,8 +2,7 @@
 
 import dataclasses
 from abc import ABC, abstractmethod
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
-                    TypeVar)
+from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar
 
 import torch
 import torch.nn as nn
@@ -24,7 +23,7 @@ T = TypeVar('T', bound="BroadcastableModelInput")
 
 
 def _add_attn_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_metadata: Optional["AttentionMetadata"]) -> None:
     """
     Helper method to update tensor_dict with broadcastable
@@ -36,8 +35,8 @@ def _add_attn_metadata_broadcastable_dict(
 
 def _init_attn_metadata_from_tensor_dict(
     attn_backend: "AttentionBackend",
-    tensor_dict: Dict[str, Any],
-) -> Dict[str, Any]:
+    tensor_dict: dict[str, Any],
+) -> dict[str, Any]:
     """
     Helper method to initialize AttentionMetadata based on an
     AttentionBackend and broadcastable AttentionMetadata fields.
@@ -57,7 +56,7 @@ def _init_attn_metadata_from_tensor_dict(
 
 
 def _init_sampling_metadata_from_tensor_dict(  # type: ignore
-        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
+        tensor_dict: dict[str, Any]) -> dict[str, Any]:
     """
     Helper method to initialize SamplingMetadata based on broadcastable
     SamplingMetadata fields.
@@ -78,7 +77,7 @@ def _init_sampling_metadata_from_tensor_dict(  # type: ignore
 
 
 def _add_sampling_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         sampling_metadata: Optional["SamplingMetadata"]) -> None:
     """
     Helper method to update tensor_dict with broadcastable
@@ -90,8 +89,8 @@ def _add_sampling_metadata_broadcastable_dict(
 
 
 def _init_frozen_model_input_from_tensor_dict(
-        frozen_model_input_cls: Type["ModelRunnerInputBase"],
-        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
+        frozen_model_input_cls: type["ModelRunnerInputBase"],
+        tensor_dict: dict[str, Any]) -> dict[str, Any]:
     """
     Helper method to initialize a frozen ModelInput based on broadcastable
     """
@@ -109,7 +108,7 @@ def _init_frozen_model_input_from_tensor_dict(
 class BroadcastableModelInput(ABC):
 
     @abstractmethod
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         """
         Extract broadcastable fields. Override for fields that require some
         custom deserialization.
@@ -119,8 +118,8 @@ class BroadcastableModelInput(ABC):
     @classmethod
     @abstractmethod
     def from_broadcasted_tensor_dict(
-        cls: Type[T],
-        tensor_dict: Dict[str, Any],
+        cls: type[T],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> T:
         """
@@ -150,7 +149,7 @@ class ModelRunnerInputBuilderBase(ABC, Generic[T]):
 
     @abstractmethod
     def prepare(self,
-                finished_requests_ids: Optional[List[str]] = None) -> None:
+                finished_requests_ids: Optional[list[str]] = None) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -191,12 +190,12 @@ class ModelRunnerBase(ABC, Generic[T]):
         self.observability_config = vllm_config.observability_config
 
     # Map of request_id -> generator used for seeded random sampling
-    generators: Dict[str, torch.Generator] = {}
+    generators: dict[str, torch.Generator] = {}
 
     @abstractmethod
     def make_model_input_from_broadcasted_tensor_dict(
         self,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> T:
         """
         Make an instance of a ModelRunnerInputBase from the broadcasted tensor
@@ -207,9 +206,9 @@ class ModelRunnerBase(ABC, Generic[T]):
     @abstractmethod
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None,
+        finished_requests_ids: Optional[list[str]] = None,
     ) -> T:
         """
         Prepare the inputs to ModelRunnerBase.execute_model from an execution
@@ -225,17 +224,17 @@ class ModelRunnerBase(ABC, Generic[T]):
     def execute_model(
         self,
         model_input: T,
-        kv_caches: Optional[List[torch.Tensor]],
+        kv_caches: Optional[list[torch.Tensor]],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         **kwargs,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         """
         Execute the model on the given input.
         """
         raise NotImplementedError
 
-    def get_generators(self, finished_request_ids: Optional[List[str]] = None):
+    def get_generators(self, finished_request_ids: Optional[list[str]] = None):
         """
         Return dict of per-request generators used for random sampling.
         """

@@ -17,8 +17,8 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict)
+from collections.abc import Iterable, Mapping
+from typing import Literal, Optional, TypedDict
 
 import torch
 import torch.nn as nn
@@ -58,7 +58,7 @@ class FuyuImagePatchInputs(TypedDict):
     `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
     """
 
-    patches_per_image: List[int]
+    patches_per_image: list[int]
     """
     List of number of total patches for each image in the batch.
     This is used to restore the first two dimensions of `flat_data`.
@@ -390,7 +390,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         next_tokens = self.language_model.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

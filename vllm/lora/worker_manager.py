@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import contextmanager
-from typing import Any, Dict, List, Literal, Optional, Set, Type, Union
+from typing import Any, Literal, Optional, Union
 
 import torch
 
@@ -27,7 +27,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
     Every request, the requested LoRAs will be loaded (unless they are already
     loaded), and every other LoRA will be unloaded."""
 
-    _manager_cls: Type[LoRAModelManager] = LoRAModelManager
+    _manager_cls: type[LoRAModelManager] = LoRAModelManager
 
     def __init__(
         self,
@@ -36,9 +36,9 @@ class WorkerLoRAManager(AbstractWorkerManager):
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
-        embedding_modules: Dict[str, str],
-        embedding_padding_modules: List[str],
-        lora_model_cls: Type[LoRAModel] = LoRAModel,
+        embedding_modules: dict[str, str],
+        embedding_padding_modules: list[str],
+        lora_model_cls: type[LoRAModel] = LoRAModel,
         max_position_embeddings: Optional[int] = None,
     ):
         self._lora_model_cls = lora_model_cls
@@ -88,7 +88,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 self._adapter_manager.supported_lora_modules)
             packed_modules_mapping = (
                 self._adapter_manager.packed_modules_mapping)
-            expected_lora_modules: List[str] = []
+            expected_lora_modules: list[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
                     expected_lora_modules.extend(
@@ -162,12 +162,12 @@ class WorkerLoRAManager(AbstractWorkerManager):
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
 
-    def set_active_adapters(self, requests: Set[Any],
+    def set_active_adapters(self, requests: set[Any],
                             mapping: Optional[Any]) -> None:
         set_active_adapters_worker(requests, mapping, self._apply_adapters,
                                    self._adapter_manager.set_adapter_mapping)
 
-    def _apply_adapters(self, adapter_requests: Set[Any]) -> None:
+    def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         apply_adapters_worker(adapter_requests, self.list_adapters,
                               self._adapter_manager.adapter_slots,
                               self.remove_adapter, self.add_adapter)
@@ -184,7 +184,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
     def remove_all_adapters(self):
         self._adapter_manager.remove_all_adapters()
 
-    def list_adapters(self) -> Set[int]:
+    def list_adapters(self) -> set[int]:
         return list_adapters_worker(self._adapter_manager.list_adapters)
 
 
@@ -195,7 +195,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     (unless they are already loaded) and least recently used LoRAs will
     be unloaded if the cache is above capacity."""
 
-    _manager_cls: Type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
+    _manager_cls: type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
 
     def create_lora_manager(
         self,
@@ -213,7 +213,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         self._adapter_manager = lora_manager
         return lora_manager.model
 
-    def _apply_adapters(self, lora_requests: Set[LoRARequest]) -> None:
+    def _apply_adapters(self, lora_requests: set[LoRARequest]) -> None:
         loras_map = {
             lora_request.lora_int_id: lora_request
             for lora_request in lora_requests if lora_request

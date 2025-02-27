@@ -4,11 +4,11 @@
 # https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py
 """A HuggingFace-style model configuration."""
 import warnings
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 from transformers import PretrainedConfig
 
-attn_config_defaults: Dict = {
+attn_config_defaults: dict = {
     'attn_type': 'multihead_attention',
     'attn_pdrop': 0.0,
     'attn_impl': 'triton',
@@ -20,8 +20,8 @@ attn_config_defaults: Dict = {
     'alibi': False,
     'alibi_bias_max': 8
 }
-ffn_config_defaults: Dict = {'ffn_type': 'mptmlp'}
-init_config_defaults: Dict = {
+ffn_config_defaults: dict = {'ffn_type': 'mptmlp'}
+init_config_defaults: dict = {
     'name': 'kaiming_normal_',
     'fan_mode': 'fan_in',
     'init_nonlinearity': 'relu',
@@ -52,15 +52,15 @@ class MPTConfig(PretrainedConfig):
                  resid_pdrop: float = 0.0,
                  emb_pdrop: float = 0.0,
                  learned_pos_emb: bool = True,
-                 attn_config: Dict = attn_config_defaults,
-                 ffn_config: Dict = ffn_config_defaults,
+                 attn_config: dict = attn_config_defaults,
+                 ffn_config: dict = ffn_config_defaults,
                  init_device: str = 'cpu',
                  logit_scale: Optional[Union[float, str]] = None,
                  no_bias: bool = False,
                  embedding_fraction: float = 1.0,
                  norm_type: str = 'low_precision_layernorm',
                  use_cache: bool = False,
-                 init_config: Dict = init_config_defaults,
+                 init_config: dict = init_config_defaults,
                  fc_type: str = 'torch',
                  verbose: Optional[int] = None,
                  **kwargs: Any):
@@ -102,8 +102,8 @@ class MPTConfig(PretrainedConfig):
         self._validate_config()
 
     def _set_config_defaults(
-            self, config: Dict[str, Any],
-            config_defaults: Dict[str, Any]) -> Dict[str, Any]:
+            self, config: dict[str, Any],
+            config_defaults: dict[str, Any]) -> dict[str, Any]:
         for (k, v) in config_defaults.items():
             if k not in config:
                 config[k] = v

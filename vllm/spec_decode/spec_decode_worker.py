@@ -3,7 +3,7 @@
 import copy
 from collections import defaultdict
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -148,7 +148,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     def create_worker(
         cls,
         scorer_worker: WorkerBase,
-        draft_worker_kwargs: Dict[str, Any],
+        draft_worker_kwargs: dict[str, Any],
         disable_mqa_scorer: bool,
         disable_by_batch_size: Optional[int],
         draft_token_acceptance_method: str,
@@ -324,10 +324,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Tracks the sequence IDs that received a bonus token ID in
         # their last forward pass. Needed only if KV cache is being
         # used for token generation such as in the case of MultiStepWorker.
-        self._seq_with_bonus_token_in_last_step: Set[int] = set()
+        self._seq_with_bonus_token_in_last_step: set[int] = set()
         # Tracks the currently active request ids and the sequence IDs
         # corresponding to them
-        self._request_id_seq_id_mapping: Dict[str, Set[int]] = defaultdict(set)
+        self._request_id_seq_id_mapping: dict[str, set[int]] = defaultdict(set)
         # Tracks if the proposer worker uses the KV cache or not.
 
         self.probs_dtype = self.spec_decode_sampler.probs_dtype
@@ -374,7 +374,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             self.spec_decode_sampler.init_tensors(self.rank,
                                                   device_type=self.device)
 
-        scorer_cls: Type[SpeculativeScorer]
+        scorer_cls: type[SpeculativeScorer]
         if self.disable_mqa_scorer:
             scorer_cls = BatchExpansionTop1Scorer
             logger.info("[Speculative Decoding] Use batch "
@@ -419,7 +419,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of cache blocks to use.
 
         This is done by profiling the scorer model (which is typically the
@@ -456,7 +456,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
         if self.rank != self._driver_rank:
@@ -560,7 +560,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
     def _maybe_disable_speculative_tokens(
             self, disable_all_speculation: bool,
-            seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
+            seq_group_metadata_list: list[SequenceGroupMetadata]) -> None:
         if not disable_all_speculation:
             return
 
@@ -574,7 +574,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
     def _serialize_sampler_output_no_logprobs(
             self, execute_model_req: ExecuteModelRequest,
-            sampler_output: SamplerOutput) -> List[SamplerOutput]:
+            sampler_output: SamplerOutput) -> list[SamplerOutput]:
         """
         Creates and returns a `SamplerOutput` with only the token IDs being
         serialized to CPU and populated in `CompletionSequenceGroupOutput`.
@@ -609,7 +609,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             execute_model_req.seq_group_metadata_list \
             for seq_id, seq_data in sg.seq_data.items()
         ]
-        completion_seq_group_output_list: List[
+        completion_seq_group_output_list: list[
             CompletionSequenceGroupOutput] = []
         output_index = 0
         # Make sure the non-terminal prefill chunks are still aligned with
@@ -664,7 +664,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
-                     skip_proposer: bool) -> List[SamplerOutput]:
+                     skip_proposer: bool) -> list[SamplerOutput]:
         """Run a single generation step without any speculation. The input is
         sent to the proposer and scorer model so that the KV cache is consistent
         between the two. When skip_proposer is True, the proposer model is
@@ -759,7 +759,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
             self, execute_model_req: ExecuteModelRequest,
-            num_lookahead_slots: int) -> List[SamplerOutput]:
+            num_lookahead_slots: int) -> list[SamplerOutput]:
         """Execute a single step of speculative decoding.
 
         This invokes the proposer worker to get k speculative tokens for each
@@ -838,11 +838,11 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         proposal_scores: SpeculativeScores,
         proposals: SpeculativeProposals,
         max_proposal_len: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Determine which speculative tokens are accepted using the
         probabilities of each token according to the proposer and scorer models.
 
@@ -875,7 +875,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
         # Sampler arguments
-        sampler_extra_kwargs: Dict[str, Any] = {}
+        sampler_extra_kwargs: dict[str, Any] = {}
         if self.generators and isinstance(self.spec_decode_sampler,
                                           SpecDecodeStochasticBaseSampler):
             sampler_extra_kwargs["seeded_seqs"] = {
@@ -934,14 +934,14 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
     def _create_output_sampler_list(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
         target_logprobs: torch.Tensor,  # shape: [batch_size, k+1, vocab_size]
         prompt_logprobs: Optional[
             torch.Tensor],  # shape: [nprompt_tokens, vocab_size]
         k: int,
-        stage_times: Tuple[float, float, float],
-    ) -> List[SamplerOutput]:
+        stage_times: tuple[float, float, float],
+    ) -> list[SamplerOutput]:
         """Given the accepted token ids, create a list of SamplerOutput.
 
         The output is padded with -1 tokens such that each sequence has
@@ -984,7 +984,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Non-terminal prefill chunks will end up here as rows with just -1s
         # i.e mixed-batch [[-1, 1576], [-1, 29884], [-1, -1], [-1, -1]] while
         # terminal chunks will only have one generated token at time 0.
-        sampler_output_list: List[SamplerOutput] = []
+        sampler_output_list: list[SamplerOutput] = []
 
         # Prefills are not multi-step (return at most 1 token), in order to
         # avoid padding or repetition to fit decodes, we separate them.
@@ -1058,7 +1058,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                    if not sg.is_prompt):
                 break
 
-            step_output_token_ids: List[CompletionSequenceGroupOutput] = []
+            step_output_token_ids: list[CompletionSequenceGroupOutput] = []
             for sequence_index in range(batch_size):
                 seq_meta = seq_group_metadata_list[sequence_index]
                 # Prompts already processed above.
@@ -1124,9 +1124,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         batch_size: int,
         num_steps: int,
         num_top_k: int,
-    ) -> Tuple[List[List[int]], List[List[float]],
-               List[List[List[Optional[float]]]],
-               List[List[List[Optional[int]]]]]:
+    ) -> tuple[list[list[int]], list[list[float]],
+               list[list[list[Optional[float]]]],
+               list[list[list[Optional[int]]]]]:
         """
         Creates and returns four dummy lists representing token probabilities 
         and their ranks.
@@ -1153,10 +1153,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                                            for _ in range(num_steps)]
         accepted_token_id_logprobs_by_step = [[0.0] * batch_size
                                               for _ in range(num_steps)]
-        topk_logprobs_by_step: List[List[List[Optional[float]]]] = [[
+        topk_logprobs_by_step: list[list[list[Optional[float]]]] = [[
             [None] * num_top_k for _ in range(batch_size)
         ] for _ in range(num_steps)]
-        topk_indices_by_step: List[List[List[Optional[int]]]] = [[
+        topk_indices_by_step: list[list[list[Optional[int]]]] = [[
             [None] * num_top_k for _ in range(batch_size)
         ] for _ in range(num_steps)]
         return (accepted_token_id_ranks_by_step,
@@ -1168,9 +1168,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         target_logprobs_by_step: torch.Tensor,
         accepted_token_ids_by_step: torch.Tensor,
         num_top_k: int,
-    ) -> Tuple[List[List[int]], List[List[float]],
-               List[List[List[Optional[float]]]],
-               List[List[List[Optional[int]]]]]:
+    ) -> tuple[list[list[int]], list[list[float]],
+               list[list[list[Optional[float]]]],
+               list[list[list[Optional[int]]]]]:
         """
         Creates and returns four lists representing token probabilities and
         their ranks.
@@ -1232,9 +1232,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             del self._request_id_seq_id_mapping[finished_request]
 
     def _track_sequences_with_bonus_tokens(
-            self, seq_ids: List[int],
-            request_ids_seq_ids_mapping: Dict[str, Set[int]],
-            accepted_token_ids_by_step: List[List[int]]):
+            self, seq_ids: list[int],
+            request_ids_seq_ids_mapping: dict[str, set[int]],
+            accepted_token_ids_by_step: list[list[int]]):
         """
         Updates the internal data structures which keep track of sequences
         which have been assigned bonus tokens in their last forward pass.

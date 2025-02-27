@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, List, Optional, Set
+from typing import Callable, Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 
 
 class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
-    _kernel_backends_being_used: Set[str] = set()
+    _kernel_backends_being_used: set[str] = set()
 
     def __init__(self, strategy: str, is_static_input_scheme: bool,
                  input_symmetric: bool):
@@ -33,7 +33,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
         return 75
 
     def create_weights(self, layer: torch.nn.Module,
-                       output_partition_sizes: List[int],
+                       output_partition_sizes: list[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Optional
 
 
 ## model functions
-def deactivate_adapter(adapter_id: int, active_adapters: Dict[int, None],
+def deactivate_adapter(adapter_id: int, active_adapters: dict[int, None],
                        deactivate_func: Callable) -> bool:
     if adapter_id in active_adapters:
         deactivate_func(adapter_id)
@@ -13,7 +13,7 @@ def deactivate_adapter(adapter_id: int, active_adapters: Dict[int, None],
     return False
 
 
-def add_adapter(adapter: Any, registered_adapters: Dict[int, Any],
+def add_adapter(adapter: Any, registered_adapters: dict[int, Any],
                 capacity: int, add_func: Callable) -> bool:
     if adapter.id not in registered_adapters:
         if len(registered_adapters) >= capacity:
@@ -32,23 +32,23 @@ def set_adapter_mapping(mapping: Any, last_mapping: Any,
     return last_mapping
 
 
-def remove_adapter(adapter_id: int, registered_adapters: Dict[int, Any],
+def remove_adapter(adapter_id: int, registered_adapters: dict[int, Any],
                    deactivate_func: Callable) -> bool:
     deactivate_func(adapter_id)
     return bool(registered_adapters.pop(adapter_id, None))
 
 
-def list_adapters(registered_adapters: Dict[int, Any]) -> Dict[int, Any]:
+def list_adapters(registered_adapters: dict[int, Any]) -> dict[int, Any]:
     return dict(registered_adapters)
 
 
 def get_adapter(adapter_id: int,
-                registered_adapters: Dict[int, Any]) -> Optional[Any]:
+                registered_adapters: dict[int, Any]) -> Optional[Any]:
     return registered_adapters.get(adapter_id)
 
 
 ## worker functions
-def set_active_adapters_worker(requests: Set[Any], mapping: Optional[Any],
+def set_active_adapters_worker(requests: set[Any], mapping: Optional[Any],
                                apply_adapters_func,
                                set_adapter_mapping_func) -> None:
     apply_adapters_func(requests)
@@ -66,7 +66,7 @@ def add_adapter_worker(adapter_request: Any, list_adapters_func,
     return loaded
 
 
-def apply_adapters_worker(adapter_requests: Set[Any], list_adapters_func,
+def apply_adapters_worker(adapter_requests: set[Any], list_adapters_func,
                           adapter_slots: int, remove_adapter_func,
                           add_adapter_func) -> None:
     models_that_exist = list_adapters_func()
@@ -88,5 +88,5 @@ def apply_adapters_worker(adapter_requests: Set[Any], list_adapters_func,
         add_adapter_func(models_map[adapter_id])
 
 
-def list_adapters_worker(adapter_manager_list_adapters_func) -> Set[int]:
+def list_adapters_worker(adapter_manager_list_adapters_func) -> set[int]:
     return set(adapter_manager_list_adapters_func())

@@ -2,7 +2,7 @@
 
 import dataclasses
 import itertools
-from typing import Any, Dict, List, Optional, Tuple, Type, cast
+from typing import Any, Optional, cast
 
 import torch
 import torch.distributed
@@ -44,7 +44,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -63,7 +63,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "EncoderDecoderModelInput":
         return cast(
@@ -72,9 +72,9 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
 
 
 class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
-    _model_input_cls: Type[EncoderDecoderModelInput] = (
+    _model_input_cls: type[EncoderDecoderModelInput] = (
         EncoderDecoderModelInput)
-    _builder_cls: Type[ModelInputForGPUBuilder] = (ModelInputForGPUBuilder)
+    _builder_cls: type[ModelInputForGPUBuilder] = (ModelInputForGPUBuilder)
 
     def __init__(
         self,
@@ -133,13 +133,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def _list_to_int32_tensor(
         self,
-        _list: List[int],
+        _list: list[int],
     ) -> torch.Tensor:
         return torch.tensor(_list, dtype=torch.int32, device=self.device)
 
     def _list_to_long_tensor(
         self,
-        _list: List[int],
+        _list: list[int],
     ) -> torch.Tensor:
         return torch.tensor(_list, dtype=torch.long, device=self.device)
 
@@ -153,10 +153,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
     def execute_model(
         self,
         model_input: EncoderDecoderModelInput,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[PoolerOutput]]:
+    ) -> Optional[list[PoolerOutput]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
@@ -207,7 +207,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         return [output]
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> EncoderDecoderModelInput:
+            self, tensor_dict: dict[str, Any]) -> EncoderDecoderModelInput:
         return EncoderDecoderModelInput.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,
@@ -215,9 +215,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> EncoderDecoderModelInput:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -270,7 +270,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
-        seqs: List[SequenceGroupMetadata] = []
+        seqs: list[SequenceGroupMetadata] = []
 
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
             self.model_config)
@@ -332,9 +332,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def _prepare_encoder_model_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         model_input: EncoderDecoderModelInput,
-    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
+    ) -> tuple[AttentionMetadata, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs
@@ -379,7 +379,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         is_prompt = seq_group_metadata_list[0].is_prompt
 
         # Build encoder inputs
-        encoder_seq_lens: List[int] = []
+        encoder_seq_lens: list[int] = []
         if is_prompt:
             # Prefill phase.
             cross_block_tables = self._empty_int32_tensor().view(

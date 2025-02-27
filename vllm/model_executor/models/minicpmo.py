@@ -22,9 +22,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
+from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Set, Tuple, TypedDict, Union)
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -80,7 +80,7 @@ class MiniCPMOAudioFeatureInputs(TypedDict):
 
 class MiniCPMOAudioEmbeddingInputs(TypedDict):
     type: Literal["audio_embeds"]
-    data: List[torch.Tensor]
+    data: list[torch.Tensor]
     """
     Shape: `(batch_size * num_images * num_slices, hidden_size)`
 
@@ -152,7 +152,7 @@ class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
 class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     audio_pattern = "(<audio>./</audio>)"
 
-    def get_supported_mm_modalities(self) -> List[str]:
+    def get_supported_mm_modalities(self) -> list[str]:
         return ["image", "video", "audio"]
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -261,7 +261,7 @@ class MiniCPMOMultiModalProcessor(
         return self.info.get_hf_processor().get_audio_placeholder(
             audio_lens, chunk_input, chunk_length)
 
-    def get_special_tokens(self) -> Dict[str, torch.Tensor]:
+    def get_special_tokens(self) -> dict[str, torch.Tensor]:
         tokenizer = self.info.get_tokenizer()
         special_tokens = super().get_special_tokens()
         if hasattr(tokenizer, "audio_start_id"):
@@ -272,7 +272,7 @@ class MiniCPMOMultiModalProcessor(
         return special_tokens
 
     def process_audios(self, mm_data: Mapping[str, object],
-                       mm_kwargs: Mapping[str, object]) -> Dict[str, object]:
+                       mm_kwargs: Mapping[str, object]) -> dict[str, object]:
         audios = mm_data.pop("audios", [])
         audio_embeds = mm_data.pop("audio_embeds", [])
         if isinstance(audios, (list, torch.Tensor)) and len(audios) > 0:
@@ -343,13 +343,13 @@ class MiniCPMOMultiModalProcessor(
             return "audio_lens"
         return super().get_modality_num_counter(modality)
 
-    def get_num_slices_by_modality(self, inputs: Dict[str, object],
+    def get_num_slices_by_modality(self, inputs: dict[str, object],
                                    modality: str, index: int) -> int:
         if modality == "audio":
             return inputs["audio"]["audio_num_segments"][index]
         return super().get_num_slices_by_modality(inputs, modality, index)
 
-    def get_prompt_texts_by_modality(self, inputs: Dict[str, object],
+    def get_prompt_texts_by_modality(self, inputs: dict[str, object],
                                      modality: str, index: int) -> str:
         if modality == "audio":
             return self.get_audio_prompt_texts(
@@ -359,7 +359,7 @@ class MiniCPMOMultiModalProcessor(
     def _get_prompt_replacements(
             self, mm_items: MultiModalDataItems,
             hf_processor_mm_kwargs: Mapping[str, Any],
-            out_mm_kwargs: MultiModalKwargs) -> List[PromptReplacement]:
+            out_mm_kwargs: MultiModalKwargs) -> list[PromptReplacement]:
         placeholder = {
             "image": self.info.image_pattern,
             "video": self.info.video_pattern,
@@ -579,8 +579,8 @@ class MiniCPMO(MiniCPMV2_6):
         self.audio_encoder_layer = -1
         return model
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["tts"])
         return loader.load_weights(weights)
 
@@ -742,7 +742,7 @@ class MiniCPMO(MiniCPMV2_6):
 
     def _parse_and_validate_audio_inputs(
             self, input_ids: torch.Tensor,
-            **kwargs: object) -> Tuple[MiniCPMOAudioInputs]:
+            **kwargs: object) -> tuple[MiniCPMOAudioInputs]:
         audio_features = kwargs.pop("audio_features", [])
         audio_feature_lens = kwargs.pop("audio_feature_lens", [])
         audio_embeds = kwargs.pop("audio_embeds", None)

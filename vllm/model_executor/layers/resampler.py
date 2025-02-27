@@ -33,7 +33,7 @@ Example models: Qwen (Qwen-VL), MiniCPM-V 2.0
 """
 import math
 from functools import partial
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -69,7 +69,7 @@ def get_abs_pos(abs_pos: torch.Tensor, tgt_size: Union[torch.Tensor,
 # https://github.com/facebookresearch/mae/blob/efb2a8062c206524e35e47d04501ed4f544c0ae8/util/pos_embed.py#L20
 def get_1d_sincos_pos_embed_from_grid(
     embed_dim: int, pos: np.ndarray,
-    version: Tuple[int, int] = (2, 0)) -> torch.Tensor:
+    version: tuple[int, int] = (2, 0)) -> torch.Tensor:
     """
     embed_dim: output dimension for each position
     pos: a list of positions to be encoded: size (M,) / (H, W)
@@ -96,7 +96,7 @@ def get_1d_sincos_pos_embed_from_grid(
 
 def get_2d_sincos_pos_embed_from_grid(
     embed_dim: int, grid: np.ndarray,
-    version: Tuple[int, int] = (2, 0)) -> torch.Tensor:
+    version: tuple[int, int] = (2, 0)) -> torch.Tensor:
     assert embed_dim % 2 == 0
 
     # use half of dimensions to encode grid_h
@@ -114,9 +114,9 @@ def get_2d_sincos_pos_embed_from_grid(
 
 def get_2d_sincos_pos_embed(
         embed_dim: int,
-        grid_size: Union[int, Tuple[int, int]],
+        grid_size: Union[int, tuple[int, int]],
         cls_token: bool = False,
-        version: Tuple[int, int] = (2, 0),
+        version: tuple[int, int] = (2, 0),
 ) -> torch.Tensor:
     """
     grid_size: int of the grid height and width

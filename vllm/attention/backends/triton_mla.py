@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Optional
 
 import torch
 
@@ -18,7 +18,7 @@ class TritonMLABackend(MLACommonBackend):
         return "TRITON_MLA"
 
     @staticmethod
-    def get_impl_cls() -> Type["TritonMLAImpl"]:
+    def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
 
 
@@ -30,10 +30,10 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             head_size: int,
             scale: float,
             num_kv_heads: int,
-            alibi_slopes: Optional[List[float]],
+            alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[Dict[str, Any]],
+            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             # MLA Specific Arguments

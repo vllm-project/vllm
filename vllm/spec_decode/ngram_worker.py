@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import weakref
-from typing import List, Optional, Set, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -71,8 +71,8 @@ class NGramWorker(NonLLMProposerWorkerBase):
         sample_len: int,
         # Unused parameter. NGramWorker does not use the KV Cache and
         # therefore does not need this parameter.
-        seq_ids_with_bonus_token_in_last_step: Set[int],
-    ) -> Tuple[Optional[List[Optional[SamplerOutput]]], bool]:
+        seq_ids_with_bonus_token_in_last_step: set[int],
+    ) -> tuple[Optional[list[Optional[SamplerOutput]]], bool]:
         """NGram match algo to pick proposal candidate. Returns the list of
         sampler output, one per SequenceGroupMetadata.
 
@@ -82,8 +82,8 @@ class NGramWorker(NonLLMProposerWorkerBase):
         self._raise_if_unsupported(execute_model_req)
 
         has_spec_out = False
-        token_id_list: List[Optional[torch.Tensor]] = []
-        token_prob_list: List[Optional[torch.Tensor]] = []
+        token_id_list: list[Optional[torch.Tensor]] = []
+        token_prob_list: list[Optional[torch.Tensor]] = []
         for idx, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
@@ -142,7 +142,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
         if not has_spec_out:
             return None, False
 
-        outputs: List[Optional[SamplerOutput]] = []
+        outputs: list[Optional[SamplerOutput]] = []
         for idx in range(len(execute_model_req.seq_group_metadata_list)):
             if token_id_list[idx] is None:
                 outputs.append(None)
@@ -164,7 +164,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
         execute_model_req: ExecuteModelRequest,
         # Unused parameter. NGramWorker does not use the KV Cache and
         # therefore does not need this parameter.
-        seq_ids_with_bonus_token_in_last_step: Set[int],
+        seq_ids_with_bonus_token_in_last_step: set[int],
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.

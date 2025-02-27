@@ -2,7 +2,7 @@
 
 from os import PathLike
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 
 def is_s3(model_or_path: str) -> bool:
@@ -26,7 +26,7 @@ def modelscope_list_repo_files(
     repo_id: str,
     revision: Optional[str] = None,
     token: Union[str, bool, None] = None,
-) -> List[str]:
+) -> list[str]:
     """List files in a modelscope repo."""
     from modelscope.hub.api import HubApi
     api = HubApi()

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Optional
 
 import torch
 
@@ -58,7 +58,7 @@ class BlocksparseParams:
     head_sliding_step: int = field(init=False)
 
     # range of q heads to for a TP rank
-    active_head_range: Tuple = field(init=False)
+    active_head_range: tuple = field(init=False)
 
     def __post_init__(self):
         assert self.block_size > 0
@@ -95,19 +95,19 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
         return "BLOCK_SPARSE_FLASH_ATTN"
 
     @staticmethod
-    def get_impl_cls() -> Type["BlocksparseFlashAttentionImpl"]:
+    def get_impl_cls() -> type["BlocksparseFlashAttentionImpl"]:
         return BlocksparseFlashAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return BlocksparseFlashAttentionMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["BlocksparseFlashAttentionMetadataBuilder"]:
+    def get_builder_cls() -> type["BlocksparseFlashAttentionMetadataBuilder"]:
         return BlocksparseFlashAttentionMetadataBuilder
 
     @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
+    def get_state_cls() -> type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -116,7 +116,7 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                  num_kv_heads, head_size)
 
@@ -124,14 +124,14 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: dict[int, int],
     ) -> None:
         PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        kv_caches: list[torch.Tensor],
+        src_to_dists: dict[int, list[int]],
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
@@ -148,7 +148,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     """
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    seq_lens: Optional[List[int]]
+    seq_lens: Optional[list[int]]
     # seq_lens stored as a tensor.
     seq_lens_tensor: Optional[torch.Tensor]
 
@@ -299,10 +299,10 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
     ) -> None:

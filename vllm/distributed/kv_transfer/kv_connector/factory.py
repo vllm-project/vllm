@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
-from typing import TYPE_CHECKING, Callable, Dict, Type
+from typing import TYPE_CHECKING, Callable
 
 from .base import KVConnectorBase
 
@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 
 class KVConnectorFactory:
-    _registry: Dict[str, Callable[[], Type[KVConnectorBase]]] = {}
+    _registry: dict[str, Callable[[], type[KVConnectorBase]]] = {}
 
     @classmethod
     def register_connector(cls, name: str, module_path: str,
@@ -19,7 +19,7 @@ class KVConnectorFactory:
         if name in cls._registry:
             raise ValueError(f"Connector '{name}' is already registered.")
 
-        def loader() -> Type[KVConnectorBase]:
+        def loader() -> type[KVConnectorBase]:
             module = importlib.import_module(module_path)
             return getattr(module, class_name)
 

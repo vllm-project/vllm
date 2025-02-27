@@ -2,7 +2,7 @@
 import enum
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Optional
 from unittest.mock import patch
 
 import numpy as np
@@ -50,9 +50,9 @@ class ExecutionMode(enum.Enum):
 
 @dataclass
 class PromptDecodeInfo:
-    prompt_req_ids: List[str]
-    decode_req_ids: List[str]
-    prompt_scheduled_tokens: List[int]
+    prompt_req_ids: list[str]
+    decode_req_ids: list[str]
+    prompt_scheduled_tokens: list[int]
 
 
 @dataclass
@@ -126,13 +126,13 @@ class TPUModelRunner:
         )
 
         # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
+        self.requests: dict[str, CachedRequestState] = {}
 
         # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+        self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
         # KV caches for forward pass
-        self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        self.kv_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         # Cached torch/numpy tensors
         self.num_swaps = 2
@@ -204,7 +204,7 @@ class TPUModelRunner:
         # then resubmitted with the same ID. In this case, we treat them as two
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
-        removed_req_indices: List[int] = []
+        removed_req_indices: list[int] = []
         for req_id in scheduler_output.finished_req_ids:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
@@ -227,7 +227,7 @@ class TPUModelRunner:
             assert req_index is not None
             removed_req_indices.append(req_index)
 
-        req_ids_to_add: List[str] = []
+        req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
@@ -488,7 +488,7 @@ class TPUModelRunner:
 
     def _prepare_decode(
         self,
-        decode_req_ids: List[str],
+        decode_req_ids: list[str],
     ) -> DecodeData:
         # Batch size
         batch_size = len(decode_req_ids)
@@ -685,7 +685,7 @@ class TPUModelRunner:
 
         # Create output.
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
-        prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]] = {}
+        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
         for req_id in all_req_ids:
             prompt_logprobs_dict[req_id] = None
 
@@ -923,7 +923,7 @@ class TPUModelRunner:
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
-        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
 
         for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
             tensor_config = kv_cache_config.tensors[layer_name]
@@ -960,7 +960,7 @@ class ModelWrapperV1(nn.Module):
         self,
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 

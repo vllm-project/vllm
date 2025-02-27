@@ -6,9 +6,10 @@ import io
 import os
 import re
 import time
+from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
-from typing import BinaryIO, Generator, Optional, Tuple, Type, Union
+from typing import BinaryIO, Optional, Union
 
 import torch
 from torch import nn
@@ -67,7 +68,7 @@ class TensorizerConfig:
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
     s3_endpoint: Optional[str] = None
-    model_class: Optional[Type[torch.nn.Module]] = None
+    model_class: Optional[type[torch.nn.Module]] = None
     hf_config: Optional[PretrainedConfig] = None
     dtype: Optional[Union[str, torch.dtype]] = None
     _is_sharded: bool = False
@@ -365,7 +366,7 @@ class TensorizerAgent:
 
 def tensorizer_weights_iterator(
     tensorizer_args: "TensorizerArgs"
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     logger.warning("Deserializing HuggingFace models is not optimized for "
                    "loading on vLLM, as tensorizer is forced to load to CPU. "
                    "Consider deserializing a vLLM model instead for faster "

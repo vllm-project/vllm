@@ -4,9 +4,9 @@ import asyncio
 import copy
 import time
 import weakref
+from collections.abc import AsyncGenerator, Coroutine, Iterable, Mapping
 from functools import partial
-from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
-                    List, Mapping, Optional, Set, Tuple, Type, Union, overload)
+from typing import Any, Callable, Optional, Union, overload
 from weakref import ReferenceType
 
 from typing_extensions import deprecated
@@ -93,7 +93,7 @@ class AsyncStream:
 
     def finish(
         self,
-        exception: Optional[Union[BaseException, Type[BaseException]]] = None,
+        exception: Optional[Union[BaseException, type[BaseException]]] = None,
     ) -> None:
         if not self._finished:
             self._finished = True
@@ -130,9 +130,9 @@ class RequestTracker:
     """Synchronous abstraction for tracking requests."""
 
     def __init__(self) -> None:
-        self._request_streams: Dict[str, AsyncStream] = {}
+        self._request_streams: dict[str, AsyncStream] = {}
         self._aborted_requests: asyncio.Queue[str] = asyncio.Queue()
-        self._new_requests: asyncio.Queue[Tuple[AsyncStream,
+        self._new_requests: asyncio.Queue[tuple[AsyncStream,
                                                 dict]] = asyncio.Queue()
         self.new_requests_event = asyncio.Event()
 
@@ -216,7 +216,7 @@ class RequestTracker:
                       request_id: str,
                       *,
                       exception: Optional[Union[BaseException,
-                                                Type[BaseException]]] = None,
+                                                type[BaseException]]] = None,
                       verbose: bool = False) -> None:
         """Abort a request during next background loop iteration."""
         if verbose:
@@ -228,11 +228,11 @@ class RequestTracker:
         if stream is not None:
             stream.finish(exception=exception)
 
-    def get_new_and_aborted_requests(self) -> Tuple[List[Dict], Set[str]]:
+    def get_new_and_aborted_requests(self) -> tuple[list[dict], set[str]]:
         """Get the new requests and finished requests to be
         sent to the engine."""
-        new_requests: List[Dict] = []
-        finished_requests: Set[str] = set()
+        new_requests: list[dict] = []
+        finished_requests: set[str] = set()
 
         while not self._aborted_requests.empty():
             request_id = self._aborted_requests.get_nowait()
@@ -268,7 +268,7 @@ class _AsyncLLMEngine(LLMEngine):
 
     async def step_async(
         self, virtual_engine: int
-    ) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+    ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
 
@@ -583,7 +583,7 @@ class AsyncLLMEngine(EngineClient):
         **kwargs: Arguments for :class:`LLMEngine`.
     """
 
-    _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
+    _engine_class: type[_AsyncLLMEngine] = _AsyncLLMEngine
 
     def __init__(self,
                  *args,
@@ -621,7 +621,7 @@ class AsyncLLMEngine(EngineClient):
 
     @classmethod
     def _get_executor_cls(cls,
-                          engine_config: VllmConfig) -> Type[ExecutorBase]:
+                          engine_config: VllmConfig) -> type[ExecutorBase]:
         return LLMEngine._get_executor_cls(engine_config)
 
     @classmethod
@@ -631,7 +631,7 @@ class AsyncLLMEngine(EngineClient):
         engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
@@ -1156,7 +1156,7 @@ class AsyncLLMEngine(EngineClient):
     async def do_log_stats(
             self,
             scheduler_outputs: Optional[SchedulerOutputs] = None,
-            model_output: Optional[List[SamplerOutput]] = None) -> None:
+            model_output: Optional[list[SamplerOutput]] = None) -> None:
         self.engine.do_log_stats()
 
     async def check_health(self) -> None:

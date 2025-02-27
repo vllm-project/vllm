@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
-from typing import Callable, List
+from typing import Callable
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -28,7 +28,7 @@ class SequenceGroupOutputProcessor(ABC):
     def create_output_processor(
         scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
-        scheduler: List[Scheduler],
+        scheduler: list[Scheduler],
         seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
         stop_checker: "StopChecker",
@@ -59,7 +59,7 @@ class SequenceGroupOutputProcessor(ABC):
 
     @abstractmethod
     def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput],
+                        outputs: list[SequenceGroupOutput],
                         is_async: bool) -> None:
         """Process new token ids for the sequence group. Handles logic such as
         detokenization, stop checking, and freeing/forking sequences in the
@@ -69,6 +69,6 @@ class SequenceGroupOutputProcessor(ABC):
 
     @abstractmethod
     def process_prompt_logprob(self, seq_group: SequenceGroup,
-                               outputs: List[SequenceGroupOutput]) -> None:
+                               outputs: list[SequenceGroupOutput]) -> None:
         """Update prompt logprobs received from outputs to seq_group."""
         pass

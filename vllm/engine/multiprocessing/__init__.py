@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Mapping, Optional, Union, overload
+from typing import Optional, Union, overload
 
 from typing_extensions import deprecated
 
@@ -153,7 +154,7 @@ RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,
                       RPCWakeUpRequest]
 
-REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
+REQUEST_OUTPUTS_T = Union[list[RequestOutput], RPCAdapterLoadedResponse,
                           RPCError]
 
 

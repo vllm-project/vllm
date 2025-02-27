@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
-from typing import AbstractSet, Any, Literal, Mapping, Optional
+from typing import Any, Literal, Optional
 
 import pytest
 from packaging.version import Version
@@ -324,7 +325,7 @@ class HfExampleModels:
 
         self.hf_models = hf_models
 
-    def get_supported_archs(self) -> AbstractSet[str]:
+    def get_supported_archs(self) -> Set[str]:
         return self.hf_models.keys()
 
     def get_hf_info(self, model_arch: str) -> _HfExamplesInfo:
