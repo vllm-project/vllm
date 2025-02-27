@@ -12,6 +12,7 @@ from torch.nn import LayerNorm
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from transformers import PreTrainedTokenizer, TensorType
+from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.attention.layer import MultiHeadAttention
@@ -354,9 +355,6 @@ class GLM4VProcessor:
     This model doesn't define its own HF processor,
     so we implement our own one here.
     """
-    # lazy import ImageInput because huggingface/transformers#34275 adds a
-    # non-lazy cv2 import. TODO: move this back if this is fixed
-    from transformers.image_utils import ImageInput
 
     def __init__(
         self,
