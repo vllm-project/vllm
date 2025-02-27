@@ -232,6 +232,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
+from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 
 try:
@@ -292,7 +293,10 @@ class MLACommonBackend(AttentionBackend):
         return [576]
 
 
-class MLACommonState(AttentionState):
+T = TypeVar("T", bound="MLACommonMetadata")
+
+
+class MLACommonState(AttentionState, Generic[T]):
 
     def __init__(self, runner):
         self.runner = runner
@@ -354,7 +358,9 @@ class MLACommonState(AttentionState):
         return self.__class__(self.runner)
 
     def graph_capture_get_metadata_for_batch(
-            self, batch_size: int, is_encoder_decoder_model: bool = False):
+            self,
+            batch_size: int,
+            is_encoder_decoder_model: bool = False) -> T:
         assert self._is_graph_capturing
 
         attn_metadata = self.runner.attn_backend.make_metadata(
@@ -506,8 +512,8 @@ class MLACommonMetadata(AttentionMetadata):
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor] = None
 
-    _cached_prefill_metadata: Optional["MLACommonMetadata"] = None
-    _cached_decode_metadata: Optional["MLACommonMetadata"] = None
+    _cached_prefill_metadata: Optional[Any] = None
+    _cached_decode_metadata: Optional[Any] = None
 
     num_prefill_tokens: int
 
@@ -536,7 +542,7 @@ class MLACommonMetadata(AttentionMetadata):
                 f" received {self.head_dim}.")
 
     @property
-    def prefill_metadata(self) -> Optional["MLACommonMetadata"]:
+    def prefill_metadata(self):
         if self.num_prefills == 0:
             return None
 
@@ -564,7 +570,7 @@ class MLACommonMetadata(AttentionMetadata):
         input_positions = (None if self.input_positions is None else
                            self.input_positions[:self.num_prefill_tokens])
 
-        self._cached_prefill_metadata = MLACommonMetadata(
+        self._cached_prefill_metadata = self.__class__(
             # Required by ModelRunner
             use_cuda_graph=False,  # Not Attention Related
             # Required by Attention Metadata
@@ -598,7 +604,7 @@ class MLACommonMetadata(AttentionMetadata):
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["MLACommonMetadata"]:
+    def decode_metadata(self):
         if self.num_decode_tokens == 0:
             return None
 
@@ -616,7 +622,7 @@ class MLACommonMetadata(AttentionMetadata):
         input_positions = (None if self.input_positions is None else
                            self.input_positions[self.num_prefill_tokens:])
 
-        self._cached_decode_metadata = MLACommonMetadata(
+        self._cached_decode_metadata = self.__class__(
             # Required by ModelRunner
             use_cuda_graph=self.use_cuda_graph,  # Not Attention Related
             # Required by Attention Metadata
@@ -722,10 +728,7 @@ class MLACommonMetadata(AttentionMetadata):
                                    block_tables=self.block_tables)
 
 
-T = TypeVar("T", bound=MLACommonMetadata)
-
-
-class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
+class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     """
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
@@ -958,7 +961,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
             assert max(context_chunk_seq_tot) <= \
                 self.chunked_prefill_workspace_size
 
-        return MLACommonMetadata(
+        return self.runner.attn_backend.make_metadata(
             # Required by ModelRunner
             use_cuda_graph=use_captured_graph,  # Not Attention Related
             # Required by Attention Metadata
@@ -1371,18 +1374,35 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
 
-        output = self.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v_padded,
-            cu_seqlens_q=prefill_metadata.query_start_loc,
-            cu_seqlens_k=prefill_metadata.query_start_loc,
-            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_softmax_lse=has_context,
-        )
+        if has_context:
+            if not current_platform.is_cuda():
+                raise NotImplementedError(
+                    "Chunked Prefill for MLA is not currently supported on"
+                    "non-cuda platforms")
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=True,
+            )
+        else:
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+            )
 
         if has_context:
             suffix_output, suffix_lse = output

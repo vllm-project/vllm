@@ -95,7 +95,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self.use_v1 = envs.VLLM_USE_V1
 
         self.pp_locks: Optional[List[asyncio.Lock]] = None
-        self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
         if not self.use_ray_compiled_dag:
             self.driver_exec_method = make_async(
                 self.driver_worker.execute_method)
@@ -229,9 +228,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
         logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
         if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
             raise ValueError(
-                "Ray does not allocate any GPUs on the driver node. Consider "
-                "adjusting the Ray placement group or running the driver on a "
-                "GPU node.")
+                "Ray does not allocate any GPUs on the driver node."
+                f"Driver IP: {driver_ip}, worker IPs: {worker_ips}."
+                "Consider adjusting the Ray placement group or running "
+                "the driver on a GPU node.")
 
         ip_counts: Dict[str, int] = {}
         for ip in worker_ips:
@@ -491,7 +491,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         async_run_remote_workers_only to complete."""
         ray.get(parallel_worker_tasks)
 
-    def _check_ray_adag_installation(self):
+    def _check_ray_cgraph_installation(self):
         import pkg_resources
         from packaging import version
 
@@ -503,10 +503,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
                              f"required, but found {current_version}")
 
         import importlib.util
-        adag_spec = importlib.util.find_spec(
+        cgraph_spec = importlib.util.find_spec(
             "ray.experimental.compiled_dag_ref")
-        if adag_spec is None:
-            raise ValueError("Ray accelerated DAG is not installed. "
+        if cgraph_spec is None:
+            raise ValueError("Ray Compiled Graph is not installed. "
                              "Run `pip install ray[adag]` to install it.")
 
         cupy_spec = importlib.util.find_spec("cupy")
@@ -518,7 +518,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _compiled_ray_dag(self, enable_asyncio: bool):
         assert self.parallel_config.use_ray
-        self._check_ray_adag_installation()
+        self._check_ray_cgraph_installation()
         from ray.dag import InputNode, MultiOutputNode
         from ray.experimental.channel.torch_tensor_type import TorchTensorType
 

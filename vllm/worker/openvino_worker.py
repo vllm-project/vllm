@@ -24,7 +24,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.utils import bind_kv_cache
 from vllm.worker.openvino_model_runner import OpenVINOModelRunner
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
 
@@ -203,7 +203,7 @@ class OpenVINOCacheEngine:
         return dtype_size * total
 
 
-class OpenVINOWorker(LoraNotSupportedWorkerBase):
+class OpenVINOWorker(LoRANotSupportedWorkerBase):
     """A worker class that executes the model on OpenVINO backend.
 
     Each worker is associated with a single OpenVINO device. The worker is
