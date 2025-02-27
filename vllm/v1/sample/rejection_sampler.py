@@ -285,8 +285,7 @@ def _create_uniform_samples(seeded_seqs: Optional[Dict[int, torch.Generator]],
         Args:
             seeded_seqs : Optional[Dict[int, torch.Generator]]
                 A dictionary mapping indices in the batch to 
-                `torch.Generator` objects. If `None`, all samples are 
-                generated without a seed.
+                `torch.Generator` objects.
             batch_size : int
                 The number of sequences to generate.
             k : int
@@ -302,20 +301,12 @@ def _create_uniform_samples(seeded_seqs: Optional[Dict[int, torch.Generator]],
     if not seeded_seqs:
         return torch.rand(batch_size, k, device=device)
 
-    uniform_rand = torch.empty(batch_size, k, device=device)
-
-    non_seeded_indices = []
-    for idx in range(batch_size):
-        generator = seeded_seqs.get(idx)
-        if generator is None:
-            non_seeded_indices.append(idx)
-        else:
+    uniform_rand = torch.rand(batch_size, k, device=device)
+    # Apply seeded generators only where needed
+    if seeded_seqs:
+        for idx, generator in seeded_seqs.items():
             uniform_rand[idx, :] = torch.rand(1,
                                               k,
-                                              dtype=torch.float,
                                               device=device,
                                               generator=generator)
-    if non_seeded_indices:
-        uniform_rand[non_seeded_indices, :] = torch.rand(
-            len(non_seeded_indices), k, dtype=torch.float, device=device)
     return uniform_rand
