@@ -16,6 +16,7 @@ from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsV0Only
 from .utils import AutoWeightsLoader
 
 
@@ -84,7 +85,7 @@ class Florence2LanguageModel(nn.Module):
         return decoder_outputs
 
 
-class Florence2LanguageForConditionalGeneration(nn.Module):
+class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

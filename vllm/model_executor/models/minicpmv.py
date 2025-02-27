@@ -62,7 +62,8 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsV0Only)
 from .utils import AutoWeightsLoader, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
@@ -1307,7 +1308,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                                          patch_attn_mask, tgt_sizes)
 
 
-class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
+class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA, SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
