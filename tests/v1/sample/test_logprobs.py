@@ -8,7 +8,7 @@ import torch
 
 from tests.kernels.utils import override_backend_env_variable
 from tests.v1.sample.utils import (
-    assert_incr_detok_str_matches_non_incr_detok_str,
+    BatchLogprobsComposition, assert_incr_detok_str_matches_non_incr_detok_str,
     compute_correct_cumulative_logprob, get_test_batch)
 from vllm import SamplingParams
 
@@ -16,6 +16,11 @@ from ...conftest import VllmRunner
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 DTYPE = "half"
+
+NONE = BatchLogprobsComposition.NONE
+SAMPLE = BatchLogprobsComposition.SAMPLE
+PROMPT = BatchLogprobsComposition.PROMPT
+SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
 
 
 @pytest.fixture(scope="module")
@@ -95,7 +100,7 @@ def _repeat_logprob_config(
 def _test_case_get_logprobs_and_prompt_logprobs(
     hf_model,
     vllm_model,
-    batch_logprobs_composition: str,
+    batch_logprobs_composition: BatchLogprobsComposition,
     temperature: float,
     example_prompts,
 ) -> None:
@@ -270,7 +275,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
 
 #@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("batch_logprobs_composition",
-                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
+                         [NONE, SAMPLE, PROMPT, SAMPLE_PROMPT])
 @pytest.mark.parametrize("temperature", [0.0, 2.0])
 def test_get_logprobs_and_prompt_logprobs(
     hf_model,
