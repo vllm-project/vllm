@@ -74,12 +74,15 @@ class DecodeData:
 # this class and support most options.
 @dataclass
 class TPUSupportedSamplingMetadata:
+    # This class exposes a more xla-friendly interfaces, in particular 
+    # all arguments should be traceable and no optionals are allowed, 
+    # to avoid graph recompilation on Nones.
     temperature: torch.Tensor
 
     min_p: torch.Tensor
     # Still too slow on forward_native!
-    top_k: Optional[torch.Tensor] = None
-    top_p: Optional[torch.Tensor] = None
+    top_k: torch.Tensor = None
+    top_p: torch.Tensor = None
 
     # XLA-unfriendly control flow
     all_greedy: bool = False
@@ -110,60 +113,89 @@ class TPUSupportedSamplingMetadata:
 
     @classmethod
     def from_sampling_metadata(cls, metadata: SamplingMetadata, batch_size: int, device: torch.device)->"TPUSupportedSamplingMetadata":
-        metadata = cls._validate_sampling_metadata(metadata, batch_size, device)
-        new_metadata= cls(temperature=metadata.temperature, min_p=metadata.min_p)
+        metadata = cls._validate_sampling_metadata(metadata)
+        # NOTE we have to initialize default tensor-based params first and 
+        # skip None values altogether to produce the same xla graph.  
+        new_metadata = cls.get_default_sampling_params(batch_size, device)
 
-        sampling_metadata_disable_value = dict(
-            temperature=0,
-            min_p=0,
-            top_k=-1,
-            top_p=0,
-            frequency_penalties=0,
-            presence_penalties=0,
-            repetition_penalties=0,
-        )
-        # Broadcast sampling param to match sequence batch padding.
-        for field in fields(new_metadata):
-            val = getattr(new_metadata, field.name)
-            # TODO Standardize to batch size OR compile with both batch=1 and batch=NB  
-            if isinstance(val, torch.Tensor) and val.numel()>1 and val.numel() != batch_size:
+        supported_params = TPUSupportedSamplingMetadata._get_default_params_values()
+        # Copy `metadata` non-None values into `new_metadata`, while 
+        # broadcasting tensor params to match sequence batch padding.
+        for field in supported_params:
+            old_val = getattr(metadata, field)
+            new_val = getattr(new_metadata, field)
+            # Branching in pre-processing will trigger re-compilation.
+            if isinstance(old_val, torch.Tensor) and old_val.numel() != batch_size:
                 # TODO not efficient, manage a tensor of compiled size B
-                default_val = sampling_metadata_disable_value[field.name]
-                padded_param = torch.full((batch_size,), default_val, device=val.device, dtype=val.dtype)
-                padded_param[:val.shape[0]] = val
-                setattr(new_metadata, field.name, padded_param)
+                # Handle padded batch.
+                new_val[:old_val.shape[0]] = old_val
+            elif isinstance(old_val, torch.Tensor):
+                # This is either one value for all batch, standardized to batch 
+                # size, or B values.  
+                new_val[:] = old_val
+            setattr(new_metadata, field, new_val)
+
+        xm.mark_step()
+        xm.wait_device_ops()
+        return new_metadata
+
+    @classmethod
+    def from_single_prefill_metadata(cls, metadata: SamplingMetadata, prefill_idx: int, device: torch.device)->"TPUSupportedSamplingMetadata":
+        # TODO tmp constructor until ragged kernel is implemented for B=1 case.
+        metadata = cls._validate_sampling_metadata(metadata)
+        new_metadata = cls.get_default_sampling_params(1, device)
+
+        supported_params = TPUSupportedSamplingMetadata._get_default_params_values()
+        # Copy `metadata` non-None values into `new_metadata`.
+        for field in supported_params:
+            old_val = getattr(metadata, field)
+            new_val = getattr(new_metadata, field)
+            if isinstance(old_val, torch.Tensor) and old_val.numel() > 1:
+                # Select the right prefill metadata.
+                new_val[:] = old_val[prefill_idx]
+            elif isinstance(old_val, torch.Tensor):
+                # num_prefills==1 or one param value for whole batch
+                new_val[:] = old_val
+            setattr(new_metadata, field, new_val)
         xm.mark_step()
         xm.wait_device_ops()
         return new_metadata
 
     @classmethod
     def get_default_sampling_params(cls, batch_size: int, device: torch.device)->"TPUSupportedSamplingMetadata":
-        # Sampling metadata for tracing all available sampling options
-        temp = torch.tensor([0.1]*batch_size, device=device)
-        minp = torch.tensor([0.1]*batch_size, device=device) 
-        # NOTE prompt sequences must be padded to a shape we compile for
-        # prompt_ids = None
-        return cls(temperature=temp, min_p=minp)
+        # As sampling happens on a single traced function, options
+        # are "disabled" by having them evaluate to an Identity op.
+        # Note that initialization is dependent on batch_size.
+        sampling_metadata_disable_value = TPUSupportedSamplingMetadata._get_default_params_values()
+        kwargs = dict()
+        for field, default_val in sampling_metadata_disable_value.items():
+            default_tensor = torch.full((batch_size,), default_val, device=device)
+            kwargs[field] = default_tensor
+
+        return cls(**kwargs)
 
     @staticmethod
-    def _validate_sampling_metadata(sampling_metadata: SamplingMetadata, batch_size: int, device: torch.device)->SamplingMetadata:
-        # As sampling happens on a single traced function, we need to disable
-        # unused options by setting their arg value to an operation 
-        # functionally identical to the Identity.
-        # TODO extend or merge with disable_value above
-        if sampling_metadata.min_p is None:
-            sampling_metadata.min_p = torch.tensor([0]*batch_size, device=device)
+    def _validate_sampling_metadata(sampling_metadata: SamplingMetadata)->SamplingMetadata:
         if sampling_metadata.all_greedy:
             # Greedy sampling is always performed as long as temp is 0, but 
             # the control flow must be constant.
             sampling_metadata.all_greedy = False
             # TODO this is checked somewhere else already isnt it?
             assert torch.count_nonzero(sampling_metadata.temperature) == 0
-        if sampling_metadata.top_p:
-            logger.warning("Top-p sampling is currently disabled on TPU.")
-        if sampling_metadata.top_k:
-            logger.warning("Top-k sampling is currently disabled on TPU.")
         return sampling_metadata
+
+    @staticmethod
+    def _get_default_params_values():
+        return dict(
+            temperature=0.0,
+            min_p=0.0,
+            # strictly disabled for now
+            # top_k=-1,
+            # top_p=0.0,
+            # frequency_penalties=0.0,
+            # presence_penalties=0.0,
+            # repetition_penalties=0.0,
+        )
 
 class TPUModelRunner:
 
@@ -713,7 +745,8 @@ class TPUModelRunner:
             num_scheduled_tokens = pd_info.prompt_scheduled_tokens[i]
             prompt_len = num_scheduled_tokens
             seq_len = req_state.num_computed_tokens + num_scheduled_tokens
-            prefill_sampling_meta = TPUSupportedSamplingMetadata.from_sampling_metadata(sampling_metadata, _get_padded_prompt_len(num_scheduled_tokens), self.device)
+            # Select the portion of the sampling params corresponding to req i
+            prefill_sampling_meta = TPUSupportedSamplingMetadata.from_single_prefill_metadata(sampling_metadata, req_index, self.device)
 
             # Prepare first prompt
             if is_first:
@@ -754,7 +787,6 @@ class TPUModelRunner:
 
         # Run decodes (a single batch)
         if num_decodes > 0:
-
             decode_sampling_meta = TPUSupportedSamplingMetadata.from_sampling_metadata(sampling_metadata, _get_padded_batch_size(num_decodes), self.device)
             # Prepare decode (if was not yet prepared)
             if decode_data is None:
