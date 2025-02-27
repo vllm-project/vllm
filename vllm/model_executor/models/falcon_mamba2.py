@@ -86,11 +86,12 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+
         self.mamba = MambaMixer2(
             hidden_size=config.hidden_size,
             ssm_state_size=config.mamba_d_state,
             conv_kernel_size=config.mamba_d_conv,
-            intermediate_size=config.mamba_expand * config.hidden_size,
+            intermediate_size=int(config.mamba_expand * config.hidden_size) if config.mamba_d_ssm is None else config.mamba_d_ssm,
             use_conv_bias=config.mamba_conv_bias,
             use_bias=config.mamba_proj_bias,
             n_groups=config.mamba_n_groups,
@@ -100,6 +101,7 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
             activation=config.hidden_act,
             chunk_size=config.mamba_chunk_size,
             quant_config=quant_config,
+            use_rms_norm=config.mamba_rms_norm
         )
         self.zxbcdt_multipliers = config.ssm_multipliers
 
@@ -177,7 +179,7 @@ class FalconMamba2AttentionDecoderLayer(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = config.hidden_size // self.total_num_heads
+        self.head_dim = config.hidden_size // self.total_num_heads if getattr(config, "head_dim", None) is None else config.head_dim // tp_size
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim ** -0.5
@@ -302,7 +304,9 @@ class FalconMamba2ParallelHybrid(nn.Module):
         self.attention_in_multiplier = config.attention_in_multiplier
 
         self.feed_forward = FalconMamba2MLP(config)
+
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
 
     def forward(
@@ -346,12 +350,14 @@ class FalconMamba2ParallelHybrid(nn.Module):
         # Sum the outputs from both branches.
         # We assume both branches produce outputs of the same
         # dimensionality (config.hidden_size).
-        hybrid_hidden = attn_hidden + (ssm_hidden * self.ssm_out_multiplier)
-        # For the residual, resi.
-        # Here we simply return the residual from the attention branch.
-        hybrid_res = residuals
+        hidden_states = attn_hidden + (ssm_hidden * self.ssm_out_multiplier)
+        # feed-forward
+        residual = hidden_states
+        hidden_states = self.pre_ff_layernorm(hidden_states)
+        hidden_states = self.feed_forward(hidden_states)
+        hidden_states = residual + hidden_states
 
-        return hybrid_hidden, hybrid_res
+        return hidden_states, residual
 
 
 # ALL_DECODER_LAYER_TYPES = {
@@ -514,6 +520,7 @@ class FalconMamba2ForCausalLM(
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
@@ -523,6 +530,9 @@ class FalconMamba2ForCausalLM(
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
+        if config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(
+                self.model.embed_tokens)
         self.lm_head_multiplier = config.lm_head_multiplier
         # Used to track and store by the Mamba cache between steps.
         self.mamba_cache: Optional[MambaCacheManager] = None
@@ -660,6 +670,7 @@ class FalconMamba2ForCausalLM(
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
+                print(name, param.shape)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:

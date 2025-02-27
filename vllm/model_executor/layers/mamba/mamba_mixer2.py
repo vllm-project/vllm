@@ -218,6 +218,7 @@ class MambaMixer2(CustomOp):
                  rms_norm_eps: float = 1e-5,
                  activation="silu",
                  chunk_size: int = 256,
+                 use_rms_norm: bool = True,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
@@ -346,6 +347,7 @@ class MambaMixer2(CustomOp):
             ))
         self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
         self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
+        self.use_rms_norm = use_rms_norm
 
         set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
         a_weight_loader = composed_weight_loader(
@@ -360,9 +362,10 @@ class MambaMixer2(CustomOp):
                                           input_is_parallel=True,
                                           quant_config=quant_config)
 
-        self.norm = Mixer2RMSNormGated(intermediate_size,
-                                       n_groups,
-                                       eps=rms_norm_eps)
+        if self.use_rms_norm:
+            self.norm = Mixer2RMSNormGated(intermediate_size,
+                                        n_groups,
+                                        eps=rms_norm_eps)
 
     def forward_native(self, hidden_states: torch.Tensor,
                        attn_metadata: AttentionMetadata,
@@ -528,7 +531,10 @@ class MambaMixer2(CustomOp):
                 -1, (self.num_heads // self.tp_size) * self.head_dim)
 
         # # 4. gated MLP
-        hidden_states = self.norm(hidden_states, gate)
+        if self.use_rms_norm:
+            hidden_states = self.norm(hidden_states, gate)
+        else:
+            hidden_states = hidden_states * torch.nn.functional.silu(gate)
 
         # # 5. Final linear projection
         out, _ = self.out_proj(hidden_states)
