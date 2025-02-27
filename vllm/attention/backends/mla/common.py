@@ -1055,6 +1055,26 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 functools.partial(flash_attn_varlen_func,
                                   fa_version=self.vllm_flash_attn_version)
 
+        # For MLA the v head dim is smaller than qk head dim so we pad out
+        # v with 0s to match the qk head dim for attention backends that do
+        # not support different headdims
+        # We don't need to pad V if we are on a hopper system with FA3
+        self._pad_v = self.vllm_flash_attn_version is None or not (
+            self.vllm_flash_attn_version == 3
+            and current_platform.get_device_capability()[0] == 9)
+
+    def flash_attn_varlen_diff_headdims(self, q, k, v, **kwargs):
+        maybe_padded_v = v
+        if self._pad_v:
+            maybe_padded_v = torch.nn.functional.pad(
+                v, [0, q.shape[-1] - v.shape[-1]], value=0)
+        # rest in case we have softmax lse output
+        attn_output, *rest = self._flash_attn_varlen_func(
+            q, k, maybe_padded_v, **kwargs)
+        if self._pad_v:
+            attn_output = attn_output[:, :, :v.shape[-1]], *rest
+        return attn_output, *rest
+
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -1291,7 +1311,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 return_softmax_lse=has_context,
             )
         else:
-            output = self.flash_attn_varlen_func(
+            output = self.flash_attn_varlen_diff_headdims(
                 q=q,
                 k=k,
                 v=v,
@@ -1319,13 +1339,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 suffix_lse=suffix_lse,
             )
 
-        # slice by `:v.shape[-1]` in order to remove v headdim padding
-        if pad_v:
-            attn_output = attn_output\
-                .view(-1, self.num_heads, q.shape[-1])[..., :v_dim]
-
-        attn_output = attn_output.reshape(-1, self.num_heads * v_dim)
-        return self.o_proj(output)[0]
+        return self.o_proj(output[0].flatten(start_dim=-2))[0]
 
     @abstractmethod
     def _forward_decode(
