@@ -122,8 +122,9 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
-        if not self.enable_caching:
-            # Prefix caching is disabled.
+        if not (self.enable_caching
+                and request.sampling_params.prompt_logprobs is None):
+            # Prefix caching is disabled or prompt logprobs request
             return [], 0
 
         computed_blocks = []
@@ -184,6 +185,8 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
+        do_apc = (self.enable_caching
+                  and request.sampling_params.prompt_logprobs is None)
         if num_tokens == 0:
             raise ValueError("num_tokens must be greater than 0")
 
@@ -210,7 +213,7 @@ class KVCacheManager:
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
+        if do_apc:
             self._touch(new_computed_blocks)
         else:
             assert not new_computed_blocks, (
@@ -240,10 +243,10 @@ class KVCacheManager:
             assert num_new_blocks > 0
 
             # Concatenate the computed block IDs and the new block IDs.
-            new_blocks = self._get_new_blocks(num_new_blocks)
+            new_blocks = self._get_new_blocks(num_new_blocks, do_apc)
             req_blocks.extend(new_blocks)
 
-        if not self.enable_caching:
+        if not do_apc:
             return new_blocks
 
         num_cached_blocks = self.num_cached_block[request.request_id]
@@ -278,7 +281,8 @@ class KVCacheManager:
         # Default to [] in case a request is freed (aborted) before alloc.
         blocks = self.req_to_blocks.pop(request.request_id, [])
         ordered_blocks: Iterable[KVCacheBlock] = blocks
-        if self.enable_caching:
+        if (self.enable_caching
+                and request.sampling_params.prompt_logprobs is None):
             # Free blocks in reverse order so that the tail blocks are
             # freed first.
             ordered_blocks = reversed(blocks)
@@ -367,7 +371,8 @@ class KVCacheManager:
                 break
         return num_common_blocks
 
-    def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
+    def _get_new_blocks(self, num_blocks: int,
+                        do_apc: bool) -> List[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
@@ -390,7 +395,7 @@ class KVCacheManager:
             assert curr_block.ref_cnt == 0
 
             # If the block is cached, evict it.
-            if self.enable_caching:
+            if do_apc:
                 self._maybe_evict_cached_block(curr_block)
 
             curr_block.incr_ref()
