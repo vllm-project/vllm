@@ -102,7 +102,6 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
             quant_config=quant_config,
         )
         self.zxbcdt_multipliers = config.ssm_multipliers
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def _init_mup_vector(self):
         vector_shape = (
@@ -140,12 +139,6 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
         ssm_in_multiplier: float = 1.0,
         **kwargs,
     ):
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-
         hidden_states = self.mamba(
             hidden_states,
             attn_metadata,
@@ -233,7 +226,6 @@ class FalconMamba2AttentionDecoderLayer(nn.Module):
         )
         self.key_multiplier = config.key_multiplier
         self.attn_out_multiplier = config.attention_out_multiplier
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def self_attention(
         self,
@@ -260,12 +252,6 @@ class FalconMamba2AttentionDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         **kwargs,
     ):
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-
         hidden_states = self.self_attention(
             positions=positions,
             hidden_states=hidden_states,
@@ -296,7 +282,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
     ) -> None:
         super().__init__()
         # Instantiate the attention branch
-        self.attn_layer = FalconMamba2AttentionDecoderLayer(
+        self.self_attn = FalconMamba2AttentionDecoderLayer(
             config=config,
             layer_idx=layer_idx,
             cache_config=cache_config,
@@ -304,7 +290,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
             prefix=prefix,
         )
         # Instantiate the SSM branch
-        self.ssm_layer = FalconMamba2SSMDecoderLayer(
+        self.mamba = FalconMamba2SSMDecoderLayer(
             config=config,
             layer_idx=layer_idx,
             cache_config=cache_config,
@@ -316,6 +302,8 @@ class FalconMamba2ParallelHybrid(nn.Module):
         self.attention_in_multiplier = config.attention_in_multiplier
 
         self.feed_forward = FalconMamba2MLP(config)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
 
     def forward(
         self,
@@ -328,10 +316,12 @@ class FalconMamba2ParallelHybrid(nn.Module):
         sequence_idx: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
         # Process input through the attention branch.
         # FalconMamba2AttentionDecoderLayer expects positions, hidden_states,
         # kv_cache, attn_metadata, and residual.
-        attn_hidden, residuals = self.attn_layer(
+        attn_hidden, residuals = self.self_attn(
             positions=positions,
             hidden_states=hidden_states * self.attention_in_multiplier,
             kv_cache=kv_cache,
@@ -343,7 +333,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
         # Process input through the SSM branch.
         # FalconMamba2SSMDecoderLayer expects hidden_states, attn_metadata, 
         # residual, mamba_cache_params, and sequence_idx.
-        ssm_hidden, residuals = self.ssm_layer(
+        ssm_hidden, residuals = self.mamba(
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
             residual=residual,
@@ -651,8 +641,11 @@ class FalconMamba2ForCausalLM(
             if "A_log" in name:
                 name = name.replace("A_log", "A")
 
-            if ".self_attn." in name:
-                name = name.replace(".self_attn", "")
+            if "mamba" in name:
+                name = name.replace("mamba", "mamba.mamba")
+
+            # if ".self_attn." in name:
+            #     name = name.replace(".self_attn", "")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -678,6 +671,7 @@ class FalconMamba2ForCausalLM(
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                print(name, param.shape)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
