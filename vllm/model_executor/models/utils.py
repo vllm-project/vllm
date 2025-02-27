@@ -646,7 +646,7 @@ def extract_layer_index(layer_name: str) -> int:
 def cast_overflow_tensors(
     tensors: torch.Tensor,
     offset: float = 1000,
-) -> Dict[str, torch.Tensor]:
+) -> torch.Tensor:
     if tensors.isinf().any() or tensors.isnan().any():
         clamp_value = torch.finfo(tensors.dtype).max - offset
         tensors = torch.clamp(tensors, min=-clamp_value, max=clamp_value)
