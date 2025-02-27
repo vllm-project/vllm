@@ -287,11 +287,9 @@ class BlockList:
         self._blocks = []
         self._block_ids = []
 
-    @property
-    def blocks(self) -> list[Block]:
+    def list(self) -> list[Block]:
         return self._blocks
 
-    @property
     def ids(self) -> list[int]:
         return self._block_ids
 
