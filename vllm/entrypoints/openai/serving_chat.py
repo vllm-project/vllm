@@ -195,7 +195,6 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
-
         request_id = "chatcmpl-" \
                      f"{self._base_request_id(raw_request, request.request_id)}"
 
@@ -253,18 +252,18 @@ class OpenAIServingChat(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        assert len(generators) == 1
-        result_generator, = generators
+        # assert len(generators) == 1
+        # result_generator, = generators
 
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, model_name,
+                request, generators, request_id, model_name,
                 conversation, tokenizer, request_metadata)
 
         try:
             return await self.chat_completion_full_generator(
-                request, result_generator, request_id, model_name,
+                request, generators, request_id, model_name,
                 conversation, tokenizer, request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -278,7 +277,7 @@ class OpenAIServingChat(OpenAIServing):
     async def chat_completion_stream_generator(
         self,
         request: ChatCompletionRequest,
-        result_generator: AsyncIterator[RequestOutput],
+        result_generator: List[AsyncIterator[RequestOutput]],
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
@@ -670,7 +669,7 @@ class OpenAIServingChat(OpenAIServing):
     async def chat_completion_full_generator(
         self,
         request: ChatCompletionRequest,
-        result_generator: AsyncIterator[RequestOutput],
+        result_generator: List[AsyncIterator[RequestOutput]],
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
@@ -682,8 +681,9 @@ class OpenAIServingChat(OpenAIServing):
         final_res: Optional[RequestOutput] = None
 
         try:
-            async for res in result_generator:
-                final_res = res
+            for result_generator in result_generator:
+                async for res in result_generator:
+                    final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:

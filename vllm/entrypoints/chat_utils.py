@@ -49,10 +49,26 @@ class AudioURL(TypedDict, total=False):
     """
 
 
+class ImageEmbeds(TypedDict, total=False):
+    embeds: Required[str]
+    # image_sizes: Optional[List[int]] TODO(@chaunceyjiang)
+    image_grid_thw: Optional[str]
+    """
+    Image embeds to be used in the chat completion API.
+    """
+
+
 class ChatCompletionContentPartAudioParam(TypedDict, total=False):
     audio_url: Required[AudioURL]
 
     type: Required[Literal["audio_url"]]
+    """The type of the content part."""
+
+
+class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
+    image_embeds: Required[Union[str, ImageEmbeds]]
+
+    type: Required[Literal["image_embeds"]]
     """The type of the content part."""
 
 
@@ -109,6 +125,7 @@ ChatCompletionContentPartParam: TypeAlias = Union[
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartVideoParam, ChatCompletionContentPartRefusalParam,
     CustomChatCompletionContentSimpleImageParam,
+    ChatCompletionContentPartImageEmbedsParam,
     CustomChatCompletionContentSimpleAudioParam,
     CustomChatCompletionContentSimpleVideoParam, str]
 
@@ -510,6 +527,10 @@ class BaseMultiModalContentParser(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def parse_image_embeds(self, image_embeds: Union[str, ImageEmbeds]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def parse_audio(self, audio_url: str) -> None:
         raise NotImplementedError
 
@@ -537,6 +558,37 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         image = self._connector.fetch_image(image_url)
 
         placeholder = self._tracker.add("image", image)
+        self._add_placeholder(placeholder)
+
+    def _parse_image_embeds_params(self,
+                                   image_embeds: ImageEmbeds
+                                   ) -> Dict[str, Any]:
+        grid_thw_data = image_embeds.get("image_grid_thw", "")
+        if grid_thw_data:
+            embedding_url = f"data:image/embeds;base64,{grid_thw_data}"
+            image_grid_thw = self._connector.\
+                fetch_image_embedding(embedding_url)
+            image_embeds["image_grid_thw"] = image_grid_thw
+            
+        return cast(Dict[str, Any], image_embeds)
+
+    def parse_image_embeds(self, image_embeds: Union[str, ImageEmbeds]) -> None:
+        if isinstance(image_embeds, dict):
+            image_data = image_embeds.pop("embeds", "")
+            embedding_url = f"data:image/embeds;base64,{image_data}"
+            embedding = self._connector.fetch_image_embedding(embedding_url)
+
+            embeds = cast(Dict[str, Any], image_embeds)
+            embeds["image_embeds"] = embedding # decoded image data
+            embeds |= self._parse_image_embeds_params(image_embeds)
+
+            placeholder = self._tracker.add("image", embeds)
+
+        if isinstance(image_embeds, str):
+            embedding_url = f"data:image/embeds;base64,{image_embeds}"
+            embedding = self._connector.fetch_image_embedding(embedding_url)
+            placeholder = self._tracker.add("image", image_embeds)
+
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
@@ -573,6 +625,39 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         image_coro = self._connector.fetch_image_async(image_url)
 
         placeholder = self._tracker.add("image", image_coro)
+        self._add_placeholder(placeholder)
+
+    def _parse_image_embeds_params(self,
+                                   image_embeds: ImageEmbeds,
+                                   ) -> Dict[str, Any]:
+        grid_thw_data = image_embeds.get("image_grid_thw", "")
+        if grid_thw_data:
+            embedding_url = f"data:image/embeds;base64,{grid_thw_data}"
+            image_grid_thw = self._connector.\
+                fetch_image_embedding(embedding_url)
+            image_embeds["image_grid_thw"] = image_grid_thw
+        return cast(Dict[str, Any], image_embeds)
+
+    def parse_image_embeds(self, image_embeds: Union[str, ImageEmbeds]) -> None:
+        future: asyncio.Future[Union[str, Dict[str, Any]]] = asyncio.Future()
+
+        if isinstance(image_embeds, dict):
+            image_data = image_embeds.pop("embeds", "")
+            embedding_url = f"data:image/embeds;base64,{image_data}"
+            embedding = self._connector.\
+                fetch_image_embedding(embedding_url)
+            embeds = cast(Dict[str, Any], image_embeds)
+            embeds["image_embeds"] = embedding # decoded image data
+            embeds |= self._parse_image_embeds_params(image_embeds)
+            future.set_result(embeds)
+
+        if isinstance(image_embeds, str):
+            embedding_url = f"data:image/embeds;base64,{image_embeds}"
+            embedding = self._connector.\
+                fetch_image_embedding(embedding_url)
+            future.set_result(embedding)
+
+        placeholder = self._tracker.add("image", future)
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
@@ -680,12 +765,13 @@ def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
 # No need to validate using Pydantic again
 _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageParser = partial(cast, ChatCompletionContentPartImageParam)
+_ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
 _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 _VideoParser = partial(cast, ChatCompletionContentPartVideoParam)
 
-_ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio]
+_ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio, ImageEmbeds]
 
 # Define a mapping from part types to their corresponding parsing functions.
 MM_PARSER_MAP: dict[
@@ -696,6 +782,8 @@ MM_PARSER_MAP: dict[
     lambda part: _TextParser(part).get("text", ""),
     "image_url":
     lambda part: _ImageParser(part).get("image_url", {}).get("url", ""),
+    "image_embeds":
+    lambda part: _ImageEmbedsParser(part).get("image_embeds", {}),
     "audio_url":
     lambda part: _AudioParser(part).get("audio_url", {}).get("url", ""),
     "input_audio":
@@ -765,6 +853,7 @@ def _parse_chat_message_content_mm_part(
 
 
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
+                                       "image_embeds",
                                        "audio_url", "input_audio", "video_url")
 
 
@@ -839,7 +928,13 @@ def _parse_chat_message_content_part(
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
         return {'type': 'image'} if wrap_dicts else None
-
+    if part_type == "image_embeds":
+        if isinstance(content, dict):
+            content = cast(ImageEmbeds, content)
+        if isinstance(content, str):
+            content = cast(str, content)
+        mm_parser.parse_image_embeds(content)
+        return {'type': 'image'} if wrap_dicts else None
     if part_type == "audio_url":
         str_content = cast(str, content)
         mm_parser.parse_audio(str_content)

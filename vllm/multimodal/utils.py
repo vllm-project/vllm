@@ -7,6 +7,7 @@ from urllib.parse import ParseResult, urlparse
 
 import numpy as np
 import numpy.typing as npt
+import torch
 from PIL import Image
 
 import vllm.envs as envs
@@ -16,7 +17,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .audio import AudioMediaIO
 from .base import MediaIO
-from .image import ImageMediaIO
+from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .inputs import PlaceholderRange
 from .video import VideoMediaIO
 
@@ -244,6 +245,25 @@ class MediaConnector:
             video_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
+
+    def fetch_image_embedding(
+        self,
+        image_embedding_url: str,
+    ) -> torch.Tensor:
+        """
+        Load image embedding from a URL.
+        """
+        image_embedding_io = ImageEmbeddingMediaIO()
+        url_spec = urlparse(image_embedding_url)
+
+        if url_spec.scheme == "data":
+            return self._load_data_url(url_spec, image_embedding_io)
+
+        if url_spec.scheme == "file":
+            return self._load_file_url(url_spec, image_embedding_io)
+
+        msg = "The URL must be either a data or file URL."
+        raise ValueError(msg)
 
 
 global_media_connector = MediaConnector()
