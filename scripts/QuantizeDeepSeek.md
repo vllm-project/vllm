@@ -43,7 +43,7 @@ VLLM_TARGET_DEVICE=hpu pip install -e .  --no-build-isolation
 
 ### Exporting Environment variables
 > [!NOTE]
-> Please update the `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` variables in the `head_node_source.sh` and `worker_node_source.sh` scripts with the correct device interface names.
+> Please update the `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` variables in the `head_node_source.sh` and `worker_node_source.sh` scripts with the name of network interface of the device.
 
 - Head Node
 
