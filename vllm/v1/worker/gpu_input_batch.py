@@ -80,7 +80,14 @@ class InputBatch:
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens_cpu_tensor = torch.zeros(
+            (max_num_reqs, ),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.num_computed_tokens_cpu = \
+            self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
         self.block_table = BlockTable(
@@ -355,6 +362,61 @@ class InputBatch:
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         return req_index
+
+    def swap_states(self, i1: int, i2: int) -> None:
+        old_id_i1 = self._req_ids[i1]
+        old_id_i2 = self._req_ids[i2]
+        self._req_ids[i1], self._req_ids[i2] =\
+            self._req_ids[i2], self._req_ids[i1] # noqa
+        self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
+            self.req_output_token_ids[i2], self.req_output_token_ids[i1]
+        assert old_id_i1 is not None and old_id_i2 is not None
+        self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] =\
+            self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
+        self.num_tokens[i1], self.num_tokens[i2] =\
+            self.num_tokens[i2], self.num_tokens[i1]
+        self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
+            self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
+        self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
+            self.num_tokens_no_spec[i2], self.num_tokens_no_spec[i1]
+        self.num_prompt_tokens[i1], self.num_prompt_tokens[i2] =\
+            self.num_prompt_tokens[i2], self.num_prompt_tokens[i1]
+        self.num_computed_tokens_cpu[i1], self.num_computed_tokens_cpu[i2] =\
+            self.num_computed_tokens_cpu[i2], self.num_computed_tokens_cpu[i1]
+        self.temperature_cpu[i1], self.temperature_cpu[i2] =\
+            self.temperature_cpu[i2], self.temperature_cpu[i1]
+        self.top_p_cpu[i1], self.top_p_cpu[i2] =\
+            self.top_p_cpu[i2], self.top_p_cpu[i1]
+        self.top_k_cpu[i1], self.top_k_cpu[i2] =\
+            self.top_k_cpu[i2], self.top_k_cpu[i1]
+        self.frequency_penalties_cpu[i1], self.frequency_penalties_cpu[i2] =\
+            self.frequency_penalties_cpu[i2], self.frequency_penalties_cpu[i1]
+        self.presence_penalties_cpu[i1], self.presence_penalties_cpu[i2] =\
+            self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
+        self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
+            self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+        self.min_p_cpu[i1], self.min_p_cpu[i2] =\
+            self.min_p_cpu[i2], self.min_p_cpu[i1]
+
+        g1 = self.generators.get(i1)
+        g2 = self.generators.get(i2)
+        if g1 is not None:
+            self.generators[i2] = g1
+        if g2 is not None:
+            self.generators[i1] = g2
+
+        t1 = self.min_tokens.get(i1)
+        t2 = self.min_tokens.get(i2)
+        if t1 is not None:
+            self.min_tokens[i2] = t1
+        if t2 is not None:
+            self.min_tokens[i1] = t2
+
+        self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
+            self.request_lora_mapping[i2], self.request_lora_mapping[i1]
+        self.logit_bias[i1], self.logit_bias[i2] =\
+            self.logit_bias[i2], self.logit_bias[i1]
+        self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: List[int]) -> None:
         num_reqs = self.num_reqs
