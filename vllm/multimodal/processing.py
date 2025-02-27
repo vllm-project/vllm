@@ -829,7 +829,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             logger.warning_once("`_get_prompt_replacements` has been renamed "
                                 "to `_get_prompt_updates`. The old name will "
                                 "be removed in an upcoming release.")
-            self._get_prompt_updates = get_repls
+            self._get_prompt_updates = get_repls  # type: ignore[method-assign]
 
         super().__init__()
 
