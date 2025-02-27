@@ -55,8 +55,6 @@ ignore_patterns = [
 ]
 
 [tool.ruff]
-# Allow lines to be as long as 88 to be compatible with Black.
-line-length = 88
 exclude = [
     # External file, leaving license intact
     "examples/other/fp8/quantizer/quantize.py"
