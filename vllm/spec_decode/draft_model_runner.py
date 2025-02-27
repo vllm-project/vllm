@@ -147,7 +147,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 return False
 
         # TODO: Add support for other attn backends
-        if self.attn_backend.get_name() not in ("FLASH_ATTN", "TRITON_MLA"):
+        if self.attn_backend.get_name() not in ("FLASH_ATTN", ):
             return False
 
         # TODO: Add support for LORA
