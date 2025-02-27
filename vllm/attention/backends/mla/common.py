@@ -1063,17 +1063,25 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             self.vllm_flash_attn_version == 3
             and current_platform.get_device_capability()[0] == 9)
 
-    def flash_attn_varlen_diff_headdims(self, q, k, v, **kwargs):
+    def _flash_attn_varlen_diff_headdims(self, q, k, v, **kwargs):
         maybe_padded_v = v
         if self._pad_v:
             maybe_padded_v = torch.nn.functional.pad(
                 v, [0, q.shape[-1] - v.shape[-1]], value=0)
-        # rest in case we have softmax lse output
-        attn_output, *rest = self._flash_attn_varlen_func(
-            q, k, maybe_padded_v, **kwargs)
-        if self._pad_v:
-            attn_output = attn_output[..., :v.shape[-1]]
-        return attn_output, *rest
+
+        attn_out = self._flash_attn_varlen_func(q, k, maybe_padded_v, **kwargs)
+
+        # Remain consistent with old `flash_attn_varlen_func` where there
+        # is only one output tensor if `return_softmax_lse` is False.
+        # only unpack if it is a tuple to avoid unpacking tensors by accident
+        if isinstance(attn_out, tuple):
+            attn_out, *rest = attn_out
+            # unpad if necessary
+            if self._pad_v:
+                attn_out = attn_out[..., :v.shape[-1]]
+            return attn_out, *rest
+        else:
+            return attn_out[..., :v.shape[-1]] if self._pad_v else attn_out
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -1311,7 +1319,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 return_softmax_lse=has_context,
             )
         else:
-            output = self.flash_attn_varlen_diff_headdims(
+            output = self._flash_attn_varlen_diff_headdims(
                 q=q,
                 k=k,
                 v=v,
@@ -1339,7 +1347,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 suffix_lse=suffix_lse,
             )
 
-        return self.o_proj(output[0].flatten(start_dim=-2))[0]
+        return self.o_proj(output.flatten(start_dim=-2))[0]
 
     @abstractmethod
     def _forward_decode(
