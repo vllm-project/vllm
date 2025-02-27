@@ -258,14 +258,13 @@ def test_mixed_seeded_batch(k: int, vocab_size: int, batch_size: int,
                                          target_probs.clone(),
                                          sampling_metadata).sampled_token_ids
     else:
-        rejection_sampler.init_gpu_tensors(device=device)
         batch_result = rejection_sampler(target_probs.clone(),
                                          bonus_token_ids.clone(),
                                          draft_probs.clone(),
                                          draft_token_ids.clone(), seeded_seqs)
 
     set_random_seed(0)
-    rejection_sampler = get_sampler(use_v1, use_flashinfer)
+    rejection_sampler = get_sampler(use_v1, use_flashinfer, device)
     for i in range(batch_size):
         request_seeded_seqs = {
             0: torch.Generator(device=device).manual_seed(i)
@@ -327,8 +326,8 @@ def test_compare_nonflashinfer_backend(k: int, vocab_size: int,
 
     for use_flashinfer in [True, False]:
         rejection_sampler = get_sampler(use_v1=False,
-                                        use_flashinfer=use_flashinfer)
-        rejection_sampler.init_gpu_tensors(device=device)
+                                        use_flashinfer=use_flashinfer,
+                                        device=device)
         # We use seeded sequences to ensure the same tokens are accepted
         # for both flashinfer and nonflashinfer backends.
         seeded_seqs = get_seeded_seqs()
@@ -358,8 +357,9 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
     torch.set_default_device(device)
 
     rejection_sampler = get_sampler(use_v1=False,
-                                    use_flashinfer=use_flashinfer)
-    rejection_sampler.init_gpu_tensors(device=device)
+                                    use_flashinfer=use_flashinfer,
+                                    device=device,
+                                    strict_mode=True)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size,
@@ -486,13 +486,12 @@ class _CorrectnessTestHelper:
     """
 
     def __init__(self, vocab_size: int, use_v1: bool):
-        self.rejection_sampler = get_sampler(use_v1, use_flashinfer=False)
+        self.rejection_sampler = get_sampler(use_v1,
+                                             use_flashinfer=False,
+                                             device="cpu")
         self.vocab_size = vocab_size
         self.vocab_range = (0, vocab_size)
         self.use_v1 = use_v1
-
-        if not self.use_v1:
-            self.rejection_sampler.init_gpu_tensors(device=0)
 
         # Keep test simple, use k=1
         self.k = 1
@@ -647,12 +646,14 @@ def create_v1_sampling_metadata(
 
 def get_sampler(use_v1: bool,
                 use_flashinfer: bool,
-                device: str = "cuda:0") -> Any:
+                device: str = "cuda:0",
+                strict_mode: bool = False) -> Any:
     if use_v1:
         import os
         os.environ[
             "VLLM_USE_FLASHINFER_SAMPLER"] = "1" if use_flashinfer else "0"
         return v1_rej_sampler.RejectionSampler()
-    sampler = v0_rej_sampler.RejectionSampler(use_flashinfer=use_flashinfer)
+    sampler = v0_rej_sampler.RejectionSampler(use_flashinfer=use_flashinfer,
+                                              strict_mode=strict_mode)
     sampler.init_gpu_tensors(device=device)
     return sampler
