@@ -63,7 +63,7 @@ def apply_w8a8_block_fp8_linear(
         import deep_gemm
         q_input, x_scale = per_token_group_quant_fp8(input_2d, block_size[1])
         output = torch.empty((input_2d.shape[0], weight.shape[0]),
-                             device='cuda',
+                             device=input.device,
                              dtype=input.dtype)
         deep_gemm.gemm_fp8_fp8_bf16_nt((q_input, x_scale),
                                        (weight, weight_scale), output)
