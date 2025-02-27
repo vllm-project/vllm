@@ -737,3 +737,23 @@ class FusedMoE(torch.nn.Module):
             # If we are in the row parallel case (down_proj)
             else:
                 param_data[expert_id] = loaded_weight
+
+    def extra_repr(self) -> str:
+
+        s = (
+            f"global_num_experts={self.global_num_experts}, "
+            f"local_num_experts={self.local_num_experts}, "
+            f"top_k={self.top_k}, "
+            f"intermediate_size_per_partition={self.intermediate_size_per_partition}, "  # noqa: E501
+            f"tp_size={self.tp_size},\n"
+            f"ep_size={self.ep_size}, "
+            f"reduce_results={self.reduce_results}, "
+            f"renormalize={self.renormalize}, "
+            f"use_grouped_topk={self.use_grouped_topk}")
+
+        if self.use_grouped_topk:
+            s += f", num_expert_group={self.num_expert_group}, topk_group={self.topk_group}"  # noqa: E501
+
+        s += f", scoring_func='{self.scoring_func}', activation='{self.activation}'"  # noqa: E501
+
+        return s
