@@ -174,7 +174,7 @@ Quark supports multiple quantization schemes for vLLM:
 - **FP8 Weight, Activation & Output**: `w_fp8_a_fp8_o_fp8`
 - **FP8 with KV Cache**: Add `--kv_cache_dtype fp8` to enable FP8 KV cache
 - **INT8**: `w_int8_a_int8_per_tensor_sym`
-- **4-bit Weight Only**: `w_uint4_per_group_asym` or `w_int4_per_group_sym` with AWQ/GPTQ algorithms
+- **4-bit Weight Only**: `w_uint4_per_group_asym` or `w_int4_per_group_asym` with AWQ/GPTQ algorithms
 
 #### Example: Quantizing a Model with Quark
 
