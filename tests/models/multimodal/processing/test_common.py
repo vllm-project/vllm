@@ -83,11 +83,11 @@ def _test_processing_correctness(
     }
 
     tokenizer_encode_kwargs = {}
-    if model_config.hf_config.model_type == "mllama":
-        # For Mllama, tokenizer will always add bos_token at the beginning of
-        # prompt by default, causing hf_processor outputs incorrect token ids.
-        # So we need use `add_special_tokens=False` here to leave bos_token
-        # to be added by the processor.
+    if model_config.hf_config.model_type in ("mllama", "whisper", "ultravox"):
+        # For some multimodal models, tokenizer will always add bos_token
+        # at the beginning of prompt by default, causing hf_processor outputs
+        # incorrect token ids. So we need use `add_special_tokens=False` here
+        # to leave bos_token to be added by the processor.
         tokenizer_encode_kwargs = {"add_special_tokens": False}
 
     for batch_idx in range(num_batches):
@@ -172,7 +172,8 @@ def _test_processing_correctness(
     "Qwen/Qwen2-VL-2B-Instruct",
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
-    "fixie-ai/ultravox-v0_5-llama-3_2-1b",
+    "fixie-ai/ultravox-v0_4",
+    "openai/whisper-large-v3",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])

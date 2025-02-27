@@ -11,3 +11,5 @@ peft
 pytest-asyncio
 tensorizer>=2.9.0
 setuptools_scm
+runai-model-streamer==0.11.0
+runai-model-streamer-s3==0.11.0
