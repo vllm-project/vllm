@@ -1072,7 +1072,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         attn_output, *rest = self._flash_attn_varlen_func(
             q, k, maybe_padded_v, **kwargs)
         if self._pad_v:
-            attn_output = attn_output[:, :, :v.shape[-1]], *rest
+            attn_output = attn_output[..., :v.shape[-1]]
         return attn_output, *rest
 
     def _v_up_proj_and_o_proj(self, x):
