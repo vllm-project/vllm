@@ -155,7 +155,7 @@ In this YAML configuration:
 
 ------
 
-## Deployment using native k8s
+## Deployment using native K8s
 
 Ensure that you have the following:
 
