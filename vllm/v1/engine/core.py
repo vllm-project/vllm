@@ -137,7 +137,7 @@ class EngineCore:
         req = Request.from_engine_core_request(request)
         if req.use_guided_decoding:
             # Start grammar compilation asynchronously
-            self.guided_decoding_manager.should_cache(req)
+            self.guided_decoding_manager.populate_cache(req)
 
         self.scheduler.add_request(req)
 
