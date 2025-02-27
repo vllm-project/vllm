@@ -55,8 +55,7 @@ class Grammar:
     vocab_size: int
     matcher: xgr.GrammarMatcher = field(hash=False)
     ctx: xgr.CompiledGrammar = field(hash=False)
-    max_rollback_tokens: int = field(
-        default_factory=lambda: MAX_ROLLBACK_TOKENS, kw_only=True)
+    max_rollback_tokens: int = field(default=MAX_ROLLBACK_TOKENS)
     num_processed_tokens: int = field(default_factory=lambda: 0,
                                       repr=False,
                                       hash=False,
