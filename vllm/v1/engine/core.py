@@ -2,6 +2,7 @@
 import os
 import queue
 import signal
+import sys
 import threading
 import time
 from concurrent.futures import Future
@@ -15,11 +16,12 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import get_exception_traceback, zmq_socket_ctx
+from vllm.utils import get_exception_traceback, get_mp_context, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -299,13 +301,20 @@ class EngineCoreProc(EngineCore):
         if vllm_config.parallel_config.data_parallel_size > 1:
             # Set data parallel rank for this engine process.
             vllm_config.parallel_config.data_parallel_rank = dp_rank
-            tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-            # TODO CUDA agnostic here
-            from vllm.platforms.cuda import device_id_to_physical_device_id
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-                str(device_id_to_physical_device_id(i))
-                for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
+            # Add process-specific prefix to stdout and stderr
+            process_name = get_mp_context().current_process().name
+            pid = os.getpid()
+            _add_prefix(sys.stdout, process_name, pid)
+            _add_prefix(sys.stderr, process_name, pid)
+
+            from vllm.platforms import current_platform
+            if current_platform.is_cuda_alike():
+                from vllm.platforms.cuda import device_id_to_physical_device_id
+                tp_size = vllm_config.parallel_config.tensor_parallel_size
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    str(device_id_to_physical_device_id(i))
+                    for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
 
         parent_process = psutil.Process().parent()
         engine_core = None

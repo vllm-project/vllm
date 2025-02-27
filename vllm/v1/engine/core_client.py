@@ -317,13 +317,16 @@ class MPClient(EngineCoreClient):
                                                   zmq.constants.PULL)
 
         dp_size = vllm_config.parallel_config.data_parallel_size
-        self.dp_group = None if dp_size <= 1 else (
-            vllm_config.parallel_config.stateless_init_dp_group())
 
+        # Start engine core process(es).
         for i in range(dp_size):
             resources.core_engines.append(
                 CoreEngine(vllm_config, executor_class, log_stats, self.ctx,
                            output_path, i))
+
+        # Wait for engine core process(es) to start.
+        for engine in resources.core_engines:
+            engine.proc_handle.wait_for_startup()
 
         self.output_socket = resources.output_socket
         self.core_engines = resources.core_engines
@@ -510,9 +513,10 @@ class AsyncMPClient(MPClient):
                 self.core_engines[0], method, *args)
 
         # Only the result from the first engine is returned.
-        return (await asyncio.gather(
+        return (await asyncio.gather(*[
             self._call_engine_utility_async(engine, method, *args)
-            for engine in self.core_engines))[0]
+            for engine in self.core_engines
+        ]))[0]
 
     async def _call_engine_utility_async(
         self,
@@ -552,10 +556,11 @@ class AsyncMPClient(MPClient):
         else:
             # Send request to chosen engine and dp start loop
             # control message to all other engines.
-            await asyncio.gather(
+            await asyncio.gather(*[
                 engine.input_socket.send_multipart(
                     msg if engine is chosen_engine else self.start_dp_msg,
-                    copy=False) for engine in self.core_engines)
+                    copy=False) for engine in self.core_engines
+            ])
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
         if not request_ids:

@@ -2130,11 +2130,11 @@ def make_zmq_socket(
     if type == zmq.constants.PULL:
         socket.setsockopt(zmq.constants.RCVHWM, 0)
         socket.setsockopt(zmq.constants.RCVBUF, buf_size)
-        socket.connect(path)
+        socket.bind(path)
     elif type == zmq.constants.PUSH:
         socket.setsockopt(zmq.constants.SNDHWM, 0)
         socket.setsockopt(zmq.constants.SNDBUF, buf_size)
-        socket.bind(path)
+        socket.connect(path)
     else:
         raise ValueError(f"Unknown Socket Type: {type}")
 
@@ -2147,7 +2147,7 @@ def zmq_socket_ctx(
         type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
-    ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+    ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
         yield make_zmq_socket(ctx, path, type)
 
