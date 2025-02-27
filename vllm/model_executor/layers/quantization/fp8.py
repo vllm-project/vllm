@@ -753,16 +753,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         if envs.VLLM_USE_AITER_MOE:
-            return asm_moe(hidden_states=x,
-                           w1=layer.w13_weight,
-                           w2=layer.w2_weight,
-                           topk_weight=topk_weights,
-                           topk_ids=topk_ids,
-                           fc1_scale=layer.w13_weight_scale,
-                           fc2_scale=layer.w2_weight_scale,
-                           fc1_smooth_scale=None,
-                           fc2_smooth_scale=None,
-                           a16=False)
+            return asm_moe(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weight=topk_weights,
+                topk_ids=topk_ids,
+                fc1_scale=(layer.w13_weight_scale_inv
+                           if self.block_quant else layer.w13_weight_scale),
+                fc2_scale=(layer.w2_weight_scale_inv
+                           if self.block_quant else layer.w2_weight_scale),
+                fc1_smooth_scale=None,
+                fc2_smooth_scale=None,
+                a16=False)
 
         return fused_experts(
             x,

@@ -21,10 +21,10 @@ if TYPE_CHECKING:
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
     VLLM_USE_AITER: bool = False
-    VLLM_USE_AITER_MOE: bool = False
+    VLLM_USE_AITER_MOE: bool = True
     VLLM_USE_AITER_PAGED_ATTN: bool = False
-    VLLM_USE_AITER_LINEAR: bool = False
-    VLLM_USE_AITER_NORM: bool = False
+    VLLM_USE_AITER_LINEAR: bool = True
+    VLLM_USE_AITER_NORM: bool = True
     RANK: int = 0
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
@@ -299,30 +299,22 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # use ater moe op if ater ops are enabled
     "VLLM_USE_AITER_MOE":
-    lambda:
-    (os.getenv("VLLM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_USE_AITER_MOE", "True").lower() in
-     ("true", "1")),
+    lambda: (os.getenv("VLLM_USE_AITER_MOE", "True").lower() in ("true", "1")),
 
     # use ater paged attn op if ater ops are enabled
     "VLLM_USE_AITER_PAGED_ATTN":
-    lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in
-             ("true", "1") and os.getenv("VLLM_USE_AITER_PAGED_ATTN", "False"
-                                         ).lower() in ("true", "1")),
+    lambda: (os.getenv("VLLM_USE_AITER_PAGED_ATTN", "False").lower() in
+             ("true", "1")),
 
     # use ater linear op if ater ops are enabled
     "VLLM_USE_AITER_LINEAR":
-    lambda:
-    (os.getenv("VLLM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_USE_AITER_LINEAR", "True").lower() in
-     ("true", "1")),
+    lambda: (os.getenv("VLLM_USE_AITER_LINEAR", "True").lower() in
+             ("true", "1")),
 
     # use ater rms norm op if ater ops are enabled
     "VLLM_USE_AITER_NORM":
-    lambda:
-    (os.getenv("VLLM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_USE_AITER_NORM", "True").lower() in
-     ("true", "1")),
+    lambda: (os.getenv("VLLM_USE_AITER_NORM", "True").lower() in
+             ("true", "1")),
 
     # rank of the process in the distributed setting, used to determine
     # the driver worker
