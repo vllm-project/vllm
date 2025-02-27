@@ -505,18 +505,26 @@ class AsyncMPClient(MPClient):
     def get_core_engine_for_request(self) -> CoreEngine:
         return min(self.core_engines, key=lambda e: e.num_reqs_in_flight)
 
-    async def _call_utility_async(
+    async def _call_utility_async(self, method: str, *args) -> Any:
+        if len(self.core_engines) == 1:
+            return self._call_engine_utility_async(self.core_engines[0],
+                                                   method, *args)
+        # Only the result from the first engine is returned.
+        return (await asyncio.gather(
+            self._call_engine_utility_async(engine, method, *args)
+            for engine in self.core_engines))[0]
+
+    async def _call_engine_utility_async(
         self,
+        engine: CoreEngine,
         method: str,
         *args,
-        core_engine: Optional[CoreEngine] = None,
     ) -> Any:
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
         await self._send_input(EngineCoreRequestType.UTILITY,
-                               (call_id, method, args), core_engine)
-
+                               (call_id, method, args), engine)
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
