@@ -141,6 +141,9 @@ class OpenAIServingEmbedding(OpenAIServing):
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
+        except TypeError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
