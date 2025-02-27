@@ -385,6 +385,7 @@ class EngineArgs:
             'Backend-specific options can be supplied in a comma-separated '
             'list following a colon after the backend name. Valid backends and '
             'all available options are: [xgrammar:no-fallback, '
+            'xgrammar:disable-any-whitespace, '
             'outlines:no-fallback, lm-format-enforcer:no-fallback]')
         parser.add_argument(
             '--logits-processor-pattern',
