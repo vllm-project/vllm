@@ -309,18 +309,23 @@ class RayDistributedExecutor(DistributedExecutorBase):
             ",".join(map(str, node_gpus[node_id])),
         } for (node_id, _) in worker_node_and_gpu_ids]
 
+        # Environment variables to copy from driver to workers
+        env_vars_to_copy = [
+            "VLLM_ATTENTION_BACKEND", "TPU_CHIPS_PER_HOST_BOUNDS",
+            "TPU_HOST_BOUNDS", "VLLM_USE_V1", "VLLM_TRACE_FUNCTION",
+            "VLLM_TORCH_PROFILER_DIR", "VLLM_TEST_ENABLE_EP"
+        ]
+
+        # Copy existing env vars to each worker's args
         for args in all_args_to_update_environment_variables:
-            # some carry-over env vars from the driver
             # TODO: refactor platform-specific env vars
-            for name in [
-                    "VLLM_ATTENTION_BACKEND",
-                    "TPU_CHIPS_PER_HOST_BOUNDS",
-                    "TPU_HOST_BOUNDS",
-                    "VLLM_USE_V1",
-                    "VLLM_TRACE_FUNCTION",
-            ]:
+            for name in env_vars_to_copy:
                 if name in os.environ:
                     args[name] = os.environ[name]
+
+        logger.info(
+            "Copying the following environment variables to workers: %s",
+            [v for v in env_vars_to_copy if v in os.environ])
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
