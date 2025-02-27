@@ -37,7 +37,7 @@ def torchao_quantize_param_data(param: torch.Tensor, torchao_config: str):
             64,
             128,
             256,
-        ], f"int4wo groupsize needs to be one of [32, 64, 128, 256] but "
+        ], "int4wo groupsize needs to be one of [32, 64, 128, 256] but "
         "got {group_size}"
         quantize_(dummy_linear, int4_weight_only(group_size=group_size))
     elif "fp8wo" in torchao_config:
@@ -53,9 +53,8 @@ def torchao_quantize_param_data(param: torch.Tensor, torchao_config: str):
             "per_row": PerRow(),
             "per_tensor": PerTensor(),
         }
-        assert (
-            granularity in GRANULARITY_MAP
-        ), f"Supported granularity are: {GRANULARITY_MAP.keys()}, "
+        assert (granularity in GRANULARITY_MAP
+                ), f"Supported granularity are: {GRANULARITY_MAP.keys()}, "
         f"got {granularity}"
         quantize_(
             dummy_linear,

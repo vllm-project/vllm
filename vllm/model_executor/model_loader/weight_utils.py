@@ -139,7 +139,8 @@ def get_quant_config(model_config: ModelConfig,
         return quant_cls.from_config({})
 
     if model_config.quantization == "torchao":
-        return quant_cls.from_config({"torchao_config": model_config.torchao_config})
+        return quant_cls.from_config(
+            {"torchao_config": model_config.torchao_config})
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",

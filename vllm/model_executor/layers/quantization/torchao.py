@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
-from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -19,7 +18,9 @@ class TorchAOConfig(QuantizationConfig):
 
     """
 
-    def __init__(self, torchao_config: str = "int4wo-128") -> None:
+    def __init__(self, torchao_config: Optional[str] = None) -> None:
+        if torchao_config is None:
+            torchao_config = "int4wo-128"
         self.torchao_config = torchao_config
 
     def __repr__(self) -> str:
@@ -37,13 +38,12 @@ class TorchAOConfig(QuantizationConfig):
 
     @staticmethod
     def get_config_filenames() -> List[str]:
-        # TODO
-        # return ["quant_config.json"]
-        return []
+        return ["config.json"]
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "TorchAOConfig":
-        torchao_config = cls.get_from_keys_or(config, ["torchao_config"], "int4wo-128")
+        torchao_config = cls.get_from_keys_or(config, ["torchao_config"],
+                                              "int4wo-128")
         return cls(torchao_config)
 
     def get_quant_method(self, layer: torch.nn.Module,
@@ -75,15 +75,13 @@ class TorchAOLinearMethod(LinearMethodBase):
                                        input_size_per_partition,
                                        dtype=params_dtype),
                            requires_grad=False)
+        torchao_config = self.quant_config.torchao_config
+        weight = torchao_quantize_param_data(weight, torchao_config)
+
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        torchao_config = self.quant_config.torchao_config
-        layer.weight = torchao_quantize_param_data(layer.weight,
-                                                   torchao_config)
 
     @torch.compile
     def apply(self,
