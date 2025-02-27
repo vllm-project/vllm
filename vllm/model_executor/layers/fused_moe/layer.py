@@ -18,6 +18,10 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
+if envs.VLLM_ROCM_USE_AITER_MOE:
+    from aiter import ck_moe
+    from aiter.ops.shuffle import shuffle_weight
+
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
 else:
@@ -95,6 +99,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
+        if envs.VLLM_ROCM_USE_AITER_MOE:
+            layer.w13_weight = torch.nn.Parameter(shuffle_weight(
+                layer.w13_weight.data),
+                                                  requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(shuffle_weight(
+                layer.w2_weight.data),
+                                                 requires_grad=False)
+
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
                 import intel_extension_for_pytorch as ipex
@@ -166,6 +178,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
+
+        if envs.VLLM_ROCM_USE_AITER_MOE:
+            return ck_moe(hidden_states=x,
+                          w1=layer.w13_weight,
+                          w2=layer.w2_weight,
+                          topk_weights=topk_weights,
+                          topk_ids=topk_ids)
 
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,

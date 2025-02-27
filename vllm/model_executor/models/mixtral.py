@@ -28,6 +28,7 @@ import torch
 from torch import nn
 from transformers import MixtralConfig
 
+from vllm import envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -77,12 +78,16 @@ class MixtralMoE(nn.Module):
 
         # Gate always runs at half / full precision for now.
 
-        self.gate = ReplicatedLinear(hidden_size,
-                                     num_experts,
-                                     bias=False,
-                                     params_dtype=params_dtype,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            hidden_size,
+            num_experts,
+            bias=False,
+            params_dtype=params_dtype,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+            out_dtype=torch.float32
+            if envs.VLLM_ROCM_USE_AITER_LINEAR else None,
+        )
 
         self.experts = FusedMoE(num_experts=num_experts,
                                 top_k=top_k,

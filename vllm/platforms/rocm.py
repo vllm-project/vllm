@@ -194,6 +194,16 @@ class RocmPlatform(Platform):
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
+        if not envs.VLLM_ROCM_USE_AITERand(
+                envs.VLLM_ROCM_USE_AITER_LINEAR or envs.VLLM_ROCM_USE_AITER_MOE
+                or envs.VLLM_ROCM_USE_AITER_NORM
+                or envs.VLLM_ROCM_USE_AITER_PAGED_ATTN):
+            logger.info("Aiter main switch - VLLM_ROCM_USE_AITER is not set,"
+                        " Disabling individual Aiter components")
+            envs.VLLM_ROCM_USE_AITER_LINEAR = False
+            envs.VLLM_ROCM_USE_AITER_MOE = False
+            envs.VLLM_ROCM_USE_AITER_NORM = False
+            envs.VLLM_ROCM_USE_AITER_PAGED_ATTN = False
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

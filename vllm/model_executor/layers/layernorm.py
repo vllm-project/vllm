@@ -5,7 +5,11 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.model_executor.custom_op import CustomOp
+
+if envs.VLLM_ROCM_USE_AITER_NORM:
+    import aiter
 
 
 @CustomOp.register("rms_norm")
@@ -84,20 +88,33 @@ class RMSNorm(CustomOp):
         from vllm import _custom_ops as ops
 
         if residual is not None:
-            ops.fused_add_rms_norm(
+            if envs.VLLM_ROCM_USE_AITER_NORM:
+                aiter.rmsnorm2d_fwd_with_add(
+                    x,
+                    x,
+                    residual,
+                    residual,
+                    self.weight.data,
+                    self.variance_epsilon,
+                )
+            else:
+                ops.fused_add_rms_norm(
+                    x,
+                    residual,
+                    self.weight.data,
+                    self.variance_epsilon,
+                )
+            return x, residual
+        if envs.VLLM_ROCM_USE_AITER_NORM:
+            out = aiter.rms_norm(x, self.weight.data, self.variance_epsilon)
+        else:
+            out = torch.empty_like(x)
+            ops.rms_norm(
+                out,
                 x,
-                residual,
                 self.weight.data,
                 self.variance_epsilon,
             )
-            return x, residual
-        out = torch.empty_like(x)
-        ops.rms_norm(
-            out,
-            x,
-            self.weight.data,
-            self.variance_epsilon,
-        )
         return out
 
     def forward_hpu(
