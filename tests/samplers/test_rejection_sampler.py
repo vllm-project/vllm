@@ -429,11 +429,15 @@ def test_rejection_sampling_approximates_target_distribution(
     probabilities are exactly equal. Rejection sampling should
     still work without any NaNs or exceptions.
     """
-    torch.set_default_device("cpu")
+    device = CUDA_DEVICES[0]
+    torch.set_default_device(device)
     set_random_seed(seed)
+    # Rejection sampler has to be on GPU because all metrics recorded
+    # in the rejection sampler are on GPU.
     helper = _CorrectnessTestHelper(
         vocab_size=10,
         use_v1=use_v1,
+        device=device,
     )
 
     draft_probs, target_probs, reference_probs = helper.generate_probs_for_test(
@@ -485,10 +489,11 @@ class _CorrectnessTestHelper:
     rejection sampling correctness test.
     """
 
-    def __init__(self, vocab_size: int, use_v1: bool):
+    def __init__(self, vocab_size: int, use_v1: bool, device: str):
         self.rejection_sampler = get_sampler(use_v1,
                                              use_flashinfer=False,
-                                             device="cpu")
+                                             device=device)
+        self.device = device
         self.vocab_size = vocab_size
         self.vocab_range = (0, vocab_size)
         self.use_v1 = use_v1
@@ -528,6 +533,7 @@ class _CorrectnessTestHelper:
         # Sample using rejection sampling.
         rej_sample_probs = self._estimate_rejection_sampling_pdf(
             draft_probs, target_probs, num_samples)
+        rej_sample_probs = rej_sample_probs.to(self.device)
 
         # Average distance from reference probs.
         reference_vs_rejsample_dist = torch.dist(
@@ -580,6 +586,8 @@ class _CorrectnessTestHelper:
         output_token_ids = output_token_ids[:, :-1].flatten()
 
         # Estimate probability density function
+        # torch.histogram can only be used with CUDA backend.
+        # Therefore, we move the output token ids to CPU.
         hist = torch.histogram(output_token_ids.to(dtype=torch.float,
                                                    device="cpu"),
                                bins=self.vocab_size,
