@@ -614,8 +614,6 @@ class Florence2LanguageModel(nn.Module):
         positions: torch.Tensor,
         encoder_input_ids: torch.Tensor,
         encoder_positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         r"""
@@ -641,8 +639,6 @@ class Florence2LanguageModel(nn.Module):
             # are provided as input
             encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
                                                  positions=encoder_positions,
-                                                 kv_caches=kv_caches,
-                                                 attn_metadata=attn_metadata,
                                                  inputs_embeds=inputs_embeds)
 
         # decoder outputs consists of
@@ -683,8 +679,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         positions: torch.Tensor,
         encoder_input_ids: torch.Tensor,
         encoder_positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -706,8 +700,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
                           positions,
                           encoder_input_ids,
                           encoder_positions,
-                          kv_caches,
-                          attn_metadata,
                           inputs_embeds=inputs_embeds)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -1101,8 +1093,6 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
                                             positions,
                                             encoder_input_ids,
                                             encoder_positions,
-                                            kv_caches,
-                                            attn_metadata,
                                             inputs_embeds=inputs_embeds)
         return hidden_states
 
