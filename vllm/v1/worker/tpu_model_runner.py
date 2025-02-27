@@ -587,28 +587,12 @@ class TPUModelRunner():
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()
-            # TODO(xw32): remove the next line.
-            break # temperarily reduce precompile time.
             if num_tokens >= self.scheduler_config.max_num_batched_tokens:
                 break
             num_tokens *= 2
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].",
                     end - start)
-
-        # GPU way of warming up.
-        # start = time.perf_counter()
-        # num_tokens_list = [512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1]
-        # # The num_tokens_list below is how GPU precompiles.
-        # for num_tokens in num_tokens_list:
-        #     self.dummy_run(self.kv_caches, num_tokens)
-        #     logger.info("  -- num_tokens: %d", num_tokens)
-        #     xm.mark_step()
-        #     xm.wait_device_ops()
-        #     if num_tokens >= self.scheduler_config.max_num_batched_tokens:
-        #         break
-        # end = time.perf_counter()
-        # logger.info("Compilation finished in in %.2f [secs].", end - start)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
