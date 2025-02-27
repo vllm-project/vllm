@@ -7,12 +7,14 @@
 
 
 ### Setting Up 2 Nodes Environment
-> [!NOTE] If you want to quantize the model using an existing calibration result, you can skip this step and proceed directly to the `Inference with FP8 Models on a Single Node` section.
+> [!NOTE] 
+> If you want to quantize the model using an existing calibration result, you can skip this step and proceed directly to the `Inference with FP8 Models on a Single Node` section.
 
 We use Ray to set up a cluster with two nodes, and we can update the procedure to image the system includes 16 cards. It is crucial to ensure that both nodes have the same software stack. Docker images are used to guarantee a consistent environment. The high-level steps are as follows:
 - Build and run Docker on each node.
 - Export the necessary environment variables within each Docker container.
 - Start the Ray cluster on the head node and connect the worker node to it.
+
 For more details, please refer to the <https://github.com/yangulei/vllm-fork/blob/deepseek_r1_g2/scripts/multi_nodes_README.md>
 
 ### Install Dependencies
@@ -57,10 +59,9 @@ source worker_node_souce.sh
 
 ## Calibration
 
-From the vLLM root directory, navigate to the scripts folder and run the calibration script. This process runs the BF16 model on a calibration dataset to determine the range of model weights and inputs.
+From the vLLM root directory, navigate to the scripts folder and run the calibration script. This process runs the BF16 model on a calibration dataset to observe the range of model weights and inputs.
 ```bash
 cd vllm/scripts
-# Run BF16 model with calibration dataset to observe the range of model weights and inputs.
 python n2_prepare.py
 ```
 
