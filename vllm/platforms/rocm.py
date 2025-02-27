@@ -194,7 +194,7 @@ class RocmPlatform(Platform):
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
-        if not envs.VLLM_ROCM_USE_AITERand(
+        if not envs.VLLM_ROCM_USE_AITER and (
                 envs.VLLM_ROCM_USE_AITER_LINEAR or envs.VLLM_ROCM_USE_AITER_MOE
                 or envs.VLLM_ROCM_USE_AITER_NORM
                 or envs.VLLM_ROCM_USE_AITER_PAGED_ATTN):
