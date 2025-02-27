@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import enum
+import multiprocessing
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -109,7 +110,12 @@ class GuidedDecodingManager:
         self.request_key_to_grammar: OrderedDict[GuidedDecodingKey,
                                                  Grammar] = OrderedDict()
 
-        self.executor = ThreadPoolExecutor()
+        # The default max_workers if not specified is the number of CPUs * 5,
+        # which is way too high since these tasks are CPU-bound, not I/O bound.
+        # We also know we would never dominate CPU usage with just grammar
+        # compilation, so we set it to half the number of CPUs.
+        max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.requests: Set[Request] = set()
         self._requests_lock = threading.Lock()
         self.grammar_bitmask = xgr.allocate_token_bitmask(
