@@ -159,18 +159,21 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        # Check for cached grammars and allocate bitmask if necessary
-        self.setup_grammars()
+        # Check cache for compiled grammars and add them to requests
+        # when they're ready.
+        self.guided_decoding_manager.setup_grammars()
 
         scheduler_output = self.scheduler.schedule()
 
+        # This case may occur when the only unfinished requests are
+        # guided decoding requests where the grammar has not finished
+        # compiling yet, so there's nothing to run.
         if scheduler_output.total_num_scheduled_tokens == 0:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        # the bitmask allocation for grammars
-        # should be ready at this point.
-        # Currently we will broadcast the bitmask
+        # Currently we will broadcast the bitmask. It is populated during
+        # each schedule() run.
         if len(self.guided_decoding_manager.requests) > 0:
             scheduler_output.grammar_bitmask = \
                 self.guided_decoding_manager.grammar_bitmask
@@ -259,9 +262,6 @@ class EngineCore:
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
-
-    def setup_grammars(self):
-        self.guided_decoding_manager.setup_grammars()
 
 
 class EngineCoreProc(EngineCore):

@@ -246,8 +246,7 @@ class Scheduler:
 
                 request = self.waiting[num_to_skip]
 
-                if (request.use_guided_decoding
-                        and request.status == RequestStatus.WAITING_FOR_FSM):
+                if request.status == RequestStatus.WAITING_FOR_FSM:
                     if request.grammar and request.is_grammar_ready:
                         request.status = RequestStatus.WAITING
                     else:
@@ -314,7 +313,7 @@ class Scheduler:
                 req_index += 1
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
-                if RequestStatus.is_waiting(request.status):
+                if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                     self.request_scheduled(request, scheduled_timestamp)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -613,7 +612,8 @@ class Scheduler:
                 if not accepted:
                     logger.error(
                         "Failed to advance FSM for request %s "
-                        "for tokens %s", req_id, generated_token_ids[0])
+                        "for tokens %s. Please file an issue.", 
+                        req_id, generated_token_ids[0])
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
@@ -719,10 +719,6 @@ class Scheduler:
         self._cached_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
-        if request.use_guided_decoding:
-            # NOTE: grammar should NOT be None
-            # if use_guided_decoding is True
-            request.grammar.reset()  # type: ignore[union-attr]
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
