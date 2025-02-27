@@ -10,6 +10,7 @@ import torch
 
 from typing import Tuple
 
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -292,12 +293,12 @@ def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), (x_amax / 448.0).view(m, -1)
 
 
-def per_block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def per_block_cast_to_fp8(x: torch.Tensor, block_size_n: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
-    x_padded = torch.zeros((deep_gemm.cell_div(m, 128) * 128, deep_gemm.cell_div(n, 128) * 128), dtype=x.dtype, device=x.device)
+    x_padded = torch.zeros((deep_gemm.cell_div(m, 128) * 128, deep_gemm.cell_div(n, block_size_n) * block_size_n), dtype=x.dtype, device=x.device)
     x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
+    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, block_size_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
     x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
@@ -388,32 +389,40 @@ def construct_grouped(
 
 from vllm.model_executor.layers.fused_moe import fused_topk, grouped_topk
 
-def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
+def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, score, topk, block_shape):
     """Fused moe with block-wise quantization using native torch."""
-    M, K = a.shape
-    print(f"before {a.shape}")
-    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
     topk_weight, topk_ids = torch.topk(score, topk)
     topk_weight = topk_weight.view(-1)
     topk_ids = topk_ids.to(dtype=torch.int32).view(-1)
 
-    _, block_k = block_shape[0], block_shape[1]
+    M, K = a.shape
+    N = w2.shape[-1]
+    num_groups = w1.shape[0]
+
+    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
+
+    block_n, block_k = block_shape[0], block_shape[1]
+    n_tiles_w1 = (2 * N + block_n - 1) // block_n
+    n_tiles_w2 = (K + block_n - 1) // block_n
+    k_tiles_w1 = (K + block_k - 1) // block_k
+    k_tiles_w2 = (N + block_k - 1) // block_k
+
+    w1_s = torch.empty((num_groups, n_tiles_w1, k_tiles_w1), dtype=torch.float32)
+    w2_s = torch.empty((num_groups, n_tiles_w2, k_tiles_w2), dtype=torch.float32)
+
     a_q, a_s = per_token_group_quant_fp8(a, block_k)
 
-    num_groups = w1.shape[0]
     for i in range(num_groups):
-        w1[i], w1_s[i] = per_block_cast_to_fp8(w1[i].to(dtype=torch.bfloat16))
+        w1[i], w1_s[i] = per_block_cast_to_fp8(w1[i].to(dtype=torch.bfloat16), block_n)
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2[i].to(dtype=torch.bfloat16))
 
-    print(f"{M}, {num_groups}, {a.shape}")
+    inter_out = torch.empty(a_q.shape[0], w1.shape[1], dtype=torch.bfloat16, device=a.device)
 
-    m_indices = torch.arange(0, num_groups, device=a.device, dtype=torch.int)
-    m_indices = m_indices.unsqueeze(-1).expand(num_groups, a.shape[0]//num_groups).contiguous().view(-1)
+    #print("FIRST GEMM")
 
-    inter_out = torch.zeros(a_q.shape[0], w1.shape[1], dtype=torch.bfloat16, device=a.device)
-
-    print("FIRST GEMM")
+    w1_s = deep_gemm.get_col_major_tma_aligned_tensor(w1_s).contiguous()
+    w2_s = deep_gemm.get_col_major_tma_aligned_tensor(w2_s).contiguous()
 
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((a_q, a_s),
                                                         (w1, w1_s),
@@ -425,7 +434,7 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape
 
     out = torch.zeros(M * topk, w2.shape[1], dtype=torch.bfloat16, device=a.device)
 
-    print("SECOND GEMM")
+    #print("SECOND GEMM")
 
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((act_out_q, act_out_s),
                                                         (w2, w2_s),
@@ -433,7 +442,7 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape
                                                         topk_ids)
 
     return (out.view(M, -1, w2.shape[1]) *
-            topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
+            topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1), w1_s, w2_s
 
 
 @pytest.mark.parametrize(
@@ -444,60 +453,48 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     # only aligned sizes
-    if M % 4 != 0 or K % 128 != 0 or N % 64 != 0:
+    if M % 4 != 0 or K % 128 != 0 or N % 128 != 0:
         return
 
-    torch.manual_seed(seed)
-    factor_for_scale = 1e-2
-    fp8_info = torch.finfo(torch.float8_e4m3fn)
-    fp8_max, fp8_min = fp8_info.max, fp8_info.min
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config):
+        torch.manual_seed(seed)
+        factor_for_scale = 1e-2
+        fp8_info = torch.finfo(torch.float8_e4m3fn)
+        fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
-    a = torch.randn((M, K), dtype=dtype) / 10
+        a = torch.randn((M, K), dtype=dtype) / 10
 
-    w1_bf16 = (torch.rand(
-        (E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
-    w1 = w1_bf16.clamp(min=fp8_min, max=fp8_max)
-    del w1_bf16
+        w1_bf16 = (torch.rand(
+            (E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+        w1 = w1_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+        del w1_bf16
 
-    w2_bf16 = (torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
-    w2 = w2_bf16.clamp(min=fp8_min, max=fp8_max)
-    del w2_bf16
+        w2_bf16 = (torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+        w2 = w2_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+        del w2_bf16
 
-    block_n, block_k = block_size[0], block_size[1]
-    n_tiles_w1 = (2 * N + block_n - 1) // block_n
-    n_tiles_w2 = (K + block_n - 1) // block_n
-    k_tiles_w1 = (K + block_k - 1) // block_k
-    k_tiles_w2 = (N + block_k - 1) // block_k
+        score = torch.randn((M, E), dtype=dtype)
 
-    w1_s = torch.rand(
-        (E, n_tiles_w1, k_tiles_w1), dtype=torch.float32) * factor_for_scale
-    w2_s = torch.rand(
-        (E, n_tiles_w2, k_tiles_w2), dtype=torch.float32) * factor_for_scale
+        # TODO: move out scale setup
+        ref_out, w1_s, w2_s = deep_gemm_w8a8_block_fp8_moe(a, w1, w2, score, topk, block_size)
 
-    score = torch.randn((M, E), dtype=dtype)
+        out = fused_moe(
+            a,
+            w1,
+            w2,
+            score,
+            topk,
+            renormalize=False,
+            use_fp8_w8a8=True,
+            w1_scale=w1_s,
+            w2_scale=w2_s,
+            block_shape=block_size,
+        )
+        #print(f"{out.sum()=}")
+        #print(f"{ref_out.sum()=}")
 
-    w1 = w1.to(torch.float8_e4m3fn)
-    w2 = w2.to(torch.float8_e4m3fn)
-
-    ref_out = deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
-                                           block_size)
-
-    out = fused_moe(
-        a,
-        w1,
-        w2,
-        score,
-        topk,
-        renormalize=False,
-        use_fp8_w8a8=True,
-        w1_scale=w1_s,
-        w2_scale=w2_s,
-        block_shape=block_size,
-    )
-    print(f"{out.sum()=}")
-    print(f"{ref_out.sum()=}")
-
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
-    assert rel_diff < 0.03
+        rel_diff = (torch.mean(
+            torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+                    torch.mean(torch.abs(ref_out.to(torch.float32))))
+        assert rel_diff < 0.03
