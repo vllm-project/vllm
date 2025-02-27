@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+import importlib.metadata
 from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
+from packaging import version
+from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -75,13 +78,24 @@ class TorchAOLinearMethod(LinearMethodBase):
                                        input_size_per_partition,
                                        dtype=params_dtype),
                            requires_grad=False)
-        torchao_config = self.quant_config.torchao_config
-        weight = torchao_quantize_param_data(weight, torchao_config)
+        # we load quantized model in versions after 0.9.0 and do on the fly quantization in torchao
+        # versions before 0.9.0
+        if version.parse(importlib.metadata.version(
+                "torchao")) > version.parse("0.9.0"):
+            torchao_config = self.quant_config.torchao_config
+            weight = torchao_quantize_param_data(weight, torchao_config)
 
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if version.parse(importlib.metadata.version(
+                "torchao")) <= version.parse("0.9.0"):
+            torchao_config = self.quant_config.torchao_config
+            layer.weight = torchao_quantize_param_data(layer.weight,
+                                                       torchao_config)
 
     @torch.compile
     def apply(self,
