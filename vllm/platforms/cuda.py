@@ -141,6 +141,14 @@ class CudaPlatformBase(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
+        # TODO(lucas): handle this more gracefully
+        if envs.VLLM_ATTENTION_BACKEND is not None \
+           and envs.VLLM_ATTENTION_BACKEND == "FLASHMLA" \
+           and cache_config.block_size != 64:
+            cache_config.block_size = 64
+            logger.info(
+                "FlashMLA: Forcing kv cache block size to 64 since this"
+                " is currently the only block size supported by the kernel.")
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -157,6 +165,22 @@ class CudaPlatformBase(Platform):
             logger.info("Using Flash Attention backend on V1 engine.")
             return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
         if use_mla:
+            if selected_backend == _Backend.FLASHMLA:
+                from vllm.attention.backends.flashmla import (
+                    is_flashmla_supported)
+                if not is_flashmla_supported()[0]:
+                    logger.warning(
+                        "FlashMLA backend is not supported due to %s",
+                        is_flashmla_supported()[1])
+                elif block_size != 64:
+                    logger.warning(
+                        "FlashMLA backend is not supported for block size %d"
+                        " (currently only supports block size 64).",
+                        block_size)
+                else:
+                    logger.info("Using FlashMLA backend.")
+                    return "vllm.attention.backends.flashmla.FlashMLABackend"
+
             logger.info("Using Triton MLA backend.")
             return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if selected_backend == _Backend.FLASHINFER:
