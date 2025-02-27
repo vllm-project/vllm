@@ -89,7 +89,7 @@ class TopKTopPSampler(nn.Module):
         p: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # TODO Placeholder for TPU optimized topk/p kernel
-        return self.forward_cuda(logits, generators, k, p)
+        return self.forward_native(logits, generators, k, p)
 
 
 def apply_top_k_top_p(
