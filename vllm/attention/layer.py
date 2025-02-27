@@ -47,6 +47,10 @@ class Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
         **extra_impl_args,
     ) -> None:
+        """
+        The KV cache is stored inside this class and is accessed via
+        `self.kv_cache`.
+        """
         super().__init__()
         if per_layer_sliding_window is not None:
             # per-layer sliding window
@@ -155,6 +159,15 @@ class Attention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        The KV cache is stored inside this class and is accessed via
+        `self.kv_cache`.
+
+        Attention metadata (`attn_metadata`) is set using a context manager in
+        the model runner's `execute_model` method. It is accessed via forward
+        context using
+        `vllm.forward_context.get_forward_context().attn_metadata`.
+        """
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
