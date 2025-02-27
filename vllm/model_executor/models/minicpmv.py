@@ -25,9 +25,10 @@
 import math
 import re
 from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property, partial
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Set, Tuple, TypedDict, Union)
+from typing import (Any, Callable, Dict, List, Literal, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -732,7 +733,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             }
         }
 
-    def _hf_processor_applies_repl(
+    def _hf_processor_applies_updates(
         self,
         prompt_text: str,
         mm_items: MultiModalDataItems,
@@ -740,10 +741,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> bool:
         return False
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
             self, mm_items: MultiModalDataItems,
             hf_processor_mm_kwargs: Mapping[str, Any],
-            out_mm_kwargs: MultiModalKwargs) -> List[PromptReplacement]:
+            out_mm_kwargs: MultiModalKwargs) -> Sequence[PromptReplacement]:
         placeholder = {
             "image": self.info.image_pattern,
             "video": self.info.video_pattern,
