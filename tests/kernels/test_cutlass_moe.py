@@ -10,8 +10,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe,
                                                             fused_topk)
 from vllm.platforms import current_platform
 
-NUM_EXPERTS = [8, 64]
-TOP_KS = [2, 6]
+NUM_EXPERTS = [32, 40, 64]
+TOP_KS = [6, 8]
 
 
 def run(a_q: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
@@ -27,9 +27,9 @@ def run(a_q: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
                            c_strides1, ab_strides2, c_strides2)
 
 
-@pytest.mark.parametrize("m", [2, 16, 32, 64, 224, 163840])
-@pytest.mark.parametrize("n", [128, 2048])
-@pytest.mark.parametrize("k", [128, 1024])
+@pytest.mark.parametrize("m", [2, 16, 32, 64, 224, 512, 163840])
+@pytest.mark.parametrize("n", [1024, 2048, 3072])
+@pytest.mark.parametrize("k", [1024, 1536, 2048])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("per_act_token", [True, False])
@@ -115,9 +115,9 @@ def test_cutlass_moe_no_graph(
                                    rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [2, 16, 32, 64, 224, 163840])
-@pytest.mark.parametrize("n", [128, 2048])
-@pytest.mark.parametrize("k", [128, 1024])
+@pytest.mark.parametrize("m", [2, 16, 32, 64, 224, 512, 163840])
+@pytest.mark.parametrize("n", [1024, 2048, 3072])
+@pytest.mark.parametrize("k", [1024, 1536, 2048])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("per_act_token", [True, False])
