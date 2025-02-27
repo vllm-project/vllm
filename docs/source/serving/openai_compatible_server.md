@@ -396,6 +396,15 @@ To use the Transcriptions API, please install with extra audio dependencies usin
 
 <!-- TODO: api enforced limits + uploading audios -->
 
+#### Additional Transcription API Parameters
+
+Our Transcriptions API supports these extra optional parameters to fine-tune the sampling behavior during transcription:
+
+- **seed** (*Optional[int]*): The seed to use for sampling. Must be between `_LONG_INFO.min` and `_LONG_INFO.max`.
+- **frequency_penalty** (*Optional[float]*): Applies a penalty to tokens based on their frequency, reducing the likelihood of repeating common tokens (default: `0.0`).
+- **repetition_penalty** (*Optional[float]*): Discourages the model from repeating the same tokens by applying a penalty (default: `1.0`).
+- **presence_penalty** (*Optional[float]*): Encourages the introduction of new tokens by applying a penalty to those already present (default: `0.0`).
+
 Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
 
 (tokenizer-api)=
