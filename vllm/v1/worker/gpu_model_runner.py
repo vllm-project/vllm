@@ -1405,18 +1405,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention, MLA.
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type == AttentionType.DECODER:
-                # In the MLA backend, kv_cache includes both k_c and
-                # pe (i.e. decoupled position embeddings). In particular,
-                # the concat_and_cache_mla op requires
-                #     k_c.size(1) + k_pe.size(1) == kv_cache.size(2)
-                # i.e.
-                #     kv_lora_rank + pe_dim == kv_cache.size(2)
-                head_size = self.head_size if self.model_config.use_mla \
-                                           else attn_module.head_size
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
-                    head_size=head_size,
+                    head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
                 )
             elif attn_module.attn_type in (AttentionType.ENCODER,

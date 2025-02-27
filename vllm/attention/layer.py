@@ -126,11 +126,6 @@ class Attention(nn.Module):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,
                              **extra_impl_args)
-        self.use_mla = use_mla
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.num_kv_heads = num_kv_heads
-        self.sliding_window = sliding_window
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 
