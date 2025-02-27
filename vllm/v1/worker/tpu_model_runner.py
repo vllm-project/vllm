@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-import enum
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 from unittest.mock import patch
 
@@ -13,7 +11,6 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
-from vllm.attention import AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
@@ -22,13 +19,13 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingType
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
-from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
-                                               PallasMetadata,
+from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
                                                NUM_QUERIES_PER_BLOCK,
-                                               NUM_KV_PAGES_PER_BLOCK)
+                                               PallasAttentionBackend,
+                                               PallasMetadata)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -48,7 +45,7 @@ _MAX_NUM_SAMPLES = 128
 INVALID_TOKEN_ID = -1
 
 
-class TPUModelRunner():
+class TPUModelRunner:
 
     def __init__(
         self,
@@ -80,8 +77,8 @@ class TPUModelRunner():
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
-        self.max_num_tokens = scheduler_config.max_num_batched_tokens # 8192
-        self.max_num_reqs = scheduler_config.max_num_seqs # 16
+        self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
@@ -115,8 +112,8 @@ class TPUModelRunner():
         # The pytorch tensor and numpy array share the same buffer.
         # Sometimes the numpy op is faster so we create both.
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int32,
-                                     device="cpu")
+                                         dtype=torch.int32,
+                                         device="cpu")
         self.input_ids_np = self.input_ids_cpu.numpy()
 
         self.positions_cpu = torch.zeros(self.max_num_tokens,
@@ -132,10 +129,12 @@ class TPUModelRunner():
         # self.input_batch.block_table has a shape of [max_num_reqs, max_num_blocks_per_req].
         # To reduce the number of recompilation, we want the block_table.shape[0] to be num_tokens.
         # To make the block_table to be compatible with the paged attention kernel, we want the block_table[1] to be multiple of NUM_KV_PAGES_PER_BLOCK.
-        padded_max_num_blocks_per_req = _get_padded_number(self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
-        self.block_table_cpu = torch.zeros((self.max_num_tokens, padded_max_num_blocks_per_req),
-                                           dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
-                                           device="cpu")
+        padded_max_num_blocks_per_req = _get_padded_number(
+            self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
+        self.block_table_cpu = torch.zeros(
+            (self.max_num_tokens, padded_max_num_blocks_per_req),
+            dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
+            device="cpu")
 
         self.query_start_loc_cpu = torch.zeros(self.max_num_tokens + 1,
                                                dtype=torch.int32,
@@ -325,9 +324,10 @@ class TPUModelRunner():
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens_per_req.append(num_tokens)
-            max_num_scheduled_tokens_all_reqs = max(max_num_scheduled_tokens_all_reqs,
-                                           num_tokens)
-        num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req, dtype=np.int32)
+            max_num_scheduled_tokens_all_reqs = max(
+                max_num_scheduled_tokens_all_reqs, num_tokens)
+        num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req,
+                                                dtype=np.int32)
         assert max_num_scheduled_tokens_all_reqs > 0
 
         # Get request indices.
@@ -341,13 +341,13 @@ class TPUModelRunner():
         # For each scheduled token, what is its position in the corresponding req.
         arange = np.concatenate(
             [self.arange_np[:n] for n in num_scheduled_tokens_per_req])
-        
+
         # Get positions.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
-        
+
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -362,7 +362,7 @@ class TPUModelRunner():
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
-        
+
         # Calculate the slot mapping.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
@@ -381,27 +381,40 @@ class TPUModelRunner():
         np.add(block_numbers * self.block_size,
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
-        
+
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_per_req,
                   out=self.query_start_loc_np[1:num_reqs + 1])
-        
+
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = _get_padded_number(total_num_scheduled_tokens, NUM_QUERIES_PER_BLOCK)
-        self.input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens].to(self.device)
-        self.position_ids = self.positions_cpu[:padded_total_num_scheduled_tokens].to(self.device)
+        padded_total_num_scheduled_tokens = _get_padded_number(
+            total_num_scheduled_tokens, NUM_QUERIES_PER_BLOCK)
+        self.input_ids = self.input_ids_cpu[:
+                                            padded_total_num_scheduled_tokens].to(
+                                                self.device)
+        self.position_ids = self.positions_cpu[:
+                                               padded_total_num_scheduled_tokens].to(
+                                                   self.device)
         self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
-        slot_mapping = self.slot_mapping_cpu[:padded_total_num_scheduled_tokens].to(self.device)
-        padded_block_table = self.block_table_cpu[:padded_total_num_scheduled_tokens]
-        padded_block_table[:num_reqs, :self.max_num_blocks_per_req] = self.input_batch.block_table.get_cpu_tensor()[:num_reqs]
+        slot_mapping = self.slot_mapping_cpu[:
+                                             padded_total_num_scheduled_tokens].to(
+                                                 self.device)
+        padded_block_table = self.block_table_cpu[:
+                                                  padded_total_num_scheduled_tokens]
+        padded_block_table[:num_reqs, :self.
+                           max_num_blocks_per_req] = self.input_batch.block_table.get_cpu_tensor(
+                           )[:num_reqs]
         padded_block_table = padded_block_table.to(self.device)
-        query_start_loc = self.query_start_loc_cpu[:padded_total_num_scheduled_tokens+1].to(self.device)
-        seq_lens = self.seq_lens_cpu[:padded_total_num_scheduled_tokens].to(self.device)
+        query_start_loc = self.query_start_loc_cpu[:
+                                                   padded_total_num_scheduled_tokens
+                                                   + 1].to(self.device)
+        seq_lens = self.seq_lens_cpu[:padded_total_num_scheduled_tokens].to(
+            self.device)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -418,7 +431,6 @@ class TPUModelRunner():
         logits_indices = query_start_loc[1:] - 1
         return attn_metadata, logits_indices
 
-
     @torch.no_grad()
     def execute_model(
         self,
@@ -432,7 +444,7 @@ class TPUModelRunner():
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         # Run the decoder
-        with set_forward_context(attn_metadata, self.vllm_config): 
+        with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
                 token_ids=self.input_ids,
                 position_ids=self.position_ids,
@@ -461,14 +473,14 @@ class TPUModelRunner():
                 if generator is not None:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
-        
+
         # num_reqs entries should be non-None
         assert all(
             req_id is not None for req_id in
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
 
-        prompt_logprobs_dict: Dict[str, LogprobsTensors] = {}
+        prompt_logprobs_dict = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
@@ -526,7 +538,6 @@ class TPUModelRunner():
         xm.mark_step()
         xm.wait_device_ops()
         model = ModelWrapperV1(model)
-        # self.model = model
         self.model = torch.compile(model,
                                    backend="openxla",
                                    fullgraph=True,
@@ -546,12 +557,14 @@ class TPUModelRunner():
         slot_mapping = torch.zeros(num_tokens,
                                    dtype=torch.int64,
                                    device=self.device)
-        block_tables = torch.zeros(
-            (num_tokens, self.block_table_cpu.shape[1]),
-            dtype=torch.int32,
-            device=self.device)
+        block_tables = torch.zeros((num_tokens, self.block_table_cpu.shape[1]),
+                                   dtype=torch.int32,
+                                   device=self.device)
         query_lens = [1] * num_tokens
-        query_start_loc = torch.cumsum(torch.tensor([0] + query_lens, dtype=torch.int32), dim=0, dtype=torch.int32).to(self.device)
+        query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
+                                                    dtype=torch.int32),
+                                       dim=0,
+                                       dtype=torch.int32).to(self.device)
         context_lens = torch.ones((num_tokens, ),
                                   dtype=torch.int32,
                                   device=self.device)
@@ -581,7 +594,6 @@ class TPUModelRunner():
 
         start = time.perf_counter()
         num_tokens = 16
-        # The num_tokens_list below is how GPU precompiles.
         while True:
             self.dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
@@ -591,8 +603,7 @@ class TPUModelRunner():
                 break
             num_tokens *= 2
         end = time.perf_counter()
-        logger.info("Compilation finished in in %.2f [secs].",
-                    end - start)
+        logger.info("Compilation finished in in %.2f [secs].", end - start)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -682,7 +693,7 @@ class ModelWrapperV1(nn.Module):
             position_ids,
             kv_caches,
         )
-        
+
         return hidden_states
 
     def compute_logits(

@@ -7,10 +7,8 @@ import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
-
 
 NUM_QUERIES_PER_BLOCK = 16
 NUM_KV_PAGES_PER_BLOCK = 128
@@ -53,7 +51,7 @@ class PallasAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class PallasMetadata():
+class PallasMetadata:
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
@@ -68,7 +66,6 @@ class PallasMetadata():
     context_lens: torch.Tensor
     query_start_loc: torch.Tensor
     num_seqs: int
-
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
@@ -88,7 +85,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
-                "Paged attention Pallas kernel does not support block-sparse attention.")
+                "Paged attention Pallas kernel does not support block-sparse attention."
+            )
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
