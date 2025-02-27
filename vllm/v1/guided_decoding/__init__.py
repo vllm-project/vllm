@@ -55,13 +55,12 @@ class Grammar:
     vocab_size: int
     matcher: xgr.GrammarMatcher = field(hash=False)
     ctx: xgr.CompiledGrammar = field(hash=False)
-    max_rollback_tokens: int = field(default=MAX_ROLLBACK_TOKENS, kw_only=True)
-    num_processed_tokens: int = field(
-        default_factory=lambda: 0,
-        repr=False,
-        hash=False,
-        init=False,
-    )
+    max_rollback_tokens: int = field(
+        default_factory=lambda: MAX_ROLLBACK_TOKENS, kw_only=True)
+    num_processed_tokens: int = field(default_factory=lambda: 0,
+                                      repr=False,
+                                      hash=False,
+                                      init=False)
 
     def accept_token(self, token: int) -> bool:
         # NOTE: accept_token will determines whether we accept this token
@@ -83,7 +82,8 @@ class Grammar:
         self.matcher.reset()
 
     def __copy__(self):
-        return Grammar(matcher=xgr.GrammarMatcher(self.ctx),
+        return Grammar(matcher=xgr.GrammarMatcher(
+            self.ctx, max_rollback_tokens=self.max_rollback_tokens),
                        vocab_size=self.vocab_size,
                        ctx=self.ctx,
                        max_rollback_tokens=self.max_rollback_tokens)
@@ -180,13 +180,15 @@ class GuidedDecodingManager:
             raise ValueError(
                 f"grammar is not of valid supported types. ({request_type!s})")
 
-        return Grammar(
-            matcher=xgr.GrammarMatcher(ctx),
-            vocab_size=self.vocab_size,
-            ctx=ctx,
-            max_rollback_tokens=self.vllm_config.speculative_config.
-            num_lookahead_slots
-            if self.vllm_config.speculative_config else MAX_ROLLBACK_TOKENS)
+        max_rollback_tokens = MAX_ROLLBACK_TOKENS
+        if self.vllm_config.speculative_config:
+            max_rollback_tokens = self.vllm_config.speculative_config\
+                                      .num_lookahead_slots + 1
+        return Grammar(matcher=xgr.GrammarMatcher(
+            ctx, max_rollback_tokens=max_rollback_tokens),
+                       vocab_size=self.vocab_size,
+                       ctx=ctx,
+                       max_rollback_tokens=max_rollback_tokens)
 
     def setup_grammars(self):
         with self._requests_lock:
