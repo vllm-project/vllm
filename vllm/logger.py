@@ -15,11 +15,24 @@ from logging.config import dictConfig
 from os import path
 from pathlib import Path
 from types import MethodType
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union, cast
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Protocol,
+                    Union, cast, runtime_checkable)
 
-# For type checking, always import LoguruLogger
+import vllm.envs as envs
+from vllm.logging_utils import NewLineFormatter
+
+# For type checking with the actual LoguruLogger
 if TYPE_CHECKING:
     from loguru._logger import Logger as LoguruLogger
+
+
+@runtime_checkable
+class LoggerProtocol(Protocol):
+    """Protocol defining the minimal interface for loggers."""
+
+    def bind(self, **kwargs):
+        ...
+
 
 # Try to import loguru as it's part of an optional dependency
 try:
@@ -29,18 +42,15 @@ try:
 except ImportError:
     LOGURU_AVAILABLE = False
 
-    # Create a stub class for LoguruLogger to prevent NameError at runtime
-    class LoguruLogger:
-        """Stub class when loguru is not available."""
+    class _StubLogger:
+        """Stub logger when loguru is not available."""
 
         def bind(self, **kwargs):
-            # Return self to allow chaining
             return self
 
-    logger = logging.getLogger("vllm")
+    LoguruLogger = _StubLogger
 
-import vllm.envs as envs
-from vllm.logging_utils import NewLineFormatter
+    logger = logging.getLogger("vllm")
 
 # If loguru is not available, force VLLM_CONFIGURE_LOGGING to False
 VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING and LOGURU_AVAILABLE
