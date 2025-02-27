@@ -72,12 +72,6 @@ class Processor:
                 f"Requested prompt logprobs of {params.prompt_logprobs}, "
                 f"which is greater than max allowed: {max_logprobs}")
 
-        # TODO(andy): enable this in follow up by recomputing.
-        if (params.prompt_logprobs is not None
-                and self.cache_config.enable_prefix_caching):
-            raise ValueError("Prefix caching with prompt logprobs not yet "
-                             "supported on VLLM V1.")
-
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
