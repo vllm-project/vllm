@@ -160,7 +160,7 @@ class MultiModalProfiler(Generic[_I]):
 
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(
-                "The keys returned by `get_supported_mm_limits`"
+                "The keys returned by `get_supported_mm_limits` "
                 f"({set(mm_counts.keys())}) should be the same as those "
                 "returned by `get_mm_max_tokens_per_item` "
                 f"({set(mm_max_tokens_per_item.keys())})")
@@ -170,6 +170,11 @@ class MultiModalProfiler(Generic[_I]):
             mm_inputs["prompt_token_ids"] if not is_encoder_data else
             mm_inputs["encoder_prompt_token_ids"])  # type: ignore
         placeholders_by_modality = mm_inputs["mm_placeholders"]
+        # For encoder-decoder models, use encoder prompt token ids instead of
+        # decoder prompt to construct dummy seq_data for encoder profiling.
+        prompt_token_ids = (
+            mm_inputs["prompt_token_ids"] if not is_encoder_data else
+            mm_inputs["encoder_prompt_token_ids"])  # type: ignore
 
         total_placeholders_by_modality = {
             modality: sum(item["length"] for item in placeholders)

@@ -7,6 +7,7 @@ from typing import List
 import pytest
 from huggingface_hub import snapshot_download
 
+import vllm.envs as env
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import TextPrompt
 from vllm.lora.request import LoRARequest
@@ -144,10 +145,14 @@ async def test_add_lora():
         await requests_processing_time(llm, dummy_run_requests)
 
         # Run with warmup
-        for lr in warmup_run_requests:
-            await llm.add_lora(lr)
-        # Wait for the add_lora function to complete on the server side.
-        await asyncio.sleep(30)
+        add_lora_tasks = [llm.add_lora(lr) for lr in warmup_run_requests]
+        add_lora_results = await asyncio.gather(*add_lora_tasks)
+        if env.VLLM_USE_V1:
+            # Test that all all_lora calls are successful.
+            assert all(add_lora_results)
+        else:
+            # No way to check V0 engine results as the calls just return None.
+            pass
         time_with_add_lora = await requests_processing_time(
             llm, warmup_run_requests)
 

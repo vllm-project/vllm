@@ -60,6 +60,7 @@ _TEXT_GENERATION_MODELS = {
     "GraniteForCausalLM": ("granite", "GraniteForCausalLM"),
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
     "GritLM": ("gritlm", "GritLM"),
+    "Grok1ModelForCausalLM": ("grok1", "Grok1ForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
@@ -347,6 +348,10 @@ class _ModelRegistry:
           when importing the model and thus the related error
           :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
         """
+        if not isinstance(model_arch, str):
+            msg = f"`model_arch` should be a string, not a {type(model_arch)}"
+            raise TypeError(msg)
+
         if model_arch in self.models:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
@@ -360,8 +365,12 @@ class _ModelRegistry:
                 raise ValueError(msg)
 
             model = _LazyRegisteredModel(*split_str)
-        else:
+        elif isinstance(model_cls, type) and issubclass(model_cls, nn.Module):
             model = _RegisteredModel.from_model_cls(model_cls)
+        else:
+            msg = ("`model_cls` should be a string or PyTorch model class, "
+                   f"not a {type(model_arch)}")
+            raise TypeError(msg)
 
         self.models[model_arch] = model
 

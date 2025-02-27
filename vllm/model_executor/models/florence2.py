@@ -11,7 +11,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature, PretrainedConfig
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -631,10 +630,6 @@ class Florence2LanguageModel(nn.Module):
                 Indices of *encoder* input sequence tokens in the vocabulary.
             encoder_positions:
                 Positions of *encoder* input sequence tokens.
-            kv_caches:
-                Layer-wise list of KV cache tensors
-            attn_metadata:
-                vLLM Attention metadata structure
         Returns:
             Model output torch.Tensor
         """
@@ -655,9 +650,7 @@ class Florence2LanguageModel(nn.Module):
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
             decoder_positions=positions,
-            encoder_hidden_states=encoder_hidden_states,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata)
+            encoder_hidden_states=encoder_hidden_states)
 
         return decoder_outputs
 
@@ -705,10 +698,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
                 torch.Tensor of *encoder* input token ids.
             encoder_positions
                 torch.Tensor of *encoder* position indices
-            kv_caches:
-                Layer-wise list of KV cache tensors
-            attn_metadata:
-                vLLM Attention metadata structure
         Returns:
             Output torch.Tensor
         """
@@ -1082,8 +1071,6 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         *,
         encoder_input_ids: torch.Tensor,
@@ -1100,10 +1087,6 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
                 torch.Tensor of *encoder* input token ids.
             encoder_positions
                 torch.Tensor of *encoder* position indices
-            kv_caches:
-                Layer-wise list of KV cache tensors
-            attn_metadata:
-                vLLM Attention metadata structure
         Returns:
             Output torch.Tensor
         """
