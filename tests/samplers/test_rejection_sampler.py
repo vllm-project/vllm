@@ -618,11 +618,12 @@ def mock_causal_accepted_tensor(
 
 def create_v1_sampling_metadata(
         all_greedy: bool,
-        generators: Dict[int, Any]) -> v1_rej_sampler.SamplingMetadata:
+        generators: Dict[int, Any] = None) -> v1_rej_sampler.SamplingMetadata:
     """Create a v1 sampling metadata object with all_greedy set 
         to the given value. Either all greedy or all random sampling 
         is used.
     """
+    generators = generators or {}
     return v1_rej_sampler.SamplingMetadata(
         temperature=torch.tensor([]),
         all_greedy=all_greedy,
