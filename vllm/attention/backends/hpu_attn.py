@@ -386,7 +386,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 matmul_qk_op=self.matmul_qk,
                 softmax_op=self.softmax,
                 matmul_av_op=self.matmul_av,
-                fsdpa_op=self.fused_scaled_dot_product_attention,
+                fsdpa_op=self.fused_scaled_dot_product_attention
+                if self.prefill_use_fusedsdpa else None,
             )
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
