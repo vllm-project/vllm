@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import List, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
@@ -31,7 +31,7 @@ from vllm.multimodal.parse import (MultiModalDataDict, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .interfaces import SupportsMultiModal, SupportsTranscription
@@ -623,12 +623,12 @@ class WhisperMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(input_features=MultiModalFieldConfig.batched("audio"))
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         num_tokens = self.info.get_max_audio_tokens()
         return [
             PromptReplacement(
