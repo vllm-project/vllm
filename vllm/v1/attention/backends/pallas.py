@@ -155,6 +155,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
         query = query * self.scale
+        # TODO(xw32): change use_kernel=False
         output = torch.ops.xla.ragged_paged_attention(
             query,
             key_cache,

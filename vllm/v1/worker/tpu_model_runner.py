@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
+from vllm.attention import AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
@@ -129,7 +130,8 @@ class TPUModelRunner():
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
         # self.input_batch.block_table has a shape of [max_num_reqs, max_num_blocks_per_req].
-        # Because we want the block_table.shape[0] to be num_tokens nad block_table[1] to be multiple of NUM_KV_PAGES_PER_BLOCK, so we create a separate one.
+        # To reduce the number of recompilation, we want the block_table.shape[0] to be num_tokens.
+        # To make the block_table to be compatible with the paged attention kernel, we want the block_table[1] to be multiple of NUM_KV_PAGES_PER_BLOCK.
         padded_max_num_blocks_per_req = _get_padded_number(self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
         self.block_table_cpu = torch.zeros((self.max_num_tokens, padded_max_num_blocks_per_req),
                                            dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
@@ -435,7 +437,6 @@ class TPUModelRunner():
                 token_ids=self.input_ids,
                 position_ids=self.position_ids,
                 kv_caches=self.kv_caches,
-                attn_metadata=attn_metadata,
             )
         hidden_states = hidden_states[:total_num_scheduled_tokens]
         num_reqs = self.input_batch.num_reqs
@@ -531,12 +532,10 @@ class TPUModelRunner():
                                    fullgraph=True,
                                    dynamic=False)
 
-    # @torch.inference_mode()
     def dummy_run(
         self,
         kv_caches,
         num_tokens: int,
-        seq_len: Optional[int] = None,
     ) -> None:
         input_ids = torch.zeros(num_tokens,
                                 dtype=torch.int32,
@@ -573,7 +572,7 @@ class TPUModelRunner():
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
-            self.model(input_ids, position_ids, attn_metadata, kv_caches)
+            self.model(input_ids, position_ids, kv_caches)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -588,6 +587,8 @@ class TPUModelRunner():
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()
+            # TODO(xw32): remove the next line.
+            break # temperarily reduce precompile time.
             if num_tokens >= self.scheduler_config.max_num_batched_tokens:
                 break
             num_tokens *= 2
@@ -663,12 +664,8 @@ class ModelWrapperV1(nn.Module):
         """Executes the forward pass of the model and samples the next token.
 
         Args:
-            token_ids: The input token IDs of shape [batch_size, seq_len].
-            position_ids: The input position IDs of shape [batch_size, seq_len].
-            input_lens: The actual input lengths of shape [batch_size].
-            t: The sampling temperature of shape [batch_size].
-            p: The top-p probability of shape [batch_size].
-            num_samples: Number of samples to draw from each logits vector.
+            token_ids: The input token IDs of shape [num_tokens].
+            position_ids: The input position IDs of shape [num_tokens].
             kv_caches: The key and value caches. They can be None during the
                 memory profiling at initialization.
         """
@@ -700,7 +697,6 @@ class ModelWrapperV1(nn.Module):
             token_ids,
             position_ids,
             kv_caches,
-            attn_metadata,
         )
         
         return hidden_states
