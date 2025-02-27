@@ -40,12 +40,7 @@ struct cutlass_3x_gemm {
       typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
                                 float>::type;
 
-  using EpilogueDescriptor =
-      cutlass::epilogue::collective::detail::EpilogueDescriptor<
-          TileShape, cutlass::epilogue::collective::EpilogueTileAuto, ElementD,
-          ElementD, EpilogueSchedule>;
-
-  using Epilogue = Epilogue_<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Epilogue = Epilogue_<ElementAcc, ElementD, TileShape>;
 
   using StrideD = Stride<int64_t, Int<1>, Int<0>>;
   using ElementC = void;
@@ -96,20 +91,20 @@ struct cutlass_3x_gemm_sm100 {
   using ElementAB = ElementAB_;
   using LayoutA = cutlass::layout::RowMajor;
   static constexpr int AlignmentA =
-      128 / cutlass::sizeof_bits<ElementAB_>::value;
+      128 / cutlass::sizeof_bits<ElementAB>::value;
 
   using LayoutB = cutlass::layout::ColumnMajor;
   static constexpr int AlignmentB =
-      128 / cutlass::sizeof_bits<ElementAB_>::value;
-
-  using ElementD = ElementD_;
-  using LayoutD = cutlass::layout::ColumnMajor;
-  static constexpr int AlignmentD =
-      128 / cutlass::sizeof_bits<ElementD_>::value;
+      128 / cutlass::sizeof_bits<ElementAB>::value;
 
   using ElementC = void;
-  using LayoutC = LayoutD;
-  static constexpr int AlignmentC = AlignmentD;
+  using LayoutC = cutlass::layout::RowMajor;
+  static constexpr int AlignmentC =
+      128 / cutlass::sizeof_bits<ElementD_>::value;
+
+  using ElementD = ElementD_;
+  using LayoutD = cutlass::layout::RowMajor;
+  static constexpr int AlignmentD = AlignmentC;
 
   using ElementAcc =
       typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
@@ -126,9 +121,6 @@ struct cutlass_3x_gemm_sm100 {
   using LayoutAux = LayoutD;
   using ElementAmax = float;
 
-  using StrideD = Stride<int64_t, Int<1>, Int<0>>;
-  using StrideC = StrideD;
-
   using EVTCompute = typename Epilogue::EVTCompute;
 
   using CollectiveEpilogue =
@@ -136,7 +128,7 @@ struct cutlass_3x_gemm_sm100 {
           cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp, TileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
           ElementAccumulator, ElementCompute, ElementC, LayoutC, AlignmentC,
-          ElementD, LayoutC, AlignmentD, EpilogueSchedule,
+          ElementD, LayoutD, AlignmentD, EpilogueSchedule,
           EVTCompute>::CollectiveOp;
 
   using CollectiveMainloop =

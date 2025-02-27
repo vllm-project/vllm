@@ -1,6 +1,6 @@
 #include "scaled_mm_kernels.hpp"
 #include "scaled_mm_sm100_fp8_dispatch.cuh"
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x_blackwell.hpp"
+#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 namespace vllm {
 
@@ -13,11 +13,10 @@ void cutlass_scaled_mm_sm100_fp8(torch::Tensor& out, torch::Tensor const& a,
   if (bias) {
     TORCH_CHECK(bias->dtype() == out.dtype(),
                 "currently bias dtype must match output dtype ", out.dtype());
-    return cutlass_scaled_mm_sm100_fp8_epilogue<
-        c3x_blackwell::ScaledEpilogueBias>(out, a, b, a_scales, b_scales,
-                                           *bias);
+    return cutlass_scaled_mm_sm100_fp8_epilogue<c3x::ScaledEpilogueBias>(
+        out, a, b, a_scales, b_scales, *bias);
   } else {
-    return cutlass_scaled_mm_sm100_fp8_epilogue<c3x_blackwell::ScaledEpilogue>(
+    return cutlass_scaled_mm_sm100_fp8_epilogue<c3x::ScaledEpilogue>(
         out, a, b, a_scales, b_scales);
   }
 }
