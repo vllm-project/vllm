@@ -8,10 +8,10 @@ import PIL
 
 import torch
 import torch.nn as nn
-from torch import Tensor
+from torch import Tensor, TensorType
 from torch.nn import init
 
-from transformers import (ProcessorMixin,SiglipVisionConfig,BatchFeature)
+from transformers import (ProcessorMixin,SiglipVisionConfig,BatchFeature,PretrainedConfig,PreTrainedTokenizer)
 from torch.nn.functional import softmax, gumbel_softmax, pad
 
 from vllm.model_executor.models.vision import get_vision_encoder_info
@@ -50,84 +50,20 @@ class OvisImageEmbeddingInputs(TypedDict):
 
 OvisImageInputs = Union[OvisImagePixelInputs,OvisImageEmbeddingInputs]
 
-class OvisProcessingInfo(BaseProcessingInfo):
-    # maybe this class is getting the vision_config so make a new config class to handle this...
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(OvisConfig)
-    
-    def get_hf_image_processor(self) -> ProcessorMixin:
-        visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config
-        image_processor = visual_tokenizer_config.backbone_config._name_or_path
-        
-        return cached_get_image_processor(image_processor)
-
-    def get_tokenizer(self):
-        text_tokenizer_config = self.get_hf_config().llm_config
-        return get_tokenizer(text_tokenizer_config._name_or_path)
-    
-    def get_vision_encoder_info(self):
-        visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config
-        vision_encoder_config = visual_tokenizer_config.backbone_config
-        
-        return get_vision_encoder_info(SiglipVisionConfig(**vision_encoder_config))
-    
-    def get_num_image_tokens(self)-> int:
-        vision_encoder_info = self.get_vision_encoder_info()
-        image_size = vision_encoder_info.get_image_size()
-        return vision_encoder_info.get_num_image_tokens(image_width=image_size,image_height=image_size)
-    
-    def get_supported_mm_limits(self) -> Mapping[str,Optional[int]]:
-        return {"image" : None}
-    
-    def get_mm_max_tokens_per_item(self, seq_len) -> Mapping[str,Optional[int]]:
-       vision_encoder_info = self.get_vision_encoder_info()
-       
-       return {"image" : vision_encoder_info.get_max_image_tokens()}
-    
-    def get_image_size_with_most_features(self) -> ImageSize:
-        return ImageSize(height=384,width=384)
+class OvisProcessor:
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        tokenizer: PreTrainedTokenizer,
+        image_processor: ProcessorMixin,
+    ) -> None:
+        self.config = config
+        self.tokenizer = tokenizer
+        self.image_processor = image_processor
+        self.visual_tokenizer = SiglipVisualTokenizer(config)
     
     def get_conversation_formatter(self) -> ConversationFormatter:
-        tokenizer = self.get_tokenizer()
-        
-        return GemmaConversationFormatter(tokenizer)
-        
-    
-
-_I = TypeVar("_I",bound=OvisProcessingInfo)
-
-class OvisDummyInputsBuilder(BaseDummyInputsBuilder[_I]):   
-    
-    def get_dummy_processor_inputs(self, seq_len, mm_counts) -> ProcessorInputs:
-        num_images = mm_counts.get("image",0)
-        
-        processor = self.info.get_hf_processor()
-        image_token = processor.image_token
-        target_width,target_height = self.info.get_image_size_with_most_features()
-        
-        mm_data = {
-            "image":
-                self._get_dummy_images(width=target_width,
-                                       height=target_height,
-                                       num_images=num_images)
-        }
-        
-        return ProcessorInputs(
-            prompt=image_token*num_images,
-            mm_data=mm_data,
-        )
-
-
-class OvisMultiModalProcessor(BaseMultiModalProcessor[_I]):
-        
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-        )
+        return GemmaConversationFormatter(self.tokenizer)
     
     @staticmethod
     def construct_image_placeholders(grid):
@@ -261,7 +197,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[_I]):
                              f' but got {type(text_or_conversations)}')
 
         # format conversations
-        prompt, raw_input_ids, _ = super().get_conversation_formatter().format(
+        prompt, raw_input_ids, _ = self.get_conversation_formatter().format(
             conversations, generation_preface=generation_preface)
 
         # place image placeholders
@@ -293,14 +229,118 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[_I]):
         
         return prompt, input_ids, pixel_values
     
+    def __call__(
+        self,
+        text_or_conversations: Union[List[Dict], str],
+        images: Optional[List[PIL.Image.Image]],
+        max_partition=9,
+        generation_preface='',
+        propagate_exception=True,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+    ):
+        _,text_inputs,pixel_values = self.preprocess_inputs(
+            text_or_conversations, images, max_partition, generation_preface, propagate_exception)
+        
+        image_inputs = {"pixel_values" : pixel_values}
+        return BatchFeature(
+            {
+            **text_inputs,
+            **image_inputs
+        },
+            tensor_type=return_tensors
+                            )
+
+class OvisProcessingInfo(BaseProcessingInfo):
+    def get_hf_config(self):
+        return self.ctx.get_hf_config(OvisConfig)
+    
+    def get_hf_image_processor(self) -> ProcessorMixin:
+        visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config
+        image_processor = visual_tokenizer_config.backbone_config._name_or_path
+        
+        return cached_get_image_processor(image_processor)
+
+    def get_tokenizer(self):
+        text_tokenizer_config = self.get_hf_config().llm_config
+        return get_tokenizer(text_tokenizer_config._name_or_path)
+    
+    def get_hf_processor(self, **kwargs)-> OvisProcessor:
+        return self.ctx.init_processor(
+            OvisProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            image_processor = self.get_hf_image_processor(),
+            **kwargs
+        )
+    
+    def get_vision_encoder_info(self):
+        visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config
+        vision_encoder_config = visual_tokenizer_config.backbone_config
+        
+        return get_vision_encoder_info(SiglipVisionConfig(**vision_encoder_config))
+    
+    def get_num_image_tokens(self)-> int:
+        vision_encoder_info = self.get_vision_encoder_info()
+        image_size = vision_encoder_info.get_image_size()
+        return vision_encoder_info.get_num_image_tokens(image_width=image_size,image_height=image_size)
+    
+    def get_supported_mm_limits(self) -> Mapping[str,Optional[int]]:
+        return {"image" : None}
+    
+    def get_mm_max_tokens_per_item(self, seq_len) -> Mapping[str,Optional[int]]:
+       vision_encoder_info = self.get_vision_encoder_info()
+       
+       return {"image" : vision_encoder_info.get_max_image_tokens()}
+    
+    def get_image_size_with_most_features(self) -> ImageSize:
+        return ImageSize(height=384,width=384)
+        
+_I = TypeVar("_I",bound=OvisProcessingInfo)
+
+class OvisDummyInputsBuilder(BaseDummyInputsBuilder[_I]):   
+    
+    def get_dummy_processor_inputs(self, seq_len, mm_counts) -> ProcessorInputs:
+        num_images = mm_counts.get("image",0)
+        
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+        target_width,target_height = self.info.get_image_size_with_most_features()
+        
+        mm_data = {
+            "image":
+                self._get_dummy_images(width=target_width,
+                                       height=target_height,
+                                       num_images=num_images)
+        }
+        
+        return ProcessorInputs(
+            prompt=image_token*num_images,
+            mm_data=mm_data,
+        )
+
+
+class OvisMultiModalProcessor(BaseMultiModalProcessor[_I]):
+        
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+        )
+    
     def _call_hf_processor(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        processed_outputs = self.preprocess_inputs(prompt,mm_data["image"])
-        return BatchFeature(processed_outputs)
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,    
+            mm_kwargs=mm_kwargs
+        )
     
     def _get_prompt_replacements(
         self,
@@ -435,6 +475,7 @@ class OvisForConditionalGeneration(nn.Module,SupportsMultiModal,SupportsPP):
     def sampler(self):
         if hasattr(self.llm,"sampler"):
             return self.llm.sampler
+        return None
     
     def _validate_pixel_values(self, pixel_values: Union[torch.Tensor,List[torch.Tensor]]) -> Union[torch.Tensor,List[torch.Tensor]]:
         h = w = self.config.visual_tokenizer.backbone_config.image_size
@@ -453,101 +494,6 @@ class OvisForConditionalGeneration(nn.Module,SupportsMultiModal,SupportsPP):
         
         return pixel_values
 
-    # def merge_multimodal(
-    #     self,
-    #     text_input_ids: torch.Tensor,
-    #     text_attention_masks: torch.Tensor,
-    #     text_labels: Optional[torch.Tensor],
-    #     pixel_values: List[Optional[torch.Tensor]],
-    #     left_padding: bool = False
-    # ):
-    #     input_device = text_input_ids.device
-    #     visual_vocab_size = self.get_visual_tokenizer().config.vocab_size
-    #     visual_indicator_embeds = self.get_vte()(
-    #         torch.tensor(
-    #             list(range(visual_vocab_size - 5, visual_vocab_size)),
-    #             dtype=torch.long,
-    #             device=self.get_visual_tokenizer().device
-    #         )
-    #     ).to(device=input_device)
-
-    #     num_images = [x.shape[0] if x is not None else 0 for x in pixel_values]
-    #     if sum(num_images) > 0:
-    #         visual_tokens = self.visual_tokenizer(torch.cat([x for x in pixel_values if x is not None], dim=0))
-    #         visual_embeds = torch.split(self.get_vte()(visual_tokens).to(dtype=self.dtype, device=input_device),
-    #                                     split_size_or_sections=num_images, dim=0)
-    #         visual_input_ids = torch.split(torch.argmax(visual_tokens, dim=-1).to(device=input_device),
-    #                                        split_size_or_sections=num_images, dim=0)
-    #         visual_labels = [torch.full(x.shape, IGNORE_ID, dtype=torch.long, device=input_device) for x in
-    #                          visual_input_ids]
-    #     else:
-    #         # just placeholders
-    #         visual_embeds = [None] * len(num_images)
-    #         visual_input_ids = [None] * len(num_images)
-    #         visual_labels = [None] * len(num_images)
-    #     if text_labels is None:
-    #         text_labels = torch.full(text_input_ids.shape, IGNORE_ID, dtype=torch.long, device=input_device)
-
-    #     input_embeds = []
-    #     attention_masks = []
-    #     labels = []
-    #     for text_input_id, text_label, text_attention_mask, visual_embed, visual_input_id, visual_label in zip(
-    #             text_input_ids, text_labels, text_attention_masks, visual_embeds, visual_input_ids, visual_labels
-    #     ):
-    #         placeholder_token_mask = torch.lt(text_input_id, 0)
-    #         text_embed = self.get_wte()(torch.masked_fill(text_input_id, placeholder_token_mask, 0))
-    #         for i, indicator_id in enumerate(IMAGE_INDICATOR_IDS):
-    #             text_embed[text_input_id == indicator_id] = visual_indicator_embeds[i]
-    #         image_atom_positions = torch.where(torch.eq(text_input_id, IMAGE_ATOM_ID))[0].tolist()
-    #         if len(image_atom_positions) > 0:
-    #             input_embed_parts = []
-    #             attention_mask_parts = []
-    #             label_parts = []
-    #             prev_image_atom_position = -1
-    #             for index, image_atom_position in enumerate(image_atom_positions):
-    #                 input_embed_parts.append(
-    #                     text_embed[prev_image_atom_position + 1:image_atom_position, :])
-    #                 label_parts.append(
-    #                     text_label[prev_image_atom_position + 1:image_atom_position])
-    #                 attention_mask_parts.append(
-    #                     text_attention_mask[prev_image_atom_position + 1:image_atom_position])
-    #                 input_embed_parts.append(visual_embed[index])
-    #                 attention_mask_parts.append(
-    #                     torch.ones_like(visual_label[index], dtype=torch.bool))
-    #                 label_parts.append(visual_label[index])
-    #                 prev_image_atom_position = image_atom_position
-    #             if prev_image_atom_position + 1 < text_input_id.shape[0]:
-    #                 input_embed_parts.append(
-    #                     text_embed[prev_image_atom_position + 1:, :])
-    #                 attention_mask_parts.append(
-    #                     text_attention_mask[prev_image_atom_position + 1:])
-    #                 label_parts.append(
-    #                     text_label[prev_image_atom_position + 1:])
-    #             input_embed = torch.cat(input_embed_parts, dim=0)
-    #             attention_mask = torch.cat(attention_mask_parts, dim=0)
-    #             label = torch.cat(label_parts, dim=0)
-    #         else:
-    #             input_embed = text_embed
-    #             attention_mask = text_attention_mask
-    #             label = text_label
-    #         input_embeds.append(input_embed)
-    #         attention_masks.append(attention_mask)
-    #         labels.append(label)
-
-    #     batch_input_embeds = self.pad_truncate_sequence(input_embeds, batch_first=True, padding_value=0.0, left_padding=left_padding)
-    #     batch_attention_mask = self.pad_truncate_sequence(attention_masks, batch_first=True, padding_value=False, left_padding=left_padding)
-    #     batch_labels = self.pad_truncate_sequence(labels, batch_first=True, padding_value=IGNORE_ID, left_padding=left_padding)
-
-    #     return visual_input_ids, batch_input_embeds, batch_labels, batch_attention_mask
-
-    # def pad_truncate_sequence(self, sequences: List[torch.Tensor], batch_first: bool = True, padding_value: float = 0.0, left_padding: bool = False) -> torch.Tensor:
-    #     if left_padding == False:
-    #         pad_sequence = torch.nn.utils.rnn.pad_sequence(sequences, batch_first=batch_first, padding_value=padding_value)
-    #         return pad_sequence[:,:self.config.multimodal_max_length]
-    #     else:
-    #         pad_sequence = torch.nn.utils.rnn.pad_sequence([i.flip(dims=[0]) for i in sequences],batch_first=True, padding_value=padding_value).flip(dims=[1])
-    #         return pad_sequence[:,-self.config.multimodal_max_length:]
-    
     def _parse_and_validate_image_input(
         self, **kwargs:object
     )-> Optional[OvisImageInputs]:
