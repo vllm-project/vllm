@@ -35,7 +35,8 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .interfaces import SupportsMultiModal, SupportsTranscription
-from .utils import AutoWeightsLoader, WeightsMapper, make_layers
+from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
+                    make_layers)
 
 logger = init_logger(__name__)
 
@@ -285,11 +286,7 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        if hidden_states.isinf().any() or hidden_states.isnan().any():
-            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states,
-                                        min=-clamp_value,
-                                        max=clamp_value)
+        hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
