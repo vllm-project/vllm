@@ -30,7 +30,8 @@ QUANTIZATION_METHODS: List[str] = [
     "neuron_quant",
     "ipex",
     "quark",
-    "moe_wna16"
+    "moe_wna16",
+    "blockwise_int8",
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -103,6 +104,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
+    from .blockwise_int8 import BlockInt8Config
 
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
@@ -130,6 +132,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "ipex": IPEXConfig,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
+        "blockwise_int8": BlockInt8Config,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
