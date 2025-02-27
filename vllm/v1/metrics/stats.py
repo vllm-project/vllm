@@ -67,6 +67,8 @@ class FinishedRequestStats:
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
+    queued_time: float = 0.0
+    prefill_time: float = 0.0
     inference_time: float = 0.0
     decode_time: float = 0.0
 
@@ -78,11 +80,10 @@ class IterationStats:
         self.iteration_timestamp = time.time()
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
+        self.num_preempted_reqs = 0
         self.finished_requests: List[FinishedRequestStats] = []
         self.time_to_first_tokens_iter: List[float] = []
         self.time_per_output_tokens_iter: List[float] = []
-        self.queue_times_iter: List[float] = []
-        self.prefill_times_iter: List[float] = []
         self.waiting_lora_adapters: Dict[str, int] = {}
         self.running_lora_adapters: Dict[str, int] = {}
 
@@ -122,9 +123,6 @@ class IterationStats:
         if is_prefilling:
             # TODO: re-enable no-output-for-partial-prefills invariant as above
             if num_new_generation_tokens > 0:
-                prefill_interval = \
-                    engine_core_timestamp - req_stats.scheduled_ts
-                self.prefill_times_iter.append(prefill_interval)
                 req_stats.first_token_ts = engine_core_timestamp
         else:
             tpot = engine_core_timestamp - req_stats.last_token_ts
@@ -145,24 +143,39 @@ class IterationStats:
                 if lora_stats is not None:
                     lora_stats.waiting_requests.add(req_id)
             elif event.type == EngineCoreEventType.SCHEDULED:
-                queued_interval = event.timestamp - req_stats.queued_ts
-                self.queue_times_iter.append(queued_interval)
-                req_stats.scheduled_ts = event.timestamp
+                if req_stats.scheduled_ts == 0.0:  # ignore preemptions
+                    req_stats.scheduled_ts = event.timestamp
                 LoRARequestStates.scheduled_request(lora_stats, req_id)
+            elif event.type == EngineCoreEventType.PREEMPTED:
+                self.num_preempted_reqs += 1
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      request_output: "RequestOutput",
                                      req_stats: RequestStateStats):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
-        inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
+        # Queued interval is from first QUEUED event to first SCHEDULED
+        queued_time = req_stats.scheduled_ts - req_stats.queued_ts
+
+        # Prefill interval is from first SCHEDULED to first NEW_TOKEN
+        # Any preemptions during prefill is included in the interval
+        prefill_time = req_stats.first_token_ts - req_stats.scheduled_ts
+
+        # Decode interval is from first NEW_TOKEN to last NEW_TOKEN
+        # Any preemptions during decode are included
         decode_time = req_stats.last_token_ts - req_stats.first_token_ts
+
+        # Inference interval is from first SCHEDULED to last NEW_TOKEN
+        # Any preemptions during prefill or decode are included
+        inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
 
         finished_req = \
             FinishedRequestStats(finish_reason=finish_reason,
                                  e2e_latency=e2e_latency,
                                  num_prompt_tokens=len(request_output.prompt_token_ids),
                                  num_generation_tokens=req_stats.num_generation_tokens,
+                                 queued_time=queued_time,
+                                 prefill_time=prefill_time,
                                  inference_time=inference_time,
                                  decode_time=decode_time)
         self.finished_requests.append(finished_req)

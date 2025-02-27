@@ -164,6 +164,7 @@ class Scheduler:
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
+                    self.request_preempted(preempted_req, scheduled_timestamp)
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
@@ -281,9 +282,9 @@ class Scheduler:
                 self.waiting.popleft()
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
+                self.request_scheduled(request, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
-                    self.request_scheduled(request, scheduled_timestamp)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
@@ -673,6 +674,13 @@ class Scheduler:
             return
         request.events.append(
             EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
+                                      timestamp))
+
+    def request_preempted(self, request: Request, timestamp: float):
+        if not self.log_stats:
+            return
+        request.events.append(
+            EngineCoreEvent.new_event(EngineCoreEventType.PREEMPTED,
                                       timestamp))
 
     def make_stats(self) -> Optional[SchedulerStats]:
