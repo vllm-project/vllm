@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
 from typing import TYPE_CHECKING, Optional, cast
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field
 from unittest.mock import patch
 
 import numpy as np
@@ -29,14 +29,11 @@ from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-<<<<<<< HEAD
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
-=======
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput, SamplerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
->>>>>>> 3ca4043fb (tracing sampler)
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -50,12 +47,13 @@ logger = init_logger(__name__)
 _PAD_SLOT_ID = 1_000_000_000
 INVALID_TOKEN_ID = -1
 
-# TODO (NickLucche) keep in sync with SamplingMetadata until we can drop 
+
+# TODO (NickLucche) keep in sync with SamplingMetadata until we can drop
 # this class and support most options.
 @dataclass
 class TPUSupportedSamplingMetadata:
-    # This class exposes a more xla-friendly interfaces, in particular 
-    # all arguments should be traceable and no optionals are allowed, 
+    # This class exposes a more xla-friendly interfaces, in particular
+    # all arguments should be traceable and no optionals are allowed,
     # to avoid graph recompilation on Nones.
     temperature: torch.Tensor
 
@@ -72,95 +70,111 @@ class TPUSupportedSamplingMetadata:
     spec_token_ids = None
 
     # Generator not supported by xla
-    generators = []
+    generators: Dict[int,
+                     torch.Generator] = field(default_factory=lambda: dict())
 
     # unsupported, you need to return an extra tensor of static size BxV
     max_num_logprobs = None
-    
+
     # TODO No penalties for now
     no_penalties: bool = True
     prompt_token_ids = None
     frequency_penalties = None
     presence_penalties = None
     repetition_penalties = None
-    output_token_ids = [] # should use tensor
+    # should use tensor
+    output_token_ids: List[List[int]] = field(default_factory=lambda: list())
 
     min_tokens = None  # impl is not vectorized
 
-    logit_bias = []
+    logit_bias: List[Optional[Dict[int, float]]] = field(
+        default_factory=lambda: list())
 
     allowed_token_ids_mask = None
 
     @classmethod
-    def from_sampling_metadata(cls, metadata: SamplingMetadata, batch_size: int, device: torch.device)->"TPUSupportedSamplingMetadata":
+    def from_sampling_metadata(
+            cls, metadata: SamplingMetadata, batch_size: int,
+            device: torch.device) -> "TPUSupportedSamplingMetadata":
         metadata = cls._validate_sampling_metadata(metadata)
-        # NOTE we have to initialize default tensor-based params first and 
-        # skip None values altogether to produce the same xla graph.  
+        # NOTE we have to initialize default tensor-based params first and
+        # skip None values altogether to produce the same xla graph.
         new_metadata = cls.get_default_sampling_params(batch_size, device)
 
-        supported_params = TPUSupportedSamplingMetadata._get_default_params_values()
-        # Copy `metadata` non-None values into `new_metadata`, while 
+        supported_params = \
+            TPUSupportedSamplingMetadata._get_default_params_values()
+        # Copy `metadata` non-None values into `new_metadata`, while
         # broadcasting tensor params to match sequence batch padding.
-        for field in supported_params:
-            old_val = getattr(metadata, field)
-            new_val = getattr(new_metadata, field)
+        for p_name in supported_params:
+            old_val = getattr(metadata, p_name)
+            new_val = getattr(new_metadata, p_name)
             # Branching in pre-processing will trigger re-compilation.
-            if isinstance(old_val, torch.Tensor) and old_val.numel() != batch_size:
+            if isinstance(old_val,
+                          torch.Tensor) and old_val.numel() != batch_size:
                 # TODO not efficient, manage a tensor of compiled size B
                 # Handle padded batch.
                 new_val[:old_val.shape[0]] = old_val
             elif isinstance(old_val, torch.Tensor):
-                # This is either one value for all batch, standardized to batch 
-                # size, or B values.  
+                # This is either one value for all batch, standardized to batch
+                # size, or B values.
                 new_val[:] = old_val
-            setattr(new_metadata, field, new_val)
+            setattr(new_metadata, p_name, new_val)
 
         xm.mark_step()
         xm.wait_device_ops()
         return new_metadata
 
     @classmethod
-    def from_single_prefill_metadata(cls, metadata: SamplingMetadata, prefill_idx: int, device: torch.device)->"TPUSupportedSamplingMetadata":
+    def from_single_prefill_metadata(
+            cls, metadata: SamplingMetadata, prefill_idx: int,
+            device: torch.device) -> "TPUSupportedSamplingMetadata":
         # TODO tmp constructor until ragged kernel is implemented for B=1 case.
         metadata = cls._validate_sampling_metadata(metadata)
         new_metadata = cls.get_default_sampling_params(1, device)
 
-        supported_params = TPUSupportedSamplingMetadata._get_default_params_values()
+        supported_params = \
+            TPUSupportedSamplingMetadata._get_default_params_values()
         # Copy `metadata` non-None values into `new_metadata`.
-        for field in supported_params:
-            old_val = getattr(metadata, field)
-            new_val = getattr(new_metadata, field)
+        for p_name in supported_params:
+            old_val = getattr(metadata, p_name)
+            new_val = getattr(new_metadata, p_name)
             if isinstance(old_val, torch.Tensor) and old_val.numel() > 1:
                 # Select the right prefill metadata.
                 new_val[:] = old_val[prefill_idx]
             elif isinstance(old_val, torch.Tensor):
                 # num_prefills==1 or one param value for whole batch
                 new_val[:] = old_val
-            setattr(new_metadata, field, new_val)
+            setattr(new_metadata, p_name, new_val)
         xm.mark_step()
         xm.wait_device_ops()
         return new_metadata
 
     @classmethod
-    def get_default_sampling_params(cls, batch_size: int, device: torch.device)->"TPUSupportedSamplingMetadata":
+    def get_default_sampling_params(
+            cls, batch_size: int,
+            device: torch.device) -> "TPUSupportedSamplingMetadata":
         # As sampling happens on a single traced function, options
         # are "disabled" by having them evaluate to an Identity op.
         # Note that initialization is dependent on batch_size.
-        sampling_metadata_disable_value = TPUSupportedSamplingMetadata._get_default_params_values()
+        sampling_metadata_disable_value = \
+            TPUSupportedSamplingMetadata._get_default_params_values()
         kwargs = dict()
-        for field, default_val in sampling_metadata_disable_value.items():
-            default_tensor = torch.full((batch_size,), default_val, device=device)
-            kwargs[field] = default_tensor
+        for p_name, default_val in sampling_metadata_disable_value.items():
+            default_tensor = torch.full((batch_size, ),
+                                        default_val,
+                                        device=device)
+            kwargs[p_name] = default_tensor
 
         return cls(**kwargs)
 
     @staticmethod
-    def _validate_sampling_metadata(sampling_metadata: SamplingMetadata)->SamplingMetadata:
+    def _validate_sampling_metadata(
+            sampling_metadata: SamplingMetadata) -> SamplingMetadata:
         if sampling_metadata.all_greedy:
-            # Greedy sampling is always performed as long as temp is 0, but 
+            # Greedy sampling is always performed as long as temp is 0, but
             # the control flow must be constant.
             sampling_metadata.all_greedy = False
-            # TODO this is checked somewhere else already isnt it?
+            # TODO this is checked somewhere else already isn't it?
             assert torch.count_nonzero(sampling_metadata.temperature) == 0
         return sampling_metadata
 
@@ -176,6 +190,7 @@ class TPUSupportedSamplingMetadata:
             # presence_penalties=0.0,
             # repetition_penalties=0.0,
         )
+
 
 class TPUModelRunner:
 
@@ -403,7 +418,7 @@ class TPUModelRunner:
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
         batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
-            
+
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
@@ -420,7 +435,7 @@ class TPUModelRunner:
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
-        
+
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
@@ -868,7 +883,8 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         # To allow sampling, trace the forward with all supported sampling args
-        sampling_meta = TPUSupportedSamplingMetadata.get_default_sampling_params(num_tokens, self.device)
+        sampling_meta = TPUSupportedSamplingMetadata.\
+            get_default_sampling_params(num_tokens, self.device)
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
             hidden_states = self.model(
@@ -961,19 +977,13 @@ class ModelWrapperV1(nn.Module):
         self.model = model
         self.sampler = Sampler()
 
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
-        # Greedy sampling.
-        # argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-        # argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
-        # return argmax_token_ids
-        # TODO this is currently 2 orders of magnitude slower than code above <.<
+    def sample(
+            self, logits: torch.Tensor,
+            sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
         sampler_out = self.sampler(logits, sampling_metadata)
         sampled_token_ids = sampler_out.sampled_token_ids
         return sampled_token_ids.squeeze(dim=-1)
 
-    # TODO having sampling_metadata in the signature here significantly increases
-    # torch compile time(30->~300)
     def forward(
         self,
         input_ids: torch.Tensor,
