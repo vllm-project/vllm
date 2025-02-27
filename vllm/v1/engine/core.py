@@ -14,7 +14,7 @@ import psutil
 import zmq
 import zmq.asyncio
 
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
@@ -264,6 +264,12 @@ class EngineCoreProc(EngineCore):
                          args=(output_path, ),
                          daemon=True).start()
 
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        self.dp_group = None if dp_size <= 1 else (
+            vllm_config.parallel_config.stateless_init_dp_group())
+
+        self.dp_in_progress = False
+
         # Send Readiness signal to EngineClient.
         ready_pipe.send({"status": "READY"})
 
@@ -313,23 +319,22 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
 
+    def _has_global_unfinished_dp(self, has_unfinished: bool) -> bool:
+        return ParallelConfig.has_unfinished_dp(self.dp_group, has_unfinished)
+
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
         step_fn = (self.step
                    if self.batch_queue is None else self.step_with_batch_queue)
 
-        dp_idle_mode = False
+        has_unfinished = False
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
-            if not self.scheduler.has_unfinished_requests():
+            if not has_unfinished and not self.dp_in_progress:
                 while True:
-                    if dp_idle_mode and self.input_queue.empty():
-                        # TODO if time has passed here, break to log stats
-                        self.execute_dummy_batch()
-                        continue
                     try:
                         req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
                         self._handle_client_request(*req)
@@ -345,9 +350,13 @@ class EngineCoreProc(EngineCore):
                 req = self.input_queue.get_nowait()
                 self._handle_client_request(*req)
 
-            if self.scheduler.has_unfinished_requests():
-                # TODO client to reset this in coordinated way
-                dp_idle_mode = True
+            dp_forward = False
+            if self.dp_group is not None:
+                if self.scheduler.has_unfinished_requests():
+                    dp_forward = True
+                elif self.dp_in_progress:
+                    self.execute_dummy_batch()
+                    dp_forward = True
 
             # 3) Step the engine core.
             outputs = step_fn()
@@ -355,6 +364,11 @@ class EngineCoreProc(EngineCore):
             # 4) Put EngineCoreOutputs into the output queue.
             if outputs is not None:
                 self.output_queue.put_nowait(outputs)
+
+            has_unfinished = self.scheduler.has_unfinished_requests()
+            if dp_forward:
+                self.dp_in_progress = self._has_global_unfinished_dp(
+                    has_unfinished)
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -364,6 +378,8 @@ class EngineCoreProc(EngineCore):
             self.add_request(request)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
+        elif request_type == EngineCoreRequestType.START_DP:
+            self.dp_in_progress = True
         elif request_type == EngineCoreRequestType.UTILITY:
             call_id, method_name, args = request
             output = UtilityOutput(call_id)

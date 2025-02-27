@@ -14,15 +14,12 @@ from typing import Any, Dict, List, Optional, Set, Type, Union
 
 import zmq
 import zmq.asyncio
-from sampling_params import RequestOutputKind
 
-from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
-from vllm.v1.core.scheduler import DUMMY_REQ_ID
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
@@ -318,7 +315,12 @@ class MPClient(EngineCoreClient):
         output_path = get_open_zmq_ipc_path()
         resources.output_socket = make_zmq_socket(self.ctx, output_path,
                                                   zmq.constants.PULL)
-        for i in range(vllm_config.parallel_config.data_parallel_size):
+
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        self.dp_group = None if dp_size <= 1 else (
+            vllm_config.parallel_config.stateless_init_dp_group())
+
+        for i in range(dp_size):
             resources.core_engines.append(
                 CoreEngine(vllm_config, executor_class, log_stats, self.ctx,
                            output_path, i))
@@ -452,27 +454,9 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        # Single-token request used for triggering idle mode loop.
-        self.dummy_request_msg = (
-            EngineCoreRequestType.ADD,
-            self.encoder.encode(
-                EngineCoreRequest(
-                    request_id=DUMMY_REQ_ID,
-                    prompt_token_ids=[1],
-                    sampling_params=SamplingParams(
-                        temperature=0.0,
-                        max_tokens=1,
-                        output_kind=RequestOutputKind.FINAL_ONLY,
-                    ),
-                    #TODO add defaults to EngineCoreRequest for these
-                    prompt=None,
-                    mm_inputs=None,
-                    mm_hashes=None,
-                    mm_placeholders=None,
-                    eos_token_id=None,
-                    lora_request=None,
-                    arrival_time=0.0,
-                )))
+        # Control message used for triggering dp idle mode loop.
+        self.start_dp_msg = (EngineCoreRequestType.START_DP,
+                             self.encoder.encode(None))
 
         self.outputs_queue: Optional[asyncio.Queue[EngineCoreOutputs]] = None
         self.queue_task: Optional[asyncio.Task] = None
@@ -498,9 +482,6 @@ class AsyncMPClient(MPClient):
                 for req_id in outputs.finished_requests:
                     if engine := self.reqs_in_flight.pop(req_id, None):
                         engine.num_reqs_in_flight -= 1
-                        if not self.reqs_in_flight:
-                            # TODO pause engines here
-                            pass
 
         self.queue_task = asyncio.create_task(process_outputs_socket())
 
@@ -551,15 +532,16 @@ class AsyncMPClient(MPClient):
         first_request = len(self.reqs_in_flight) == 0
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1
-        await chosen_engine.input_socket.send_multipart(msg, copy=False)
 
-        if first_request and len(self.core_engines) > 1:
-            # Send a dummy request to initiate idle forward loop
-            # in other engines.
-            for engine in self.core_engines:
-                if engine is not chosen_engine:
-                    await engine.input_socket.send_multipart(
-                        self.dummy_request_msg, copy=False)
+        if not first_request or len(self.core_engines) == 1:
+            await chosen_engine.input_socket.send_multipart(msg, copy=False)
+        else:
+            # Send request to chosen engine and dp start loop
+            # control message to all other engines.
+            await asyncio.gather(
+                engine.input_socket.send_multipart(
+                    msg if engine is chosen_engine else self.start_dp_msg,
+                    copy=False) for engine in self.core_engines)
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
         if not request_ids:

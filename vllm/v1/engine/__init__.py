@@ -147,4 +147,5 @@ class EngineCoreRequestType(enum.Enum):
     """
     ADD = b'\x00'
     ABORT = b'\x01'
-    UTILITY = b'\x02'
+    START_DP = b'\x02'
+    UTILITY = b'\x03'
