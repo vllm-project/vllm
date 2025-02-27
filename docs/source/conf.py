@@ -198,29 +198,10 @@ def linkcode_resolve(domain, info):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
-    "blake3",
-    "compressed_tensors",
-    "cpuinfo",
-    "cv2",
-    "torch",
-    "transformers",
-    "psutil",
-    "prometheus_client",
-    "sentencepiece",
-    "vllm._C",
-    "PIL",
-    "numpy",
-    'triton',
-    "tqdm",
-    "tensorizer",
-    "pynvml",
-    "outlines",
-    "xgrammar",
-    "librosa",
-    "soundfile",
-    "gguf",
-    "lark",
-    "decord",
+    "blake3", "compressed_tensors", "cpuinfo", "cv2", "torch", "transformers",
+    "psutil", "prometheus_client", "sentencepiece", "vllm._C", "PIL", "numpy",
+    'triton', "tqdm", "tensorizer", "pynvml", "outlines", "xgrammar",
+    "librosa", "soundfile", "gguf", "lark", "decord", "loguru"
 ]
 
 for mock_target in autodoc_mock_imports:
