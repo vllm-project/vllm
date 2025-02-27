@@ -5,7 +5,8 @@ from typing import List, Optional, Set, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
+from vllm.sequence import (ExecuteModelRequest, SequenceData,
+                           SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -52,15 +53,39 @@ class Top1Proposer(SpeculativeProposer):
         speculation.
         """
         proposal_len = execute_model_req.num_lookahead_slots
-        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-
+        if hasattr(self._worker, "model_runner") and getattr(
+                self._worker.model_runner, "mtp", False):
+            seq_group_metadata_list_for_proposal = []
+            for metadata in execute_model_req.seq_group_metadata_list:
+                mtp_seq_data = {}
+                for key, seq_data in metadata.seq_data.items():
+                    mtp_seq_data[key] = SequenceData.from_seqs(
+                        seq_data.prompt_token_ids,
+                        output_token_ids=seq_data.output_token_ids,
+                    )
+                    mtp_seq_data[key].update_num_computed_tokens(
+                        len(seq_data.prompt_token_ids) +
+                        len(seq_data.output_token_ids) -
+                        len(seq_data._new_appended_tokens))
+                new_metadata = SequenceGroupMetadata(
+                    request_id=metadata.request_id,
+                    is_prompt=False,
+                    seq_data=mtp_seq_data,
+                    sampling_params=metadata.sampling_params,
+                    block_tables=metadata.block_tables,
+                    lora_request=metadata.lora_request,
+                )
+                seq_group_metadata_list_for_proposal.append(new_metadata)
+        else:
+            seq_group_metadata_list_for_proposal =\
+                execute_model_req.seq_group_metadata_list
         # Split speculative- and non-speculative- sequences.
         (
             proposal_lens,
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
-        ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
-
+        ) = self._split_by_proposal_len(seq_group_metadata_list_for_proposal,
+                                        proposal_len)
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
             # sequences.
@@ -98,7 +123,7 @@ class Top1Proposer(SpeculativeProposer):
         # Combine speculative- and non-speculative sequences into the same
         # representation.
         proposal_tokens, proposal_probs, proposal_lens = self._merge_outputs(
-            batch_size=len(seq_group_metadata_list),
+            batch_size=len(seq_group_metadata_list_for_proposal),
             proposal_len=proposal_len,
             maybe_sampler_output=maybe_sampler_output,
             proposal_lens=proposal_lens,
@@ -246,7 +271,6 @@ class Top1Proposer(SpeculativeProposer):
         sampler_output = maybe_sampler_output
         proposal_tokens, proposal_probs, *_ = sampler_output_to_torch(
             sampler_output, sampler_transposed)
-
         # Now, reformat the output GPU tensors such that each sequence has
         # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
 

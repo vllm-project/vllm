@@ -175,6 +175,47 @@ class DeepSeekMTP(nn.Module):
         return self.model.compute_logits(hidden_states, sampling_metadata,
                                          spec_step_idx)
 
+    def generate_proposals(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        previous_hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> List[SamplerOutput]:
+        hidden_states = previous_hidden_states
+        cur_input_ids = input_ids
+        outputs = []
+        for i in range(self.model.num_mtp_layers):
+            hidden_states = self.forward(cur_input_ids,
+                                         positions,
+                                         kv_caches,
+                                         attn_metadata,
+                                         hidden_states,
+                                         spec_step_idx=i)
+            logits = self.compute_logits(hidden_states=hidden_states,
+                                         sampling_metadata=sampling_metadata,
+                                         spec_step_idx=i)
+            output = self.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+            outputs.append(output)
+            cur_input_ids = self.get_next_layer_input(input_ids, attn_metadata,
+                                                      output)
+        return outputs
+
+    def get_next_layer_input(
+            self, input_ids: torch.Tensor, attn_metadata: AttentionMetadata,
+            outputs: SamplerOutput) -> Tuple[torch.Tensor, SamplerOutput]:
+        assert outputs.sampled_token_ids is not None
+        assert attn_metadata.query_start_loc is not None
+        input_ids = input_ids.roll(shifts=-1, dims=0)
+        query_end_loc = attn_metadata.query_start_loc[1:] - 1
+        input_ids[query_end_loc] = outputs.sampled_token_ids[:, 0]
+        return input_ids
+
     def sample(
         self,
         logits: torch.Tensor,
@@ -182,6 +223,18 @@ class DeepSeekMTP(nn.Module):
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
+
+    def get_last_sample_output(
+        self,
+        output: SamplerOutput,
+        attn_metadata: AttentionMetadata,
+    ) -> SamplerOutput:
+        query_end_loc = attn_metadata.query_start_loc[1:] - 1
+        output.sampled_token_ids = output.sampled_token_ids[query_end_loc]
+        if output.sampled_token_probs is not None:
+            output.sampled_token_probs = output.sampled_token_probs[
+                query_end_loc]
+        return output
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

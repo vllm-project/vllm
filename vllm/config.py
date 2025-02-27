@@ -1016,6 +1016,18 @@ class ModelConfig:
         return is_encoder_decoder(self.hf_config)
 
     @property
+    def requires_multi_step_decode(self) -> bool:
+        return getattr(self.hf_config, "model_type", "")=="deepseek_mtp" and \
+            getattr(self.hf_config, "num_nextn_predict_layers", 0) > 1
+
+    @property
+    def num_decode_modules(self) -> int:
+        if getattr(self.hf_config, "model_type", "") == "deepseek_mtp":
+            return getattr(self.hf_config, "num_nextn_predict_layers", 0)
+        else:
+            return 1
+
+    @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
 
@@ -3486,7 +3498,8 @@ class VllmConfig:
                 # which then becomes the max_batchsize_to_capture
                 larger_sizes = [
                     x for x in possible_sizes
-                    if x >= self.scheduler_config.max_num_seqs
+                    if x >= self.scheduler_config.max_num_seqs *
+                    self.model_config.num_decode_modules
                 ]
                 if larger_sizes:
                     max_batchsize_to_capture = larger_sizes[0]
@@ -3499,6 +3512,7 @@ class VllmConfig:
                     size for size in possible_sizes
                     if size <= max_batchsize_to_capture
                 ]
+                # print(f"{batch_size_capture_list=}")
         else:
             batch_size_capture_list = []
             if self.model_config is not None and \

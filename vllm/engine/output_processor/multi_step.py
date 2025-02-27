@@ -185,6 +185,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         is_prefill_sampled_token = seq.data.get_num_uncomputed_tokens() == 0
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
+        # TODO: add an attribute here for reset, can be set at output processor
+        seq.data.reset_new_appended_tokens()
         for output_token_id, output_logprob in zip(output_token_ids,
                                                    output_logprobs):
             seq.append_token_id(
