@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for rejection sampling."""
 import random
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 import torch
@@ -624,8 +624,9 @@ def mock_causal_accepted_tensor(
 
 
 def create_v1_sampling_metadata(
-        all_greedy: bool,
-        generators: Dict[int, Any] = None) -> v1_rej_sampler.SamplingMetadata:
+    all_greedy: bool,
+    generators: Optional[Dict[int, Any]] = None
+) -> v1_rej_sampler.SamplingMetadata:
     """Create a v1 sampling metadata object with all_greedy set 
         to the given value. Either all greedy or all random sampling 
         is used.
