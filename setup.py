@@ -271,6 +271,10 @@ class repackage_wheel(build_ext):
     """Extracts libraries and other files from an existing wheel."""
 
     def get_base_commit_in_main_branch(self) -> str:
+        # Force to use the nightly wheel. This is mainly used for CI testing.
+        if envs.VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL:
+            return "nightly"
+
         try:
             # Get the latest commit hash of the upstream main branch.
             resp_json = subprocess.check_output([
