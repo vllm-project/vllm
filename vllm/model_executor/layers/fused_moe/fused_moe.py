@@ -502,6 +502,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     M = A.shape[0]
     num_tokens = M * top_k
 
+    # EM = num_groups
     EM = sorted_token_ids.shape[0]
     if A.shape[0] < config["BLOCK_SIZE_M"]:
         # optimize for small batch_size.
