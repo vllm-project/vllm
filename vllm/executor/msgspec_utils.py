@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from array import array
-from typing import Any
+from typing import Any, Type
 
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE
 
@@ -18,7 +18,7 @@ def encode_hook(obj: Any) -> Any:
         return obj.tobytes()
 
 
-def decode_hook(type: type, obj: Any) -> Any:
+def decode_hook(type: Type, obj: Any) -> Any:
     """Custom msgspec dec hook that supports array types.
 
     See https://jcristharif.com/msgspec/api.html#msgspec.msgpack.Encoder

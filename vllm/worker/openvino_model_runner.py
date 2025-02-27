@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections import defaultdict
-from typing import NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import openvino as ov
 import torch
@@ -27,8 +27,8 @@ class ModelInput(NamedTuple):
     input_tokens: torch.Tensor
     input_positions: torch.Tensor
     attn_metadata: Optional[OpenVINOAttentionMetadata]
-    seq_lens: list[int]
-    query_lens: list[int]
+    seq_lens: List[int]
+    query_lens: List[int]
     multi_modal_kwargs: BatchedTensorInputs
 
     @classmethod
@@ -88,7 +88,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
 
     def _prepare_model_input(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> ModelInput:
         """Prepare the model input based on a given sequence group.
 
@@ -100,20 +100,20 @@ class OpenVINOModelRunner(ModelRunnerBase):
         - input_tokens[:num_prefill_tokens] contains prefill tokens.
         - input_tokens[num_prefill_tokens:] contains decode tokens.
         """
-        input_tokens: list[int] = []
-        input_positions: list[int] = []
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
 
-        seq_lens: list[int] = []
-        past_lens: list[int] = []
-        query_lens: list[int] = []
-        multi_modal_kwargs_list: list[MultiModalKwargs] = []
-        multi_modal_placeholder_maps: dict[
+        seq_lens: List[int] = []
+        past_lens: List[int] = []
+        query_lens: List[int] = []
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        multi_modal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
 
-        subsequence_begins: list[int] = []
-        block_indices: list[int] = []
-        block_indices_begins: list[int] = []
+        subsequence_begins: List[int] = []
+        block_indices: List[int] = []
+        block_indices_begins: List[int] = []
 
         # initialize beginning of prefix sums
         subsequence_begins.append(0)
@@ -297,8 +297,8 @@ class OpenVINOModelRunner(ModelRunnerBase):
 
     def prepare_input_tensors(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> tuple[torch.Tensor, torch.Tensor, OpenVINOAttentionMetadata,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> Tuple[torch.Tensor, torch.Tensor, OpenVINOAttentionMetadata,
                SamplingMetadata, BatchedTensorInputs]:
         # Prepare input tensors.
         (
@@ -329,8 +329,8 @@ class OpenVINOModelRunner(ModelRunnerBase):
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
-        kv_caches: list[tuple["ov.Tensor", "ov.Tensor"]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        kv_caches: List[Tuple["ov.Tensor", "ov.Tensor"]],
     ) -> Optional[SamplerOutput]:
         (
             input_tokens,

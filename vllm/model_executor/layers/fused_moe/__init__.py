@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.triton_utils import HAS_TRITON
 
-_config: Optional[dict[str, Any]] = None
+_config: Optional[Dict[str, Any]] = None
 
 
 @contextmanager
@@ -19,7 +19,7 @@ def override_config(config):
     _config = old_config
 
 
-def get_config() -> Optional[dict[str, Any]]:
+def get_config() -> Optional[Dict[str, Any]]:
     return _config
 
 

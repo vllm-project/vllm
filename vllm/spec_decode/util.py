@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -17,14 +16,14 @@ SeqId = int
 
 
 def get_all_num_logprobs(
-        seq_group_metadata_list: list[SequenceGroupMetadata]) -> list[int]:
+        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
     """Given a list of SequenceGroupMetadata, create a list of all num_logprobs.
 
     If the sampling params do not call for any logprobs, return 0 for that
     sequence.
     """
 
-    all_num_logprobs: list[int] = []
+    all_num_logprobs: List[int] = []
     for seq_group_metadata in seq_group_metadata_list:
         num_logprobs = seq_group_metadata.sampling_params.logprobs
         if num_logprobs is None:
@@ -38,7 +37,7 @@ def get_sampled_token_logprobs(
         # shape [num_steps, batch_size, vocab_size]
         logprob_tensor: torch.Tensor,
         sampled_token_ids: torch.Tensor,  # shape [num_steps, batch_size]
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Get the logprobs for the sampled tokens. Returns the ranks and logprobs.
     """
     num_steps, batch_size, vocab_size = logprob_tensor.shape
@@ -60,21 +59,21 @@ def create_logprobs_output(
     token_id: int,
     token_id_logprob_rank: int,
     token_id_logprob: float,
-    topk_token_ids: list[Optional[int]],
-    topk_logprobs: list[Optional[float]],
-) -> dict[int, Logprob]:
-    """Create a Logprob dict for a token given the sampling results.
+    topk_token_ids: List[Optional[int]],
+    topk_logprobs: List[Optional[float]],
+) -> Dict[int, Logprob]:
+    """Create a Logprob Dict for a token given the sampling results.
 
     Args:
         token_id (int): The sampled token for the sequence.
         token_id_logprob_rank (int): The logprob rank of the sampled token.
         token_id_logprob (float): The logprob value of the sampled token.
-        topk_token_ids (list[Optional[int]]): The list of top-k token ids.
-        topk_logprobs (list[Optional[float]]): The list of top-k logprobs.
+        topk_token_ids (List[Optional[int]]): The list of top-k token ids.
+        topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
     """
     # vLLM logprobs always include the sampled token. In addition, the user may
     # request topk-logprobs (where top-k varies per user up to max_logprobs).
-    logprobs: dict[int, Logprob] = {
+    logprobs: Dict[int, Logprob] = {
         token_id: Logprob(
             logprob=token_id_logprob,
             rank=token_id_logprob_rank,
@@ -98,8 +97,8 @@ def create_sequence_group_output(
     token_id_logprob_rank: int,
     token_id_logprob: float,
     seq_id: SeqId,
-    topk_token_ids: list[Optional[int]],
-    topk_logprobs: list[Optional[float]],
+    topk_token_ids: List[Optional[int]],
+    topk_logprobs: List[Optional[float]],
     prompt_logprobs: Optional[PromptLogprobs] = None,
 ) -> CompletionSequenceGroupOutput:
     """Create a SequenceGroupOutput given the sampling results.
@@ -109,8 +108,8 @@ def create_sequence_group_output(
         token_id_logprob_rank (int): The logprob rank of the sampled token.
         token_id_logprob (float): The logprob value of the sampled token.
         seq_id (int): The sequence id.
-        topk_token_ids (list[Optional[int]]): The list of top-k token ids.
-        topk_logprobs (list[Optional[float]]): The list of top-k logprobs.
+        topk_token_ids (List[Optional[int]]): The list of top-k token ids.
+        topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
     """
 
     logprobs = create_logprobs_output(
@@ -132,17 +131,17 @@ def create_sequence_group_output(
 
 
 def split_batch_by_proposal_len(
-    seq_group_metadata_list: list[SequenceGroupMetadata],
-    proposal_lens: list[int],
-) -> tuple[tuple[list[SequenceGroupMetadata], list[int]], tuple[
-        list[SequenceGroupMetadata], list[int]]]:
+    seq_group_metadata_list: List[SequenceGroupMetadata],
+    proposal_lens: List[int],
+) -> Tuple[Tuple[List[SequenceGroupMetadata], List[int]], Tuple[
+        List[SequenceGroupMetadata], List[int]]]:
     """Utility function that splits a batch based on whether the proposal len is
     zero or not. We should remove this once vLLM supports per-sequence proposal
     lens in a batch.
     """
 
-    nonzero_lists: tuple[list[SequenceGroupMetadata], list[int]] = ([], [])
-    zero_lists: tuple[list[SequenceGroupMetadata], list[int]] = ([], [])
+    nonzero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
+    zero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
     for i, (seq_group, proposal_len) in enumerate(
             zip(seq_group_metadata_list, proposal_lens)):
         seq_groups, indices = nonzero_lists if proposal_len else zero_lists
@@ -153,7 +152,7 @@ def split_batch_by_proposal_len(
 
 def sampler_output_to_torch(
     sampler_output_list: Sequence[SamplerOutput], sampler_transposed: bool
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Utility function which converts a list of SamplerOutput to tensors.
 
         sampler_transposed here is used as the indicator for whether

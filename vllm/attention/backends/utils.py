@@ -3,7 +3,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
-def is_block_tables_empty(block_tables: Union[None, dict]):
+def is_block_tables_empty(block_tables: Union[None, Dict]):
     """
     Check if block_tables is None or a dictionary with all None values.
     """
@@ -58,8 +58,8 @@ def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
     return start_idx
 
 
-def _compute_slot_mapping_python(slot_mapping: list[int],
-                                 block_table: list[int], range_start: int,
+def _compute_slot_mapping_python(slot_mapping: List[int],
+                                 block_table: List[int], range_start: int,
                                  range_end: int, block_size: int):
     for i in range(range_start, range_end):
         block_number = block_table[i // block_size]
@@ -68,8 +68,8 @@ def _compute_slot_mapping_python(slot_mapping: list[int],
         slot_mapping.append(slot)
 
 
-def _compute_slot_mapping_numpy(slot_mapping: list[int],
-                                block_table: list[int], range_start: int,
+def _compute_slot_mapping_numpy(slot_mapping: List[int],
+                                block_table: List[int], range_start: int,
                                 range_end: int, block_size: int):
     block_table_array = np.array(block_table)
     idx = np.arange(range_start, range_end)
@@ -81,10 +81,10 @@ def _compute_slot_mapping_numpy(slot_mapping: list[int],
     slot_mapping.extend(seq_slot_mapping_array)
 
 
-def compute_slot_mapping(is_profile_run: bool, slot_mapping: list[int],
+def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
                          seq_id: int, seq_len: int, context_len: int,
                          start_idx: int, block_size: int,
-                         block_tables: dict[int, list[int]]):
+                         block_tables: Dict[int, List[int]]):
     """
     Compute slot mapping.
     """
@@ -125,7 +125,7 @@ TAttentionMetadata = TypeVar("TAttentionMetadata", bound='AttentionMetadata')
 
 class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
-    _metadata_cls: type[TAttentionMetadata]
+    _metadata_cls: Type[TAttentionMetadata]
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -135,12 +135,12 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.block_size = input_builder.block_size
 
     def prepare(self):
-        self.slot_mapping: list[int] = []
-        self.prefill_seq_lens: list[int] = []
-        self.context_lens: list[int] = []
-        self.block_tables: list[list[int]] = []
-        self.curr_seq_lens: list[int] = []
-        self.multimodal_placeholder_maps: dict[
+        self.slot_mapping: List[int] = []
+        self.prefill_seq_lens: List[int] = []
+        self.context_lens: List[int] = []
+        self.block_tables: List[List[int]] = []
+        self.curr_seq_lens: List[int] = []
+        self.multimodal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
@@ -202,7 +202,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
-    def build(self, seq_lens: list[int], query_lens: list[int],
+    def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
 
@@ -357,7 +357,7 @@ class CommonAttentionState(AttentionState):
     def get_graph_input_buffers(
             self,
             attn_metadata,
-            is_encoder_decoder_model: bool = False) -> dict[str, Any]:
+            is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
         input_buffers = {
             "slot_mapping": attn_metadata.slot_mapping,
             "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
@@ -426,7 +426,7 @@ class CommonAttentionState(AttentionState):
         attn_metadata.num_encoder_tokens = 0
 
     def _add_additonal_input_buffers_for_enc_dec_model(
-            self, attn_metadata, input_buffers: dict[str, Any]):
+            self, attn_metadata, input_buffers: Dict[str, Any]):
         """
         Saves additional input buffers specific to the encoder-decoder model
         from the attention metadata.
@@ -445,7 +445,7 @@ class CommonAttentionState(AttentionState):
             attn_metadata.decode_metadata.cross_block_tables)
 
     def _prepare_input_buffers_for_enc_dec_model(self, attn_metadata,
-                                                 input_buffers: dict[str,
+                                                 input_buffers: Dict[str,
                                                                      Any]):
         """
         Populates input buffers with data from the encoder-decoder model's
@@ -543,7 +543,7 @@ def get_seq_len_block_table_args(
 def get_num_prefill_decode_query_kv_tokens(
     attn_metadata,
     attn_type: str,
-) -> tuple[int, int, int]:
+) -> Tuple[int, int, int]:
     """
     Calculate the number of prefill and decode tokens for query, key/value
     based on the attention metadata and the specified attention type.
@@ -552,7 +552,7 @@ def get_num_prefill_decode_query_kv_tokens(
         attn_metadata (FlashAttentionMetadata): Attention Metadata object.
         attn_type (AttentionType): The type of attention being used.
     Returns:
-        tuple[int, int, int]: A tuple containing three integers:
+        Tuple[int, int, int]: A tuple containing three integers:
             - The number of prefill query tokens.
             - The number of prefill key/value tokens.
             - The number of decode query tokens.

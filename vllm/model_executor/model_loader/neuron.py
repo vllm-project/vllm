@@ -3,7 +3,7 @@
 import copy
 import importlib
 import os
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -30,7 +30,7 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 }
 
 # Models supported by Neuron.
-_NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str, str]] = {
+_NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str, str]] = {
     "LlamaForCausalLM": ("transformers_neuronx.llama.model",
                          "LlamaForSampling", "LlamaForCausalLM"),
     "MistralForCausalLM": ("transformers_neuronx.mistral.model",
@@ -124,7 +124,7 @@ def _get_model_architecture(config: PretrainedConfig) -> str:
         f"{list(_NEURON_SUPPORTED_MODELS.keys())}")
 
 
-def _get_buckets(env: str, default_value: list[int]) -> list[int]:
+def _get_buckets(env: str, default_value: List[int]) -> List[int]:
     env_value = os.getenv(env)
     if env_value is None:
         return default_value

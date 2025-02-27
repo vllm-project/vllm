@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from enum import IntEnum
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -46,7 +46,7 @@ class SimplePooler(nn.Module):
         normalize: bool,
         softmax: bool,
         step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[list[int]] = None,
+        returned_token_ids: Optional[List[int]] = None,
     ) -> "SimplePooler":
         if pooling_type == PoolingType.LAST:
             assert step_tag_id is None and returned_token_ids is None
@@ -174,7 +174,7 @@ class StepPool(SimplePooler):
         normalize: bool,
         softmax: bool,
         step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[list[int]] = None,
+        returned_token_ids: Optional[List[int]] = None,
     ):
         super().__init__(normalize=normalize, softmax=softmax)
 
@@ -245,7 +245,7 @@ class Pooler(nn.Module):
         normalize: bool,
         softmax: bool,
         step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[list[int]] = None,
+        returned_token_ids: Optional[List[int]] = None,
     ) -> SimplePooler:
         return SimplePooler.from_pooling_type(
             pooling_type=PoolingType[pooler_config.pooling_type]

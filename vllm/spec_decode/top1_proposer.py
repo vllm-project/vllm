@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -44,7 +44,7 @@ class Top1Proposer(SpeculativeProposer):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
-        seq_ids_with_bonus_token_in_last_step: set[int],
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Get speculative proposals given the input batch.
 
@@ -115,18 +115,18 @@ class Top1Proposer(SpeculativeProposer):
 
     def _split_by_proposal_len(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         proposal_len: int,
-    ) -> tuple[list[int], list[SequenceGroupMetadata], list[int]]:
+    ) -> Tuple[List[int], List[SequenceGroupMetadata], List[int]]:
         """Split sequences by two groups:
         1. Sequences with non-zero proposal length.
         2. Sequences with zero proposal length (due to disabled speculation
         or exceed the maximum model length).
         """
 
-        proposal_lens: list[int] = []
-        nonzero_proposal_len_seqs: list[SequenceGroupMetadata] = []
-        nonzero_proposal_len_indices: list[int] = []
+        proposal_lens: List[int] = []
+        nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
+        nonzero_proposal_len_indices: List[int] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             # The speculative decoding for this request has either been disabled
             # (e.g. due to high traffic) or this is a prompt request.
@@ -174,9 +174,9 @@ class Top1Proposer(SpeculativeProposer):
             return (proposal_lens, maybe_sampler_output,
                     nonzero_proposal_len_indices)
 
-        new_proposal_lens: list[int] = []
-        new_nonzero_proposal_len_indices: list[int] = []
-        new_maybe_sampler_output: list[SamplerOutput] = []
+        new_proposal_lens: List[int] = []
+        new_nonzero_proposal_len_indices: List[int] = []
+        new_maybe_sampler_output: List[SamplerOutput] = []
         nonzero_proposal_len_idx_ptr = 0
         seq_idx = 0
         while seq_idx < len(
@@ -217,11 +217,11 @@ class Top1Proposer(SpeculativeProposer):
         self,
         batch_size: int,
         proposal_len: int,
-        maybe_sampler_output: Optional[list[SamplerOutput]],
-        proposal_lens: list[int],
-        nonzero_proposal_len_indices: list[int],
+        maybe_sampler_output: Optional[List[SamplerOutput]],
+        proposal_lens: List[int],
+        nonzero_proposal_len_indices: List[int],
         sampler_transposed: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """After speculations are produced, merge the speculation results with
         the skipped sequences.
         """

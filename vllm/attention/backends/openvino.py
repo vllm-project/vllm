@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional, Tuple, Type
 
 import openvino as ov
 import torch
@@ -54,7 +54,7 @@ class OpenVINOAttentionBackend(AttentionBackend):
         raise NotImplementedError
 
     @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
+    def get_state_cls() -> Type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -67,22 +67,22 @@ class OpenVINOAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> tuple[int, ...]:
+    ) -> Tuple[int, ...]:
         return (2, num_blocks, num_kv_heads, block_size, head_size)
 
     @staticmethod
     def swap_blocks(
         src_tensor: ov.Tensor,
         dst_tensor: ov.Tensor,
-        src_to_dists: list[tuple[int, int]],
+        src_to_dists: List[Tuple[int, int]],
     ) -> None:
         for src, dst in src_to_dists:
             copy_cache_block(src_tensor, dst_tensor, src, dst)
 
     @staticmethod
     def copy_blocks(
-        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
-        src_to_dists: list[tuple[int, int]],
+        kv_caches: List[Tuple[ov.Tensor, ov.Tensor]],
+        src_to_dists: List[Tuple[int, int]],
     ) -> None:
         for src, dst in src_to_dists:
             for key_cache, value_cache in kv_caches:
@@ -138,7 +138,7 @@ class OpenVINOAttentionMetadata:
     # N.B. These aren't really related to attention and don't belong on this
     # type -- this is just a temporary solution to make them available to
     # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[dict[
+    multi_modal_placeholder_index_maps: Optional[Dict[
         str, MultiModalPlaceholderMap.IndexMap]]
 
     # Enable/disable KV scales calculation. This is so that we can disable the

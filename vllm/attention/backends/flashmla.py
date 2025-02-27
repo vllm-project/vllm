@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -27,25 +27,25 @@ class FlashMLABackend(MLACommonBackend):
         return "FLASHMLA"
 
     @staticmethod
-    def get_impl_cls() -> type["FlashMLAImpl"]:
+    def get_impl_cls() -> Type["FlashMLAImpl"]:
         return FlashMLAImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["FlashMLAMetadata"]:
+    def get_metadata_cls() -> Type["FlashMLAMetadata"]:
         return FlashMLAMetadata
 
     @staticmethod
-    def get_builder_cls() -> type["FlashMLAMetadataBuilder"]:
+    def get_builder_cls() -> Type["FlashMLAMetadataBuilder"]:
         return FlashMLAMetadataBuilder
 
     @staticmethod
-    def get_state_cls() -> type["FlashMLAState"]:
+    def get_state_cls() -> Type["FlashMLAState"]:
         return FlashMLAState
 
 
 @dataclass
 class FlashMLAMetadata(MLACommonMetadata):
-    decode_tile_scheduler_metadata: Optional[tuple[torch.Tensor,
+    decode_tile_scheduler_metadata: Optional[Tuple[torch.Tensor,
                                                    torch.Tensor]] = None
     decode_num_splits: Optional[torch.Tensor] = None
 
@@ -79,7 +79,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
-    def build(self, seq_lens: list[int], query_lens: list[int],
+    def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
         m = super().build(seq_lens, query_lens, cuda_graph_pad_size,
                           batch_size)
@@ -176,10 +176,10 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             head_size: int,
             scale: float,
             num_kv_heads: int,
-            alibi_slopes: Optional[list[float]],
+            alibi_slopes: Optional[List[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
+            blocksparse_params: Optional[Dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             # MLA Specific Arguments

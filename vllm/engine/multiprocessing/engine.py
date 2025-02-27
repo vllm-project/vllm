@@ -2,9 +2,8 @@
 
 import pickle
 import signal
-from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Optional, Union
+from typing import Iterator, List, Optional, Union
 
 import cloudpickle
 import zmq
@@ -206,7 +205,7 @@ class MQLLMEngine:
             if not self.use_async_sockets:
                 self._send_outputs(request_outputs)
 
-    def engine_step(self) -> list[RequestOutput]:
+    def engine_step(self) -> List[RequestOutput]:
         """Engine step wrapper with error handling."""
         try:
             return self.engine.step()

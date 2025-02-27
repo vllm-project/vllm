@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -67,7 +67,7 @@ class MarlinConfig(QuantizationConfig):
         return "marlin"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
         return [torch.half]
 
     @classmethod
@@ -76,11 +76,11 @@ class MarlinConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> list[str]:
+    def get_config_filenames(cls) -> List[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "MarlinConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "MarlinConfig":
         group_size = cls.get_from_keys(config, ["group_size"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
@@ -127,7 +127,7 @@ class MarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: list[int],
+        output_partition_sizes: List[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

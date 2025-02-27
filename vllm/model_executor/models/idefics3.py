@@ -16,8 +16,8 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Iterable, Mapping
-from typing import Literal, Optional, TypedDict, Union
+from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Set,
+                    Tuple, TypedDict, Union)
 
 import torch
 import torch.utils.checkpoint
@@ -84,7 +84,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(
         self,
         *,
-        size: Optional[dict[str, int]] = None,
+        size: Optional[Dict[str, int]] = None,
         **kwargs: object,
     ) -> Idefics3Processor:
         if size is not None:
@@ -426,8 +426,8 @@ class Idefics3Model(nn.Module):
         self.image_token_id = self.config.image_token_id
 
     def _validate_pixel_values(
-        self, data: Union[torch.Tensor, list[torch.Tensor]]
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
 
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
@@ -676,8 +676,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

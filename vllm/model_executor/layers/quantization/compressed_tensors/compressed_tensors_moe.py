@@ -2,7 +2,7 @@
 
 import enum
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import torch
 from compressed_tensors import CompressionFormat
@@ -417,10 +417,10 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             del new_t
 
         def get_scale_perms(num_bits: int):
-            scale_perm: list[int] = []
+            scale_perm: List[int] = []
             for i in range(8):
                 scale_perm.extend([i + 8 * j for j in range(8)])
-            scale_perm_single: list[int] = []
+            scale_perm_single: List[int] = []
             for i in range(4):
                 scale_perm_single.extend(
                     [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])

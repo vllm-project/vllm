@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+from typing import Optional, Type
 
 import torch
 import triton
@@ -126,7 +126,7 @@ def triton_scaled_mm(input: torch.Tensor,
                      weight: torch.Tensor,
                      scale_a: torch.Tensor,
                      scale_b: torch.Tensor,
-                     out_dtype: type[torch.dtype],
+                     out_dtype: Type[torch.dtype],
                      bias: Optional[torch.Tensor] = None,
                      block_size_m: int = 32,
                      block_size_n: int = 32,

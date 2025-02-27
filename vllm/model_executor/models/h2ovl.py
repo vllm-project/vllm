@@ -7,8 +7,7 @@
 # Copyright (c) 2024 H2O.AI
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from collections.abc import Mapping
-from typing import Optional
+from typing import Mapping, Optional
 
 import torch
 from PIL import Image

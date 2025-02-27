@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inference-only Snowflake Arctic model."""
-from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -472,8 +471,8 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -481,8 +480,8 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        mlp_params_mapping: list[tuple[str, str, int]] = []
-        expert_params_mapping: list[tuple[str, str, int]] = []
+        mlp_params_mapping: List[Tuple[str, str, int]] = []
+        expert_params_mapping: List[Tuple[str, str, int]] = []
         num_layers = self.config.num_hidden_layers
 
         for layer in range(num_layers):
@@ -511,7 +510,7 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
                         ("ws", f"experts.{expert_id}.w3.weight", expert_id))
 
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loaded_params: Set[str] = set()
 
         logger.info(
             "It will take ~10 minutes loading from the 16-bit weights. "

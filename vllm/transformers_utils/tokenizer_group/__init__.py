@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+from typing import Optional, Type
 
 from vllm.config import (LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, TokenizerPoolConfig)
@@ -35,7 +35,7 @@ def init_tokenizer_from_configs(model_config: ModelConfig,
 
 def get_tokenizer_group(tokenizer_pool_config: Optional[TokenizerPoolConfig],
                         **init_kwargs) -> BaseTokenizerGroup:
-    tokenizer_cls: type[BaseTokenizerGroup]
+    tokenizer_cls: Type[BaseTokenizerGroup]
     if tokenizer_pool_config is None:
         tokenizer_cls = TokenizerGroup
     elif isinstance(tokenizer_pool_config.pool_type, type) and issubclass(

@@ -3,8 +3,7 @@
 within a vision language model."""
 
 import math
-from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from PIL import Image
@@ -334,7 +333,7 @@ class SiglipEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, None]:
+    ) -> Tuple[torch.Tensor, None]:
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
@@ -549,8 +548,8 @@ class SiglipVisionModel(nn.Module):
             feature_sample_layers=feature_sample_layers,
         )
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -558,7 +557,7 @@ class SiglipVisionModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loaded_params: Set[str] = set()
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:

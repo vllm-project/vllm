@@ -3,9 +3,9 @@
 import asyncio
 import copy
 import pickle
-from collections.abc import AsyncGenerator, Iterator, Mapping
 from contextlib import contextmanager, suppress
-from typing import Any, Optional, Union, cast, overload
+from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
+                    Optional, Union, cast, overload)
 
 import cloudpickle
 import psutil
@@ -76,7 +76,7 @@ class MQLLMEngineClient(EngineClient):
         - Pulls RequestOutputs from its queue and yields them
 
     MQLLMEngine runs two background loops:
-        - output_loop: the output loop pulls list[RequestOutput]
+        - output_loop: the output loop pulls List[RequestOutput]
             from the MQLLMEngine via zmq (each list is the output
             of one engine_step in the LLMEngine). It then parses
             the list and pushes individual request_outputs into
@@ -120,7 +120,7 @@ class MQLLMEngineClient(EngineClient):
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
 
         # Stream for each individual request.
-        self.output_queues: dict[str, asyncio.Queue] = {}
+        self.output_queues: Dict[str, asyncio.Queue] = {}
 
         # Loop to handle output of the LLMEngine periodically.
         # Started after the MQLLMEngine is ready so that we can
@@ -401,7 +401,7 @@ class MQLLMEngineClient(EngineClient):
     async def do_log_stats(
         self,
         scheduler_outputs: Optional[SchedulerOutputs] = None,
-        model_output: Optional[list[SamplerOutput]] = None,
+        model_output: Optional[List[SamplerOutput]] = None,
     ) -> None:
         """
         Ignore do_log_stats (handled on MQLLMEngine polling)

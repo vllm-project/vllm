@@ -2,7 +2,7 @@
 
 import logging
 import math
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional, Type
 
 import torch
 from torch import nn
@@ -45,7 +45,7 @@ def convert_to_embedding_indices(indices):
 
 def convert_mapping(
     mapping: PromptAdapterMapping,
-    prompt_adapter_index_to_id: list[Optional[int]],
+    prompt_adapter_index_to_id: List[Optional[int]],
 ) -> torch.Tensor:
     """Converts PromptAdapterMapping to index tensors.
 
@@ -127,8 +127,8 @@ class PromptAdapterModelManager(AdapterModelManager):
             prompt_adapter_config: the PromptAdapter config,
         """
         self.model: nn.Module = model
-        # dict instead of a Set for compatibility with LRUCache.
-        self.prompt_adapter_index_to_id: list[
+        # Dict instead of a Set for compatibility with LRUCache.
+        self.prompt_adapter_index_to_id: List[
             Optional[int]] = [None] * self.prompt_adapter_slots
         self.max_num_seqs = max_num_seqs
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
@@ -139,7 +139,7 @@ class PromptAdapterModelManager(AdapterModelManager):
         self.base_indices = torch.tensor([-1])
         self.base_embedding_indices = torch.tensor([])
 
-        self.modules: dict[str, nn.Module] = {}
+        self.modules: Dict[str, nn.Module] = {}
         self._create_prompt_adapter_modules()
         self._last_mapping: Optional[PromptAdapterMapping] = None
 
@@ -252,7 +252,7 @@ class PromptAdapterModelManager(AdapterModelManager):
         return remove_adapter(adapter_id, self._registered_adapters,
                               self.deactivate_adapter)
 
-    def list_adapters(self) -> dict[int, Any]:
+    def list_adapters(self) -> Dict[int, Any]:
         return list_adapters(self._registered_adapters)
 
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
@@ -284,7 +284,7 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
         self._active_adapters = PromptAdapterLRUCache(
             self.prompt_adapter_slots, self._deactivate_adapter)
 
-    def list_adapters(self) -> dict[int, PromptAdapterModel]:
+    def list_adapters(self) -> Dict[int, PromptAdapterModel]:
         """List all registered PromptAdapterModel."""
         return dict(self._registered_adapters.cache)
 
@@ -344,7 +344,7 @@ def create_prompt_adapter_manager(
         max_num_seqs: int,
         max_num_batched_tokens: int,
         prompt_adapter_config: PromptAdapterConfig,
-        prompt_adapter_manager_cls: type[
+        prompt_adapter_manager_cls: Type[
             PromptAdapterModelManager] = PromptAdapterModelManager,
         **kwargs) -> PromptAdapterModelManager:
     """Create a PromptAdapterModel for a given model."""

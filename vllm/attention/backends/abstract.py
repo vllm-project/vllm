@@ -3,7 +3,8 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, Any, Generic, Optional, Protocol, TypeVar
+from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
+                    Protocol, Set, Tuple, Type, TypeVar)
 
 import torch
 
@@ -44,17 +45,17 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_impl_cls() -> type["AttentionImpl"]:
+    def get_impl_cls() -> Type["AttentionImpl"]:
         raise NotImplementedError
 
     @staticmethod
     @abstractmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
         raise NotImplementedError
 
     @staticmethod
     @abstractmethod
-    def get_state_cls() -> type["AttentionState"]:
+    def get_state_cls() -> Type["AttentionState"]:
         raise NotImplementedError
 
     @classmethod
@@ -63,7 +64,7 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_builder_cls() -> type["AttentionMetadataBuilder"]:
+    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
         raise NotImplementedError
 
     @staticmethod
@@ -73,7 +74,7 @@ class AttentionBackend(ABC):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> tuple[int, ...]:
+    ) -> Tuple[int, ...]:
         raise NotImplementedError
 
     @staticmethod
@@ -88,7 +89,7 @@ class AttentionBackend(ABC):
     @staticmethod
     @abstractmethod
     def copy_blocks(
-        kv_caches: list[torch.Tensor],
+        kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         raise NotImplementedError
@@ -121,7 +122,7 @@ class AttentionMetadata:
     # N.B. These aren't really related to attention and don't belong on this
     # type -- this is just a temporary solution to make them available to
     # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[dict[
+    multi_modal_placeholder_index_maps: Optional[Dict[
         str, MultiModalPlaceholderMap.IndexMap]]
 
     # Enable/disable KV scales calculation. This is so that we can disable the
@@ -143,8 +144,8 @@ class AttentionMetadata:
         pass
 
     def asdict_zerocopy(self,
-                        skip_fields: Optional[set[str]] = None
-                        ) -> dict[str, Any]:
+                        skip_fields: Optional[Set[str]] = None
+                        ) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
         if skip_fields is None:
             skip_fields = set()
@@ -190,14 +191,14 @@ class AttentionState(ABC, Generic[T]):
     def get_graph_input_buffers(
             self,
             attn_metadata: T,
-            is_encoder_decoder_model: bool = False) -> dict[str, Any]:
+            is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
         """Get attention-specific input buffers for CUDA graph capture."""
         ...
 
     @abstractmethod
     def prepare_graph_input_buffers(
             self,
-            input_buffers: dict[str, Any],
+            input_buffers: Dict[str, Any],
             attn_metadata: T,
             is_encoder_decoder_model: bool = False) -> None:
         """In-place modify input buffers dict for CUDA graph replay."""
@@ -223,7 +224,7 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
         raise NotImplementedError
 
     @abstractmethod
-    def build(self, seq_lens: list[int], query_lens: list[int],
+    def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int) -> T:
         """Build attention metadata with on-device tensors."""
         raise NotImplementedError
@@ -256,10 +257,10 @@ class AttentionImpl(ABC, Generic[T]):
         head_size: int,
         scale: float,
         num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[list[float]] = None,
+        alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
-        blocksparse_params: Optional[dict[str, Any]] = None,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
     ) -> None:

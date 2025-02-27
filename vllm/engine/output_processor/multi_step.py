@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import functools
-from typing import Callable, cast
+from typing import Callable, List, cast
 
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
@@ -39,7 +39,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def __init__(
         self,
         detokenizer: Detokenizer,
-        scheduler: list[Scheduler],
+        scheduler: List[Scheduler],
         seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
         stop_checker: StopChecker,
@@ -51,7 +51,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         self.stop_checker = stop_checker
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
-                               outputs: list[SequenceGroupOutput]) -> None:
+                               outputs: List[SequenceGroupOutput]) -> None:
         """Process prompt logprobs associated with each step of a multi-step-
         scheduled computation.
 
@@ -75,7 +75,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_outputs(self,
                         sequence_group: SequenceGroup,
-                        outputs: list[SequenceGroupOutput],
+                        outputs: List[SequenceGroupOutput],
                         is_async: bool = False) -> None:
         """Append new tokens in the outputs to sequences in the sequence group.
 
@@ -112,7 +112,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             isinstance(output, CompletionSequenceGroupOutput)
             for output in outputs
         ])
-        compl_outputs = cast(list[CompletionSequenceGroupOutput], outputs)
+        compl_outputs = cast(List[CompletionSequenceGroupOutput], outputs)
         assert all([
             seq_id == output.samples[0].parent_seq_id
             for output in compl_outputs
@@ -158,7 +158,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         )
 
     def _process_seq_outputs(self, seq: Sequence,
-                             valid_samples: list[SequenceOutput],
+                             valid_samples: List[SequenceOutput],
                              sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]

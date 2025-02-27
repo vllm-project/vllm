@@ -4,8 +4,7 @@
 # https://github.com/THUDM/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
-from collections.abc import Mapping
-from typing import Literal, Optional, TypedDict, Union
+from typing import Literal, Mapping, Optional, TypedDict, Union
 
 import torch
 from torch import nn

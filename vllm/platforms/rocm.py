@@ -2,7 +2,7 @@
 
 import os
 from functools import lru_cache, wraps
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 
@@ -36,7 +36,7 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._rocm_C with %r", e)
 
 # Models not supported by ROCm.
-_ROCM_UNSUPPORTED_MODELS: list[str] = []
+_ROCM_UNSUPPORTED_MODELS: List[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
@@ -44,7 +44,7 @@ _ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
                     "Triton flash attention. For half-precision SWA support, "
                     "please use CK flash attention by setting "
                     "`VLLM_USE_TRITON_FLASH_ATTN=0`")
-_ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {
+_ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
     "Qwen2ForCausalLM":
     _ROCM_SWA_REASON,
     "MistralForCausalLM":

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import operator
-from collections.abc import Iterable
-from typing import Optional
+from typing import Iterable, Optional
 
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized

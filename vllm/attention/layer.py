@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer."""
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -36,10 +36,10 @@ class Attention(nn.Module):
         head_size: int,
         scale: float,
         num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[list[float]] = None,
+        alibi_slopes: Optional[List[float]] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        blocksparse_params: Optional[dict[str, Any]] = None,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
         use_mla: bool = False,

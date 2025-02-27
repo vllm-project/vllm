@@ -10,7 +10,7 @@ import enum
 import sys
 import warnings
 from types import TracebackType
-from typing import Any, Optional
+from typing import Any, Optional, Type
 
 if sys.version_info[:2] >= (3, 11):
     from asyncio import timeout as asyncio_timeout
@@ -77,7 +77,7 @@ else:
 
         def __exit__(
             self,
-            exc_type: Optional[type[BaseException]],
+            exc_type: Optional[Type[BaseException]],
             exc_val: Optional[BaseException],
             exc_tb: Optional[TracebackType],
         ) -> Optional[bool]:
@@ -90,7 +90,7 @@ else:
 
         async def __aexit__(
             self,
-            exc_type: Optional[type[BaseException]],
+            exc_type: Optional[Type[BaseException]],
             exc_val: Optional[BaseException],
             exc_tb: Optional[TracebackType],
         ) -> Optional[bool]:
@@ -173,7 +173,7 @@ else:
             self._state = _State.ENTER
             self._reschedule()
 
-        def _do_exit(self, exc_type: Optional[type[BaseException]]) -> None:
+        def _do_exit(self, exc_type: Optional[Type[BaseException]]) -> None:
             if exc_type is asyncio.CancelledError and \
                     self._state == _State.TIMEOUT:
                 self._timeout_handler = None

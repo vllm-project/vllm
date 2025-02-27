@@ -2,7 +2,7 @@
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Type
 
 import torch
 from torch import nn
@@ -43,7 +43,7 @@ class QuantizeMethodBase(ABC):
 
 
 def method_has_implemented_embedding(
-        method_class: type[QuantizeMethodBase]) -> bool:
+        method_class: Type[QuantizeMethodBase]) -> bool:
     """
     Not all quant methods have embedding implemented, so we need to check that
     it exists for our given method. We check this by making sure the function
@@ -63,7 +63,7 @@ class QuantizationConfig(ABC):
     def __init__(self):
         super().__init__()
         # mapping is updated by models as they initialize
-        self.packed_modules_mapping: dict[str, list[str]] = dict()
+        self.packed_modules_mapping: Dict[str, List[str]] = dict()
 
     @abstractmethod
     def get_name(self) -> str:
@@ -71,7 +71,7 @@ class QuantizationConfig(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
         """List of supported activation dtypes."""
         raise NotImplementedError
 
@@ -88,13 +88,13 @@ class QuantizationConfig(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_config_filenames() -> list[str]:
+    def get_config_filenames() -> List[str]:
         """List of filenames to search for in the model directory."""
         raise NotImplementedError
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: dict[str, Any]) -> "QuantizationConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
 
@@ -110,7 +110,7 @@ class QuantizationConfig(ABC):
         return None
 
     @staticmethod
-    def get_from_keys(config: dict[str, Any], keys: list[str]) -> Any:
+    def get_from_keys(config: Dict[str, Any], keys: List[str]) -> Any:
         """Get a value from the model's quantization config."""
         for key in keys:
             if key in config:
@@ -119,7 +119,7 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @staticmethod
-    def get_from_keys_or(config: dict[str, Any], keys: list[str],
+    def get_from_keys_or(config: Dict[str, Any], keys: List[str],
                          default: Any) -> Any:
         """Get a optional value from the model's quantization config."""
         try:

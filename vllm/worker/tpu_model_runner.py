@@ -3,7 +3,8 @@
 import enum
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Type, Union)
 from unittest.mock import patch
 
 import numpy as np
@@ -59,15 +60,15 @@ class ModelInputForTPU(ModelRunnerInputBase):
     t: torch.Tensor
     p: torch.Tensor
     num_samples: int
-    n: list[int]
-    seq_groups: list[list[int]]
+    n: List[int]
+    seq_groups: List[List[int]]
     is_first_multi_step: bool = True
     is_last_step: bool = True
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(
-            self) -> dict[str, Union[int, torch.Tensor]]:
+            self) -> Dict[str, Union[int, torch.Tensor]]:
         tensor_dict = {
             "token_ids": self.token_ids,
             "position_ids": self.position_ids,
@@ -86,8 +87,8 @@ class ModelInputForTPU(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: type["ModelInputForTPU"],
-        tensor_dict: dict[str, Any],
+        cls: Type["ModelInputForTPU"],
+        tensor_dict: Dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForTPU":
         if attn_backend is not None:
@@ -120,7 +121,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             self.model_config.is_attention_free,
             False,
         )
-        self.cached_step_outputs: list[torch.Tensor] = []
+        self.cached_step_outputs: List[torch.Tensor] = []
 
         smem_size = 512 * 1024
         block_table_size = 4 * self.block_tables.size
@@ -166,7 +167,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         self,
         batch_size: int,
         seq_len: int,
-        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
         exec_mode: ExecutionMode,
     ) -> None:
         exec_mode = ExecutionMode(exec_mode)
@@ -279,7 +280,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
     def warmup_model(
         self,
-        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
         # Prefill
         logger.info("Compiling the model with different input shapes...")
@@ -346,14 +347,14 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
     def _prepare_prompt(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: list[int] = []
-        input_positions: list[int] = []
-        prompt_lens: list[int] = []
-        context_lens: list[int] = []
-        slot_mapping: list[int] = []
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
+        prompt_lens: List[int] = []
+        context_lens: List[int] = []
+        slot_mapping: List[int] = []
 
         for batch_idx, seq_group_metadata in enumerate(
                 seq_group_metadata_list):
@@ -438,13 +439,13 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
     def _prepare_decode(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: list[list[int]] = []
-        input_positions: list[list[int]] = []
-        slot_mapping: list[list[int]] = []
-        context_lens: list[int] = []
+        input_tokens: List[List[int]] = []
+        input_positions: List[List[int]] = []
+        slot_mapping: List[List[int]] = []
+        context_lens: List[int] = []
 
         batch_idx = 0
         for seq_group_metadata in seq_group_metadata_list:
@@ -509,9 +510,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
     def _prepare_sample(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         padded_batch_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[int]]:
         assert len(seq_group_metadata_list) > 0
         t = []
         p = []
@@ -557,9 +558,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[list[str]] = None,
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> ModelInputForTPU:
         del finished_requests_ids  # Unused.
         assert virtual_engine == 0
@@ -585,7 +586,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                 input_lens, t, p, num_samples, n, seq_groups)
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: dict[str, Any]) -> ModelInputForTPU:
+            self, tensor_dict: Dict[str, Any]) -> ModelInputForTPU:
         model_input = ModelInputForTPU.from_broadcasted_tensor_dict(
             tensor_dict, attn_backend=self.attn_backend)
         return model_input
@@ -594,10 +595,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     def execute_model(
         self,
         model_input: ModelInputForTPU,
-        kv_caches: Optional[list[Any]],
+        kv_caches: Optional[List[Any]],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> list[SamplerOutput]:
+    ) -> List[SamplerOutput]:
         assert intermediate_tensors is None
         if not model_input.is_first_multi_step:
             if not model_input.is_last_step:
@@ -780,7 +781,7 @@ class ModelWrapper(nn.Module):
         t: torch.Tensor,
         p: torch.Tensor,
         num_samples: int,
-        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -887,8 +888,8 @@ def _apply_top_p(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
 
 
 def _make_decode_output(
-    next_token_ids: list[int],
-    seq_groups: list[list[int]],
+    next_token_ids: List[int],
+    seq_groups: List[List[int]],
 ) -> SamplerOutput:
     zero_logprob = Logprob(0.0)
     sampler_outputs = []

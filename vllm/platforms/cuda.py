@@ -5,7 +5,8 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from functools import lru_cache, wraps
-from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
+from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
+                    Union)
 
 import torch
 from typing_extensions import ParamSpec
@@ -99,7 +100,7 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def is_full_nvlink(cls, device_ids: list[int]) -> bool:
+    def is_full_nvlink(cls, device_ids: List[int]) -> bool:
         raise NotImplementedError
 
     @classmethod
@@ -286,7 +287,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def has_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: Union[Tuple[int, int], int],
         device_id: int = 0,
     ) -> bool:
         try:
@@ -319,7 +320,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
-    def is_full_nvlink(cls, physical_device_ids: list[int]) -> bool:
+    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
         """
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
@@ -384,7 +385,7 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
         return device_props.total_memory
 
     @classmethod
-    def is_full_nvlink(cls, physical_device_ids: list[int]) -> bool:
+    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
         logger.exception(
             "NVLink detection not possible, as context support was"
             " not found. Assuming no NVLink available.")

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer ROCm GPUs."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -35,19 +35,19 @@ class ROCmFlashAttentionBackend(AttentionBackend):
         return "ROCM_FLASH"
 
     @staticmethod
-    def get_impl_cls() -> type["ROCmFlashAttentionImpl"]:
+    def get_impl_cls() -> Type["ROCmFlashAttentionImpl"]:
         return ROCmFlashAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
         return ROCmFlashAttentionMetadata
 
     @staticmethod
-    def get_builder_cls() -> type["ROCmFlashAttentionMetadataBuilder"]:
+    def get_builder_cls() -> Type["ROCmFlashAttentionMetadataBuilder"]:
         return ROCmFlashAttentionMetadataBuilder
 
     @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
+    def get_state_cls() -> Type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -56,7 +56,7 @@ class ROCmFlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> tuple[int, ...]:
+    ) -> Tuple[int, ...]:
         return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                  num_kv_heads, head_size)
 
@@ -70,7 +70,7 @@ class ROCmFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: list[torch.Tensor],
+        kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
@@ -87,7 +87,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     """
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    seq_lens: Optional[list[int]]
+    seq_lens: Optional[List[int]]
     # seq_lens stored as a tensor.
     seq_lens_tensor: Optional[torch.Tensor]
     # Maximum sequence length among prefill batch. 0 if there are decoding
@@ -133,7 +133,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Begin encoder attn & enc/dec cross-attn fields...
 
     # Encoder sequence lengths representation
-    encoder_seq_lens: Optional[list[int]] = None
+    encoder_seq_lens: Optional[List[int]] = None
     encoder_seq_lens_tensor: Optional[torch.Tensor] = None
 
     # Maximum sequence length among encoder sequences
@@ -301,8 +301,8 @@ class ROCmFlashAttentionMetadataBuilder(
 
 def _make_alibi_bias(alibi_slopes: torch.Tensor,
                      dtype: torch.dtype,
-                     seq_lens: Optional[list[int]],
-                     make_attn_mask: bool = True) -> list[torch.Tensor]:
+                     seq_lens: Optional[List[int]],
+                     make_attn_mask: bool = True) -> List[torch.Tensor]:
     attn_biases = []
     if seq_lens:
         for seq_len in seq_lens:
@@ -453,10 +453,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
+        alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -846,12 +846,12 @@ def _sdpa_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    seq_lens: list[int],
+    seq_lens: List[int],
     num_tokens: int,
     num_heads: int,
     head_size: int,
     scale: float,
-    attn_masks: Optional[list[torch.Tensor]] = None,
+    attn_masks: Optional[List[torch.Tensor]] = None,
 ) -> torch.Tensor:
     start = 0
     output = torch.empty((num_tokens, num_heads, head_size),

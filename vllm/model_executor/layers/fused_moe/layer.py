@@ -2,7 +2,7 @@
 
 from abc import abstractmethod
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Tuple
 
 import torch
 from torch.nn.parameter import UninitializedParameter
@@ -698,7 +698,7 @@ class FusedMoE(torch.nn.Module):
     def make_expert_params_mapping(
             cls, ckpt_gate_proj_name: str, ckpt_down_proj_name: str,
             ckpt_up_proj_name: str,
-            num_experts: int) -> list[tuple[str, str, int, str]]:
+            num_experts: int) -> List[Tuple[str, str, int, str]]:
 
         return [
             # (param_name, weight_name, expert_id, shard_id)

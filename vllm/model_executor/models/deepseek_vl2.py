@@ -3,9 +3,9 @@
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
-from collections.abc import Iterable, Mapping
 from functools import cached_property
-from typing import Literal, Optional, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -50,7 +50,7 @@ _IMAGE_TOKEN = "<image>"
 
 class DeepseekVL2ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+    data: Union[torch.Tensor, List[torch.Tensor]]
     """
     Shape: `(batch_size * num_images, num_channels, height, width)`
     """
@@ -62,7 +62,7 @@ class DeepseekVL2ImagePixelInputs(TypedDict):
 
 class DeepseekVL2VImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+    data: Union[torch.Tensor, List[torch.Tensor]]
     """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
@@ -416,8 +416,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return get_sampler()
 
     def _validate_pixel_values(
-        self, data: Union[torch.Tensor, list[torch.Tensor]]
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
 
         h = w = self.vision_config.image_size
         expected_dims = (3, h, w)
@@ -437,8 +437,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return data
 
     def _validate_images_spatial_crop(
-        self, data: Union[torch.Tensor, list[torch.Tensor]]
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
         expected_dims = 2
 
         def _validate_shape(d: torch.Tensor):
@@ -665,8 +665,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
 
         loader = AutoWeightsLoader(self)
         autoloaded_weights = loader.load_weights(weights,

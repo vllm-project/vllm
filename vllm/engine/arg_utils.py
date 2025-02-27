@@ -3,9 +3,9 @@
 import argparse
 import dataclasses
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast, get_args
+from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
+                    Tuple, Type, Union, cast, get_args)
 
 import torch
 
@@ -65,7 +65,7 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
     if len(val) == 0:
         return None
 
-    out_dict: dict[str, int] = {}
+    out_dict: Dict[str, int] = {}
     for item in val.split(","):
         kv_parts = [part.lower().strip() for part in item.split("=")]
         if len(kv_parts) != 2:
@@ -91,7 +91,7 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str = 'facebook/opt-125m'
-    served_model_name: Optional[Union[str, list[str]]] = None
+    served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
     hf_config_path: Optional[str] = None
     task: TaskOption = "auto"
@@ -110,7 +110,7 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     distributed_executor_backend: Optional[Union[str,
-                                                 type[ExecutorBase]]] = None
+                                                 Type[ExecutorBase]]] = None
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
@@ -131,7 +131,7 @@ class EngineArgs:
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
-    rope_scaling: Optional[dict[str, Any]] = None
+    rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
     hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
@@ -143,10 +143,10 @@ class EngineArgs:
     # Note: Specifying a tokenizer pool by passing a class
     # is intended for expert use only. The API may change without
     # notice.
-    tokenizer_pool_type: Union[str, type["BaseTokenizerGroup"]] = "ray"
-    tokenizer_pool_extra_config: Optional[dict[str, Any]] = None
+    tokenizer_pool_type: Union[str, Type["BaseTokenizerGroup"]] = "ray"
+    tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
-    mm_processor_kwargs: Optional[dict[str, Any]] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
     enable_lora: bool = False
     enable_lora_bias: bool = False
@@ -157,7 +157,7 @@ class EngineArgs:
     max_prompt_adapter_token: int = 0
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
-    long_lora_scaling_factors: Optional[tuple[float]] = None
+    long_lora_scaling_factors: Optional[Tuple[float]] = None
     lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
@@ -167,7 +167,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
-    ignore_patterns: Optional[Union[str, list[str]]] = None
+    ignore_patterns: Optional[Union[str, List[str]]] = None
     preemption_mode: Optional[str] = None
 
     scheduler_delay_factor: float = 0.0
@@ -196,9 +196,9 @@ class EngineArgs:
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
-    scheduler_cls: Union[str, type[object]] = "vllm.core.scheduler.Scheduler"
+    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
 
-    override_neuron_config: Optional[dict[str, Any]] = None
+    override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = "auto"
@@ -206,13 +206,13 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
-    override_generation_config: Optional[dict[str, Any]] = None
+    override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
     model_impl: str = "auto"
 
     calculate_kv_scales: Optional[bool] = None
 
-    additional_config: Optional[dict[str, Any]] = None
+    additional_config: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if not self.tokenizer:

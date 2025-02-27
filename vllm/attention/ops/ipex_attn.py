@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
@@ -16,7 +16,7 @@ from vllm import _custom_ops as ops
 class _PagedAttention:
 
     @staticmethod
-    def get_supported_head_sizes() -> list[int]:
+    def get_supported_head_sizes() -> List[int]:
         return [32, 64, 80, 96, 112, 128, 256]
 
     @staticmethod
@@ -26,7 +26,7 @@ class _PagedAttention:
         num_kv_heads: int,
         head_size: int,
         *args,
-    ) -> tuple[int, ...]:
+    ) -> Tuple[int, ...]:
         return (2, num_blocks, block_size * num_kv_heads * head_size)
 
     @staticmethod
@@ -35,7 +35,7 @@ class _PagedAttention:
         num_kv_heads: int,
         head_size: int,
         *args,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         x = 16 // kv_cache.element_size()
         num_blocks = kv_cache.shape[1]
 
@@ -117,8 +117,8 @@ class _PagedAttention:
 
     @staticmethod
     def copy_blocks(
-        kv_caches: list[torch.Tensor],
-        src_to_dists: dict[int, list[int]],
+        kv_caches: List[torch.Tensor],
+        src_to_dists: Dict[int, List[int]],
         *args,
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
@@ -134,7 +134,7 @@ class _IPEXPagedAttention(_PagedAttention):
         num_kv_heads: int,
         head_size: int,
         *args,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]

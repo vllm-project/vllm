@@ -17,12 +17,14 @@
 # limitations under the License.
 """Exaone model configuration"""
 
+from typing import Dict
+
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-EXAONE_PRETRAINED_CONFIG_ARCHIVE_MAP: dict[str, str] = {}
+EXAONE_PRETRAINED_CONFIG_ARCHIVE_MAP: Dict[str, str] = {}
 
 
 class ExaoneConfig(PretrainedConfig):

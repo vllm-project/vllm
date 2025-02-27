@@ -4,7 +4,7 @@ import dataclasses
 import os
 import time
 from abc import abstractmethod
-from typing import Any, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import cloudpickle
 import torch
@@ -77,7 +77,7 @@ class WorkerBase:
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[list[SamplerOutput]]:
+    ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
     def start_worker_execution_loop(self) -> None:
@@ -92,14 +92,14 @@ class WorkerBase:
                 if output is None:
                     return None
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
 
         The implementation may run profiling or other heuristics to determine
         the size of caches.
 
-        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
         are blocks that are "active" on the device and can be appended to.
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.
@@ -121,7 +121,7 @@ class WorkerBase:
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    def list_loras(self) -> set[int]:
+    def list_loras(self) -> Set[int]:
         raise NotImplementedError
 
     @property
@@ -150,7 +150,7 @@ class DelegateWorkerBase(WorkerBase):
     def init_device(self) -> None:
         self.worker.init_device()
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         return self.worker.determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -167,7 +167,7 @@ class DelegateWorkerBase(WorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[list[SamplerOutput]]:
+    ) -> Optional[List[SamplerOutput]]:
         return self.worker.execute_model(execute_model_req)
 
     def get_cache_block_size_bytes(self) -> int:
@@ -182,7 +182,7 @@ class DelegateWorkerBase(WorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.worker.pin_lora(lora_id)
 
-    def list_loras(self) -> set[int]:
+    def list_loras(self) -> Set[int]:
         return self.worker.list_loras()
 
     def __getattr__(self, attr):
@@ -204,7 +204,7 @@ class LoRANotSupportedWorkerBase(WorkerBase):
         return ValueError(
             f"{type(self)} does not support LoRA")  # type: ignore
 
-    def list_loras(self) -> set[int]:
+    def list_loras(self) -> Set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")
 
 
@@ -223,8 +223,8 @@ class WorkerInput:
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: type["WorkerInput"],
-        tensor_dict: dict[str, Any],
+        cls: Type["WorkerInput"],
+        tensor_dict: Dict[str, Any],
     ) -> "WorkerInput":
         """
         Pop fields from the given tensor_dict and populate a new instance of
@@ -240,7 +240,7 @@ class WorkerInput:
         )
 
     def as_broadcastable_tensor_dict(
-            self) -> dict[str, Union[int, torch.Tensor]]:
+            self) -> Dict[str, Union[int, torch.Tensor]]:
         """
         Extract broadcastable fields.
         """
@@ -282,7 +282,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     @property
     @abstractmethod
-    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         """
         Gets the list of kv caches to pass to the worker's model runner. Each
         element in the list is a kv cache corresponding to a particular virtual
@@ -311,7 +311,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def _get_worker_input_from_broadcast(
         self
-    ) -> Optional[tuple[BroadcastableModelInput, WorkerInput, dict[
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
             str, torch.Tensor]]]:
         """ Get the worker input from the broadcasted tensor dict. """
         assert self.do_metadata_broadcast
@@ -331,7 +331,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> tuple[BroadcastableModelInput, WorkerInput, dict[str, torch.Tensor]]:
+    ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
         """ Get the driver input and broadcast it to other workers.  """
         assert self.is_driver_worker
 
@@ -361,7 +361,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[tuple[BroadcastableModelInput, WorkerInput, dict[
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
             str, torch.Tensor]]]:
         """
         Prepare the inputs to ModelRunner and workers.
@@ -386,7 +386,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[list[SamplerOutput]]:
+    ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         start_time = time.perf_counter()
@@ -444,14 +444,14 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 o.model_execute_time = (orig_model_execute_time +
                                         model_execute_time)
 
-        # output is list[SamplerOutput]
+        # output is List[SamplerOutput]
         return output
 
     def _execute_model_spmd(
         self,
         execute_model_req: ExecuteModelRequest,
         intermediate_tensors: Optional[IntermediateTensors] = None
-    ) -> Optional[list[SamplerOutput]]:
+    ) -> Optional[List[SamplerOutput]]:
         """
         Execute model in Single Program Multiple Data (SPMD) fashion.
         All workers take the same request, prepare the input and
@@ -521,7 +521,7 @@ class WorkerWrapperBase:
                 from vllm.utils import init_cached_hf_modules
                 init_cached_hf_modules()
 
-    def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
+    def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         """
         Adjust the rpc_rank based on the given mapping.
         It is only used during the initialization of the executor,
@@ -530,7 +530,7 @@ class WorkerWrapperBase:
         if self.rpc_rank in rank_mapping:
             self.rpc_rank = rank_mapping[self.rpc_rank]
 
-    def update_environment_variables(self, envs_list: list[dict[str,
+    def update_environment_variables(self, envs_list: List[Dict[str,
                                                                 str]]) -> None:
         envs = envs_list[self.rpc_rank]
         key = 'CUDA_VISIBLE_DEVICES'
@@ -540,7 +540,7 @@ class WorkerWrapperBase:
             del os.environ[key]
         update_environment_variables(envs)
 
-    def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:
+    def init_worker(self, all_kwargs: List[Dict[str, Any]]) -> None:
         """
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
@@ -567,7 +567,7 @@ class WorkerWrapperBase:
             self.worker = worker_class(**kwargs)
             assert self.worker is not None
 
-    def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
+    def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.rpc_rank]
         self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
@@ -598,8 +598,8 @@ class WorkerWrapperBase:
 
 
 def extract_previous_hidden_states(
-        data: Union[ExecuteModelRequest, dict[str, torch.Tensor]]) -> \
-            dict[str, torch.Tensor]:
+        data: Union[ExecuteModelRequest, Dict[str, torch.Tensor]]) -> \
+            Dict[str, torch.Tensor]:
     """If data contains previous_hidden_states, extract it. This returns a dict
     which can be used directly as additional kwargs in any following 
     execute_model calls. This is used in draft models like EAGLE."""

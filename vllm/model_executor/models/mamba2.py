@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """PyTorch MAMBA2 model."""
-from collections.abc import Iterable
-from typing import Optional
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -34,7 +33,7 @@ from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-KVCache = tuple[torch.Tensor, torch.Tensor]
+KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class Mamba2DecoderLayer(nn.Module):
@@ -249,7 +248,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def _get_mamba_cache_shape(
-            self) -> tuple[tuple[int, int], tuple[int, int]]:
+            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
 
         conv_state_shape, temporal_state_shape = None, None
@@ -295,10 +294,10 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "A_log" in name:
                 name = name.replace("A_log", "A")

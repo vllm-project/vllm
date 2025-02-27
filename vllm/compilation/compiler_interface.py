@@ -3,7 +3,7 @@ import copy
 import hashlib
 import os
 from contextlib import ExitStack
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import torch
@@ -43,10 +43,10 @@ class CompilerInterface:
     def compile(
         self,
         graph: fx.GraphModule,
-        example_inputs: list[Any],
-        compiler_config: dict[str, Any],
+        example_inputs: List[Any],
+        compiler_config: Dict[str, Any],
         runtime_shape: Optional[int] = None
-    ) -> tuple[Optional[Callable], Optional[Any]]:
+    ) -> Tuple[Optional[Callable], Optional[Any]]:
         """
         Compile the graph with the given example inputs and compiler config,
         with a runtime shape. If the `runtime_shape` is None, it means
@@ -72,7 +72,7 @@ class CompilerInterface:
     def load(self,
              handle: Any,
              graph: fx.GraphModule,
-             example_inputs: list[Any],
+             example_inputs: List[Any],
              graph_index: int,
              runtime_shape: Optional[int] = None) -> Callable:
         """
@@ -110,7 +110,7 @@ class AlwaysHitShapeEnv:
     """
 
     def __init__(self) -> None:
-        self.guards: list[Any] = []
+        self.guards: List[Any] = []
 
     def evaluate_guards_expression(self, *args, **kwargs):
         return True
@@ -129,7 +129,7 @@ class InductorAdaptor(CompilerInterface):
     name = "inductor"
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
-        factors: list[Any] = []
+        factors: List[Any] = []
         # summarize system state
         from torch._inductor.codecache import CacheBase
         system_factors = CacheBase.get_system()
@@ -159,10 +159,10 @@ class InductorAdaptor(CompilerInterface):
     def compile(
         self,
         graph: fx.GraphModule,
-        example_inputs: list[Any],
-        compiler_config: dict[str, Any],
+        example_inputs: List[Any],
+        compiler_config: Dict[str, Any],
         runtime_shape: Optional[int] = None
-    ) -> tuple[Optional[Callable], Optional[Any]]:
+    ) -> Tuple[Optional[Callable], Optional[Any]]:
         from torch._inductor import config
         current_config = config.get_config_copy()
         from torch._inductor.compile_fx import compile_fx
@@ -273,7 +273,7 @@ class InductorAdaptor(CompilerInterface):
     def load(self,
              handle: Any,
              graph: fx.GraphModule,
-             example_inputs: list[Any],
+             example_inputs: List[Any],
              graph_index: int,
              runtime_shape: Optional[int] = None) -> Callable:
         assert isinstance(handle, tuple)
@@ -331,10 +331,10 @@ class EagerAdaptor(CompilerInterface):
     def compile(
         self,
         graph: fx.GraphModule,
-        example_inputs: list[Any],
-        compiler_config: dict[str, Any],
+        example_inputs: List[Any],
+        compiler_config: Dict[str, Any],
         runtime_shape: Optional[int] = None
-    ) -> tuple[Optional[Callable], Optional[Any]]:
+    ) -> Tuple[Optional[Callable], Optional[Any]]:
         # we don't need to compile the graph, just return the graph itself.
         # It does not support caching, return None for the handle.
         return graph, None

@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import List, Optional, Set, Union
 
 import torch
 
@@ -58,7 +58,7 @@ class SpeculativeScores:
 
     # Scoring model may also return logprobs for prompt tokens
     # for each request, when chunked prefill is enabled.
-    prompt_logprobs: Optional[list[PromptLogprobs]] = None
+    prompt_logprobs: Optional[List[PromptLogprobs]] = None
 
     def __repr__(self):
         return (f"SpeculativeScores("
@@ -74,7 +74,7 @@ class SpeculativeProposer(ABC):
         execute_model_req: ExecuteModelRequest,
         # If set, this contains all sequence IDs that were assigned
         # bonus tokens in their last forward pass.
-        seq_ids_with_bonus_token_in_last_step: set[int],
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         raise NotImplementedError
 

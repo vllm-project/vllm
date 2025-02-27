@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -24,7 +24,7 @@ class MarlinLinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls,
-                      c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+                      c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         if c.zero_points:
             return False, "Zero points currently not supported by "\
                           " MarlinLinearKernel. Will be added when AWQMarlin "\

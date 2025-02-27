@@ -3,7 +3,8 @@
 import dataclasses
 import functools
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 
@@ -36,7 +37,7 @@ MULTI_STEP_ATTENTION_BACKENDS = [
 MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["FLASH_ATTN", "FLASHINFER"]
 
 def _get_supported_attention_backends(chunked_prefill_enabled: bool) \
-    -> list[str]:
+    -> List[str]:
     if chunked_prefill_enabled:
         return MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS
     else:
@@ -145,8 +146,8 @@ class StatefulModelInput(BroadcastableModelInput):
     # actual frozen model input dataclass passed to _base_model_runner
     frozen_model_input: Optional[ModelInputForGPUWithSamplingMetadata] = None
 
-    # List of model outputs for each step, may not be all pythonized
-    cached_outputs: list[ModelOutput] = field(default_factory=list)
+    # list of model outputs for each step, may not be all pythonized
+    cached_outputs: List[ModelOutput] = field(default_factory=list)
 
     # used to pass sampled token ids from the last step to the current step for
     # TP workers. Used to append to end of outputs and used by advance_step
@@ -157,13 +158,13 @@ class StatefulModelInput(BroadcastableModelInput):
     is_first_multi_step: bool = False
     base_output_proc_callback: Optional[Callable] = None
     # ping-pong data structures for multi-step to wait on the previous step
-    step_cuda_events: list[torch.cuda.Event] = field(
+    step_cuda_events: List[torch.cuda.Event] = field(
         default_factory=lambda: [torch.cuda.Event(blocking=True)] * 2)
     num_seqs: int = -1
     num_queries: int = -1
     num_single_step_prefills: int = 0
 
-    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         assert self.frozen_model_input is not None
         tensor_dict = self.frozen_model_input.as_broadcastable_tensor_dict()
         new_tensor_dict = {
@@ -182,7 +183,7 @@ class StatefulModelInput(BroadcastableModelInput):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: dict[str, Any],
+        tensor_dict: Dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "StatefulModelInput":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -311,7 +312,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         super().__init__(*args, **kwargs)
 
         # Check attention backend support.
-        supported_attention_backends: list[str] = \
+        supported_attention_backends: List[str] = \
             _get_supported_attention_backends(
                 self.scheduler_config.chunked_prefill_enabled)
         if self.attn_backend.get_name() not in supported_attention_backends:
@@ -345,7 +346,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return torch.cuda.Stream()
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: dict[str, Any]) -> StatefulModelInput:
+            self, tensor_dict: Dict[str, Any]) -> StatefulModelInput:
         model_input = (StatefulModelInput.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,
@@ -354,9 +355,9 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[list[str]] = None
+        finished_requests_ids: Optional[List[str]] = None
     ) -> StatefulModelInput:
         frozen_model_input: ModelInputForGPUWithSamplingMetadata = \
               self._base_model_runner.prepare_model_input(
@@ -409,7 +410,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
     def _final_process_outputs(
             self, model_input: StatefulModelInput,
-            output_proc_callback: Optional[Callable]) -> list[SamplerOutput]:
+            output_proc_callback: Optional[Callable]) -> List[SamplerOutput]:
         assert model_input.frozen_model_input is not None
 
         has_async_callback = output_proc_callback is not None
@@ -460,10 +461,10 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
     def execute_model(
         self,
         model_input: StatefulModelInput,
-        kv_caches: list[torch.Tensor],
+        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[Union[list[SamplerOutput], IntermediateTensors]]:
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """ 
         Execute the model for a single step and update multi-step
         metadata
@@ -670,7 +671,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
     def remove_all_loras(self):
         return self._base_model_runner.remove_all_loras()
 
-    def capture_model(self, kv_caches: list[list]) -> None:
+    def capture_model(self, kv_caches: List[List]) -> None:
         return self._base_model_runner.capture_model(kv_caches)
 
     @property
@@ -678,8 +679,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return self._base_model_runner.vocab_size
 
 
-DeferredLogprobsReturnType = tuple[Optional[list[Optional[PromptLogprobs]]],
-                                   Optional[list[SampleLogprobs]]]
+DeferredLogprobsReturnType = Tuple[Optional[List[Optional[PromptLogprobs]]],
+                                   Optional[List[SampleLogprobs]]]
 
 
 def deferred_pythonize_logprobs(
@@ -853,7 +854,7 @@ def _pythonize_sampler_output(
         seq_ids = seq_group.seq_ids
         next_token_ids = sample_result
         parent_ids = [0]
-        seq_outputs: list[SequenceOutput]
+        seq_outputs: List[SequenceOutput]
 
         if cache is not None:
             completion_seq_group_output: CompletionSequenceGroupOutput = \

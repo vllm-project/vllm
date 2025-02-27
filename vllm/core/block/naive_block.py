@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections import deque
-from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple, Union
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
@@ -39,7 +38,7 @@ class NaiveBlockAllocator(BlockAllocator):
         if block_ids is None:
             block_ids = range(num_blocks)
 
-        self._free_block_indices: deque[BlockId] = deque(block_ids)
+        self._free_block_indices: Deque[BlockId] = deque(block_ids)
         self._all_block_indices = frozenset(block_ids)
         assert len(self._all_block_indices) == num_blocks
 
@@ -65,7 +64,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
-                                 token_ids: list[int],
+                                 token_ids: List[int],
                                  extra_hash: Optional[int] = None,
                                  device: Optional[Device] = None) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
@@ -75,7 +74,7 @@ class NaiveBlockAllocator(BlockAllocator):
             prev_block (Optional[Block]): The previous block in the sequence. If
                 None, then the block to be allocated is the first block in the
                 sequence.
-            token_ids (list[int]): The token IDs to be stored in the new block.
+            token_ids (List[int]): The token IDs to be stored in the new block.
 
         Returns:
             Block: The newly allocated immutable block.
@@ -88,9 +87,9 @@ class NaiveBlockAllocator(BlockAllocator):
     def allocate_immutable_blocks(
             self,
             prev_block: Optional[Block],
-            block_token_ids: list[list[int]],
+            block_token_ids: List[List[int]],
             extra_hash: Optional[int] = None,
-            device: Optional[Device] = None) -> list[Block]:
+            device: Optional[Device] = None) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
 
@@ -162,7 +161,7 @@ class NaiveBlockAllocator(BlockAllocator):
     def free_block_id(self, block_id: BlockId) -> None:
         self._free_block_id(block_id)
 
-    def fork(self, last_block: Block) -> list[Block]:
+    def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
         memory as the original sequence.
 
@@ -170,12 +169,12 @@ class NaiveBlockAllocator(BlockAllocator):
             last_block (Block): The last block in the original sequence.
 
         Returns:
-            list[Block]: The new sequence of blocks that shares the same memory
+            List[Block]: The new sequence of blocks that shares the same memory
                 as the original sequence.
         """
         source_blocks = get_all_blocks_recursively(last_block)
 
-        forked_blocks: list[Block] = []
+        forked_blocks: List[Block] = []
         prev_block = None
         for block in source_blocks:
 
@@ -219,7 +218,7 @@ class NaiveBlockAllocator(BlockAllocator):
         return self._refcounter
 
     @property
-    def all_block_ids(self) -> frozenset[int]:
+    def all_block_ids(self) -> FrozenSet[int]:
         return self._all_block_indices
 
     def cow_block_if_not_appendable(self, block: Block) -> BlockId:
@@ -247,16 +246,16 @@ class NaiveBlockAllocator(BlockAllocator):
 
         return trg_block_id
 
-    def clear_copy_on_writes(self) -> list[tuple[BlockId, BlockId]]:
+    def clear_copy_on_writes(self) -> List[Tuple[BlockId, BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            list[tuple[BlockId, BlockId]]: A list mapping source
+            List[Tuple[BlockId, BlockId]]: A list mapping source
                 block indices to destination block indices.
         """
         return self._cow_tracker.clear_cows()
 
-    def mark_blocks_as_accessed(self, block_ids: list[int],
+    def mark_blocks_as_accessed(self, block_ids: List[int],
                                 now: float) -> None:
         """Mark blocks as accessed, used in prefix caching.
 
@@ -265,7 +264,7 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         pass
 
-    def mark_blocks_as_computed(self, block_ids: list[int]) -> None:
+    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
         """Mark blocks as computed, used in prefix caching.
 
         Since the naive allocator does not implement prefix caching, we do
@@ -274,7 +273,7 @@ class NaiveBlockAllocator(BlockAllocator):
         pass
 
     def get_common_computed_block_ids(
-            self, computed_seq_block_ids: list[list[int]]) -> list[int]:
+            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         """Determine blocks that can be skipped in prefill.
 
         Since the naive allocator does not support prefix caching, always return
@@ -285,12 +284,12 @@ class NaiveBlockAllocator(BlockAllocator):
     def promote_to_immutable_block(self, block: Block) -> BlockId:
         raise NotImplementedError("There is no promotion for naive blocks")
 
-    def get_num_full_blocks_touched(self, blocks: list[Block]) -> int:
+    def get_num_full_blocks_touched(self, blocks: List[Block]) -> int:
         """Returns the number of full blocks that will be touched by
         swapping in/out.
 
         Args:
-            blocks: list of blocks to be swapped.
+            blocks: List of blocks to be swapped.
         Returns:
             int: the number of full blocks that will be touched by
                 swapping in/out the given blocks. Non full blocks are ignored
@@ -306,11 +305,11 @@ class NaiveBlockAllocator(BlockAllocator):
                 old_block_set.add(block)
         return len(old_block_set)
 
-    def swap_out(self, blocks: list[Block]) -> None:
+    def swap_out(self, blocks: List[Block]) -> None:
         for block in blocks:
             self._free_block_id(block)
 
-    def swap_in(self, blocks: list[Block]) -> None:
+    def swap_in(self, blocks: List[Block]) -> None:
         for block in blocks:
             # Here we allocate either immutable or mutable block and then
             # extract its block_id. Note that the block object is released
@@ -337,7 +336,7 @@ class NaiveBlockAllocator(BlockAllocator):
         """No prefix cache for naive block allocator."""
         return True
 
-    def find_cached_blocks_prefix(self, block_hashes: list[int]) -> list[int]:
+    def find_cached_blocks_prefix(self, block_hashes: List[int]) -> List[int]:
         # Not applicable for naive block allocator.
         return []
 
@@ -352,7 +351,7 @@ class NaiveBlock(Block):
 
     Args:
         prev_block (Block): The previous block in the sequence.
-        token_ids (list[int]): The initial token IDs to be stored in the block.
+        token_ids (List[int]): The initial token IDs to be stored in the block.
         block_size (int): The maximum number of token IDs that can be stored in
             the block.
         allocator (BlockAllocator): The block allocator associated with this
@@ -366,13 +365,13 @@ class NaiveBlock(Block):
 
     def __init__(self,
                  prev_block: Optional[Block],
-                 token_ids: list[int],
+                 token_ids: List[int],
                  block_size: int,
                  allocator: BlockAllocator,
                  block_id: Optional[int] = None,
                  _cow_target: Optional[Block] = None,
                  extra_hash: Optional[int] = None):
-        self._token_ids: list[int] = []
+        self._token_ids: List[int] = []
         self._block_size = block_size
         self._prev_block = prev_block
         self._block_id = block_id
@@ -381,12 +380,12 @@ class NaiveBlock(Block):
 
         self._append_token_ids_no_cow(token_ids)
 
-    def append_token_ids(self, token_ids: list[int]) -> None:
+    def append_token_ids(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block and performs a 
         copy-on-write if necessary.
 
         Args:
-            token_ids (Optional[list[int]]): The token IDs to be appended 
+            token_ids (Optional[List[int]]): The token IDs to be appended 
                 to the block.
         """
         self._append_token_ids_no_cow(token_ids)
@@ -395,11 +394,11 @@ class NaiveBlock(Block):
             self._block_id = (self._allocator.cow_block_if_not_appendable(
                 self._cow_target))
 
-    def _append_token_ids_no_cow(self, token_ids: list[int]) -> None:
+    def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block
 
         Args:
-            token_ids (list[int]): The token IDs to be appended to the block.
+            token_ids (List[int]): The token IDs to be appended to the block.
         """
         if len(token_ids) == 0:
             return
@@ -441,7 +440,7 @@ class NaiveBlock(Block):
         return self._block_size - len(self.token_ids)
 
     @property
-    def token_ids(self) -> list[int]:
+    def token_ids(self) -> List[int]:
         return self._token_ids
 
     @property

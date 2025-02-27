@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
-from typing import Optional, Protocol
+from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
 
 from vllm.utils import Device
 
@@ -11,7 +11,7 @@ BlockId = int
 class Block(ABC):
 
     @abstractmethod
-    def append_token_ids(self, token_ids: list[int]) -> None:
+    def append_token_ids(self, token_ids: List[int]) -> None:
         pass
 
     @property
@@ -27,7 +27,7 @@ class Block(ABC):
 
     @property
     @abstractmethod
-    def token_ids(self) -> list[int]:
+    def token_ids(self) -> List[int]:
         pass
 
     @property
@@ -84,7 +84,7 @@ class Block(ABC):
         def __call__(
             self,
             prev_block: Optional["Block"],
-            token_ids: list[int],
+            token_ids: List[int],
             block_size: int,
             allocator: "BlockAllocator",
             block_id: Optional[int] = None,
@@ -114,14 +114,14 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: list[int],
+                                 token_ids: List[int],
                                  extra_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_blocks(self, prev_block: Optional[Block],
-                                  block_token_ids: list[list[int]],
-                                  extra_hash: Optional[int]) -> list[Block]:
+                                  block_token_ids: List[List[int]],
+                                  extra_hash: Optional[int]) -> List[Block]:
         pass
 
     @abstractmethod
@@ -129,7 +129,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def fork(self, last_block: Block) -> list[Block]:
+    def fork(self, last_block: Block) -> List[Block]:
         pass
 
     @abstractmethod
@@ -145,34 +145,34 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def swap_out(self, blocks: list[Block]) -> None:
+    def swap_out(self, blocks: List[Block]) -> None:
         pass
 
     @abstractmethod
-    def swap_in(self, blocks: list[Block]) -> None:
+    def swap_in(self, blocks: List[Block]) -> None:
         pass
 
     @property
     @abstractmethod
-    def all_block_ids(self) -> frozenset[int]:
+    def all_block_ids(self) -> FrozenSet[int]:
         pass
 
     @abstractmethod
-    def clear_copy_on_writes(self) -> list[tuple[int, int]]:
+    def clear_copy_on_writes(self) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
-    def mark_blocks_as_accessed(self, block_ids: list[int],
+    def mark_blocks_as_accessed(self, block_ids: List[int],
                                 now: float) -> None:
         pass
 
     @abstractmethod
-    def mark_blocks_as_computed(self, block_ids: list[int]) -> None:
+    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
         pass
 
     @abstractmethod
     def get_common_computed_block_ids(
-            self, computed_seq_block_ids: list[list[int]]) -> list[int]:
+            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
     @abstractmethod
@@ -186,7 +186,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_num_full_blocks_touched(self, blocks: list[Block]) -> int:
+    def get_num_full_blocks_touched(self, blocks: List[Block]) -> int:
         pass
 
     @abstractmethod
@@ -205,8 +205,8 @@ class BlockAllocator(ABC):
     @abstractmethod
     def find_cached_blocks_prefix(
         self,
-        block_hashes: list[int],
-    ) -> list[int]:
+        block_hashes: List[int],
+    ) -> List[int]:
         pass
 
 
@@ -222,7 +222,7 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
-                                 token_ids: list[int],
+                                 token_ids: List[int],
                                  device: Device,
                                  extra_hash: Optional[int] = None) -> Block:
         pass
@@ -231,10 +231,10 @@ class DeviceAwareBlockAllocator(ABC):
     def allocate_immutable_blocks(
         self,
         prev_block: Optional[Block],
-        block_token_ids: list[list[int]],
+        block_token_ids: List[List[int]],
         device: Device,
         extra_hash: Optional[int] = None,
-    ) -> list[Block]:
+    ) -> List[Block]:
         pass
 
     @abstractmethod
@@ -250,40 +250,40 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def fork(self, last_block: Block) -> list[Block]:
+    def fork(self, last_block: Block) -> List[Block]:
         pass
 
     @property
     @abstractmethod
-    def all_block_ids(self) -> frozenset[int]:
+    def all_block_ids(self) -> FrozenSet[int]:
         pass
 
     @abstractmethod
-    def clear_copy_on_writes(self) -> list[tuple[int, int]]:
+    def clear_copy_on_writes(self) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
-    def mark_blocks_as_accessed(self, block_ids: list[int],
+    def mark_blocks_as_accessed(self, block_ids: List[int],
                                 now: float) -> None:
         pass
 
     @abstractmethod
-    def mark_blocks_as_computed(self, block_ids: list[int]) -> None:
+    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
         pass
 
     @abstractmethod
     def get_common_computed_block_ids(
-            self, computed_seq_block_ids: list[list[int]]) -> list[int]:
+            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
     @abstractmethod
-    def get_num_full_blocks_touched(self, blocks: list[Block],
+    def get_num_full_blocks_touched(self, blocks: List[Block],
                                     device: Device) -> int:
         pass
 
     @abstractmethod
-    def swap(self, blocks: list[Block], src_device: Device,
-             dst_device: Device) -> dict[int, int]:
+    def swap(self, blocks: List[Block], src_device: Device,
+             dst_device: Device) -> Dict[int, int]:
         pass
 
     @abstractmethod
@@ -312,7 +312,7 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def find_cached_blocks_prefix(
         self,
-        block_hashes: list[int],
+        block_hashes: List[int],
         device: Device = Device.GPU,
-    ) -> list[int]:
+    ) -> List[int]:
         pass

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
-from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -294,8 +293,8 @@ class BlipVisionModel(nn.Module):
 
         return self.post_layernorm(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -303,7 +302,7 @@ class BlipVisionModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loaded_params: Set[str] = set()
         layer_count = len(self.encoder.layers)
 
         for name, loaded_weight in weights:

@@ -7,7 +7,7 @@ The LMCacheConnector can (1) transfer KV caches between prefill vLLM worker
 (2) offload and share KV caches.
 """
 
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
 
@@ -61,8 +61,8 @@ class LMCacheConnector(KVConnectorBase):
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: list[torch.Tensor]
-    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
+        kv_caches: List[torch.Tensor]
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
         hidden_or_intermediate_states = None
@@ -80,7 +80,7 @@ class LMCacheConnector(KVConnectorBase):
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: list[torch.Tensor],
+        kv_caches: List[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:

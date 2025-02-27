@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping
 from functools import cached_property
-from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
-                    Union)
+from typing import (Final, Iterable, List, Literal, Mapping, Optional,
+                    Protocol, Set, Tuple, TypedDict, TypeVar, Union)
 
 import torch
 import torch.nn as nn
@@ -48,7 +47,7 @@ from .vision import get_vision_encoder_info
 
 class LlavaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+    data: Union[torch.Tensor, List[torch.Tensor]]
     """
     Shape: `(batch_size * num_images, num_channels, height, width)`
 
@@ -730,8 +729,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

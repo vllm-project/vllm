@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """CacheEngine class for managing the KV cache."""
+from typing import List
 
 import numpy as np
 import torch
@@ -73,12 +74,12 @@ class CacheEngine:
         self,
         num_blocks: int,
         device: str,
-    ) -> list[torch.Tensor]:
+    ) -> List[torch.Tensor]:
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
-        kv_cache: list[torch.Tensor] = []
+        kv_cache: List[torch.Tensor] = []
 
         # Align entries so they are 256 byte aligned for better performance
         # Primarily targets MLA as this typically only ends up having entries

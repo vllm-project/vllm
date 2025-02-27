@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Callable, Literal, Optional, Protocol, Union, overload
+from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
+                    Protocol, Set, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -56,8 +56,8 @@ class WeightsMapper:
         return key
 
     def apply(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
+        self, weights: Iterable[Tuple[str, torch.Tensor]]
+    ) -> Iterable[Tuple[str, torch.Tensor]]:
         return ((out_name, data) for name, data in weights
                 if (out_name := self._map_name(name)) is not None)
 
@@ -82,8 +82,8 @@ class AutoWeightsLoader:
         self,
         module: nn.Module,
         *,
-        skip_prefixes: Optional[list[str]] = None,
-        ignore_unexpected_prefixes: Optional[list[str]] = None,
+        skip_prefixes: Optional[List[str]] = None,
+        ignore_unexpected_prefixes: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
 
@@ -93,8 +93,8 @@ class AutoWeightsLoader:
 
     def _groupby_prefix(
         self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> Iterable[tuple[str, Iterable[tuple[str, torch.Tensor]]]]:
+        weights: Iterable[Tuple[str, torch.Tensor]],
+    ) -> Iterable[Tuple[str, Iterable[Tuple[str, torch.Tensor]]]]:
         weights_by_parts = ((weight_name.split(".", 1), weight_data)
                             for weight_name, weight_data in weights)
 
@@ -127,7 +127,7 @@ class AutoWeightsLoader:
         self,
         base_prefix: str,
         param: nn.Parameter,
-        weights: Iterable[tuple[str, torch.Tensor]],
+        weights: Iterable[Tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
@@ -160,7 +160,7 @@ class AutoWeightsLoader:
         self,
         base_prefix: str,
         module: nn.Module,
-        weights: Iterable[tuple[str, torch.Tensor]],
+        weights: Iterable[Tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
         if isinstance(module, PPMissingLayer):
             return
@@ -225,10 +225,10 @@ class AutoWeightsLoader:
 
     def load_weights(
         self,
-        weights: Iterable[tuple[str, torch.Tensor]],
+        weights: Iterable[Tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
-    ) -> set[str]:
+    ) -> Set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
 
@@ -266,13 +266,13 @@ def flatten_bn(x: torch.Tensor) -> torch.Tensor:
 
 
 @overload
-def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]:
+def flatten_bn(x: List[torch.Tensor]) -> List[torch.Tensor]:
     ...
 
 
 @overload
 def flatten_bn(
-    x: Union[list[torch.Tensor], torch.Tensor],
+    x: Union[List[torch.Tensor], torch.Tensor],
     *,
     concat: Literal[True],
 ) -> torch.Tensor:
@@ -281,18 +281,18 @@ def flatten_bn(
 
 @overload
 def flatten_bn(
-    x: Union[list[torch.Tensor], torch.Tensor],
+    x: Union[List[torch.Tensor], torch.Tensor],
     *,
     concat: bool = False,
-) -> Union[list[torch.Tensor], torch.Tensor]:
+) -> Union[List[torch.Tensor], torch.Tensor]:
     ...
 
 
 def flatten_bn(
-    x: Union[list[torch.Tensor], torch.Tensor],
+    x: Union[List[torch.Tensor], torch.Tensor],
     *,
     concat: bool = False,
-) -> Union[list[torch.Tensor], torch.Tensor]:
+) -> Union[List[torch.Tensor], torch.Tensor]:
     """
     Flatten the ``B`` and ``N`` dimensions of batched multimodal inputs.
 
@@ -416,7 +416,7 @@ def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: Union[int, list[int]],
+    placeholder_token_id: Union[int, List[int]],
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -544,7 +544,7 @@ def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
     prefix: str,
-) -> tuple[int, int, torch.nn.ModuleList]:
+) -> Tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
     """
@@ -562,10 +562,10 @@ def make_layers(
 
 
 # NOTE: don't use lru_cache here because it can prevent garbage collection
-_model_to_pp_missing_layer_names: dict[int, list[str]] = {}
+_model_to_pp_missing_layer_names: Dict[int, List[str]] = {}
 
 
-def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
+def get_pp_missing_layer_names(model: torch.nn.Module) -> List[str]:
     """Get the names of the missing layers in a pipeline parallel model."""
     model_id = id(model)
     if model_id in _model_to_pp_missing_layer_names:
@@ -593,7 +593,7 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
         for missing_layer_name in get_pp_missing_layer_names(model))
 
 
-def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
+def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
 
     def make_empty_intermediate_tensors(
         batch_size: int,
@@ -632,7 +632,7 @@ def extract_layer_index(layer_name: str) -> int:
     - "model.encoder.layers.0.sub.1" -> ValueError
     """
     subnames = layer_name.split(".")
-    int_vals: list[int] = []
+    int_vals: List[int] = []
     for subname in subnames:
         try:
             int_vals.append(int(subname))

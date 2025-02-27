@@ -2,8 +2,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Mapping
-from typing import Optional
+from typing import AsyncGenerator, List, Mapping, Optional
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig
@@ -255,7 +254,7 @@ class EngineClient(ABC):
     async def do_log_stats(
         self,
         scheduler_outputs: Optional[SchedulerOutputs] = None,
-        model_output: Optional[list[SamplerOutput]] = None,
+        model_output: Optional[List[SamplerOutput]] = None,
     ) -> None:
         ...
 

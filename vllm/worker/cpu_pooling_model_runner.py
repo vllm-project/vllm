@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-from typing import Any, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 
@@ -25,18 +25,18 @@ class ModelInputForCPUWithPoolingMetadata(ModelInputForCPU):
 
 class CPUPoolingModelRunner(
         CPUModelRunnerBase[ModelInputForCPUWithPoolingMetadata]):
-    _model_input_cls: type[ModelInputForCPUWithPoolingMetadata] = (
+    _model_input_cls: Type[ModelInputForCPUWithPoolingMetadata] = (
         ModelInputForCPUWithPoolingMetadata)
-    _builder_cls: type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
+    _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
 
     @torch.inference_mode()
     def execute_model(
         self,
         model_input: ModelInputForCPUWithPoolingMetadata,
-        kv_caches: list[torch.Tensor],
+        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[Union[list[PoolerOutput], IntermediateTensors]]:
+    ) -> Optional[Union[List[PoolerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(
                 "CPU worker does not support multi-step execution.")
@@ -72,7 +72,7 @@ class CPUPoolingModelRunner(
 
     def make_model_input_from_broadcasted_tensor_dict(
             self,
-            tensor_dict: dict[str,
+            tensor_dict: Dict[str,
                               Any]) -> ModelInputForCPUWithPoolingMetadata:
         return ModelInputForCPUWithPoolingMetadata.from_broadcasted_tensor_dict(
             tensor_dict,
@@ -81,9 +81,9 @@ class CPUPoolingModelRunner(
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: Optional[list[SequenceGroupMetadata]],
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[list[str]] = None
+        finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForCPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(
@@ -99,17 +99,17 @@ class CPUPoolingModelRunner(
 
     def _prepare_pooling(
         self,
-        seq_group_metadata_list: list[SequenceGroupMetadata],
-        prompt_lens: list[int],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        prompt_lens: List[int],
     ) -> PoolingMetadata:
         """Prepare PoolingMetadata for the sequence group metadata list."""
-        seq_groups: list[tuple[list[int], PoolingParams]] = []
+        seq_groups: List[Tuple[List[int], PoolingParams]] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             pooling_params = seq_group_metadata.pooling_params
             seq_groups.append((seq_ids, pooling_params))
 
-        seq_data: dict[int, SequenceData] = {}
+        seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -88,7 +88,7 @@ class QQQConfig(QuantizationConfig):
         return "qqq"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
         return [torch.half]
 
     @classmethod
@@ -96,7 +96,7 @@ class QQQConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> list[str]:
+    def get_config_filenames(cls) -> List[str]:
         """List of filenames to search for in the model directory."""
         return [
             "quant_config.json",
@@ -104,7 +104,7 @@ class QQQConfig(QuantizationConfig):
         ]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "QQQConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "QQQConfig":
         weight_bits = cls.get_from_keys(config, ["wbits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(weight_bits, group_size)
@@ -130,7 +130,7 @@ class QQQLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: list[int],
+        output_partition_sizes: List[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

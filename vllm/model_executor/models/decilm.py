@@ -24,7 +24,7 @@
 # limitations under the License.
 """Inference-only DeciLM model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
+from typing import Iterable, Set, Tuple
 
 import torch
 
@@ -59,8 +59,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
         delattr(config, "num_key_value_heads_per_layer")
         super().__init__(vllm_config=vllm_config)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -70,7 +70,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import gguf
 import torch
@@ -31,7 +31,7 @@ class GGUFConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "gguf"
 
-    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
         return [torch.half]
 
     @classmethod
@@ -39,11 +39,11 @@ class GGUFConfig(QuantizationConfig):
         return 60
 
     @classmethod
-    def get_config_filenames(cls) -> list[str]:
+    def get_config_filenames(cls) -> List[str]:
         return []  # no extra configs.
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "GGUFConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "GGUFConfig":
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,
@@ -131,7 +131,7 @@ class GGUFLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: list[int], input_size: int,
+                       output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         output_size_per_partition = sum(output_partition_sizes)
@@ -332,7 +332,7 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
 
 class GGUFUninitializedParameter(UninitializedParameter):
     cls_to_become = Parameter
-    data_container: list[torch.Tensor]
+    data_container: List[torch.Tensor]
 
     def materialize_nested(self) -> Parameter:
         dtype = {data.dtype for data in self.data_container}

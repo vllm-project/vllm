@@ -4,7 +4,7 @@ import asyncio
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 import cloudpickle
 import msgspec
@@ -91,10 +91,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
         self.output_decoder = msgspec.msgpack.Decoder(
-            Optional[list[SamplerOutput]])
+            Optional[List[SamplerOutput]])
         self.use_v1 = envs.VLLM_USE_V1
 
-        self.pp_locks: Optional[list[asyncio.Lock]] = None
+        self.pp_locks: Optional[List[asyncio.Lock]] = None
         if not self.use_ray_compiled_dag:
             self.driver_exec_method = make_async(
                 self.driver_worker.execute_method)
@@ -112,7 +112,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             self.forward_dag = None
 
     def _configure_ray_workers_use_nsight(self,
-                                          ray_remote_kwargs) -> dict[str, Any]:
+                                          ray_remote_kwargs) -> Dict[str, Any]:
         # If nsight profiling is enabled, we need to set the profiling
         # configuration for the ray workers as runtime env.
         runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
@@ -138,12 +138,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # It holds the resource for the driver worker.
         self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
         # The remaining workers are the actual ray actors.
-        self.workers: list[RayWorkerWrapper] = []
+        self.workers: List[RayWorkerWrapper] = []
 
         # Used in ray compiled DAG: indexed first by PP rank,
         # and then TP rank. In other words, the inner list is
         # the TP group of workers for a PP rank.
-        self.pp_tp_workers: list[list[RayWorkerWrapper]] = []
+        self.pp_tp_workers: List[List[RayWorkerWrapper]] = []
 
         if self.parallel_config.ray_workers_use_nsight:
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
@@ -152,7 +152,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
 
         # Create the workers.
-        bundle_indices: list[int]
+        bundle_indices: List[int]
         if envs.VLLM_RAY_BUNDLE_INDICES:
             # Use the bundle indices specified by the user.
             bundle_indices = list(
@@ -172,7 +172,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     bundle_indices.append(bundle_id)
             bundle_indices = bundle_indices[:self.parallel_config.world_size]
 
-        worker_metadata: list[RayWorkerMetaData] = []
+        worker_metadata: List[RayWorkerMetaData] = []
         driver_ip = get_ip()
         for rank, bundle_id in enumerate(bundle_indices):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
@@ -233,7 +233,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 "Consider adjusting the Ray placement group or running "
                 "the driver on a GPU node.")
 
-        ip_counts: dict[str, int] = {}
+        ip_counts: Dict[str, int] = {}
         for ip in worker_ips:
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
@@ -377,11 +377,11 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # This is the list of workers that are rank 0 of each TP group EXCEPT
         # global rank 0. These are the workers that will broadcast to the
         # rest of the workers.
-        self.tp_driver_workers: list[RayWorkerWrapper] = []
+        self.tp_driver_workers: List[RayWorkerWrapper] = []
         # This is the list of workers that are not drivers and not the first
         # worker in a TP group. These are the workers that will be
         # broadcasted to.
-        self.non_driver_workers: list[RayWorkerWrapper] = []
+        self.non_driver_workers: List[RayWorkerWrapper] = []
 
         # Enforce rank order for correct rank to return final output.
         for index, worker in enumerate(self.workers):
@@ -394,7 +394,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[list[SamplerOutput]]:
+    ) -> Optional[List[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
@@ -407,7 +407,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def execute_model(
             self,
-            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         if not self.use_ray_spmd_worker:
             return super().execute_model(execute_model_req)
 
@@ -586,7 +586,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         if not self.use_ray_spmd_worker:
             return await super().execute_model_async(execute_model_req)
 
@@ -601,7 +601,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> list[SamplerOutput]:
+    ) -> List[SamplerOutput]:
         assert not self.use_ray_spmd_worker, (
             "driver_worker does not exist for VLLM_USE_RAY_SPMD_WORKER=1")
         if not self.tp_driver_workers:

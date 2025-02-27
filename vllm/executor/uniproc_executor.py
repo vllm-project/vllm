@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -49,8 +49,8 @@ class UniProcExecutor(ExecutorBase):
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
-                       args: tuple = (),
-                       kwargs: Optional[dict] = None) -> list[Any]:
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
         if kwargs is None:
             kwargs = {}
         answer = run_method(self.driver_worker, method, args, kwargs)
@@ -120,7 +120,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """
         Determine the number of available KV blocks.
         Add an additional all_reduce to get the min across all ranks.

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 def compute_meta(
     token_lora_tensor: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, bool]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, bool]:
     """
     Get the information required for the sgmv kernel. With the  features:
     1. If consecutive requests in the batch use the same LoRA, this function
@@ -43,19 +43,19 @@ def compute_meta(
 # TODO see if this can be vectorized
 def convert_mapping(
     mapping: "LoRAMapping",
-    lora_index_to_id: list[Optional[int]],
+    lora_index_to_id: List[Optional[int]],
     max_loras: int,
     vocab_size: int,
     extra_vocab_size: int,
     device: torch.device,
     long_lora_context: Optional["LongContextLoRAContext"] = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           Optional[torch.Tensor], list[int]]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           Optional[torch.Tensor], List[int]]:
     """Converts LoRAMapping to index tensors.
 
     Args:
         mapping: LoRAMapping mapping rows in a batch to LoRA ids.
-        lora_index_to_id: list mapping LoRA ids to LoRA indices.
+        lora_index_to_id: List mapping LoRA ids to LoRA indices.
         max_loras: Maximum number of LoRAs.
         vocab_size: Model vocab size.
         extra_vocab_size: Extra vocab size each LoRA can have.
@@ -80,11 +80,11 @@ def convert_mapping(
             long_lora_indices: Tensor of shape [batch_size] mapping
                 requests to RoPE offsets and rot dims for long LoRAs.
                 None if long context lora doesn't exist.
-            indices_len: list of lengths of the above tensors. It contains
+            indices_len: List of lengths of the above tensors. It contains
                 (base_indices, sampler_indices, sampler_indices_padded,
                 embeddings_indices, long_lora_indices).
     """
-    index_mapping_indices: list[int] = list(mapping.index_mapping).copy()
+    index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
     long_lora_offsets: Optional[torch.Tensor] = None
@@ -92,7 +92,7 @@ def convert_mapping(
         long_lora_offsets = torch.zeros(len(index_mapping_indices),
                                         device=device,
                                         dtype=torch.long)
-    prompt_mapping: list[int] = [
+    prompt_mapping: List[int] = [
         lora_index_to_id.index(x) if x > 0 else -1
         for x in mapping.prompt_mapping
     ]
@@ -109,7 +109,7 @@ def convert_mapping(
                 index_mapping_indices[i], 0)
             long_lora_offsets[i] = lora_offset
 
-    indices_list: list[Union[list[int], torch.Tensor]] = [
+    indices_list: List[Union[List[int], torch.Tensor]] = [
         index_mapping_indices,
         lora_indices,
         embedding_indices,

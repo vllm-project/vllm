@@ -2,7 +2,7 @@
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -35,13 +35,13 @@ class MultiStepWorker(Worker):
         )
 
         pipeline_parallel_size = self.parallel_config.pipeline_parallel_size
-        self.multi_step_states: list[
+        self.multi_step_states: List[
             Optional[MultiStepState]] = [None] * pipeline_parallel_size
         self.temp_output = None
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> tuple[BroadcastableModelInput, WorkerInput, dict[str, torch.Tensor]]:
+    ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
         """
         Get the driver input and broadcast it to other workers.
         """
@@ -136,7 +136,7 @@ class MultiStepWorker(Worker):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[tuple[StatefulModelInput, WorkerInput, dict[str,
+    ) -> Optional[Tuple[StatefulModelInput, WorkerInput, Dict[str,
                                                               torch.Tensor]]]:
         """
         Depending on the current state of the request and multi step worker,

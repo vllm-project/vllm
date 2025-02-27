@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -31,7 +31,7 @@ class HQQMarlinConfig(QuantizationConfig):
         self,
         weight_bits: int,
         group_size: int,
-        skip_modules: Optional[list[str]] = None,
+        skip_modules: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
         assert group_size == 64, ("The only supported HQQ group size is "
@@ -54,7 +54,7 @@ class HQQMarlinConfig(QuantizationConfig):
         return "hqq"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
@@ -62,11 +62,11 @@ class HQQMarlinConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> list[str]:
+    def get_config_filenames(cls) -> List[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "HQQMarlinConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "HQQMarlinConfig":
         wq_params = (config["quant_config"]["weight_quant_params"])
         weight_bits = cls.get_from_keys(wq_params, ["nbits"])
         group_size = cls.get_from_keys(wq_params, ["group_size"])
@@ -191,7 +191,7 @@ class HQQMarlinMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: list[int],
+        output_partition_sizes: List[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

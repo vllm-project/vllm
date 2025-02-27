@@ -10,10 +10,10 @@ import subprocess
 import sys
 import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Set
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Callable, Optional, TypeVar, Union
+from typing import (AbstractSet, Callable, Dict, List, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import cloudpickle
 import torch.nn as nn
@@ -230,7 +230,7 @@ class _ModelInfo:
     supports_transcription: bool
 
     @staticmethod
-    def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
+    def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
         return _ModelInfo(
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
@@ -251,7 +251,7 @@ class _BaseRegisteredModel(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_model_cls(self) -> type[nn.Module]:
+    def load_model_cls(self) -> Type[nn.Module]:
         raise NotImplementedError
 
 
@@ -262,10 +262,10 @@ class _RegisteredModel(_BaseRegisteredModel):
     """
 
     interfaces: _ModelInfo
-    model_cls: type[nn.Module]
+    model_cls: Type[nn.Module]
 
     @staticmethod
-    def from_model_cls(model_cls: type[nn.Module]):
+    def from_model_cls(model_cls: Type[nn.Module]):
         return _RegisteredModel(
             interfaces=_ModelInfo.from_model_cls(model_cls),
             model_cls=model_cls,
@@ -274,7 +274,7 @@ class _RegisteredModel(_BaseRegisteredModel):
     def inspect_model_cls(self) -> _ModelInfo:
         return self.interfaces
 
-    def load_model_cls(self) -> type[nn.Module]:
+    def load_model_cls(self) -> Type[nn.Module]:
         return self.model_cls
 
 
@@ -291,7 +291,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         return _run_in_subprocess(
             lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
 
-    def load_model_cls(self) -> type[nn.Module]:
+    def load_model_cls(self) -> Type[nn.Module]:
         mod = importlib.import_module(self.module_name)
         return getattr(mod, self.class_name)
 
@@ -300,7 +300,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
-) -> Optional[type[nn.Module]]:
+) -> Optional[Type[nn.Module]]:
     from vllm.platforms import current_platform
     current_platform.verify_model_arch(model_arch)
     try:
@@ -327,15 +327,15 @@ def _try_inspect_model_cls(
 @dataclass
 class _ModelRegistry:
     # Keyed by model_arch
-    models: dict[str, _BaseRegisteredModel] = field(default_factory=dict)
+    models: Dict[str, _BaseRegisteredModel] = field(default_factory=dict)
 
-    def get_supported_archs(self) -> Set[str]:
+    def get_supported_archs(self) -> AbstractSet[str]:
         return self.models.keys()
 
     def register_model(
         self,
         model_arch: str,
-        model_cls: Union[type[nn.Module], str],
+        model_cls: Union[Type[nn.Module], str],
     ) -> None:
         """
         Register an external model to be used in vLLM.
@@ -374,7 +374,7 @@ class _ModelRegistry:
 
         self.models[model_arch] = model
 
-    def _raise_for_unsupported(self, architectures: list[str]):
+    def _raise_for_unsupported(self, architectures: List[str]):
         all_supported_archs = self.get_supported_archs()
 
         if any(arch in all_supported_archs for arch in architectures):
@@ -387,7 +387,7 @@ class _ModelRegistry:
             f"Supported architectures: {all_supported_archs}")
 
     def _try_load_model_cls(self,
-                            model_arch: str) -> Optional[type[nn.Module]]:
+                            model_arch: str) -> Optional[Type[nn.Module]]:
         if model_arch not in self.models:
             return None
 
@@ -401,8 +401,8 @@ class _ModelRegistry:
 
     def _normalize_archs(
         self,
-        architectures: Union[str, list[str]],
-    ) -> list[str]:
+        architectures: Union[str, List[str]],
+    ) -> List[str]:
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
@@ -417,8 +417,8 @@ class _ModelRegistry:
 
     def inspect_model_cls(
         self,
-        architectures: Union[str, list[str]],
-    ) -> tuple[_ModelInfo, str]:
+        architectures: Union[str, List[str]],
+    ) -> Tuple[_ModelInfo, str]:
         architectures = self._normalize_archs(architectures)
 
         for arch in architectures:
@@ -430,8 +430,8 @@ class _ModelRegistry:
 
     def resolve_model_cls(
         self,
-        architectures: Union[str, list[str]],
-    ) -> tuple[type[nn.Module], str]:
+        architectures: Union[str, List[str]],
+    ) -> Tuple[Type[nn.Module], str]:
         architectures = self._normalize_archs(architectures)
 
         for arch in architectures:
@@ -443,63 +443,63 @@ class _ModelRegistry:
 
     def is_text_generation_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: Union[str, List[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_text_generation_model
 
     def is_pooling_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: Union[str, List[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_pooling_model
 
     def is_cross_encoder_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: Union[str, List[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_cross_encoding
 
     def is_multimodal_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: Union[str, List[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_multimodal
 
     def is_pp_supported_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: Union[str, List[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_pp
 
     def model_has_inner_state(
         self,
-        architectures: Union[str, list[str]],
+        architectures: Union[str, List[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.has_inner_state
 
     def is_attention_free_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: Union[str, List[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_attention_free
 
     def is_hybrid_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: Union[str, List[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_hybrid
 
     def is_transcription_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: Union[str, List[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_transcription

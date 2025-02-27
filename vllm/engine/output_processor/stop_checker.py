@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Tuple
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
@@ -94,9 +94,9 @@ class StopChecker:
     def check_stop_strings(
         output_text: str,
         new_char_count: int,
-        stop: list[str],
+        stop: List[str],
         include_in_output: bool,
-    ) -> Optional[tuple[str, int]]:
+    ) -> Optional[Tuple[str, int]]:
         """Check if any stop strings are matched and truncate sequence
         output text accordingly.
 
