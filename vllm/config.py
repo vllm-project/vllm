@@ -1425,12 +1425,8 @@ class ParallelConfig:
             self.tensor_parallel_size
 
         if self.data_parallel_size > 1:
-            import os
-            if os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1") != "1":
-                raise ValueError(
-                    "VLLM_ENABLE_V1_MULTIPROCESSING can't be disabled when "
-                    "using data parallel.")
             self.data_parallel_master_port = get_open_port()
+            # TODO multi-node
         else:
             self.data_parallel_size = envs.VLLM_DP_SIZE
             self.data_parallel_rank = envs.VLLM_DP_RANK
