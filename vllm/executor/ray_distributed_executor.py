@@ -324,7 +324,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     args[name] = os.environ[name]
 
         logger.info(
-            "Copied the following environment variables to workers: %s",
+            "Copying the following environment variables to workers: %s",
             [v for v in env_vars_to_copy if v in os.environ])
 
         self._env_vars_for_all_workers = (
