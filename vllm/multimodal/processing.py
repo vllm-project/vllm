@@ -825,6 +825,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                  *,
                  cache: Optional[ProcessingCache] = None,
                  enable_sanity_checks: bool = True) -> None:
+        if get_repls := getattr(self, "_get_prompt_replacements", None):
+            logger.warning_once("`_get_prompt_replacements` has been renamed "
+                                "to `_get_prompt_updates`. The old name will "
+                                "be removed in an upcoming release.")
+            self._get_prompt_updates = get_repls
+
         super().__init__()
 
         self.info = info
@@ -833,9 +839,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.enable_sanity_checks = enable_sanity_checks
 
         self.data_parser = self._get_data_parser()
-
-        if hasattr(self, "_get_prompt_replacements"):
-            raise RuntimeError("Please override `_get_prompt_updates` instead")
 
     def __call__(
         self,
