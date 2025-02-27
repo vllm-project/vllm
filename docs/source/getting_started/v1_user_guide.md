@@ -7,8 +7,11 @@ Previous blog post [vLLM V1: A Major Upgrade to vLLM's Core Architecture](https:
 
 ### Logprobs
 - vLLM v1 now supports both sample logprobs and prompt logprobs, as introduced in this [PR](https://github.com/vllm-project/vllm/pull/9880).
-- In vLLM v1, logprobs are computed before logits post-processing, so penalty adjustments and temperature scaling are not applied.
-- The team is actively working on implementing logprobs that include post-sampling adjustments, incorporating both penalties and temperature scaling.
+- **Current Limitations**: 
+  - v1 prompt logprobs do not support prefix caching.
+  - v1 logprobs are computed before logits post-processing, so penalty 
+  adjustments and temperature scaling are not applied.
+- The team is actively working on implementing logprobs that include post-sampling adjustments.
 
 ### Encoder-Decoder
 - vLLM v1 is currently limited to decoder-only Transformers. Please check out our [documentation](https://docs.vllm.ai/en/latest/models/supported_models.html) for a more detailed list of the supported models. 
