@@ -278,7 +278,7 @@ def test_get_logprobs_and_prompt_logprobs(
 
     APC tests run two test iterations so that cache hits occur.
 
-    To save time, only test a limited number of APC-enabled scenarios
+    To save time, only test one APC-enabled scenario
     (sample & prompt logprobs enabled, temperature>0.0).
     
     Args:
