@@ -274,10 +274,7 @@ class EngineCoreProc(EngineCore):
         ready_pipe.send({"status": "READY"})
 
     @staticmethod
-    def run_engine_core(*args,
-                        vllm_config: VllmConfig,
-                        dp_rank: int = 0,
-                        **kwargs):
+    def run_engine_core(*args, dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
         # Signal handler used for graceful termination.
@@ -298,6 +295,7 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        vllm_config: VllmConfig = kwargs["vllm_config"]
         if vllm_config.parallel_config.data_parallel_size > 1:
             # Set data parallel rank for this engine process.
             vllm_config.parallel_config.data_parallel_rank = dp_rank

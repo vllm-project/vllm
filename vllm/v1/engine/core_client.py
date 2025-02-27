@@ -455,7 +455,7 @@ class AsyncMPClient(MPClient):
         )
 
         # Control message used for triggering dp idle mode loop.
-        self.start_dp_msg = (EngineCoreRequestType.START_DP,
+        self.start_dp_msg = (EngineCoreRequestType.START_DP.value,
                              self.encoder.encode(None))
 
         self.outputs_queue: Optional[asyncio.Queue[EngineCoreOutputs]] = None
@@ -507,8 +507,9 @@ class AsyncMPClient(MPClient):
 
     async def _call_utility_async(self, method: str, *args) -> Any:
         if len(self.core_engines) == 1:
-            return self._call_engine_utility_async(self.core_engines[0],
-                                                   method, *args)
+            return await self._call_engine_utility_async(
+                self.core_engines[0], method, *args)
+
         # Only the result from the first engine is returned.
         return (await asyncio.gather(
             self._call_engine_utility_async(engine, method, *args)
@@ -535,7 +536,7 @@ class AsyncMPClient(MPClient):
         if self.outputs_queue is None:
             await self._start_output_queue_task()
 
-        msg = (EngineCoreRequestType.ADD, self.encoder.encode(request))
+        msg = (EngineCoreRequestType.ADD.value, self.encoder.encode(request))
 
         if len(self.core_engines) == 1:
             engine = self.core_engines[0]
@@ -581,8 +582,8 @@ class AsyncMPClient(MPClient):
 
     async def _abort_requests(self, request_ids: List[str],
                               engine: CoreEngine) -> None:
-        msg = (EngineCoreRequestType.ABORT, self.encoder.encode(request_ids))
-        await engine.input_socket.send_multipart(msg, copy=False)
+        await self._send_input(EngineCoreRequestType.ABORT, request_ids,
+                               engine)
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self._call_utility_async("profile", is_start)
