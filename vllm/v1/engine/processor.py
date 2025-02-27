@@ -3,7 +3,7 @@
 import time
 from typing import Mapping, Optional, Union
 
-from vllm.config import CacheConfig, DecodingConfig, LoRAConfig, ModelConfig
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs
@@ -25,35 +25,34 @@ class Processor:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        lora_config: Optional[LoRAConfig],
-        decoding_config: DecodingConfig,
+        vllm_config: VllmConfig,
         tokenizer: BaseTokenizerGroup,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.decoding_config = decoding_config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.decoding_config = vllm_config.decoding_config
         self.tokenizer = tokenizer
 
-        self.generation_config_fields = model_config.try_get_generation_config(
-        )
-        self.input_preprocessor = InputPreprocessor(model_config,
+        self.generation_config_fields = (
+            self.model_config.try_get_generation_config())
+        self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
         self.input_processor = input_registry.create_input_processor(
-            model_config)
+            self.model_config)
 
         # Multi-modal (huggingface) input mapper
-        self.mm_input_cache_client = MMInputCacheClient(model_config)
+        self.mm_input_cache_client = MMInputCacheClient(self.model_config)
 
         # Multi-modal hasher (for images)
-        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
-            cache_config.enable_prefix_caching
+        self.use_hash = (
+            not self.model_config.disable_mm_preprocessor_cache) or \
+            self.cache_config.enable_prefix_caching
 
     def _validate_logprobs(
         self,
@@ -90,13 +89,18 @@ class Processor:
             self, params: Union[SamplingParams, PoolingParams]) -> None:
         if not isinstance(params, SamplingParams):
             return
+        if not params.guided_decoding or not self.decoding_config:
+            return
         if self.decoding_config.guided_decoding_backend != "xgrammar":
             raise ValueError(
                 "Only xgrammar guided decoding is supported in V1.")
-        if (params.guided_decoding and params.guided_decoding.backend
+        if (params.guided_decoding.backend
                 and params.guided_decoding.backend != 'xgrammar'):
             raise ValueError(
                 "Only xgrammar guided decoding is supported in V1.")
+        if self.vllm_config.speculative_config:
+            raise ValueError("Structured output is not supported with "
+                             "speculative decoding.")
         validate_guided_decoding_request(params)
 
     def _validate_allowed_token_ids(

@@ -68,10 +68,7 @@ class LLMEngine:
         self.tokenizer.ping()
 
         # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(model_config=vllm_config.model_config,
-                                   cache_config=vllm_config.cache_config,
-                                   lora_config=vllm_config.lora_config,
-                                   decoding_config=vllm_config.decoding_config,
+        self.processor = Processor(vllm_config=vllm_config,
                                    tokenizer=self.tokenizer,
                                    input_registry=input_registry,
                                    mm_registry=mm_registry)

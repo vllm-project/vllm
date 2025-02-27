@@ -71,10 +71,7 @@ class AsyncLLM(EngineClient):
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
-            model_config=vllm_config.model_config,
-            cache_config=vllm_config.cache_config,
-            lora_config=vllm_config.lora_config,
-            decoding_config=vllm_config.decoding_config,
+            vllm_config=vllm_config,
             tokenizer=self.tokenizer,
             input_registry=input_registry,
         )
