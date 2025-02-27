@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, OrderedDict,
-                    Set, Tuple, TypedDict, Union)
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -23,8 +24,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
-                                        EncDecMultiModalProcessor, PromptIndex,
-                                        PromptReplacement)
+                                        EncDecMultiModalProcessor,
+                                        PromptInsertion, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -802,7 +803,7 @@ class Florence2DummyInputsBuilder(
 class Florence2MultiModalProcessor(
         EncDecMultiModalProcessor[Florence2ProcessingInfo]):
 
-    def _hf_processor_applies_repl(
+    def _hf_processor_applies_updates(
         self,
         prompt_text: str,
         mm_items: MultiModalDataItems,
@@ -849,22 +850,22 @@ class Florence2MultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         pad_token_id = hf_config.pad_token_id
         num_image_tokens = self.info.get_max_image_tokens()
         image_tokens = [pad_token_id] * num_image_tokens
 
         return [
-            PromptReplacement(
+            PromptInsertion(
                 modality="image",
-                target=PromptIndex(token_index=0, string_index=0),
-                replacement=image_tokens,
+                target="",
+                insertion=image_tokens,
             )
         ]
 

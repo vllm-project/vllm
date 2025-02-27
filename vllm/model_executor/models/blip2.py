@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -19,8 +19,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptIndex,
-                                        PromptReplacement)
+                                        BaseProcessingInfo, PromptInsertion,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -474,12 +474,12 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
@@ -488,10 +488,10 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         image_tokens = [image_token_id] * num_image_tokens
 
         return [
-            PromptReplacement(
+            PromptInsertion(
                 modality="image",
-                target=PromptIndex(token_index=0, string_index=0),
-                replacement=image_tokens,
+                target="",
+                insertion=image_tokens,
             )
         ]
 

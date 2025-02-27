@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union, cast)
+from typing import List, Optional, Set, Tuple, TypedDict, Union, cast
 
 import numpy as np
 import torch
@@ -46,8 +46,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptIndex,
-                                        PromptReplacement)
+                                        BaseProcessingInfo, PromptInsertion,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import JSONTree, json_map_leaves
@@ -1330,12 +1330,12 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             img_patch_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         image_token_length_w = processor.image_token_length_w
@@ -1351,7 +1351,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         extra_joint = ([img_start_id] + extra_row * image_token_length_h +
                        [img_end_id])
 
-        def get_replacement_molmo(item_idx: int):
+        def get_insertion_molmo(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
@@ -1369,11 +1369,10 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             return image_tokens
 
         return [
-            PromptReplacement(
+            PromptInsertion(
                 modality="image",
-                # Insert after "<|endoftext|>"
-                target=PromptIndex(token_index=1, string_index=13),
-                replacement=get_replacement_molmo,
+                target="<|endoftext|>",
+                insertion=get_insertion_molmo,
             )
         ]
 
