@@ -362,13 +362,6 @@ class FalconMamba2ParallelHybrid(nn.Module):
         return hidden_states, residual
 
 
-# ALL_DECODER_LAYER_TYPES = {
-#     "attention": FalconMamba2AttentionDecoderLayer,
-#     "mamba": FalconMamba2SSMDecoderLayer,
-#     "parallel_hybrid_falcon": FalconMamba2ParallelHybrid,
-# }
-
-
 class FalconMamba2Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
