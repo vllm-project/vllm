@@ -8,13 +8,11 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 * **Ease of use** – Simplified deployment via Helm charts and observability through Grafana dashboards.
 * **High performance** – Optimized for LLM workloads with features like multi-model support, model-aware and prefix-aware routing, fast vLLM bootstrapping, and KV cache offloading with [LMCache](https://github.com/LMCache/LMCache), among others.
 
-## Before getting started
-
-If you are new to Kubernetes, don't worry: in vLLM production stack [repo](https://github.com/vllm-project/production-stack), we provide a step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and a [short video](https://www.youtube.com/watch?v=EsTJbQtzj0g) to set up everything and get started in **4 minutes**!
+If you are new to Kubernetes, don't worry: in the vLLM production stack [repo](https://github.com/vllm-project/production-stack), we provide a step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and a [short video](https://www.youtube.com/watch?v=EsTJbQtzj0g) to set up everything and get started in **4 minutes**!
 
 ## Pre-requisite
 
-Ensure that you have a running Kubernetes environment with GPU (you can follow [this tutorial](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) to install Kubernetes environment on a bare-medal GPU machine).
+Ensure that you have a running Kubernetes environment with GPU (you can follow [this tutorial](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) to install a Kubernetes environment on a bare-medal GPU machine).
 
 ## Deployment using vLLM production stack
 
@@ -145,7 +143,7 @@ In this YAML configuration:
   * `name`: A nickname that you prefer to call the model.
   * `repository`: Docker repository of vLLM.
   * `tag`: Docker image tag.
-  * `modelURL`: the LLM model that you want to use.
+  * `modelURL`: The LLM model that you want to use.
 * **`replicaCount`**: Number of replicas.
 * **`requestCPU` and `requestMemory`**: Specifies the CPU and memory resource requests for the pod.
 * **`requestGPU`**: Specifies the number of GPUs required.
@@ -153,7 +151,7 @@ In this YAML configuration:
 
 **NOTE:** If you intend to set up two pods, please refer to this [YAML file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
 
-**NOTE:** vLLM production stack offers much more features (*e.g.* CPU offloading and a wide range of routing algorithms). Please check out these [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and our [repo](https://github.com/vllm-project/production-stack) for more details!
+**NOTE:** vLLM production stack offers many more features (*e.g.* CPU offloading and a wide range of routing algorithms). Please check out these [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and our [repo](https://github.com/vllm-project/production-stack) for more details!
 
 ------
 
@@ -161,7 +159,7 @@ In this YAML configuration:
 
 Ensure that you have the following:
 
-* A running Kubernetes cluster (use this to set up K8S from scrath)
+* A running Kubernetes cluster (use this to set up K8s from scratch)
 * NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
 * Available GPU resources in your cluster
 
