@@ -33,10 +33,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
     -r requirements-xpu.txt
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install torch torchvision torchaudio triton \
-    --index-url https://download.pytorch.org/whl/xpu
-
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
 COPY . .
