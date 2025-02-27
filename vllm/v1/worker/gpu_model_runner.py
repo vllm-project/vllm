@@ -26,6 +26,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
+from vllm.v1.attention.backends.flashinfer import (FlashInferBackend,
+                                                   FlashInferMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -427,7 +429,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Tuple[FlashAttentionMetadata, torch.Tensor]:
+    ) -> Tuple[FlashInferMetadata, torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -559,21 +561,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prefix_kv_lens = None
             suffix_kv_lens = None
 
-        attn_metadata = FlashAttentionMetadata(
+        # attn_metadata = FlashAttentionMetadata(
+        #     num_actual_tokens=total_num_scheduled_tokens,
+        #     max_query_len=max_num_scheduled_tokens,
+        #     query_start_loc=query_start_loc,
+        #     max_seq_len=max_seq_len,
+        #     seq_lens=seq_lens,
+        #     block_table=(
+        #         self.input_batch.block_table.get_device_tensor()[:num_reqs]),
+        #     slot_mapping=slot_mapping,
+        #     use_cascade=use_cascade,
+        #     common_prefix_len=common_prefix_len,
+        #     cu_prefix_query_lens=cu_prefix_query_lens,
+        #     prefix_kv_lens=prefix_kv_lens,
+        #     suffix_kv_lens=suffix_kv_lens,
+        # )
+        attn_metadata = FlashInferMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            query_start_loc=query_start_loc,
-            max_seq_len=max_seq_len,
             seq_lens=seq_lens,
             block_table=(
                 self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=slot_mapping,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            cu_prefix_query_lens=cu_prefix_query_lens,
-            prefix_kv_lens=prefix_kv_lens,
-            suffix_kv_lens=suffix_kv_lens,
+            qo_indptr=query_start_loc,
+            num_qo_heads=self.model_config.get_num_attention_heads(self.parallel_config),
+            num_kv_heads=self.model_config.get_num_kv_heads(self.parallel_config),
+            head_dim=self.model_config.get_head_size(),
+            page_size=self.cache_config.block_size,
+            data_type=self.kv_cache_dtype,
+            q_data_type=self.model_config.dtype,
         )
+        attn_metadata.plan()
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -667,7 +684,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # common_prefix_len should be a multiple of the block size.
         common_prefix_len = (common_prefix_len // self.block_size *
                              self.block_size)
-        use_cascade = FlashAttentionBackend.use_cascade_attention(
+        use_cascade = FlashInferBackend.use_cascade_attention(
             common_prefix_len=common_prefix_len,
             query_lens=num_scheduled_tokens,
             num_query_heads=self.num_query_heads,
@@ -1379,7 +1396,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert tensor_config.size % layer_spec.page_size_bytes == 0
             num_blocks = tensor_config.size // layer_spec.page_size_bytes
             if isinstance(layer_spec, FullAttentionSpec):
-                kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+                kv_cache_shape = FlashInferBackend.get_kv_cache_shape(
                     num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
                     layer_spec.head_size)
                 dtype = layer_spec.dtype

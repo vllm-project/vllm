@@ -154,8 +154,10 @@ class CudaPlatformBase(Platform):
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
         if use_v1:
-            logger.info("Using Flash Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+            # logger.info("Using Flash Attention backend on V1 engine.")
+            # return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+            logger.info("Using FlashInfer backend on V1 engine.")
+            return "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
         if use_mla:
             logger.info("Using Triton MLA backend.")
             return "vllm.attention.backends.triton_mla.TritonMLABackend"
