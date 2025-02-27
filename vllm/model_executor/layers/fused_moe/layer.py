@@ -817,52 +817,7 @@ def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
     self = forward_context.attn_layers[layer_name]
     assert self.quant_method is not None
 
-    if self.dp_size > 1:
-        num_tokens_across_dp = forward_context.num_tokens_across_dp
-        max_num_tokens = max(num_tokens_across_dp)
-        num_tokens = hidden_states.size(0)
-
-        assert num_tokens_across_dp is not None
-        hidden_states = self.naive_multicast(hidden_states, max_num_tokens)
-        router_logits = self.naive_multicast(router_logits, max_num_tokens)
-
-    # Matrix multiply.
-    final_hidden_states = self.quant_method.apply(
-        layer=self,
-        x=hidden_states,
-        router_logits=router_logits,
-        top_k=self.top_k,
-        renormalize=self.renormalize,
-        use_grouped_topk=self.use_grouped_topk,
-        global_num_experts=self.global_num_experts,
-        expert_map=self.expert_map,
-        topk_group=self.topk_group,
-        num_expert_group=self.num_expert_group,
-        custom_routing_function=self.custom_routing_function,
-        scoring_func=self.scoring_func,
-        e_score_correction_bias=self.e_score_correction_bias,
-        activation=self.activation,
-    )
-
-    if self.dp_size > 1:
-        if False:  # For now change this to select between all_reduce and
-            # reduce_scatter implementations
-            all_hidden_states = get_dp_group().all_reduce(final_hidden_states)
-            all_hidden_states = all_hidden_states.view(
-                self.dp_size, -1, all_hidden_states.size(-1))
-            final_hidden_states = all_hidden_states[
-                self.dp_rank, :num_tokens, :]
-        else:
-            final_hidden_states = get_dp_group().reduce_scatter(
-                final_hidden_states, 0)
-            final_hidden_states = final_hidden_states[:num_tokens, :]
-
-    if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-        # Default set to False. (May have to add shared expert outputs.)
-        final_hidden_states = tensor_model_parallel_all_reduce(
-            final_hidden_states)
-
-    return final_hidden_states
+    return self.forward_impl(hidden_states, router_logits)
 
 
 def moe_forward_fake(hidden_states: torch.Tensor, router_logits: torch.Tensor,
