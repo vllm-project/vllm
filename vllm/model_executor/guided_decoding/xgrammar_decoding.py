@@ -21,7 +21,6 @@ except ImportError:
     xgr_installed = False
     pass
 
-from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
                                                        grammar_is_likely_lark)
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
