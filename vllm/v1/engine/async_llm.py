@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+
 import asyncio
-from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
+import os
+from typing import AsyncGenerator, List, Mapping, Optional, Set, Type, Union
 
 import numpy as np
 
@@ -23,6 +25,7 @@ from vllm.utils import cdiv
 from vllm.v1.engine.core_client import AsyncMPClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import generate_parallel_sampling_async
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
@@ -50,10 +53,12 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: List[StatLoggerBase] = [
-            LoggingStatLogger(),
-            PrometheusStatLogger(vllm_config.model_config),
-        ]
+        self.stat_loggers: List[StatLoggerBase] = []
+        if self.log_stats:
+            self.stat_loggers.extend([
+                LoggingStatLogger(),
+                PrometheusStatLogger(vllm_config),
+            ])
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -80,6 +85,7 @@ class AsyncLLM(EngineClient):
         self.engine_core = AsyncMPClient(
             vllm_config=vllm_config,
             executor_class=executor_class,
+            log_stats=self.log_stats,
         )
 
         self.output_handler: Optional[asyncio.Task] = None
@@ -165,7 +171,7 @@ class AsyncLLM(EngineClient):
     # requests we don't need to send multiple messages to core proc,
     # and so we don't need multiple streams which then get
     # re-multiplexed in the API server anyhow.
-    async def generate(
+    async def _generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -253,6 +259,29 @@ class AsyncLLM(EngineClient):
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
+    def generate(
+        self,
+        prompt: PromptType,
+        sampling_params: SamplingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        kwargs = dict(prompt=prompt,
+                      sampling_params=sampling_params,
+                      request_id=request_id,
+                      lora_request=lora_request,
+                      trace_headers=trace_headers,
+                      prompt_adapter_request=prompt_adapter_request,
+                      priority=priority)
+        if sampling_params.n is None or sampling_params.n == 1:
+            return self._generate(**kwargs)
+        else:
+            # Special handling for parallel sampling requests
+            return generate_parallel_sampling_async(generate=self._generate,
+                                                    **kwargs)
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
@@ -261,6 +290,8 @@ class AsyncLLM(EngineClient):
             while True:
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
+
+                iteration_stats = IterationStats() if self.log_stats else None
 
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
@@ -273,14 +304,12 @@ class AsyncLLM(EngineClient):
                         outputs.outputs,
                         cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
 
-                iteration_stats = None
                 for i, outputs_slice in enumerate(slices):
                     # 2) Process EngineCoreOutputs.
                     processed_outputs = self.output_processor.process_outputs(
-                        outputs_slice, iteration_stats)
+                        outputs_slice, outputs.timestamp, iteration_stats)
                     # NOTE: RequestOutputs are pushed to their queues.
                     assert not processed_outputs.request_outputs
-                    iteration_stats = processed_outputs.iteration_stats
 
                     # Allow other asyncio tasks to run between chunks
                     if i + 1 < len(slices):
@@ -293,7 +322,6 @@ class AsyncLLM(EngineClient):
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
-                assert iteration_stats is not None
                 self._log_stats(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
@@ -316,12 +344,14 @@ class AsyncLLM(EngineClient):
 
     def _log_stats(
         self,
-        scheduler_stats: SchedulerStats,
-        iteration_stats: IterationStats,
+        scheduler_stats: Optional[SchedulerStats],
+        iteration_stats: Optional[IterationStats],
     ):
         if not self.log_stats:
             return
 
+        assert scheduler_stats is not None
+        assert iteration_stats is not None
         for logger in self.stat_loggers:
             logger.log(scheduler_stats=scheduler_stats,
                        iteration_stats=iteration_stats)
@@ -374,6 +404,28 @@ class AsyncLLM(EngineClient):
     async def reset_prefix_cache(self) -> None:
         await self.engine_core.reset_prefix_cache_async()
 
+    async def sleep(self, level: int = 1) -> None:
+        await self.engine_core.sleep_async(level)
+
+    async def wake_up(self) -> None:
+        await self.engine_core.wake_up_async()
+
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
+        """Load a new LoRA adapter into the engine for future requests."""
+        return await self.engine_core.add_lora_async(lora_request)
+
+    async def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter."""
+        return await self.engine_core.remove_lora_async(lora_id)
+
+    async def list_loras(self) -> Set[int]:
+        """List all registered adapters."""
+        return await self.engine_core.list_loras_async()
+
+    async def pin_lora(self, lora_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return await self.engine_core.pin_lora_async(lora_id)
+
     @property
     def is_running(self) -> bool:
         # Have not started the loop yet.
@@ -393,7 +445,3 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return EngineDeadError()
-
-    async def add_lora(self, lora_request: LoRARequest) -> None:
-        """Load a new LoRA adapter into the engine for future requests."""
-        raise NotImplementedError("LoRA not yet supported in V1")

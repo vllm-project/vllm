@@ -46,7 +46,10 @@ def _init_attn_metadata_from_tensor_dict(
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
         if field.name in tensor_dict:
-            valid_attn_kwargs[field.name] = tensor_dict.pop(field.name)
+            if field.name == "input_positions":
+                valid_attn_kwargs[field.name] = tensor_dict[field.name]
+            else:
+                valid_attn_kwargs[field.name] = tensor_dict.pop(field.name)
 
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
     tensor_dict["attn_metadata"] = attn_metadata
@@ -258,3 +261,21 @@ class ModelRunnerWrapperBase:
 
     def __getattr__(self, attr):
         return getattr(self.model_runner, attr)
+
+
+class InputProcessingError(Exception):
+    """This exception is raised when an error occurs preparing the inputs for
+    a single sequence group.
+    This allows the engine to gracefully handle errors with a single sequence
+    group without having to fail the entire batch.
+    """
+
+    def __init__(self, request_id, message):
+        """request_id is the id of the offending sequence group"""
+        self.request_id = request_id
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return "Failed to prepare inputs for sequence group with request id: " \
+                f"{self.request_id}, Error: {self.message}"

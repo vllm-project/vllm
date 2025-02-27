@@ -212,10 +212,11 @@ class WorkerProc:
         input_shm_handle: Handle,
         ready_pipe: Connection,
     ):
+
         try:
             self.rank = rank
             wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
-            # TODO: move `init_worker` to executor as a collective rpc call
+            # TODO: move `init_worker` to executor level as a collective rpc call
             all_kwargs: List[Dict] = [
                 {} for _ in range(vllm_config.parallel_config.world_size)
             ]
@@ -224,9 +225,10 @@ class WorkerProc:
                 "local_rank": local_rank,
                 "rank": rank,
                 "distributed_init_method": distributed_init_method,
+                "is_driver_worker": rank == 0,
             }
             wrapper.init_worker(all_kwargs)
-            self.worker = wrapper.worker
+            self.worker = wrapper
 
             pid = os.getpid()
             _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)

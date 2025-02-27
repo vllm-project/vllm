@@ -6,13 +6,14 @@ import weakref
 
 import jsonschema
 import pytest
+from pydantic import BaseModel
 
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
 
@@ -148,6 +149,47 @@ def test_guided_definition_json_completion(sample_definition_json_schema, llm,
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
+def test_guided_enum_json_completion(sample_enum_json_schema, llm,
+                                     guided_decoding_backend: str):
+    sampling_params = SamplingParams(temperature=1.0,
+                                     max_tokens=1000,
+                                     guided_decoding=GuidedDecodingParams(
+                                         json=sample_enum_json_schema,
+                                         backend=guided_decoding_backend))
+    outputs = llm.generate(prompts=[
+        "Create a bug report JSON that fits this schema: "
+        f"{sample_enum_json_schema}. Make it for a high priority critical bug."
+    ] * 2,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
+
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json,
+                            schema=sample_enum_json_schema)
+
+        # Additional assertions to verify enum values
+        assert output_json["status"] in ["active", "inactive", "pending"]
+        assert output_json["priority"] in ["low", "medium", "high", "critical"]
+        assert output_json["category"]["type"] in [
+            "bug", "feature", "improvement"
+        ]
+        assert output_json["category"]["severity"] in [1, 2, 3, 4, 5]
+        for flag in output_json["flags"]:
+            assert flag in ["urgent", "blocked", "needs_review", "approved"]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_choice_completion(sample_guided_choice, llm,
                                   guided_decoding_backend: str):
     sampling_params = SamplingParams(temperature=0.8,
@@ -237,6 +279,22 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
 
 
 @pytest.mark.skip_global_cleanup
+def test_disable_guided_decoding_fallback(sample_regex, llm):
+    sampling_params = SamplingParams(temperature=0.8,
+                                     top_p=0.95,
+                                     guided_decoding=GuidedDecodingParams(
+                                         regex=sample_regex,
+                                         backend="xgrammar:no-fallback"))
+
+    with pytest.raises(
+            ValueError,
+            match="xgrammar does not support regex guided decoding"):
+        llm.generate(prompts="This should fail",
+                     sampling_params=sampling_params,
+                     use_tqdm=True)
+
+
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_json_object(llm, guided_decoding_backend: str):
     sampling_params = SamplingParams(temperature=1.0,
@@ -265,3 +323,56 @@ def test_guided_json_object(llm, guided_decoding_backend: str):
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
             assert isinstance(parsed_json, dict)
+
+
+@pytest.mark.skip_global_cleanup
+def test_json_with_any_whitespace_disabled(llm):
+
+    class ResponseSchema(BaseModel):
+        clarifying_question: str
+        cost_per_serving: str
+        calories: str
+        type_dish_ids: str
+        type_meal_ids: str
+        product_ids: list[str]
+        exclude_product_ids: list[str]
+        allergen_ids: list[str]
+        total_cooking_time: str
+        kitchen_ids: str
+        holiday_ids: str
+
+    # Note: Without this setting, the response is sometimes full of `\n`
+    # for some models. This option prevents that.
+    guided_decoding_backend = 'xgrammar:disable-any-whitespace'
+
+    schema = ResponseSchema.model_json_schema()
+    guided_params = GuidedDecodingParams(json=schema,
+                                         backend=\
+                                           guided_decoding_backend)
+    sampling_params = SamplingParams(max_tokens=2000,
+                                     frequency_penalty=0,
+                                     presence_penalty=-1.1,
+                                     repetition_penalty=1.3,
+                                     guided_decoding=guided_params)
+
+    prompt = ("<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You"
+              "are a helpful assistant.<|im_end|>\n<|im_start|>user\nI want a "
+              "quick launch fast with $10.<|im_end|>\n<|im_start|>assistant\n")
+    outputs = llm.generate(prompts=prompt,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
+
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        assert "\n" not in generated_text
+
+        # Parse to verify it is valid JSON
+        parsed_json = json.loads(generated_text)
+        assert isinstance(parsed_json, dict)
+        jsonschema.validate(instance=parsed_json, schema=schema)

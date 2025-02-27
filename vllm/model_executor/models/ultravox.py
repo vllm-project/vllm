@@ -4,8 +4,8 @@
 """PyTorch Ultravox model."""
 import math
 from functools import cached_property
-from typing import (Any, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from typing import (Any, Iterable, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.utils.checkpoint
@@ -16,8 +16,8 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from vllm import envs
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -68,8 +68,9 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         *,
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
+        **kwargs: object,
     ) -> ProcessorMixin:
-        hf_processor = self.ctx.get_hf_processor()
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
 
         # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
         # placeholder that will cause confusion with the actual end of turn
@@ -145,7 +146,8 @@ class UltravoxMultiModalProcessor(
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not mm_data or not mm_data.get("audios", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self.info.get_tokenizer().encode(
+                prompt, add_special_tokens=False)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -183,16 +185,6 @@ class UltravoxMultiModalProcessor(
             audio_token_len=audio_token_len,
         )
         return BatchFeature(combined_outputs)
-
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
-        # HF processor omits bos_token_id by setting add_special_tokens=False
-        tokenizer = self.info.get_tokenizer()
-        assert prompt_tokens[0] == tokenizer.bos_token_id
-
-        return prompt_tokens[1:]
 
     def _get_mm_fields_config(
         self,
@@ -258,27 +250,35 @@ class UltravoxProjector(nn.Module):
         super().__init__()
         self.hidden_dim = config.hidden_size
         self._pad_and_stack = StackAudioFrames(config.stack_factor)
-        dim = config.audio_config.hidden_size * config.stack_factor
-        self.ln_pre = RMSNorm(dim)
-        self.linear_1 = nn.Linear(dim, self.hidden_dim, bias=False)
-        dim = self.hidden_dim
+        dim_in = config.audio_config.hidden_size * config.stack_factor
+        self.ln_pre = RMSNorm(dim_in)
+        self.linear_1 = nn.Linear(dim_in, self.hidden_dim, bias=False)
+        dim_mid = self.hidden_dim
 
         if config.projector_act == "swiglu":
             self.act = MulAndSilu()
-            dim = dim // 2
+            dim_mid = dim_mid // 2
         else:
             self.act = get_act_fn(config.projector_act)
 
-        self.linear_2 = nn.Linear(dim,
-                                  config.text_config.hidden_size,
-                                  bias=False)
-        self.ln_post = RMSNorm(config.text_config.hidden_size)
+        dim_out = config.text_config.hidden_size
+        self.linear_2 = nn.Linear(dim_mid, dim_out, bias=False)
+
+        # Ultravox v0.4.1 and below use layer_norm after the second linear layer
+        # while v0.5.0 and above uses layer_norm after the first linear layer.
+        if config.projector_ln_mid:
+            self.ln_mid: nn.Module = RMSNorm(dim_mid)
+            self.ln_post = nn.Identity()
+        else:
+            self.ln_mid = nn.Identity()
+            self.ln_post = RMSNorm(dim_out)
 
     def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
         audio_features = self._pad_and_stack(audio_features)
         audio_features = self.ln_pre(audio_features)
         hidden_states = self.linear_1(audio_features)
         hidden_states = self.act(hidden_states)
+        hidden_states = self.ln_mid(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         hidden_states = self.ln_post(hidden_states)
         return hidden_states
@@ -350,14 +350,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
-
-    # LoRA specific attributes
-    # TODO : Add LoRA to the audio tower and projector.
-    supported_lora_modules = [
-        "qkv_proj", "o_proj", "gate_up_proj", "down_proj"
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
@@ -494,13 +486,13 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[NestedTensors] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
             if not envs.VLLM_USE_V1:
+                attn_metadata = get_forward_context().attn_metadata
                 merge_multimodal_embeddings_from_map(
                     inputs_embeds, multimodal_embeddings,
                     attn_metadata.multi_modal_placeholder_index_maps["audio"])
@@ -513,8 +505,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[torch.Tensor] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
@@ -539,17 +529,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         elif inputs_embeds is None:
             multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-            # TODO(ywang96): remove attn_metadata from get_input_embeddings
-            # after v0 is deprecated
             inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings,
-                                                      attn_metadata)
+                                                      multimodal_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
         return hidden_states
