@@ -168,10 +168,11 @@ def show_mem_info(logger=None, msg="", loglevel="info"):
     hpu_mem_mb = get_used_hpu_mem_MB()
     show_fn = getattr(logger, loglevel)
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
-    show_fn(f"[Rank {rank}] {msg}")
-    show_fn(f"[Rank {rank}] Used HPU memory: {hpu_mem_mb // 1000} GB {hpu_mem_mb % 1000} MB")
-    cpu_mem_mb = get_used_cpu_mem_MB()
-    show_fn(f"[Rank {rank}] Used CPU memory: {cpu_mem_mb // 1000} GB {cpu_mem_mb % 1000} MB")
+    if rank == 0:
+        show_fn(f"[Rank {rank}] {msg}")
+        show_fn(f"[Rank {rank}] Used HPU memory: {hpu_mem_mb // 1000} GB {hpu_mem_mb % 1000} MB")
+        cpu_mem_mb = get_used_cpu_mem_MB()
+        show_fn(f"[Rank {rank}] Used CPU memory: {cpu_mem_mb // 1000} GB {cpu_mem_mb % 1000} MB")
     
 
 def get_used_hpu_mem_MB():
