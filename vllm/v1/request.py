@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from __future__ import annotations
-
 import enum
 import functools
 import json
@@ -33,13 +31,13 @@ class Request:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: List[int],
-        multi_modal_inputs: Optional[List[MultiModalKwargs]],
+        multi_modal_inputs: Optional[List["MultiModalKwargs"]],
         multi_modal_hashes: Optional[List[str]],
-        multi_modal_placeholders: Optional[List[PlaceholderRange]],
+        multi_modal_placeholders: Optional[List["PlaceholderRange"]],
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         arrival_time: float,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional["LoRARequest"] = None,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
@@ -83,7 +81,7 @@ class Request:
         self._grammar: Optional[Union[Future[Grammar], Grammar]] = None
 
     @classmethod
-    def from_engine_core_request(cls, request: EngineCoreRequest) -> Request:
+    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         return cls(
             request_id=request.request_id,
             prompt=request.prompt,
@@ -217,12 +215,12 @@ class RequestStatus(enum.IntEnum):
     FINISHED_IGNORED = enum.auto()
 
     @staticmethod
-    def is_finished(status: RequestStatus) -> bool:
+    def is_finished(status: "RequestStatus") -> bool:
         return status > RequestStatus.PREEMPTED
 
     @staticmethod
     def get_finished_reason(
-            status: RequestStatus) -> Union[FinishReason, None]:
+            status: "RequestStatus") -> Union[FinishReason, None]:
         return _FINISHED_REASON_MAP.get(status)
 
 
