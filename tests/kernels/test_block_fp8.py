@@ -26,9 +26,15 @@ NUM_TOKENS = [7, 83, 2048]
 D = [512, 4096, 5120, 13824]
 GROUP_SIZE = [64, 128, 256, 512]
 #M = [1, 7, 83, 512, 2048]
-M = [1, 8, 84, 512, 2048]
-N = [128, 512, 1024, 4096, 7748, 13824]
-K = [256, 4096, 5120, 3884, 13824]
+
+M = [1, 8, 84, 512, 2048, 4096]
+N = [128, 512, 1024, 4096, 7748, 13824, 7168]
+K = [256, 4096, 5120, 3884, 13824, 16384]
+
+#M = [128]
+#N = [24576]
+#K = [1536]
+
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
 #M_moe = [1, 7, 83, 512, 2048]
@@ -384,46 +390,50 @@ from vllm.model_executor.layers.fused_moe import fused_topk, grouped_topk
 
 def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
     """Fused moe with block-wise quantization using native torch."""
-    B, D = a.shape
-    a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
+    M, K = a.shape
+    print(f"before {a.shape}")
+    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
     topk_weight, topk_ids = torch.topk(score, topk)
     topk_weight = topk_weight.view(-1)
-    topk_ids = topk_ids.view(-1)
+    topk_ids = topk_ids.to(dtype=torch.int32).view(-1)
 
     _, block_k = block_shape[0], block_shape[1]
     a_q, a_s = per_token_group_quant_fp8(a, block_k)
-    w1, w1_s = per_block_cast_to_fp8(w1)
-    w2, w2_s = per_block_cast_to_fp8(w2)
 
-    num_groups = w1.shape[0] # ???
+    num_groups = w1.shape[0]
+    for i in range(num_groups):
+        w1[i], w1_s[i] = per_block_cast_to_fp8(w1[i].to(dtype=torch.bfloat16))
+        w2[i], w2_s[i] = per_block_cast_to_fp8(w2[i].to(dtype=torch.bfloat16))
+
+    print(f"{M}, {num_groups}, {a.shape}")
 
     m_indices = torch.arange(0, num_groups, device=a.device, dtype=torch.int)
-    m_indices = m_indices.unsqueeze(-1).expand(num_groups, m).contiguous().view(-1)
+    m_indices = m_indices.unsqueeze(-1).expand(num_groups, a.shape[0]//num_groups).contiguous().view(-1)
 
     inter_out = torch.zeros(a_q.shape[0], w1.shape[1], dtype=torch.bfloat16, device=a.device)
+
+    print("FIRST GEMM")
 
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((a_q, a_s),
                                                         (w1, w1_s),
                                                         inter_out,
-                                                        m_indices)
+                                                        topk_ids)
 
     act_out = SiluAndMul().forward_native(inter_out)
     act_out_q, act_out_s = per_token_group_quant_fp8(act_out, block_k)
 
-    num_groups2 = w2.shape[0] # ???
+    out = torch.zeros(M * topk, w2.shape[1], dtype=torch.bfloat16, device=a.device)
 
-    m_indices2 = torch.arange(0, num_groups2, device=a.device, dtype=torch.int)
-    m_indices2 = m_indices2.unsqueeze(-1).expand(num_groups2, n).contiguous().view(-1)
-    out = torch.zeros(B * topk, w2.shape[1], dtype=torch.bfloat16, device=a.device)
+    print("SECOND GEMM")
 
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((act_out_q, act_out_s),
                                                         (w2, w2_s),
                                                         out,
-                                                        m_indices2)
+                                                        topk_ids)
 
-    return (out.view(B, -1, w2.shape[1]) *
-            topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+    return (out.view(M, -1, w2.shape[1]) *
+            topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
 
 
 @pytest.mark.parametrize(
@@ -446,11 +456,11 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size, dtype,
 
     w1_bf16 = (torch.rand(
         (E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
-    w1 = w1_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    w1 = w1_bf16.clamp(min=fp8_min, max=fp8_max)
     del w1_bf16
 
     w2_bf16 = (torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
-    w2 = w2_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    w2 = w2_bf16.clamp(min=fp8_min, max=fp8_max)
     del w2_bf16
 
     block_n, block_k = block_size[0], block_size[1]
@@ -466,6 +476,12 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size, dtype,
 
     score = torch.randn((M, E), dtype=dtype)
 
+    w1 = w1.to(torch.float8_e4m3fn)
+    w2 = w2.to(torch.float8_e4m3fn)
+
+    ref_out = deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
+                                           block_size)
+
     out = fused_moe(
         a,
         w1,
@@ -478,9 +494,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size, dtype,
         w2_scale=w2_s,
         block_shape=block_size,
     )
-    ref_out = deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
-                                           block_size)
-
     print(f"{out.sum()=}")
     print(f"{ref_out.sum()=}")
 

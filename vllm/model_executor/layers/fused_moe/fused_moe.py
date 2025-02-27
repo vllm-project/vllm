@@ -707,6 +707,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         assert A_scale is None
         assert B_scale is None
 
+    # EM = num_groups
     EM = sorted_token_ids.shape[0]
     if A.shape[0] < config["BLOCK_SIZE_M"]:
         # optimize for small batch_size.
