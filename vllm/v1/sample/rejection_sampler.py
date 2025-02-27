@@ -185,6 +185,7 @@ class RejectionSampler(nn.Module):
                 dim=-1, index=draft_token_ids_tensor.unsqueeze(-1)).squeeze(-1)
             target_token_probs = target_probs.gather(
                 dim=-1, index=draft_token_ids_tensor.unsqueeze(-1)).squeeze(-1)
+
             # 2. Generate uniform samples.
             # [batch_size, max_spec_len + 1]
             uniform_samples = _create_uniform_samples(
@@ -193,13 +194,16 @@ class RejectionSampler(nn.Module):
 
             # 3. Accept or reject the samples.
             # [batch_size, max_spec_len]
-            accepted = uniform_samples <= draft_token_probs / target_token_probs
+            accepted = uniform_samples <= target_token_probs / draft_token_probs
             accept_mask = accepted.cumprod(dim=1)
-            accepted_token_ids = draft_token_ids_tensor & accept_mask
+            # Set the token ids to the draft token ids if accepted, otherwise
+            # set them to INVALID_TOKEN_ID.
+            accepted_token_ids = (draft_token_ids_tensor * accept_mask +
+                                  INVALID_TOKEN_ID * (1 - accept_mask))
 
             # 4. Adjust the distribution for the bonus token.
             bonus_prob = torch.clamp(target_probs[:, :-1, :] - draft_probs,
-                                     min=0)
+                                     min=1e-5)
             normalized_bonus_prob = bonus_prob / bonus_prob.sum(dim=-1,
                                                                 keepdim=True)
             # Concatenate normalized prob with the prob of last target token.
@@ -209,8 +213,10 @@ class RejectionSampler(nn.Module):
 
             # 5. Sample bonus token.
             # [batch_size, max_spec_len + 1]
-            bonus_token_ids = random_sample(sample_prob,
-                                            sampling_metadata.generators)
+            bonus_token_ids = random_sample(
+                sample_prob,
+                sampling_metadata.generators).reshape(batch_size,
+                                                      max_spec_len + 1)
 
             # 6. Concatenate the bonus tokens with accepted tokens to get the
             # output token ids.
@@ -229,8 +235,9 @@ class RejectionSampler(nn.Module):
                            device=accept_mask.device)
             ],
                                          dim=1)
-            output_token_ids[:,
-                             first_zero_idx] = bonus_token_ids[first_zero_idx]
+            output_token_ids[torch.arange(batch_size),
+                             first_zero_idx] = bonus_token_ids[
+                                 torch.arange(batch_size), first_zero_idx]
 
         return SamplerOutput(sampled_token_ids=output_token_ids,
                              logprobs_tensors=None)

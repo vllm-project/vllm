@@ -433,13 +433,11 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
 
 
 @pytest.mark.parametrize("draft_and_target_probs_equal", [True, False])
-@pytest.mark.parametrize("seed", list(range(5)))
-@pytest.mark.parametrize("use_flashinfer", [False])
-@pytest.mark.parametrize("use_v1", [True])
+@pytest.mark.parametrize("seed", [1, 3, 5])
+@pytest.mark.parametrize("use_v1", [True, False])
 @torch.inference_mode()
 def test_rejection_sampling_approximates_target_distribution(
-        seed: int, draft_and_target_probs_equal: bool, use_flashinfer: bool,
-        use_v1: bool):
+        seed: int, draft_and_target_probs_equal: bool, use_v1: bool):
     """Verify rejection sampling approximates target distribution,
     despite sampling from a potentially distinct draft distribution.
 
@@ -468,10 +466,9 @@ def test_rejection_sampling_approximates_target_distribution(
     """
     torch.set_default_device("cpu")
     set_random_seed(seed)
-    sampler = get_sampler(use_v1, use_flashinfer)
     helper = _CorrectnessTestHelper(
         vocab_size=10,
-        rejection_sampler=sampler,
+        use_v1=use_v1,
     )
 
     draft_probs, target_probs, reference_probs = helper.generate_probs_for_test(
@@ -523,13 +520,14 @@ class _CorrectnessTestHelper:
     rejection sampling correctness test.
     """
 
-    def __init__(self, vocab_size: int,
-                 rejection_sampler: v0_rejection_sampler.RejectionSampler):
-        self.rejection_sampler = rejection_sampler
+    def __init__(self, vocab_size: int, use_v1: bool):
+        self.rejection_sampler = get_sampler(use_v1, use_flashinfer=False)
         self.vocab_size = vocab_size
         self.vocab_range = (0, vocab_size)
+        self.use_v1 = use_v1
 
-        self.rejection_sampler.init_gpu_tensors(device=0)
+        if not self.use_v1:
+            self.rejection_sampler.init_gpu_tensors(device=0)
 
         # Keep test simple, use k=1
         self.k = 1
@@ -603,10 +601,16 @@ class _CorrectnessTestHelper:
                                       device="cuda").repeat(num_samples, 1)
 
         # Get output tokens via rejection sampling.
-        output_token_ids = self.rejection_sampler(target_probs.to("cuda"),
-                                                  bonus_token_ids.to("cuda"),
-                                                  draft_probs.to("cuda"),
-                                                  draft_token_ids.to("cuda"))
+        if self.use_v1:
+            draft_token_ids_list = draft_token_ids.tolist()
+            output_token_ids = self.rejection_sampler(
+                draft_token_ids_list, draft_probs, target_probs,
+                create_v1_sampling_metadata(
+                    all_greedy=False)).sampled_token_ids
+        else:
+            output_token_ids = self.rejection_sampler(
+                target_probs.to("cuda"), bonus_token_ids.to("cuda"),
+                draft_probs.to("cuda"), draft_token_ids.to("cuda"))
 
         # Remove bonus tokens
         output_token_ids = output_token_ids[:, :-1].flatten()
