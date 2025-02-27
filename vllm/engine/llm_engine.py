@@ -388,6 +388,10 @@ class LLMEngine:
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
 
+        if self.device_config.device_type == "neuron":
+            num_lookahead_slots = self.scheduler_config.num_lookahead_slots
+        else:
+            num_lookahead_slots = 0
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -400,7 +404,7 @@ class LLMEngine:
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
                     get_tokenizer_for_seq,
-                ),
+                    num_lookahead_slots=num_lookahead_slots),
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}

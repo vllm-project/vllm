@@ -174,6 +174,7 @@ class EngineArgs:
     speculative_draft_tensor_parallel_size: Optional[int] = None
     num_speculative_tokens: Optional[int] = None
     speculative_disable_mqa_scorer: Optional[bool] = False
+    speculative_token_tree: Optional[str] = None
     speculative_max_model_len: Optional[int] = None
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
@@ -747,6 +748,11 @@ class EngineArgs:
             'If set to True, the MQA scorer will be disabled in speculative '
             ' and fall back to batch expansion')
         parser.add_argument(
+            '--speculative-token-tree',
+            type=nullable_str,
+            default=EngineArgs.speculative_token_tree,
+            help='The token tree definition used with speculation.')
+        parser.add_argument(
             '--speculative-draft-tensor-parallel-size',
             '-spec-draft-tp',
             type=int,
@@ -1164,6 +1170,7 @@ class EngineArgs:
                 self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
             speculative_disable_mqa_scorer=self.speculative_disable_mqa_scorer,
+            speculative_token_tree=self.speculative_token_tree,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,
             speculative_max_model_len=self.speculative_max_model_len,
