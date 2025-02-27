@@ -537,12 +537,11 @@ class FalconMamba2ForCausalLM(
         if self.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(
                 self.model.embed_tokens)
-        self.lm_head_multiplier = config.lm_head_multiplier
         # Used to track and store by the Mamba cache between steps.
         self.mamba_cache: Optional[MambaCacheManager] = None
 
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
+            self.unpadded_vocab_size, config.vocab_size, scale=config.lm_head_multiplier
         )
         self.sampler = get_sampler()
 
@@ -618,12 +617,12 @@ class FalconMamba2ForCausalLM(
         return conv_state_shape, temporal_state_shape
 
     def compute_logits(
-        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = (
-            self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
-            * self.lm_head_multiplier
-        )
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(
