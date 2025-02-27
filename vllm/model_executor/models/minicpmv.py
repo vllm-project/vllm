@@ -804,7 +804,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         return result
 
 
-class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
+class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
+                        SupportsV0Only):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
@@ -1308,7 +1309,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                                          patch_attn_mask, tgt_sizes)
 
 
-class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA, SupportsV0Only):
+class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
