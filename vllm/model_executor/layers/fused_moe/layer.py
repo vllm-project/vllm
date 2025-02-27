@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Callable, List, Optional, Tuple
 
 import torch
+from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -514,7 +515,12 @@ class FusedMoE(torch.nn.Module):
         # dimension intermediate_size_per_partition is used.
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
-        expert_data = param.data[expert_id]
+        is_gguf_weight = getattr(param, "is_gguf_weight", False)
+        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
+        if is_gguf_weight_type:
+            param.weight_type = loaded_weight.item()
+            param.data.copy_(loaded_weight)
+            return
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ, compressed-tensors
@@ -524,6 +530,20 @@ class FusedMoE(torch.nn.Module):
         if is_transposed:
             shard_dim = int(not shard_dim)
 
+        full_load = len(loaded_weight.shape) == 3
+        if full_load:
+            shard_dim += 1
+
+        # Materialize GGUF UninitializedParameter
+        if is_gguf_weight and isinstance(param, UninitializedParameter):
+            final_shape = list(loaded_weight.shape)
+            if shard_id in ["w1", "w3"]:
+                final_shape[1] *= 2
+            final_shape[shard_dim] = final_shape[
+                shard_dim] // get_tensor_model_parallel_world_size()
+            param.materialize(final_shape, dtype=loaded_weight.dtype)
+
+        expert_data = param.data if full_load else param.data[expert_id]
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
