@@ -19,14 +19,18 @@ Previous blog post [vLLM V1: A Major Upgrade to vLLM's Core Architecture](https:
   more detailed list of the supported models. Encoder-decoder models support is not 
   happending soon. 
 
-## Unsupported features
+### List of features that are deprecated in v1
+- best_of
+- logits_processors
+- beam_search
 
+## Unsupported features
 
 ### LoRA
 - LoRA works for V1 on the main branch, but its performance is inferior to that of V0.
   The team is actively working on improving the performance [PR](https://github.com/vllm-project/vllm/pull/13096).
 
-### Spec decode other than ngram
+### Spec Decode other than ngram
 - Currently, only ngram spec decode is supported in V1 after this [PR](https://github.com/vllm-project/vllm/pull/12193).
 
 ### KV Cache Swapping & Offloading & FP8 KV Cache
@@ -34,7 +38,7 @@ Previous blog post [vLLM V1: A Major Upgrade to vLLM's Core Architecture](https:
   team is working actively on it.
 
 
-## Unsupported models
+## Unsupported Models
 
 
 ## FAQ
