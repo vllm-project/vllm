@@ -18,18 +18,18 @@ Previous blog post [vLLM V1: A Major Upgrade to vLLM's Core Architecture](https:
 
 ## Unsupported features
 
-vLLM v1 does not support the following features yet.
 
-### FP8 KV Cache
-- This feature is available in vLLM v0 ant not in v1. With v0, you can enable 
-  FP8 KV 
-  Cache by specifying:
-  ```--kv-cache-dtype fp8```
+### LoRA
+- LoRA works for V1 on the main branch, but its performance is inferior to that of V0.
+  The team is actively working on improving the performance on going [PR](https://github.com/vllm-project/vllm/pull/13096).
 
-### CPU Offload
-- vLLM v1 does not supports CPU offload. vLLM v0 has the CPU offload 
-  implementation in `vllm/worker/model_runner.py` that you can specify with 
-  `--cpu-offload-gb 1` (1gb)
+### Spec decode other than ngram
+- Currently, only ngram spec decode is supported in V1 after this [PR]
+  (https://github.com/vllm-project/vllm/pull/12193).
+
+### KV Cache Swapping & Offloading & FP8
+- vLLM v1 does not support KV Cache swapping, offloading, and FP8 KV Cache yet. The 
+  team is working actively on it.
 
 
 ## Unsupported models
