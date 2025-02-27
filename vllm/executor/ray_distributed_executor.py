@@ -491,7 +491,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         async_run_remote_workers_only to complete."""
         ray.get(parallel_worker_tasks)
 
-    def _check_ray_adag_installation(self):
+    def _check_ray_cgraph_installation(self):
         import pkg_resources
         from packaging import version
 
@@ -503,10 +503,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
                              f"required, but found {current_version}")
 
         import importlib.util
-        adag_spec = importlib.util.find_spec(
+        cgraph_spec = importlib.util.find_spec(
             "ray.experimental.compiled_dag_ref")
-        if adag_spec is None:
-            raise ValueError("Ray accelerated DAG is not installed. "
+        if cgraph_spec is None:
+            raise ValueError("Ray Compiled Graph is not installed. "
                              "Run `pip install ray[adag]` to install it.")
 
         cupy_spec = importlib.util.find_spec("cupy")
@@ -518,7 +518,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _compiled_ray_dag(self, enable_asyncio: bool):
         assert self.parallel_config.use_ray
-        self._check_ray_adag_installation()
+        self._check_ray_cgraph_installation()
         from ray.dag import InputNode, MultiOutputNode
         from ray.experimental.channel.torch_tensor_type import TorchTensorType
 
