@@ -9,6 +9,7 @@ import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
                     Final, List, Literal, Mapping, Optional, Protocol, Set,
@@ -293,6 +294,14 @@ class ModelConfig:
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
+
+        if (backend := envs.VLLM_ATTENTION_BACKEND
+            ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
+            raise ValueError(
+                "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
+                "module was not found."
+                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile"
+                "for instructions on how to install it.")
 
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
@@ -677,6 +686,23 @@ class ModelConfig:
                 "fallback to the eager mode.")
             self.enforce_eager = True
 
+    def _verify_with_expert_parallelism(self) -> None:
+        num_expert_names = [
+            "moe_num_experts",  # Dbrx
+            "num_experts",  # Jamba
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+        num_experts = 0
+        for name in num_expert_names:
+            num_experts = getattr(self.hf_text_config, name, 0)
+            if num_experts > 0:
+                break
+        if num_experts < 1:
+            raise ValueError(
+                "Number of experts in the model must be greater than 0 "
+                "when expert parallelism is enabled.")
+
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
         if not self.use_async_output_proc:
@@ -684,8 +710,6 @@ class ModelConfig:
             return
 
         if parallel_config.pipeline_parallel_size > 1:
-            logger.warning("Async output processing can not be enabled "
-                           "with pipeline parallel")
             self.use_async_output_proc = False
             return
 
@@ -693,15 +717,10 @@ class ModelConfig:
         # If the feature combo become valid
         from vllm.platforms import current_platform
         if not current_platform.is_async_output_supported(self.enforce_eager):
-            logger.warning(
-                "Async output processing is not supported on the "
-                "current platform type %s.", current_platform.device_type)
             self.use_async_output_proc = False
             return
 
         if envs.VLLM_USE_RAY_SPMD_WORKER:
-            logger.warning(
-                "Async output processing can not be enabled with ray spmd")
             self.use_async_output_proc = False
             return
 
@@ -713,8 +732,6 @@ class ModelConfig:
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if speculative_config:
-            logger.warning("Async output processing is not supported with"
-                           " speculative decoding currently.")
             self.use_async_output_proc = False
 
     def verify_with_parallel_config(
@@ -730,6 +747,9 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
+        if envs.VLLM_TEST_ENABLE_EP:
+            self._verify_with_expert_parallelism()
+
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
             architectures = getattr(self.hf_config, "architectures", [])
@@ -739,8 +759,6 @@ class ModelConfig:
                     "Supported models implement the `SupportsPP` interface.")
 
             if self.use_async_output_proc:
-                logger.warning("Async output processor is not supported with "
-                               "pipeline parallelism currently. Disabling it.")
                 self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(
@@ -906,8 +924,8 @@ class ModelConfig:
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
             if layers_block_type_value is None:
-                raise ValueError("The model is an hybrid without a"
-                                 "layers_block_type in the hf_config,"
+                raise ValueError("The model is an hybrid without a "
+                                 "layers_block_type in the hf_config, "
                                  "cannot determine the num of "
                                  f"{block_type.value} layers")
 
@@ -1095,6 +1113,10 @@ class CacheConfig:
         return {key: str(value) for key, value in self.__dict__.items()}
 
     def _verify_args(self) -> None:
+        if self.cpu_offload_gb < 0:
+            raise ValueError("CPU offload space must be non-negative"
+                             f", but got {self.cpu_offload_gb}")
+
         if self.gpu_memory_utilization > 1.0:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
@@ -2494,7 +2516,7 @@ def _get_and_verify_dtype(
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
-                    "For HPU, we cast models to bfloat16 instead of"
+                    "For HPU, we cast models to bfloat16 instead of "
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
                 torch_dtype = torch.bfloat16
@@ -2710,7 +2732,7 @@ class DecodingConfig:
             backend=self.guided_decoding_backend).backend_name
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
-                             f"must be one of {valid_guided_backends}")
+                             f" must be one of {valid_guided_backends}")
 
 
 @dataclass
@@ -2986,7 +3008,7 @@ class CompilationConfig(BaseModel):
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_reshape and self.enable_fusion:
                 logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled."
+                    "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + quant (fp8) fusion might not work")
 
     pass_config: PassConfig = Field(default_factory=PassConfig)
@@ -3400,6 +3422,20 @@ class VllmConfig:
                            "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        if self.model_config and self.model_config.use_mla and \
+            not current_platform.is_cuda():
+            logger.info(
+                "MLA is enabled on a non-cuda platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            self.scheduler_config.enable_chunked_prefill = False
+            self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.max_num_batched_tokens = max(
+                self.scheduler_config.max_model_len,
+                _DEFAULT_MAX_NUM_BATCHED_TOKENS)
+
+            if self.cache_config is not None:
+                self.cache_config.enable_prefix_caching = False
+
         current_platform.check_and_update_config(self)
 
         if not self.instance_id:
@@ -3541,7 +3577,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
             logger.warning(
                 "`torch.compile` is turned on, but the model %s"
                 " does not support it. Please open an issue on GitHub"
-                "if you want it to be supported.",
+                " if you want it to be supported.",
                 vllm_config.model_config.model)
         _current_vllm_config = old_vllm_config
 

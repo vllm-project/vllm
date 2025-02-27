@@ -53,7 +53,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse,
-                                              LoadLoraAdapterRequest,
+                                              LoadLoRAAdapterRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
@@ -63,7 +63,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
-                                              UnloadLoraAdapterRequest)
+                                              UnloadLoRAAdapterRequest)
 from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -575,7 +575,7 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
         "To indicate that the rerank API is not part of the standard OpenAI"
-        " API, we have located it at `/rerank`. Please update your client"
+        " API, we have located it at `/rerank`. Please update your client "
         "accordingly. (Note: Conforms to JinaAI rerank API)")
 
     return await do_rerank(request, raw_request)
@@ -690,12 +690,12 @@ if envs.VLLM_TORCH_PROFILER_DIR:
 
 if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     logger.warning(
-        "Lora dynamic loading & unloading is enabled in the API server. "
+        "LoRA dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!")
 
     @router.post("/v1/load_lora_adapter",
                  dependencies=[Depends(validate_json_request)])
-    async def load_lora_adapter(request: LoadLoraAdapterRequest,
+    async def load_lora_adapter(request: LoadLoRAAdapterRequest,
                                 raw_request: Request):
         handler = models(raw_request)
         response = await handler.load_lora_adapter(request)
@@ -707,7 +707,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
 
     @router.post("/v1/unload_lora_adapter",
                  dependencies=[Depends(validate_json_request)])
-    async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
+    async def unload_lora_adapter(request: UnloadLoRAAdapterRequest,
                                   raw_request: Request):
         handler = models(raw_request)
         response = await handler.unload_lora_adapter(request)
