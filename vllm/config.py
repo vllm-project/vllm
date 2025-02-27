@@ -229,6 +229,7 @@ class ModelConfig:
         trust_remote_code: bool,
         dtype: Union[str, torch.dtype],
         seed: int,
+        hf_config_path: Optional[str] = None,
         allowed_local_media_path: str = "",
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
@@ -259,6 +260,7 @@ class ModelConfig:
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
+        self.hf_config_path = hf_config_path
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
@@ -321,8 +323,9 @@ class ModelConfig:
         if self.enable_sleep_mode and not current_platform.is_cuda():
             raise ValueError("Sleep mode is only supported on CUDA devices.")
 
-        hf_config = get_config(self.model, trust_remote_code, revision,
-                               code_revision, config_format)
+        hf_config = get_config(self.hf_config_path or self.model,
+                               trust_remote_code, revision, code_revision,
+                               config_format)
 
         if hf_overrides_kw:
             logger.info("Overriding HF config with %s", hf_overrides_kw)
@@ -947,7 +950,7 @@ class ModelConfig:
     def try_get_generation_config(self) -> Dict[str, Any]:
         if self.generation_config is None or self.generation_config == "auto":
             config = try_get_generation_config(
-                self.model,
+                self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
             )
@@ -3420,6 +3423,20 @@ class VllmConfig:
             logger.warning("LoRA is not supported with `torch.compile` yet. "
                            "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        if self.model_config and self.model_config.use_mla and \
+            not current_platform.is_cuda():
+            logger.info(
+                "MLA is enabled on a non-cuda platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            self.scheduler_config.enable_chunked_prefill = False
+            self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.max_num_batched_tokens = max(
+                self.scheduler_config.max_model_len,
+                _DEFAULT_MAX_NUM_BATCHED_TOKENS)
+
+            if self.cache_config is not None:
+                self.cache_config.enable_prefix_caching = False
 
         current_platform.check_and_update_config(self)
 
