@@ -12,6 +12,7 @@ from tests.kernels.utils import override_backend_env_variable
 from vllm import SamplingParams, TokensPrompt
 from vllm.core.scheduler import Scheduler
 from vllm.engine.llm_engine import LLMEngine
+from vllm.platforms import current_platform
 
 from ..models.utils import check_outputs_equal
 
@@ -53,6 +54,10 @@ def test_mixed_requests(
     and the others don't. The cached position determines where
     the sequence is at among the batch of prefills.
     """
+    if backend == "FLASHINFER" and current_platform.is_rocm():
+        pytest.skip("Flashinfer does not support ROCm/HIP.")
+    if backend == "XFORMERS" and current_platform.is_rocm():
+        pytest.skip("Xformers does not support ROCm/HIP.")
     override_backend_env_variable(monkeypatch, backend)
 
     with hf_runner(model, dtype=dtype) as hf_model:
@@ -103,6 +108,11 @@ def test_unstable_prompt_sequence(
     backend: str,
     monkeypatch,
 ) -> None:
+
+    if backend == "FLASHINFER" and current_platform.is_rocm():
+        pytest.skip("Flashinfer does not support ROCm/HIP.")
+    if backend == "XFORMERS" and current_platform.is_rocm():
+        pytest.skip("Xformers does not support ROCm/HIP.")
     override_backend_env_variable(monkeypatch, backend)
 
     with vllm_runner(

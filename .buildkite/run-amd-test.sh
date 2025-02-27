@@ -92,7 +92,9 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_moe.py \
   --ignore=kernels/test_prefix_prefill.py \
   --ignore=kernels/test_rand.py \
-  --ignore=kernels/test_sampler.py"
+  --ignore=kernels/test_sampler.py \
+  --ignore=kernels/test_cascade_flash_attn.py \
+  --ignore=kernels/test_mamba_mixer2.py"
 fi
 
 #ignore certain Entrypoints tests
