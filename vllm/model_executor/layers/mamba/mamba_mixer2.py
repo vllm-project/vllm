@@ -491,9 +491,6 @@ class MambaMixer2(CustomOp):
             # update ssm states
             # - varlen state is a (batch, nheads, headdim, dstate) tensor
             for i, idx in enumerate(mamba_cache_params.state_indices_tensor):
-                print("varlen_shape: ", varlen_state[i].shape)
-                print("head: ", self.n_groups, self.head_dim, self.ssm_state_size)
-                print("mamba_cache_shape: ", mamba_cache_params.ssm_state[idx].shape)
                 mamba_cache_params.ssm_state[idx].copy_(varlen_state[i])
 
             # - reshape

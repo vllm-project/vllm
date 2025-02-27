@@ -667,7 +667,6 @@ class FalconMamba2ForCausalLM(
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                print(name, param.shape)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -679,7 +678,6 @@ class FalconMamba2ForCausalLM(
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                print(name, param.shape)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
