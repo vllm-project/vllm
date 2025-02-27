@@ -242,7 +242,8 @@ class FalconMamba2AttentionDecoderLayer(nn.Module):
         k = k * self.key_multiplier
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        output, _ = self.o_proj(attn_output) * self.attn_out_multiplier
+        output, _ = self.o_proj(attn_output) 
+        output = output * self.attn_out_multiplier
         return output
 
     def forward(
@@ -530,7 +531,10 @@ class FalconMamba2ForCausalLM(
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
-        if config.tie_word_embeddings:
+        # self.tie_word_embeddings = config.tie_word_embeddings
+        # TODO: what is going on here?
+        self.tie_word_embeddings = True
+        if self.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(
                 self.model.embed_tokens)
         self.lm_head_multiplier = config.lm_head_multiplier
@@ -560,10 +564,6 @@ class FalconMamba2ForCausalLM(
         **kwargs,
     ):
         if self.mamba_cache is None:
-
-            # num_mamba_layers = self.model_config.get_num_layers_by_block_type(
-            #     self.vllm_config.parallel_config, LayerBlockType.mamba)
-
             self.mamba_cache = MambaCacheManager(
                 self.vllm_config,
                 self.lm_head.weight.dtype,
@@ -654,9 +654,6 @@ class FalconMamba2ForCausalLM(
             if "mamba" in name:
                 name = name.replace("mamba", "mamba.mamba")
 
-            # if ".self_attn." in name:
-            #     name = name.replace(".self_attn", "")
-
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -685,4 +682,7 @@ class FalconMamba2ForCausalLM(
                 print(name, param.shape)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        if self.tie_word_embeddings:
+            loaded_params.add("lm_head.weight")
         return loaded_params

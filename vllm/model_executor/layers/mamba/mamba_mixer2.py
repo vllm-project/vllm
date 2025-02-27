@@ -397,7 +397,9 @@ class MambaMixer2(CustomOp):
             has_initial_states = attn_metadata.context_lens_tensor > 0
 
         # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states) * ssm_in_multiplier
+        projected_states, _ = self.in_proj(hidden_states)
+        projected_states = projected_states * ssm_in_multiplier
+        
         gate, hidden_states_B_C, dt = torch.split(
             projected_states,
             [
