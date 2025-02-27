@@ -541,9 +541,9 @@ class ModelConfig:
         if task_option == "draft":
             return {"draft"}, "draft"
 
+        registry = self.registry
         architectures = self.architectures
 
-        registry = self.registry
         runner_support: Dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
