@@ -31,6 +31,7 @@ quantized_model.push_to_hub(hub_repo, safe_serialization=False)
 or with [spaces](https://huggingface.co/spaces/medmekk/TorchAO_Quantization).
 
 We can then test latency for the quantized model with vllm:
+
 ```console
 python benchmarks/benchmark_latency.py --input-len 256 --output-len 256 --model jerryzh168/llama3-8b-int8wo --batch-size 1 --quantization torchao --torchao-config int8wo
 ```
@@ -40,6 +41,7 @@ Note: torch.compile is enabled by default.
 Note: we currently need to explicitly specify torchao-config that matches the checkpoint, we'll follow up with fixes that allow loading the configuration from config file directly.
 
 Example output:
+
 ```
 Avg latency: 2.145327783127626 seconds
 10% percentile latency: 2.1314279098063706 seconds
@@ -49,5 +51,3 @@ Avg latency: 2.145327783127626 seconds
 90% percentile latency: 2.1607464250177144 seconds
 99% percentile latency: 2.1807862490043046 seconds
 ```
-
-
