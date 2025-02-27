@@ -17,13 +17,25 @@ from pathlib import Path
 from types import MethodType
 from typing import Any, Callable, Dict, Optional, Union, cast
 
-from loguru import logger
-from loguru._logger import Logger as LoguruLogger
+# Try to import loguru as it's part of an optional dependency
+try:
+    from loguru import logger
+    from loguru._logger import Logger as LoguruLogger
+    LOGURU_AVAILABLE = True
+except ImportError:
+    LOGURU_AVAILABLE = False
+
+    class LoguruLogger:
+        """Placeholder class for type hints when loguru is not available."""
+        pass
+
+    logger = logging.getLogger("vllm")
 
 import vllm.envs as envs
 from vllm.logging_utils import NewLineFormatter
 
-VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
+# If loguru is not available, force VLLM_CONFIGURE_LOGGING to False
+VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING and LOGURU_AVAILABLE
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
 VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
@@ -432,7 +444,7 @@ def init_logger(name: str) -> Union[LoguruLogger, _VllmLogger]:
         A logger instance (either a loguru logger or standard Logger
         with custom methods).
     """
-    if VLLM_CONFIGURE_LOGGING and _root_logger and hasattr(
+    if LOGURU_AVAILABLE and VLLM_CONFIGURE_LOGGING and _root_logger and hasattr(
             _root_logger, 'bind'):
         return _root_logger.bind(name=name)
 
