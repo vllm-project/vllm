@@ -447,7 +447,7 @@ def get_ip() -> str:
         logger.warning(
             "The environment variable HOST_IP is deprecated and ignored, as"
             " it is often used by Docker and other software to"
-            "interact with the container's network stack. Please "
+            " interact with the container's network stack. Please "
             "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
             " to communicate with each other.")
     if host_ip:
@@ -501,6 +501,25 @@ def get_open_zmq_ipc_path() -> str:
 
 
 def get_open_port() -> int:
+    """
+    Get an open port for the vLLM process to listen on.
+    An edge case to handle, is when we run data parallel,
+    we need to avoid ports that are potentially used by
+    the data parallel master process.
+    Right now we reserve 10 ports for the data parallel master
+    process. Currently it uses 2 ports.
+    """
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        dp_port = envs.VLLM_DP_MASTER_PORT
+        while True:
+            port = _get_open_port()
+            if port >= dp_port and port < dp_port + 10:
+                continue
+            return port
+    return _get_open_port()
+
+
+def _get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
         while True:
@@ -563,6 +582,10 @@ def cdiv(a: int, b: int) -> int:
 
 def round_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
+
+
+def round_down(x: int, y: int) -> int:
+    return (x // y) * y
 
 
 def _generate_random_fp8(
@@ -1189,6 +1212,19 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
+
+    def check_port(self, value):
+        try:
+            value = int(value)
+        except ValueError:
+            msg = "Port must be an integer"
+            raise argparse.ArgumentTypeError(msg) from None
+
+        if not (1024 <= value <= 65535):
+            raise argparse.ArgumentTypeError(
+                "Port must be between 1024 and 65535")
+
+        return value
 
     def _pull_args_from_config(self, args: List[str]) -> List[str]:
         """Method to pull arguments specified in the config file
@@ -2055,8 +2091,8 @@ def set_ulimit(target_soft_limit=65535):
                                (target_soft_limit, current_hard))
         except ValueError as e:
             logger.warning(
-                "Found ulimit of %s and failed to automatically increase"
-                "with error %s. This can cause fd limit errors like"
+                "Found ulimit of %s and failed to automatically increase "
+                "with error %s. This can cause fd limit errors like "
                 "`OSError: [Errno 24] Too many open files`. Consider "
                 "increasing with ulimit -n", current_soft, e)
 
