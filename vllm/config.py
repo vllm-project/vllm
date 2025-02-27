@@ -1976,6 +1976,7 @@ class SpeculativeConfig:
                     num_speculative_tokens = n_predict
                 elif num_speculative_tokens > n_predict and \
                         num_speculative_tokens % n_predict != 0:
+                    # Ensure divisibility for MTP module reuse.
                     raise ValueError(
                         f"{num_speculative_tokens=} must be divisible by "
                         f"{n_predict=}")
