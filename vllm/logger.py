@@ -28,8 +28,15 @@ try:
     LOGURU_AVAILABLE = True
 except ImportError:
     LOGURU_AVAILABLE = False
-    # No need to define LoguruLogger class again
-    # it's already defined for type checking above
+
+    # Create a stub class for LoguruLogger to prevent NameError at runtime
+    class LoguruLogger:
+        """Stub class when loguru is not available."""
+
+        def bind(self, **kwargs):
+            # Return self to allow chaining
+            return self
+
     logger = logging.getLogger("vllm")
 
 import vllm.envs as envs
