@@ -71,7 +71,8 @@ class FalconMamba2MLP(nn.Module):
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
         x = self.act_fn(x * self.gate_multiplier)
-        x, _ = self.down_proj(x) * self.down_multiplier
+        x, _ = self.down_proj(x)
+        x = x * self.down_multiplier
         return x
 
 
@@ -499,8 +500,7 @@ class FalconMamba2ForCausalLM(
     embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # config = vllm_config.model_config.hf_config
-        config = FalconMamba2Config()
+        config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
