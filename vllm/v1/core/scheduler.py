@@ -20,9 +20,6 @@ from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
-# Used to trigger dummy requests whose outputs should be ignored.
-DUMMY_REQ_ID = "__DUMMY_REQ_ID"
-
 
 class Scheduler:
 
@@ -568,8 +565,7 @@ class Scheduler:
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             # Transmit partial if chunked prefill & prompt logprobs is enabled
-            if (new_token_ids or prompt_logprobs_tensors is not None) \
-                    and req_id != DUMMY_REQ_ID:
+            if new_token_ids or prompt_logprobs_tensors is not None:
                 # Add EngineCoreOutput for this Request.
                 finish_reason = request.get_finished_reason()
                 outputs.append(

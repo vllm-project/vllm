@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import os
 import queue
 import signal
 import threading
@@ -304,8 +304,6 @@ class EngineCoreProc(EngineCore):
             tp_size = vllm_config.parallel_config.tensor_parallel_size
 
             # TODO CUDA agnostic here
-            import os
-
             from vllm.platforms.cuda import device_id_to_physical_device_id
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
                 str(device_id_to_physical_device_id(i))
