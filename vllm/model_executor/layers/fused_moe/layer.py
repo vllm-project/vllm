@@ -7,10 +7,11 @@ from typing import Callable, List, Optional, Tuple
 import torch
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
@@ -18,6 +19,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
+from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
@@ -337,6 +339,14 @@ class FusedMoE(torch.nn.Module):
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
+
+        # For smuggling this layer into the fused moe custom op
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+        self.layer_name = prefix
+        self.use_direct_call = not envs.VLLM_TEST_ENABLE_EP
 
         self.tp_size = (tp_size if tp_size is not None else
                         get_tensor_model_parallel_world_size())
@@ -699,6 +709,14 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
+        if self.use_direct_call:
+            return self.forward_impl(hidden_states, router_logits)
+        else:
+            return torch.ops.vllm.moe_forward(hidden_states, router_logits,
+                                              self.layer_name)
+
+    def forward_impl(self, hidden_states: torch.Tensor,
+                     router_logits: torch.Tensor):
         assert self.quant_method is not None
 
         if self.dp_size > 1:
@@ -791,3 +809,71 @@ class FusedMoE(torch.nn.Module):
             # If we are in the row parallel case (down_proj)
             else:
                 param_data[expert_id] = loaded_weight
+
+
+def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
+                layer_name: str) -> torch.Tensor:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.attn_layers[layer_name]
+    assert self.quant_method is not None
+
+    if self.dp_size > 1:
+        num_tokens_across_dp = forward_context.num_tokens_across_dp
+        max_num_tokens = max(num_tokens_across_dp)
+        num_tokens = hidden_states.size(0)
+
+        assert num_tokens_across_dp is not None
+        hidden_states = self.naive_multicast(hidden_states, max_num_tokens)
+        router_logits = self.naive_multicast(router_logits, max_num_tokens)
+
+    # Matrix multiply.
+    final_hidden_states = self.quant_method.apply(
+        layer=self,
+        x=hidden_states,
+        router_logits=router_logits,
+        top_k=self.top_k,
+        renormalize=self.renormalize,
+        use_grouped_topk=self.use_grouped_topk,
+        global_num_experts=self.global_num_experts,
+        expert_map=self.expert_map,
+        topk_group=self.topk_group,
+        num_expert_group=self.num_expert_group,
+        custom_routing_function=self.custom_routing_function,
+        scoring_func=self.scoring_func,
+        e_score_correction_bias=self.e_score_correction_bias,
+        activation=self.activation,
+    )
+
+    if self.dp_size > 1:
+        if False:  # For now change this to select between all_reduce and
+            # reduce_scatter implementations
+            all_hidden_states = get_dp_group().all_reduce(final_hidden_states)
+            all_hidden_states = all_hidden_states.view(
+                self.dp_size, -1, all_hidden_states.size(-1))
+            final_hidden_states = all_hidden_states[
+                self.dp_rank, :num_tokens, :]
+        else:
+            final_hidden_states = get_dp_group().reduce_scatter(
+                final_hidden_states, 0)
+            final_hidden_states = final_hidden_states[:num_tokens, :]
+
+    if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+        # Default set to False. (May have to add shared expert outputs.)
+        final_hidden_states = tensor_model_parallel_all_reduce(
+            final_hidden_states)
+
+    return final_hidden_states
+
+
+def moe_forward_fake(hidden_states: torch.Tensor, router_logits: torch.Tensor,
+                     layer_name: str) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="moe_forward",
+    op_func=moe_forward,
+    mutates_args=[],
+    fake_impl=moe_forward_fake,
+    dispatch_key=current_platform.dispatch_key,
+)

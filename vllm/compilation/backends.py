@@ -397,7 +397,9 @@ class VllmBackend:
         cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         local_cache_dir = os.path.join(
-            cache_dir, f"rank_{vllm_config.parallel_config.rank}")
+            cache_dir,
+            f"rank_{vllm_config.parallel_config.rank}_{vllm_config.parallel_config.data_parallel_rank}"
+        )
         self.compilation_config.local_cache_dir = local_cache_dir
 
         disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
