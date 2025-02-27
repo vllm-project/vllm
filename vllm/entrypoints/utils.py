@@ -4,6 +4,8 @@ import asyncio
 import functools
 
 from fastapi import Request
+from starlette.background import BackgroundTask
+from starlette.middleware.base import BaseHTTPMiddleware
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -17,9 +19,9 @@ async def listen_for_disconnect(request: Request) -> None:
 def with_cancellation(handler_func):
     """Decorator that allows a route handler to be cancelled by client
     disconnections.
-    
+
     This does _not_ use request.is_disconnected, which does not work with
-    middleware. Instead this follows the pattern from 
+    middleware. Instead this follows the pattern from
     starlette.StreamingResponse, which simultaneously awaits on two tasks- one
     to wait for an http disconnect message, and the other to do the work that we
     want done. When the first task finishes, the other is cancelled.
@@ -57,3 +59,31 @@ def with_cancellation(handler_func):
         return None
 
     return wrapper
+
+
+class ServerLoadMiddelware(BaseHTTPMiddleware):
+
+    async def dispatch(self, request, call_next):
+        if not request.url.path.startswith("/v1"):
+            return await call_next(request)
+
+        with request.app.state.server_load_metrics_lock:
+            request.app.state.server_load_metrics += 1
+
+        async def decrement():
+            with request.app.state.server_load_metrics_lock:
+                request.app.state.server_load_metrics -= 1
+
+        response = None
+        try:
+            response = await call_next(request)
+        finally:
+            if response is None:
+                await decrement()
+            else:
+                if response.background is None:
+                    response.background = BackgroundTask(decrement)
+                else:
+                    # Chain decrement after the existing background task
+                    response.background.add_task(BackgroundTask(decrement))
+        return response

@@ -11,6 +11,7 @@ import re
 import signal
 import socket
 import tempfile
+import threading
 import uuid
 from argparse import Namespace
 from collections.abc import AsyncIterator
@@ -80,7 +81,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import with_cancellation
+from vllm.entrypoints.utils import ServerLoadMiddelware, with_cancellation
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
@@ -345,6 +346,12 @@ async def health(raw_request: Request) -> Response:
     """Health check."""
     await engine_client(raw_request).check_health()
     return Response(status_code=200)
+
+
+@router.get("/load")
+async def get_server_load_metrics(request: Request):
+    return JSONResponse(
+        content={'server_load': request.app.state.server_load_metrics})
 
 
 @router.api_route("/ping", methods=["GET", "POST"])
@@ -739,6 +746,7 @@ def build_app(args: Namespace) -> FastAPI:
         allow_methods=args.allowed_methods,
         allow_headers=args.allowed_headers,
     )
+    app.add_middleware(ServerLoadMiddelware)
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_, exc):
@@ -893,6 +901,9 @@ async def init_app_state(
         request_logger=request_logger,
     ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
+
+    state.server_load_metrics_lock = threading.Lock()
+    state.server_load_metrics = 0
 
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
