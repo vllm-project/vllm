@@ -20,10 +20,9 @@ Previous blog post [vLLM V1: A Major Upgrade to vLLM's Core Architecture](https:
 - logits_processors
 - beam_search
 
-#### Deprecated KV Cache
+#### Deprecated KV Cache features
 - KV Cache swapping
 - KV Cache offloading
-- FP8 KV Cache
 
 ## Unsupported features
 
@@ -36,6 +35,8 @@ Previous blog post [vLLM V1: A Major Upgrade to vLLM's Core Architecture](https:
 
 - **Quantization**: For V1, when the CUDA graph is enabled, it defaults to the 
   piecewise CUDA graph introduced in this [PR](https://github.com/vllm-project/vllm/pull/10058) ; consequently, FP8 and other quantizations are not supported. 
+
+- **FP8 KV Cache**: FP8 KV Cache is not yet supported in V1.
 
 ## Unsupported models
 
