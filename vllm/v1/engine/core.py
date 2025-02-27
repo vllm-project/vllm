@@ -270,7 +270,7 @@ class EngineCoreProc(EngineCore):
         self.dp_group = None if dp_size <= 1 else (
             vllm_config.parallel_config.stateless_init_dp_group())
 
-        self.dp_in_progress = False
+        self.has_unfinished_reqs = False
 
         # Send Readiness signal to EngineClient.
         ready_pipe.send({"status": "READY"})
@@ -343,12 +343,10 @@ class EngineCoreProc(EngineCore):
         step_fn = (self.step
                    if self.batch_queue is None else self.step_with_batch_queue)
 
-        has_unfinished = False
-
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
-            if not has_unfinished and not self.dp_in_progress:
+            if not self.has_unfinished_reqs:
                 while True:
                     try:
                         req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
@@ -369,7 +367,9 @@ class EngineCoreProc(EngineCore):
             if self.dp_group is not None:
                 if self.scheduler.has_unfinished_requests():
                     dp_forward = True
-                elif self.dp_in_progress:
+                elif self.has_unfinished_reqs:
+                    # There must be unfinished requests in DP peers, run a
+                    # dummy forward pass.
                     self.execute_dummy_batch()
                     dp_forward = True
 
@@ -380,10 +380,10 @@ class EngineCoreProc(EngineCore):
             if outputs is not None:
                 self.output_queue.put_nowait(outputs)
 
-            has_unfinished = self.scheduler.has_unfinished_requests()
+            self.has_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if dp_forward:
-                self.dp_in_progress = self._has_global_unfinished_dp(
-                    has_unfinished)
+                self.has_unfinished_reqs = self._has_global_unfinished_dp(
+                    self.has_unfinished_reqs)
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -394,7 +394,7 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.START_DP:
-            self.dp_in_progress = True
+            self.has_unfinished_reqs = True
         elif request_type == EngineCoreRequestType.UTILITY:
             call_id, method_name, args = request
             output = UtilityOutput(call_id)
