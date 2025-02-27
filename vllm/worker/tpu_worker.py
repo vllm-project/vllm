@@ -94,19 +94,26 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                                      f"tp{world_size}_rank{rank}")
         xr.initialize_cache(per_rank_path, readonly=False)
 
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        self.profiler = None
+        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+            # For TPU, we can only have 1 active profiler session for 1 profiler
+            # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
             self.profiler = xp.start_server(9012)
-        else:
-            self.profiler = None
 
     def start_profile(self):
-        xp.start_trace(self.profile_dir)
+        if self.rank < 1:
+            if self.profiler is None:
+                raise RuntimeError("Profiler is not enabled.")
+            xp.start_trace(self.profile_dir)
 
     def stop_profile(self):
-        xp.stop_trace()
+        if self.rank < 1:
+            if self.profiler is None:
+                raise RuntimeError("Profiler is not enabled.")
+            xp.stop_trace()
 
     def load_model(self):
         self.model_runner.load_model()
