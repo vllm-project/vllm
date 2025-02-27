@@ -492,12 +492,11 @@ class AsyncMPClient(MPClient):
             assert self.outputs_queue is not None
         return await self.outputs_queue.get()
 
-    async def _send_input(self, request_type: EngineCoreRequestType,
-                          request: Any,
-                          core_engine: Optional[CoreEngine]) -> None:
+    async def _send_input(self, core_engine: CoreEngine,
+                          request_type: EngineCoreRequestType,
+                          request: Any) -> None:
         msg = (request_type.value, self.encoder.encode(request))
-        for engine in (core_engine, ) if core_engine else self.core_engines:
-            await engine.input_socket.send_multipart(msg, copy=False)
+        await core_engine.input_socket.send_multipart(msg, copy=False)
 
         if self.outputs_queue is None:
             await self._start_output_queue_task()
@@ -524,8 +523,8 @@ class AsyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
-        await self._send_input(EngineCoreRequestType.UTILITY,
-                               (call_id, method, args), engine)
+        await self._send_input(engine, EngineCoreRequestType.UTILITY,
+                               (call_id, method, args))
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -582,8 +581,8 @@ class AsyncMPClient(MPClient):
 
     async def _abort_requests(self, request_ids: List[str],
                               engine: CoreEngine) -> None:
-        await self._send_input(EngineCoreRequestType.ABORT, request_ids,
-                               engine)
+        await self._send_input(engine, EngineCoreRequestType.ABORT,
+                               request_ids)
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self._call_utility_async("profile", is_start)
