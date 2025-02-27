@@ -2,7 +2,7 @@
 
 import re
 from enum import Enum
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from vllm import CompletionOutput
 
@@ -15,8 +15,12 @@ class BatchLogprobsComposition(Enum):
     SAMPLE_PROMPT = 3
 
 
+BatchLogprobsSpecType = List[Tuple[Optional[int], Optional[int]]]
+
+
 def get_test_batch(
-    batch_logprobs_composition: BatchLogprobsComposition, ) -> List[Tuple]:
+    batch_logprobs_composition: BatchLogprobsComposition
+) -> BatchLogprobsSpecType:
     """Generate logprobs configs for a batch of requests
     
     A given request's logprobs configuration is (1) num_sample_logprobs and (2)
