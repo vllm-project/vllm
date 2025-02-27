@@ -122,8 +122,8 @@ class PaliGemmaMultiModalProcessor(
             # HF processor always adds placeholders even when there's no image
             tokenizer = self.info.get_tokenizer()
             prompt_ids = tokenizer.encode(prompt)
-            # Paligemma2 is NOT adding <bos> token at the beginning of the prompt
-            # Adding <bos> token (tokenizer.bos_token_id) to adapt with prompt replacement
+            # Paligemma2 is NOT adding <bos> token at the beginning
+            # Adding <bos> (tokenizer.bos_token_id) for prompt replacement
             if len(prompt_ids) == 0:
                 prompt_ids = [tokenizer.bos_token_id]
             elif prompt_ids[0] != tokenizer.bos_token_id:
@@ -148,7 +148,8 @@ class PaliGemmaMultiModalProcessor(
         prompt_tokens: list[int],
     ) -> list[int]:
         tokenizer = self.info.get_tokenizer()
-        # Adding <bos> token (tokenizer.bos_token_id) to match with _call_hf_processor
+        # Adding <bos> (tokenizer.bos_token_id) to match with
+        # self._call_hf_processor
         if len(prompt_tokens) == 0:
             tokens_with_bos = [tokenizer.bos_token_id]
         elif prompt_tokens[0] != tokenizer.bos_token_id:
@@ -174,8 +175,8 @@ class PaliGemmaMultiModalProcessor(
         assert isinstance(bos_token_id, int)
 
         # Adding <bos> token at the beginning based on add_bos_token variable.
-        # Always adding <bos> token at the end of the images tokens and before the text prompt
-        # according to Paligemma's format
+        # Always adding <bos> token at the end of the images tokens
+        # and before the text prompt according to Paligemma's format
         if tokenizer.add_bos_token:
             replacement_tokens = [bos_token_id] + image_tokens + [bos_token_id]
         else:
@@ -198,17 +199,19 @@ class PaliGemmaMultiModalProcessor(
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputs:
-        mm_inputs = super().apply(prompt, mm_data,hf_processor_mm_kwargs)
+        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 
-        newline_prompt = "\n"   
-        newline_token_id = self.info.get_tokenizer().encode(newline_prompt)[-1] # 108
-        # Force to add newline at the end of prompt according to paligemma's format
+        tokenizer = self.info.get_tokenizer()
+        newline_prompt = "\n"
+        newline_token_id = tokenizer.encode(newline_prompt)[-1]  # 108
+        # Force to add newline at the end of prompt for paligemma's format
         if len(prompt_token_ids) and prompt_token_ids[-1] != newline_token_id:
             prompt_token_ids.append(newline_token_id)
             mm_inputs["prompt_token_ids"] = prompt_token_ids
             mm_inputs["prompt"] += newline_prompt
         return mm_inputs
+
 
 @MULTIMODAL_REGISTRY.register_processor(
     PaliGemmaMultiModalProcessor,
