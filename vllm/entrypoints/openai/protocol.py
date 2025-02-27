@@ -1431,12 +1431,12 @@ class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
 
 
-class LoadLoraAdapterRequest(BaseModel):
+class LoadLoRAAdapterRequest(BaseModel):
     lora_name: str
     lora_path: str
 
 
-class UnloadLoraAdapterRequest(BaseModel):
+class UnloadLoRAAdapterRequest(BaseModel):
     lora_name: str
     lora_int_id: Optional[int] = Field(default=None)
 
@@ -1448,7 +1448,7 @@ AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json",
 
 class TranscriptionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
-    #https://platform.openai.com/docs/api-reference/audio/createTranscription
+    # https://platform.openai.com/docs/api-reference/audio/createTranscription
 
     file: UploadFile
     """
