@@ -81,6 +81,7 @@ class IterationStats:
         self.num_prompt_tokens = 0
         self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
+        self.max_num_generation_tokens_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
         self.time_per_output_tokens_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}

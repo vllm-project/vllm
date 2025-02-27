@@ -198,6 +198,8 @@ class OutputProcessor:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
+                if req_state.parent_req is not None:
+                    req_state.parent_req.finish_child_request(request_id)
 
     def add_request(
         self,
@@ -310,6 +312,8 @@ class OutputProcessor:
                     # If req not finished in EngineCore, but Detokenizer
                     # detected stop string, abort needed in EngineCore.
                     reqs_to_abort.append(req_id)
+                if req_state.parent_req is not None:
+                    req_state.parent_req.finish_child_request(req_id)
 
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
@@ -352,3 +356,10 @@ class OutputProcessor:
             num_prompt_tokens=len(req_state.prompt_token_ids),
             req_stats=req_state.stats)
         self.lora_states.finish_request(req_state)
+
+        if req_state.parent_req is None:
+            iteration_stats.max_num_generation_tokens_iter.append(
+                req_state.stats.num_generation_tokens)
+        else:
+            req_state.parent_req.observe_max_num_generation_tokens(
+                iteration_stats, req_state.stats.num_generation_tokens)
