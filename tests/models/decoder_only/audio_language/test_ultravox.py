@@ -15,7 +15,7 @@ from ....conftest import HfRunner, VllmRunner
 from ....utils import RemoteOpenAIServer
 from ...utils import check_logprobs_close
 
-MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
+MODEL_NAME = "fixie-ai/ultravox-v0_4"
 
 AudioTuple = Tuple[np.ndarray, int]
 
@@ -187,7 +187,7 @@ def run_multi_audio_test(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("vllm_kwargs", [
