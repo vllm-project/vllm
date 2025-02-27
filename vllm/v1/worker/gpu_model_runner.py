@@ -966,9 +966,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
                 for req_id in scheduled_request_ids
             ]
-            sampler_output = self.rejection_sampler(draft_token_ids,
-                                                    target_probs,
-                                                    sampling_metadata)
+            sampler_output = self.rejection_sampler(
+                draft_token_ids,
+                None,  # draft_probs
+                target_probs,
+                sampling_metadata)
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
