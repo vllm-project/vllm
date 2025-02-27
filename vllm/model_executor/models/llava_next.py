@@ -21,7 +21,7 @@ from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV1
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaDummyInputsBuilder, LlavaLikeConfig,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
@@ -201,7 +201,7 @@ class LlavaNextMultiModalProcessor(
                                         info=LlavaNextProcessingInfo,
                                         dummy_inputs=LlavaDummyInputsBuilder)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+                                        SupportsPP, SupportsV1):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

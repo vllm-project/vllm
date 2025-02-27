@@ -40,7 +40,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsV1)
 from .qwen import QWenBaseModel, QWenModel
 from .utils import flatten_bn, merge_multimodal_embeddings
 
@@ -658,7 +659,7 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
                                         info=QwenVLProcessingInfo,
                                         dummy_inputs=QwenVLDummyInputsBuilder)
 class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
-                                     SupportsMultiModal):
+                                     SupportsMultiModal, SupportsV1):
     packed_modules_mapping = {
         "c_attn": ["c_attn"],
         "gate_up_proj": [

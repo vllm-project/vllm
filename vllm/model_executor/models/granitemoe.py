@@ -48,7 +48,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from . import mixtral
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsV1
 from .utils import make_layers, maybe_prefix
 
 
@@ -306,7 +306,7 @@ class GraniteMoeModel(nn.Module):
         return hidden_states
 
 
-class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsV1):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {

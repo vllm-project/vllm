@@ -25,7 +25,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsV1
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -362,7 +362,7 @@ class DbrxModel(nn.Module):
         return hidden_states
 
 
-class DbrxForCausalLM(nn.Module, SupportsPP):
+class DbrxForCausalLM(nn.Module, SupportsPP, SupportsV1):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

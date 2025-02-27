@@ -46,7 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant, SupportsV1
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
@@ -324,7 +324,7 @@ class BaiChuanModel(nn.Module):
 
 
 class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
-                              SupportsQuant):
+                              SupportsQuant, SupportsV1):
     packed_modules_mapping = {
         "W_pack": ["W_pack"],
         "gate_up_proj": [

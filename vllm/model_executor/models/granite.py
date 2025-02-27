@@ -49,7 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsV1
 from .utils import (PPMissingLayer, is_pp_missing_parameter, make_layers,
                     maybe_prefix)
 
@@ -323,7 +323,7 @@ class GraniteModel(nn.Module):
         return hidden_states
 
 
-class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsV1):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

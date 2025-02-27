@@ -36,7 +36,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV1
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -681,7 +681,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     InternVLMultiModalProcessor,
     info=InternVLProcessingInfo,
     dummy_inputs=InternVLDummyInputsBuilder)
-class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
+class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsV1):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

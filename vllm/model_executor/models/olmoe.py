@@ -38,7 +38,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsV1
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -308,7 +308,7 @@ class OlmoeModel(nn.Module):
         return hidden_states
 
 
-class OlmoeForCausalLM(nn.Module, SupportsPP):
+class OlmoeForCausalLM(nn.Module, SupportsPP, SupportsV1):
 
     fall_back_to_pt_during_load = False
 

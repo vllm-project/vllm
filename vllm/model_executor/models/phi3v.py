@@ -49,7 +49,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP, SupportsQuant
+from .interfaces import (SupportsMultiModal, SupportsPP, SupportsQuant,
+                         SupportsV1)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -499,7 +500,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                                         info=Phi3VProcessingInfo,
                                         dummy_inputs=Phi3VDummyInputsBuilder)
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
-                       SupportsQuant):
+                       SupportsQuant, SupportsV1):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_embed_tokens.wte": "embed_tokens",

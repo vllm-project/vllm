@@ -54,7 +54,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsV1
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -498,7 +498,7 @@ class MiniCPMModel(nn.Module):
         return loaded_params
 
 
-class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsV1):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

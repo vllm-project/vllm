@@ -50,7 +50,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.exaone import ExaoneConfig
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsV1
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -386,7 +386,7 @@ class ExaoneModel(nn.Module):
         return hidden_states
 
 
-class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsV1):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

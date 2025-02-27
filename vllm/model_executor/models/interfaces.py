@@ -498,3 +498,29 @@ def supports_transcription(
         return isinstance(model, SupportsTranscription)
 
     return isinstance(model, SupportsTranscription)
+
+
+@runtime_checkable
+class SupportsV1(Protocol):
+    """The interface required for all models are supported by vLLM V1."""
+
+    supports_vllm_v1: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_v1(model: Type[object]) -> TypeIs[Type[SupportsV1]]:
+    ...
+
+
+@overload
+def supports_v1(model: object) -> TypeIs[SupportsV1]:
+    ...
+
+
+def supports_v1(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsV1]], TypeIs[SupportsV1]]:
+    if isinstance(model, type):
+        return isinstance(model, SupportsV1)
+
+    return isinstance(model, SupportsV1)

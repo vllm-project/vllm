@@ -46,7 +46,7 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import SupportsPP, SupportsV1
 from vllm.model_executor.models.utils import (
     is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
     make_layers, maybe_prefix)
@@ -313,7 +313,7 @@ class Olmo2Model(nn.Module):
         return hidden_states
 
 
-class Olmo2ForCausalLM(nn.Module, SupportsPP):
+class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsV1):
     """
     Extremely barebones HF model wrapper.
     """

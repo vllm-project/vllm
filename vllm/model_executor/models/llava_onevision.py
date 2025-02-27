@@ -28,7 +28,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV1
 from .llava import LlavaDummyInputsBuilder, init_vision_tower_for_llava
 from .llava_next import (BaseLlavaNextMultiModalProcessor, LlavaNextLikeConfig,
                          LlavaNextProcessingInfo)
@@ -426,7 +426,7 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     info=LlavaOnevisionProcessingInfo,
     dummy_inputs=LlavaOnevisionDummyInputsBuilder)
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                             SupportsPP):
+                                             SupportsPP, SupportsV1):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

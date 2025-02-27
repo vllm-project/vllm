@@ -37,7 +37,7 @@ from vllm.transformers_utils.processors.deepseek_vl2 import (
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils import is_list_of
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV1
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -321,7 +321,8 @@ class DeepseekVL2MultiModalProcessor(
     DeepseekVL2MultiModalProcessor,
     info=DeepseekVL2ProcessingInfo,
     dummy_inputs=DeepseekVL2DummyInputsBuilder)
-class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
+                              SupportsV1):
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "language.": "language_model.",

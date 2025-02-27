@@ -36,7 +36,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV1
 from .pixtral import (PixtralHFVisionModel,
                       get_pixtral_hf_image_feature_grid_size)
 from .siglip import SiglipVisionModel
@@ -484,7 +484,8 @@ def init_vision_tower_for_llava(
 @MULTIMODAL_REGISTRY.register_processor(_build_llava_or_pixtral_hf_processor,
                                         info=_build_llava_or_pixtral_hf_info,
                                         dummy_inputs=LlavaDummyInputsBuilder)
-class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
+                                    SupportsV1):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

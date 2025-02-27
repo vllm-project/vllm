@@ -35,7 +35,7 @@ from .idefics2_vision_model import Idefics2VisionConfig
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer)
 # yapf: enable
-from .interfaces import SupportsMultiModal, SupportsQuant
+from .interfaces import SupportsMultiModal, SupportsQuant, SupportsV1
 from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     is_pp_missing_parameter, maybe_prefix,
@@ -480,7 +480,7 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor[AriaProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(AriaMultiModalProcessor,
                                         info=AriaProcessingInfo,
                                         dummy_inputs=AriaDummyInputsBuilder)
-class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
+class AriaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsV1):
     """
     Aria model for conditional generation tasks.
 

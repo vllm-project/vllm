@@ -34,7 +34,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.arctic import ArcticConfig
 
-from .interfaces import SupportsPP, SupportsQuant
+from .interfaces import SupportsPP, SupportsQuant, SupportsV1
 from .utils import (extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -413,7 +413,7 @@ class ArcticModel(nn.Module):
         return hidden_states
 
 
-class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant, SupportsV1):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

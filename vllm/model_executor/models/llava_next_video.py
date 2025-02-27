@@ -26,7 +26,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV1
 from .llava import init_vision_tower_for_llava
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
@@ -280,7 +280,7 @@ class LlavaNextMultiModalProjector(nn.Module):
     dummy_inputs=LlavaNextVideoDummyInputsBuilder,
 )
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                             SupportsPP):
+                                             SupportsPP, SupportsV1):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

@@ -47,7 +47,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV1
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -249,7 +249,7 @@ class Qwen2AudioMultiModalProcessor(
     info=Qwen2AudioProcessingInfo,
     dummy_inputs=Qwen2AudioDummyInputsBuilder)
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                         SupportsPP):
+                                         SupportsPP, SupportsV1):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

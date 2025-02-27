@@ -47,7 +47,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronConfig
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsV1
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -364,7 +364,7 @@ class NemotronModel(nn.Module):
         return hidden_states
 
 
-class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsV1):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

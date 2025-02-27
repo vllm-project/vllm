@@ -41,7 +41,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV1
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
@@ -245,7 +245,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(FuyuMultiModalProcessor,
                                         info=FuyuProcessingInfo,
                                         dummy_inputs=FuyuDummyInputsBuilder)
-class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsV1):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

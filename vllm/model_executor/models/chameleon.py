@@ -39,7 +39,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV1
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -929,7 +929,7 @@ class ChameleonModel(nn.Module):
     info=ChameleonProcessingInfo,
     dummy_inputs=ChameleonDummyInputsBuilder)
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+                                        SupportsPP, SupportsV1):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

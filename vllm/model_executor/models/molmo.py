@@ -53,7 +53,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import JSONTree, json_map_leaves
 
 from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
-                         SupportsQuant)
+                         SupportsQuant, SupportsV1)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -1390,7 +1390,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
                                         info=MolmoProcessingInfo,
                                         dummy_inputs=MolmoDummyInputsBuilder)
 class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
-                       SupportsQuant):
+                       SupportsQuant, SupportsV1):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # vision backbone mapping

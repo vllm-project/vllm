@@ -69,7 +69,8 @@ from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsV1)
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -1034,7 +1035,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
                                         info=Qwen2VLProcessingInfo,
                                         dummy_inputs=Qwen2VLDummyInputsBuilder)
 class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                      SupportsLoRA, SupportsPP):
+                                      SupportsLoRA, SupportsPP, SupportsV1):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
