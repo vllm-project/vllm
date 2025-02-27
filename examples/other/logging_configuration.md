@@ -161,7 +161,13 @@ VLLM_CONFIGURE_LOGGING=0 \
 
 vLLM also supports structured JSON logging using the [`loguru`](https://github.com/Delgan/loguru) library. This approach provides more features for log handling and a more ergonomic format for log aggregation and analysis.
 
-To use loguru-based structured logging, create a configuration file with a different format:
+To use loguru-based structured logging, you need to install the `loguru` dependency:
+
+```bash
+pip install vllm[logging]
+```
+
+Then, create a configuration file with a different format:
 
 **/path/to/logging_config.json:**
 

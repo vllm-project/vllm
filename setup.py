@@ -646,7 +646,8 @@ setup(
         "tensorizer": ["tensorizer>=2.9.0"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
-        "video": ["decord"]  # Required for video processing
+        "video": ["decord"],  # Required for video processing
+        "logging": ["loguru==0.7.3"],  # Required for JSON logging
     },
     cmdclass=cmdclass,
     package_data=package_data,
