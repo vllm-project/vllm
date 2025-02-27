@@ -8,7 +8,7 @@ from typing import Dict, Tuple
 import deep_gemm
 import torch
 import triton
-from deep_gemm import calc_diff, cell_div
+from deep_gemm import calc_diff, ceil_div, get_col_major_tma_aligned_tensor
 
 # Import vLLM functions
 from vllm import _custom_ops as ops
@@ -36,7 +36,7 @@ def per_block_cast_to_fp8(
     """Convert tensor to FP8 format with per-block scaling."""
     assert x.dim() == 2
     m, n = x.shape
-    x_padded = torch.zeros((cell_div(m, 128) * 128, cell_div(n, 128) * 128),
+    x_padded = torch.zeros((ceil_div(m, 128) * 128, ceil_div(n, 128) * 128),
                            dtype=x.dtype,
                            device=x.device)
     x_padded[:m, :n] = x
@@ -50,8 +50,8 @@ def per_block_cast_to_fp8(
 def benchmark_shape(m: int,
                     n: int,
                     k: int,
-                    warmup: int = 10,
-                    repeat: int = 1000,
+                    warmup: int = 100,
+                    repeat: int = 10000,
                     verbose: bool = False) -> Dict:
     """Benchmark all implementations for a specific (m, n, k) shape."""
     if verbose:
@@ -73,14 +73,22 @@ def benchmark_shape(m: int,
     # Block size configuration
     block_size = [128, 128]
 
+    # Pre-quantize A for all implementations
+    A_deepgemm, A_scale_deepgemm = per_token_cast_to_fp8(A)
+    A_scale_deepgemm = get_col_major_tma_aligned_tensor(A_scale_deepgemm)
+    C_deepgemm = torch.empty((m, n), device='cuda', dtype=torch.bfloat16)
+    A_vllm, A_scale_vllm = per_token_group_quant_fp8(A, block_size[1])
+    A_vllm_cutlass, A_scale_vllm_cutlass = per_token_group_quant_fp8(
+        A, block_size[1], column_major_scales=True)
+
     # === DeepGEMM Implementation ===
     def deepgemm_gemm():
         # A quantization is inside the loop as it depends on activations
         # A_deepgemm, A_scale_deepgemm = per_token_cast_to_fp8(A)
-        A_deepgemm, A_scale_deepgemm = per_token_group_quant_fp8(
-            A, block_size[1])
+        # A_deepgemm, A_scale_deepgemm = per_token_group_quant_fp8(
+        #     A, block_size[1])
         # A_scale_aligned = get_col_major_tma_aligned_tensor(A_scale_deepgemm)
-        C_deepgemm = torch.empty((m, n), device='cuda', dtype=torch.bfloat16)
+        # C_deepgemm = torch.empty((m, n), device='cuda', dtype=torch.bfloat16)
         deep_gemm.gemm_fp8_fp8_bf16_nt((A_deepgemm, A_scale_deepgemm),
                                        (B_deepgemm, B_scale_deepgemm),
                                        C_deepgemm)
@@ -89,7 +97,7 @@ def benchmark_shape(m: int,
     # === vLLM Triton Implementation ===
     def vllm_triton_gemm():
         # A quantization is inside the loop as it depends on activations
-        A_vllm, A_scale_vllm = per_token_group_quant_fp8(A, block_size[1])
+        # A_vllm, A_scale_vllm = per_token_group_quant_fp8(A, block_size[1])
         return w8a8_block_fp8_matmul(A_vllm,
                                      B_vllm,
                                      A_scale_vllm,
@@ -100,8 +108,8 @@ def benchmark_shape(m: int,
     # === vLLM CUTLASS Implementation ===
     def vllm_cutlass_gemm():
         # A quantization is inside the loop as it depends on activations
-        A_vllm_cutlass, A_scale_vllm_cutlass = per_token_group_quant_fp8(
-            A, block_size[1], column_major_scales=True)
+        # A_vllm_cutlass, A_scale_vllm_cutlass = per_token_group_quant_fp8(
+        #     A, block_size[1], column_major_scales=True)
         return ops.cutlass_scaled_mm(A_vllm_cutlass,
                                      B_vllm.T,
                                      scale_a=A_scale_vllm_cutlass,
@@ -286,6 +294,26 @@ def run_benchmarks(verbose: bool = False):
         (1024, 18432, 7168),
         (2048, 4096, 7168),
         (4096, 4096, 7168),
+    ]
+    shapes = [
+        # (64, 2112, 7168),
+        (64, 24576, 1536),
+        (64, 32768, 512),
+        (64, 7168, 16384),
+        (64, 4096, 7168),
+        (64, 7168, 2048),
+        # (128, 2112, 7168),
+        (128, 24576, 1536),
+        (128, 32768, 512),
+        (128, 7168, 16384),
+        (128, 4096, 7168),
+        (128, 7168, 2048),
+        # (4096, 2112, 7168),
+        (4096, 24576, 1536),
+        (4096, 32768, 512),
+        (4096, 7168, 16384),
+        (4096, 4096, 7168),
+        (4096, 7168, 2048),
     ]
 
     all_results = []
