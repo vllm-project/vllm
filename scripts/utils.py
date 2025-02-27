@@ -1,3 +1,13 @@
+from transformers import PreTrainedTokenizerBase, AutoTokenizer
+from typing import List, Dict, Any
+
+from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
+from typing import List, Dict, Any
+import json
+
+import random
+
 def get_prompts():
     filename = "pile.txt"
     with open(filename, "r") as f:
@@ -62,3 +72,62 @@ def get_pile_prompts(model_name, num_samples=512):
         if num_sample >= num_samples:
             break
     return samples_lst
+
+#==-------------------------------------------------------------------------==
+# Load custom dataset
+#==-------------------------------------------------------------------------==
+
+def get_dataset(filepath: str) -> List[List[Dict[str, str]]]:
+    """
+    [
+        [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "query prompt"},
+        ],
+        [
+            {"role": "system", "content": "1. 角色设定：- 你是...."},
+            {"role": "user", "content": "搜索关键词】\n梁斌是谁，做什么"},
+        ],
+        ...
+    ]
+
+    """
+    with open(filepath) as f:
+        dataset: List[List[Dict[str, str]]] = [json.loads(line) for line in f]
+    return dataset
+
+
+def sample_tc_requests(
+    filepath: str,
+    num_requests: int,
+    tokenizer: PreTrainedTokenizerBase,
+    do_random: bool = False,
+) -> List[str]:
+    dataset = get_dataset(filepath)
+    prompts = dataset
+    few_shots = 0
+    sampled_requests: List[str] = []
+    for j in range(num_requests):
+        i = (
+            random.choice(range(len(prompts[few_shots:])))
+            if do_random
+            else j + few_shots
+        )
+        # message demo:
+        # [
+        #     {"role": "system", "content": "1. 角色设定：- 你是...."},
+        #     {"role": "user", "content": "搜索关键词】\n梁斌是谁，做什么"},
+        # ],
+        message: List[Dict[str, str]] = prompts[i]
+        prompt_with_template = tokenizer.apply_chat_template(
+            message, add_generation_prompt=True, tokenize=False
+        )
+        sampled_requests.append(prompt_with_template)
+
+    return sampled_requests
+
+def get_tokenizer(model_path) -> PreTrainedTokenizer | PreTrainedTokenizerFast:
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    return tokenizer
+

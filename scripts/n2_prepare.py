@@ -12,10 +12,32 @@ reset_seed()
 file_path = os.path.abspath(__file__)
 dataset_path = os.path.join(os.path.dirname(file_path), "../benchmarks")
 
+
+
+# ==-------------------------------------------------------------------------==
+# Calibration parameters
+least_tokens = 1024
+num_samples = 512
+max_new_tokens = 32
+seed = 42
+# https://github.com/deepseek-ai/DeepSeek-R1/blob/main/README.md#deepseek-r1-evaluation
+"""
+... benchmarks requiring sampling, we use a temperature of 0.6, a top-p value of 0.95...
+"""
+temperature = 0.6
+temperature = 0 # greedy sample
+top_p = 0.95
+# ==-------------------------------------------------------------------------==
+
+
 model_path = "/data/models/DeepSeek-R1/"
 model_path = "/hf/hf_models/DeepSeek-R1"
 # model_path = "deepseek-ai/DeepSeek-V2-Lite"
 model_path = "/mnt/disk5/hf_models/DeepSeek-R1-BF16"
+default_dataset_path = "./tc_datasets/qa_out_0216_r1_300_max_30k_formatted.jsonl"
+
+
+
 # Parse the command-line arguments.
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default=model_path, help="The model path.")
@@ -23,6 +45,7 @@ parser.add_argument("--tokenizer", type=str, default=model_path, help="The model
 parser.add_argument("--tp_size", type=int, default=16, help="The number of threads.")
 parser.add_argument("--ep_size", type=int, default=16, help="The number of threads.")
 parser.add_argument("--dataset", type=str, default=None, help="The dataset.")
+parser.add_argument("-dpath","--dataset_path", type=str, default=default_dataset_path, help="The dataset path.")
 parser.add_argument("--isl", type=int, default=1024, help="input sequence length.")
 parser.add_argument("--osl", type=int, default=128, help="output sequence length.")
 parser.add_argument("--nprompts", type=int, default=4, help="The number of prompts.")
@@ -46,20 +69,6 @@ args = parser.parse_args()
 # os.environ["RAY_DEDUP_LOGS"] = "1"
 # os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"
 
-# ==-------------------------------------------------------------------------==
-# Calibration parameters
-least_tokens = 1024
-num_samples = 512
-max_new_tokens = 32
-seed = 42
-# https://github.com/deepseek-ai/DeepSeek-R1/blob/main/README.md#deepseek-r1-evaluation
-"""
-... benchmarks requiring sampling, we use a temperature of 0.6, a top-p value of 0.95...
-"""
-temperature = 0.6
-temperature = 0 # greedy sample
-top_p = 0.95
-# ==-------------------------------------------------------------------------==
 
 
 def sample_sonnet_requests(
@@ -184,6 +193,22 @@ if __name__ == "__main__":
             tokenizer=tokenizer,
             do_random=args.random,
         )
+    elif args.dataset == "tc":
+        from utils import get_prompts, get_prompt_token_ids, get_pile_prompts
+        dataset_path = args.dataset_path
+        from utils import get_tokenizer, sample_tc_requests
+        tokenizer = get_tokenizer(args.tokenizer)
+        prompts = sample_tc_requests(
+            filepath=dataset_path,
+            num_requests=128, # FIXME: use all calibration samples
+            tokenizer=tokenizer,
+            do_random=args.random,
+        )
+        prompt_token_ids = get_prompt_token_ids(
+            args.model, prompts, least_tokens
+        )
+        gt = None
+        print(f"Got {len(prompts)} prompts.")
     else:
         prompts = [
             "Hello, my name is",
