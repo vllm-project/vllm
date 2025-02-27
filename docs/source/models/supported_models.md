@@ -715,6 +715,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Florence2ForConditionalGeneration`
+  * Florence-2
+  * T + I
+  * `microsoft/Florence-2-base`, `microsoft/Florence-2-large` etc.
+  *
+  *
+  *
 - * `FuyuForCausalLM`
   * Fuyu
   * T + I

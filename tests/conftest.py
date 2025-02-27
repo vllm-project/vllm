@@ -600,8 +600,8 @@ class HfRunner:
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
 
-            encoder_input_ids = self.wrap_device(
-                self.processor(**processor_kwargs).input_ids,
+            encoder_inputs = self.wrap_device(
+                self.processor(**processor_kwargs),
                 device=self.model.device.type,
             )
 
@@ -615,13 +615,13 @@ class HfRunner:
                 )
 
             output = self.model.generate(
-                encoder_input_ids,
                 decoder_input_ids=decoder_input_ids,
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
+                **encoder_inputs,
                 **kwargs,
             )
 
