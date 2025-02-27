@@ -311,7 +311,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
-        self.model_runner = self.scorer_worker.model_runner
         scorer_runner = getattr(self.scorer_worker, "model_runner", None)
         self.generators = scorer_runner.get_generators(
         ) if scorer_runner else None

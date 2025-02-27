@@ -436,13 +436,20 @@ class LLMEngine:
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
         if self.device_config.device_type == "cuda":
-            model_gpu_load_time = (
-                self.model_executor.driver_worker.model_runner.model_load_time)
-            profile_time = self.model_executor.driver_worker.profile_time
-            cuda_graph_time = (self.model_executor.driver_worker.model_runner.
-                               cuda_graph_capture_time)
+            driver_worker = getattr(self.model_executor, "driver_worker", None)
+            if driver_worker:
+                model_runner = getattr(driver_worker, "model_runner", None)
+                profile_time = getattr(driver_worker, "profile_time", 0.0)
+
+                if model_runner:
+                    model_gpu_load_time = getattr(model_runner,
+                                                  "model_load_time", 0.0)
+                    cuda_graph_time = getattr(model_runner,
+                                              "cuda_graph_capture_time", 0.0)
+
             total_gpu_load_time = (elapsed + model_gpu_load_time +
                                    profile_time + cuda_graph_time)
+
             logger.info(("GPU model loading (loading model weights, "
                          "memory profiling, capturing graphs, init engine) "
                          " %.2f seconds"), total_gpu_load_time)
