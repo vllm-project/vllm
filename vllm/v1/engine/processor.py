@@ -18,6 +18,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
+from vllm.v1.guided_decoding.utils import validate_guided_decoding_request
 
 
 class Processor:
@@ -96,6 +97,7 @@ class Processor:
                 and params.guided_decoding.backend != 'xgrammar'):
             raise ValueError(
                 "Only xgrammar guided decoding is supported in V1.")
+        validate_guided_decoding_request(params)
 
     def _validate_allowed_token_ids(
         self,

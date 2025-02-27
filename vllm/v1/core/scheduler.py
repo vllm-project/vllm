@@ -613,8 +613,8 @@ class Scheduler:
                 if not accepted:
                     logger.error(
                         "Failed to advance FSM for request %s "
-                        "for tokens %s. Please file an issue.", 
-                        req_id, generated_token_ids[0])
+                        "for tokens %s. Please file an issue.", req_id,
+                        generated_token_ids[0])
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:

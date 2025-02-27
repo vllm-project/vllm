@@ -24,7 +24,6 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.guided_decoding.utils import validate_guided_decoding_request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import BackgroundProcHandle
 
@@ -66,15 +65,6 @@ class EngineCoreClient(ABC):
             return SyncMPClient(vllm_config, executor_class, log_stats)
 
         return InprocClient(vllm_config, executor_class, log_stats)
-
-    @staticmethod
-    def _validate_request(request: EngineCoreRequest) -> None:
-        """Validate request before sending to EngineCore.
-
-        Raises ValueError if request contents are known to be invalid or
-        unsupported.
-        """
-        validate_guided_decoding_request(request.sampling_params)
 
     @abstractmethod
     def shutdown(self):
@@ -170,7 +160,6 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.step()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        self._validate_request(request)
         self.engine_core.add_request(request)
 
     def abort_requests(self, request_ids: List[str]) -> None:
@@ -379,7 +368,6 @@ class SyncMPClient(MPClient):
         return future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        self._validate_request(request)
         # NOTE: text prompt is not needed in the core engine as it has been
         # tokenized.
         request.prompt = None
@@ -478,7 +466,6 @@ class AsyncMPClient(MPClient):
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        self._validate_request(request)
         # NOTE: text prompt is not needed in the core engine as it has been
         # tokenized.
         request.prompt = None
