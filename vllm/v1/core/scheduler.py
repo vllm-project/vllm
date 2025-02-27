@@ -68,10 +68,11 @@ class Scheduler:
         # Priority queues for requests.
         self.waiting: Deque[Request] = deque()
         self.running: List[Request] = []
+
         # req_id -> Number of times the request has been scheduled.
-        # We can only schedule a request more then once before the previous
-        # scheduling step is finished when PP is enabled and the request
-        # prompt is chunked.
+        # With PP, when the input prompt is divided into chunks, we can
+        # schedule a new chunk even before the previous chunk has completed
+        # the full pipeline stages. This helps reduce TTFT.
         self.scheduled_req_ids: dict[str, int] = defaultdict(int)
 
         # The request IDs that are finished in between the previous and the
@@ -150,8 +151,7 @@ class Scheduler:
             if (request.num_computed_tokens >= request.num_tokens
                     and self.scheduled_req_ids.get(request.request_id, 0) > 0):
                 # We avoid re-scheduling the decoding requests because
-                # the number of new decoded output tokens is unknown due
-                # to speculative decoding or jump decoding.
+                # there is no tokens for decoding requests to be scheduled.
                 req_index += 1
                 continue
 
@@ -426,14 +426,17 @@ class Scheduler:
             grammar_bitmask=grammar_bitmask,
         )
 
-        # Update the number of computed tokens for the request right after
-        # the request is scheduled. This allows the request doing chunk prefill
-        # to be scheduled again immediately in the next scheduling step.
-        # If some tokens (e.g. spec tokens) are rejected later, the number of
-        # computed tokens will be adjusted in update_from_output.
-        for req in (scheduled_new_reqs + scheduled_resumed_reqs +
-                    scheduled_running_reqs):
-            req.num_computed_tokens += num_scheduled_tokens[req.request_id]
+        # Advance the number of computed tokens for the request AFTER
+        # the request is scheduled.
+        # 1. The scheduler_output of the current step has to include the
+        #    original number of scheduled tokens to determine input IDs.
+        # 2. Advance the number of computed tokens here allowing us to
+        #    schedule the (prefill) request again immediately in the next
+        #    scheduling step.
+        # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
+        #    computed tokens will be adjusted in update_from_output.
+        for req_id, num_scheduled_token in num_scheduled_tokens.items():
+            self.requests[req_id].num_computed_tokens += num_scheduled_token
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -549,6 +552,9 @@ class Scheduler:
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+
+        # We cannot use num_computed_tokens from self.requests because
+        # their values have been advanced when the requests are scheduled.
         num_computed_tokens_at_schedule = {
             req_data.req_id: req_data.num_computed_tokens
             for req_data in (scheduler_output.scheduled_cached_reqs +
@@ -598,7 +604,7 @@ class Scheduler:
                     start_pos = request.mm_positions[input_id]["offset"]
                     num_tokens = request.mm_positions[input_id]["length"]
                     if (start_pos + num_tokens
-                        ) <= num_computed_tokens_at_schedule[req_id]:
+                            <= num_computed_tokens_at_schedule[req_id]):
                         # The encoder output is already processed and stored
                         # in the decoder's KV cache.
                         self.encoder_cache_manager.free_encoder_input(
