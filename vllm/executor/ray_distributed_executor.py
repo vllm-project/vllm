@@ -318,6 +318,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     "TPU_HOST_BOUNDS",
                     "VLLM_USE_V1",
                     "VLLM_TRACE_FUNCTION",
+                    "VLLM_TEST_ENABLE_EP",
             ]:
                 if name in os.environ:
                     args[name] = os.environ[name]
