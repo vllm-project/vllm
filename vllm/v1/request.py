@@ -221,10 +221,6 @@ class RequestStatus(enum.IntEnum):
         return status > RequestStatus.PREEMPTED
 
     @staticmethod
-    def is_waiting(status: RequestStatus) -> bool:
-        return status <= RequestStatus.WAITING_FOR_FSM
-
-    @staticmethod
     def get_finished_reason(
             status: RequestStatus) -> Union[FinishReason, None]:
         return _FINISHED_REASON_MAP.get(status)
