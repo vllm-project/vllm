@@ -15,7 +15,11 @@ from logging.config import dictConfig
 from os import path
 from pathlib import Path
 from types import MethodType
-from typing import Any, Callable, Dict, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union, cast
+
+# For type checking, always import LoguruLogger
+if TYPE_CHECKING:
+    from loguru._logger import Logger as LoguruLogger
 
 # Try to import loguru as it's part of an optional dependency
 try:
@@ -24,11 +28,8 @@ try:
     LOGURU_AVAILABLE = True
 except ImportError:
     LOGURU_AVAILABLE = False
-
-    class LoguruLogger:
-        """Placeholder class for type hints when loguru is not available."""
-        pass
-
+    # No need to define LoguruLogger class again
+    # it's already defined for type checking above
     logger = logging.getLogger("vllm")
 
 import vllm.envs as envs
