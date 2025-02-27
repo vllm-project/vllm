@@ -1024,6 +1024,11 @@ class ModelConfig:
         return ModelRegistry.is_cross_encoder_model(architectures)
 
     @property
+    def is_v1_compatible(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_v1_compatible(architectures)
+
+    @property
     def use_mla(self) -> bool:
         return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
