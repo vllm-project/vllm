@@ -28,8 +28,7 @@ from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
-                             parse_fine_tuned_lora_name, pooling_model_process,
-                             replace_submodule)
+                             parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -391,9 +390,7 @@ class LoRAModelManager(AdapterModelManager):
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
-            if self.is_pooling_model:
-                module_name = pooling_model_process(module_name)
-            module_lora = lora_model.get_lora(module_name)
+            module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
                 module_lora.optimize()
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
@@ -630,9 +627,8 @@ class LoRAModelManager(AdapterModelManager):
             replaced_module: Set[str] = set()
             has_replacement = False
             for r in new_module_names:
-                if self.is_pooling_model:
-                    r = pooling_model_process(r)
-                lora = lora_model.get_lora(r)
+
+                lora = self._get_lora_layer_weights(lora_model, r)
                 replacement_loras.append(lora)
                 if lora:
                     has_replacement = True
@@ -644,12 +640,22 @@ class LoRAModelManager(AdapterModelManager):
                     continue
                 replacement_loras[i] = None
             if self.is_pooling_model:
-                module_name = pooling_model_process(module_name)
+                # TODO: optimize this
+                module_name = module_name.replace("model.", "")
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
             # Remove the modules that have been replaced.
             for module in replaced_module:
                 lora_model.loras.pop(module, None)
+
+    def _get_lora_layer_weights(
+            self, lora_model: LoRAModel,
+            module_name: str) -> Optional[LoRALayerWeights]:
+        if self.is_pooling_model:
+            module_lora = lora_model.get_lora(module_name)
+            if module_lora is None:
+                module_name = module_name.replace("model.", "")
+        return lora_model.get_lora(module_name)
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         return deactivate_adapter(adapter_id, self._active_adapters,
