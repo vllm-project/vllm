@@ -227,6 +227,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:gpu_cache_usage_perc",
     "vllm:gpu_prefix_cache_queries",
     "vllm:gpu_prefix_cache_hits",
+    "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
     "vllm:iteration_tokens_total",

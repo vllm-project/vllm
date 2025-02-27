@@ -132,6 +132,11 @@ class PrometheusStatLogger(StatLoggerBase):
             "GPU prefix cache hits, in terms of number of cached blocks.",
             labelnames=labelnames).labels(*labelvalues)
 
+        self.counter_num_preempted_reqs = prometheus_client.Counter(
+            name="vllm:num_preemptions_total",
+            documentation="Cumulative number of preemption from the engine.",
+            labelnames=labelnames).labels(*labelvalues)
+
         self.counter_prompt_tokens = prometheus_client.Counter(
             name="vllm:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
@@ -282,6 +287,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_gpu_prefix_cache_hits.inc(
             scheduler_stats.prefix_cache_stats.hits)
 
+        self.counter_num_preempted_reqs.inc(iteration_stats.num_preempted_reqs)
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(
             iteration_stats.num_generation_tokens)
@@ -289,10 +295,19 @@ class PrometheusStatLogger(StatLoggerBase):
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)
 
+        for ttft in iteration_stats.time_to_first_tokens_iter:
+            self.histogram_time_to_first_token.observe(ttft)
+        for tpot in iteration_stats.time_per_output_tokens_iter:
+            self.histogram_time_per_output_token.observe(tpot)
+
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason].inc()
             self.histogram_e2e_time_request.observe(
                 finished_request.e2e_latency)
+            self.histogram_queue_time_request.observe(
+                finished_request.queued_time)
+            self.histogram_prefill_time_request.observe(
+                finished_request.prefill_time)
             self.histogram_inference_time_request.observe(
                 finished_request.inference_time)
             self.histogram_decode_time_request.observe(
@@ -301,15 +316,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
                 finished_request.num_generation_tokens)
-
-        for ttft in iteration_stats.time_to_first_tokens_iter:
-            self.histogram_time_to_first_token.observe(ttft)
-        for tpot in iteration_stats.time_per_output_tokens_iter:
-            self.histogram_time_per_output_token.observe(tpot)
-        for queue_time in iteration_stats.queue_times_iter:
-            self.histogram_queue_time_request.observe(queue_time)
-        for prefill_time in iteration_stats.prefill_times_iter:
-            self.histogram_prefill_time_request.observe(prefill_time)
 
         if self.gauge_lora_info is not None:
             running_lora_adapters = \
