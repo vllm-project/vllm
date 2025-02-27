@@ -297,10 +297,10 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        vllm_config: VllmConfig = kwargs["vllm_config"]
-        if vllm_config.parallel_config.data_parallel_size > 1:
+        parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
+        if parallel_config.data_parallel_size > 1:
             # Set data parallel rank for this engine process.
-            vllm_config.parallel_config.data_parallel_rank = dp_rank
+            parallel_config.data_parallel_rank = dp_rank
 
             # Add process-specific prefix to stdout and stderr
             process_name = get_mp_context().current_process().name
@@ -311,7 +311,7 @@ class EngineCoreProc(EngineCore):
             from vllm.platforms import current_platform
             if current_platform.is_cuda_alike():
                 from vllm.platforms.cuda import device_id_to_physical_device_id
-                tp_size = vllm_config.parallel_config.tensor_parallel_size
+                tp_size = parallel_config.tensor_parallel_size
                 os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
                     str(device_id_to_physical_device_id(i))
                     for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
