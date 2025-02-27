@@ -114,7 +114,7 @@ class SchedulerOutput:
     # Used to free the encoder cache.
     free_encoder_input_ids: List[Tuple[str, int]]
 
-    # Dict of request ids to its index within the batch
+    # Dict of request ids to their index within the batch
     # for filling the next token bitmask
     guided_decoding_request_ids: Dict[str, int]
     # the bitmask for the whole batch
