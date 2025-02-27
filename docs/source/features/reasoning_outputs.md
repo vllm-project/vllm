@@ -146,35 +146,26 @@ class ExampleParser(ReasoningParser):
 Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in `vllm/model_executor/guided_decoding/reasoner/deepseek_reasoner.py`.
 
 ```python
+@dataclass
 class DeepSeekReasoner(Reasoner):
-    _instance = None
-    _start_token_id = None
-    _end_token_id = None
+    """
+    Reasoner for DeepSeek R series models.
+    """
+    start_token_id: int
+    end_token_id: int
 
-    def __new__(cls, tokenizer: PreTrainedTokenizer):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    start_token: str = "<think>"
+    end_token: str = "</think>"
 
-    def __init__(self, tokenizer: PreTrainedTokenizer):
-        self.tokenizer = tokenizer
+    @classmethod
+    def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
+        return cls(start_token_id=tokenizer.encode(
+            "<think>", add_special_tokens=False)[0],
+                   end_token_id=tokenizer.encode("</think>",
+                                                 add_special_tokens=False)[0])
 
-        # Initialize token IDs only once
-        if self.__class__._start_token_id is None:
-            self.__class__._start_token_id = tokenizer.encode(
-                "<think>", add_special_tokens=False)[0]
-            self.__class__._end_token_id = tokenizer.encode(
-                "</think>", add_special_tokens=False)[0]
-
-        # Use class variables
-        self.start_token_id = self.__class__._start_token_id
-        self.end_token_id = self.__class__._end_token_id
-
-    def get_start_token_id(self) -> int:
-        return self.start_token_id
-
-    def get_end_token_id(self) -> int:
-        return self.end_token_id
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        return self.end_token_id in input_ids
 ```
 
 The structured output engine like xgrammar will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
