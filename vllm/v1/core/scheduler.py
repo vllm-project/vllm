@@ -148,7 +148,8 @@ class Scheduler:
                 req_index += 1
                 continue
 
-            num_new_tokens = request.num_tokens - request.num_computed_tokens
+            num_new_tokens = (request.num_tokens_with_spec -
+                              request.num_computed_tokens)
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
