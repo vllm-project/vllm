@@ -23,9 +23,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
-                                        EncDecMultiModalProcessor,
-                                        PromptReplacement,
-                                        PromptReplacementDetails)
+                                        EncDecMultiModalProcessor, PromptIndex,
+                                        PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -858,18 +857,14 @@ class Florence2MultiModalProcessor(
     ) -> list[PromptReplacement]:
         hf_config = self.info.get_hf_config()
         pad_token_id = hf_config.pad_token_id
-        bos_token_id = hf_config.bos_token_id
         num_image_tokens = self.info.get_max_image_tokens()
         image_tokens = [pad_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
-                target=[bos_token_id],
-                replacement=PromptReplacementDetails(
-                    full=image_tokens + [bos_token_id],
-                    features=image_tokens,
-                ),
+                target=PromptIndex(token_index=0, string_index=0),
+                replacement=image_tokens,
             )
         ]
 

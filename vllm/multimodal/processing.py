@@ -7,6 +7,7 @@ from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
                              Sequence)
 from dataclasses import dataclass, field
 from functools import lru_cache
+from itertools import groupby
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union)
 
@@ -63,6 +64,16 @@ The replacement token sequence or text.
 If only part of the replacement corresponds to feature placeholders, you can
 use :class:`PromptReplacementDetails` to specify which part.
 """
+
+
+@dataclass(frozen=True)
+class PromptIndex:
+    """
+    The replacement should be inserted at the specified index of the prompt,
+    rather than replacing a particular token sequence (or text).
+    """
+    token_index: int
+    string_index: int
 
 
 @dataclass
@@ -122,7 +133,7 @@ class PromptReplacement:
     modality: str
     """The modality for which the replacement is made."""
 
-    target: PromptSeq
+    target: Union[PromptSeq, PromptIndex]
     """The token sequence (or text) to find and replace."""
 
     replacement: Union[Callable[[int], PromptRepl],
@@ -247,7 +258,7 @@ class BoundPromptReplacement:
     tokenizer: AnyTokenizer = field(repr=False)
     modality: str
 
-    _target: PromptSeq
+    _target: Union[PromptSeq, PromptIndex]
     _replacement: Union[Callable[[int], PromptRepl],
                         PromptRepl] = field(repr=False)
 
@@ -255,8 +266,11 @@ class BoundPromptReplacement:
         self._replacement_cache = dict[int, _BoundPromptReplacementGroup]()
 
     @property
-    def target(self) -> _BoundPromptSequence:
+    def target(self) -> Union[_BoundPromptSequence, PromptIndex]:
         """The token sequence (or text) to find and replace."""
+        if isinstance(self._target, PromptIndex):
+            return self._target
+
         return _BoundPromptSequence.from_seq(self.tokenizer, self._target)
 
     def get_replacement(self, item_idx: int) -> _BoundPromptReplacementGroup:
@@ -349,6 +363,24 @@ class _PromptReplacementMatch(ABC):
 
 
 @dataclass(repr=False)
+class _PromptReplacementIndexMatch(_PromptReplacementMatch):
+    target: int
+    prompt_len: int
+
+    @property
+    def start_idx(self) -> int:
+        target = self.target
+        if target < 0:
+            target += self.prompt_len
+
+        return target
+
+    @property
+    def end_idx(self) -> int:
+        return self.start_idx
+
+
+@dataclass(repr=False)
 class _PromptReplacementTokenMatch(_PromptReplacementMatch):
     match: _TokenMatch
 
@@ -395,25 +427,51 @@ class PlaceholderFeaturesInfo:
 def find_token_matches(
     prompt: list[int],
     prompt_repls: Sequence[BoundPromptReplacement],
-) -> list[_PromptReplacementTokenMatch]:
+) -> Sequence[_PromptReplacementMatch]:
     """Return each target of :code:`prompt_repls` found in :code:`prompt`."""
-    return [
-        _PromptReplacementTokenMatch(prompt_repl, match)
-        for prompt_repl in prompt_repls
-        for match in iter_token_matches(prompt, prompt_repl.target.token_ids)
-    ]
+    matches = list[_PromptReplacementMatch]()
+
+    for prompt_repl in prompt_repls:
+        target = prompt_repl.target
+
+        if isinstance(target, PromptIndex):
+            matches.append(
+                _PromptReplacementIndexMatch(
+                    prompt_repl,
+                    target=target.token_index,
+                    prompt_len=len(prompt),
+                ))
+        else:
+            matches.extend(
+                _PromptReplacementTokenMatch(prompt_repl, match)
+                for match in iter_token_matches(prompt, target.token_ids))
+
+    return matches
 
 
 def find_text_matches(
     prompt: str,
     prompt_repls: Sequence[BoundPromptReplacement],
-) -> list[_PromptReplacementTextMatch]:
+) -> Sequence[_PromptReplacementMatch]:
     """Return each target of :code:`prompt_repls` found in :code:`prompt`."""
-    return [
-        _PromptReplacementTextMatch(prompt_repl, match)
-        for prompt_repl in prompt_repls
-        for match in re.finditer(re.escape(prompt_repl.target.text), prompt)
-    ]
+    matches = list[_PromptReplacementMatch]()
+
+    for prompt_repl in prompt_repls:
+        target = prompt_repl.target
+
+        if isinstance(target, PromptIndex):
+            matches.append(
+                _PromptReplacementIndexMatch(
+                    prompt_repl,
+                    target=target.string_index,
+                    prompt_len=len(prompt),
+                ))
+        else:
+            matches.extend(
+                _PromptReplacementTextMatch(prompt_repl, match)
+                for match in re.finditer(re.escape(target.text), prompt))
+
+    return matches
 
 
 def _resolve_matches(
@@ -451,28 +509,37 @@ def _replace_matches(
     prev_end_idx = 0
     next_idx_by_modality = defaultdict[str, int](lambda: 0)
 
-    for match in _resolve_matches(prompt, mm_matches):
-        modality = match.modality
+    for (start_idx, end_idx), group in groupby(
+            _resolve_matches(prompt, mm_matches),
+            key=lambda x: (x.start_idx, x.end_idx),
+    ):
+        matches = tuple(group)
+        assert len(matches) == 1
 
-        item_idx = next_idx_by_modality[modality]
-        if item_idx >= mm_item_counts.get(modality, 0):
-            continue
+        if isinstance(matches[0], _PromptReplacementIndexMatch):
+            # Index matches take priority over other types of matches,
+            # so they will exhaust all matches belonging to that modality
+            matches *= mm_item_counts.get(matches[0].modality, 0)
 
-        start_idx = match.start_idx
-        end_idx = match.end_idx
+        for match in matches:
+            modality = match.modality
 
-        repl_info = match.prompt_repl
-        replacement = repl_info.get_replacement(item_idx)
+            item_idx = next_idx_by_modality[modality]
+            if item_idx >= mm_item_counts.get(modality, 0):
+                continue
 
-        if isinstance(prompt, str):
-            repl_seq = replacement.full.text
-            out_seqs.append(prompt[prev_end_idx:start_idx] + repl_seq)
-        else:
-            repl_seq = replacement.full.token_ids
-            out_seqs.append(prompt[prev_end_idx:start_idx] + repl_seq)
+            repl_info = match.prompt_repl
+            replacement = repl_info.get_replacement(item_idx)
 
-        prev_end_idx = end_idx
-        next_idx_by_modality[modality] += 1
+            if isinstance(prompt, str):
+                repl_seq = replacement.full.text
+                out_seqs.append(prompt[prev_end_idx:start_idx] + repl_seq)
+            else:
+                repl_seq = replacement.full.token_ids
+                out_seqs.append(prompt[prev_end_idx:start_idx] + repl_seq)
+
+            prev_end_idx = end_idx
+            next_idx_by_modality[modality] += 1
 
     out_seqs.append(prompt[prev_end_idx:])
 
@@ -481,7 +548,7 @@ def _replace_matches(
 
 def replace_token_matches(
     prompt: list[int],
-    mm_matches: Mapping[str, Sequence[_PromptReplacementTokenMatch]],
+    mm_matches: Mapping[str, Sequence[_PromptReplacementMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> list[int]:
     """Apply the replacements in :code:`mm_matches` to :code:`prompt`."""
@@ -495,7 +562,7 @@ def replace_token_matches(
 
 def replace_text_matches(
     prompt: str,
-    mm_matches: Mapping[str, Sequence[_PromptReplacementTextMatch]],
+    mm_matches: Mapping[str, Sequence[_PromptReplacementMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> str:
     """Apply the replacements in :code:`mm_matches` to :code:`prompt`."""

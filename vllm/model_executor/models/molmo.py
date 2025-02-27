@@ -46,8 +46,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        BaseProcessingInfo, PromptIndex,
+                                        PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import JSONTree, json_map_leaves
@@ -1190,6 +1190,8 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         return MolmoProcessorWrapper(processor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        # TODO: Investigate different `embed_is_patch` between cache/no-cache
+        # in multi-image case
         return {"image": 1}
 
     def get_mm_max_tokens_per_item(
@@ -1335,17 +1337,10 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
 
         image_token_length_w = processor.image_token_length_w
         image_token_length_h = processor.image_token_length_h
         pooling_size = processor.pooling_size
-
-        user_str = "User:"
-        if processor.always_start_with_space:
-            user_str = " " + user_str
-
-        user_tokens = tokenizer.encode(user_str, add_special_tokens=False)
 
         img_patch_id = processor.image_patch_id
         img_col_id = processor.im_col_id
@@ -1371,16 +1366,13 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
                      ((nrows + 1) // pooling_size) + [img_end_id])
 
             image_tokens = extra_joint + joint
-
-            return PromptReplacementDetails(
-                full=image_tokens + user_tokens,
-                features=image_tokens,
-            )
+            return image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
-                target=user_str,
+                # Insert after "<|endoftext|>"
+                target=PromptIndex(token_index=1, string_index=13),
                 replacement=get_replacement_molmo,
             )
         ]

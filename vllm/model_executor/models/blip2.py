@@ -19,8 +19,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        BaseProcessingInfo, PromptIndex,
+                                        PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -483,9 +483,6 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
-        bos_token_id = tokenizer.bos_token_id
-        assert isinstance(bos_token_id, int)
-
         image_token_id = vocab["<image>"]
         num_image_tokens = self.info.get_num_image_tokens()
         image_tokens = [image_token_id] * num_image_tokens
@@ -493,11 +490,8 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=[bos_token_id],
-                replacement=PromptReplacementDetails(
-                    full=image_tokens + [bos_token_id],
-                    features=image_tokens,
-                ),
+                target=PromptIndex(token_index=0, string_index=0),
+                replacement=image_tokens,
             )
         ]
 
