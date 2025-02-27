@@ -257,7 +257,7 @@ class BlockTable:
             list[int]: A list of physical block indices for the blocks in the
                 BlockTable.
         """
-        return self._blocks.ids()
+        return self._blocks.ids
 
     def get_unseen_token_ids(self, sequence_token_ids: list[int]) -> list[int]:
         """Get the number of "unseen" tokens in the sequence.
@@ -340,7 +340,7 @@ class BlockTable:
 
     @property
     def blocks(self) -> list[Block]:
-        return self._blocks.list()
+        return self._blocks.blocks
 
     @property
     def _num_empty_slots(self) -> int:
