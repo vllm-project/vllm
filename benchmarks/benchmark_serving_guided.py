@@ -51,6 +51,9 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
+from vllm.v1.guided_decoding.utils import (
+    has_xgrammar_unsupported_json_features)
+
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
 
@@ -190,7 +193,17 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         requests: List[SampleRequest] = []
         dataset = datasets.load_dataset("NousResearch/json-mode-eval",
                                         split="train")
-        print(f"dataset has {len(dataset)} entries")
+        full_dataset_len = len(dataset)
+
+        def _filter_func(item):
+            import json
+            schema = json.loads(item["schema"])
+            return not has_xgrammar_unsupported_json_features(schema)
+
+        dataset = dataset.filter(_filter_func)
+        num_filtered_out = full_dataset_len - len(dataset)
+        print(f"dataset has {len(dataset)} entries after filtering "
+              f"out {num_filtered_out} entries with unsupported features")
         len_dataset = len(dataset)
         for data_point_idx in range(args.num_prompts):
             idx = data_point_idx
