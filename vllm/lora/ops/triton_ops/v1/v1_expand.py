@@ -98,7 +98,7 @@ def _v1_expand_kernel(
         input_ptr,
         lora_ptr,
         out_ptr,
-        N,
+        curr_N,
         K,
         cta_m_len,
         ram,  # array identifying the rows of Input ptr to operate on
