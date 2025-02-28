@@ -123,6 +123,7 @@ class HPUWorker:
         # of the model.
         kv_caches: Dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        single_kv_block_size_bytes = 0
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
                 dtype = layer_spec.dtype
@@ -133,6 +134,9 @@ class HPUWorker:
                 hpu_v_cache = torch.tensor([], dtype=dtype, device='hpu')
 
                 kv_caches[layer_name] = (hpu_k_cache, hpu_v_cache)
+
+                single_kv_block_size_bytes += layer_spec.page_size_bytes
+
             else:
                 raise NotImplementedError
 
@@ -165,16 +169,20 @@ class HPUWorker:
         self.model_runner.mem_margin = hpu_memory_margin
         cache_size_bytes = available_hpu_memory * graph_headroom
         graph_headroom_bytes = available_hpu_memory * (1 - graph_headroom)
+        dummy_block_headroom = single_kv_block_size_bytes
         msg = (
             f"Free device memory: {format_bytes(free_hpu_memory)}, "
             f"{format_bytes(available_hpu_memory)} usable "
             f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
             f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
             f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
-            f"{format_bytes(cache_size_bytes)} reserved for KV cache")
+            f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy block "
+            f"{format_bytes(cache_size_bytes-dummy_block_headroom)} reserved for usable KV cache"
+        )
+
         logger.info(msg)
         gc.collect()
-        return cache_size_bytes
+        return cache_size_bytes - dummy_block_headroom
 
     def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
@@ -183,6 +191,11 @@ class HPUWorker:
         with HabanaMemoryProfiler() as m:
             self.model_runner.initialize_kv_cache(kv_cache_config)
             torch.hpu.synchronize()
+        msg = (
+            f"Usable num_blocks: {kv_cache_config.num_blocks}, "
+            f"actual allocated num_blocks: {self.model_runner.kv_caches[0][0].shape[0]} (_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, _PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})"
+        )
+        logger.info(msg)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
         logger.info(msg)

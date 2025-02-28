@@ -1512,6 +1512,8 @@ class SchedulerConfig:
         return hash_str
 
     def __post_init__(self) -> None:
+        if envs.VLLM_USE_V1:
+            self.use_padding_aware_scheduling = False
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 if self.num_scheduler_steps > 1:

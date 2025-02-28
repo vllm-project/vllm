@@ -50,10 +50,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _TYPE_CACHE = {}
-# These values are assumed to be zero in several places.
-# Use caution when updating them!
-_PAD_SLOT_ID = 0
-_PAD_BLOCK_ID = 0
 
 
 class PhaseType(Enum):
@@ -660,6 +656,10 @@ class HPUModelRunner:
             logger.info("Bucketing is OFF.")
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
                                           'false').lower() == 'true'
+        # These values are assumed to be zero in several places.
+        # Use caution when updating them!
+        self._PAD_SLOT_ID = -1
+        self._PAD_BLOCK_ID = -1
         self._tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
@@ -940,7 +940,7 @@ class HPUModelRunner:
             padding_fn = lambda tensor, pad_value: pad_list(
                 tensor, block_bucket_size, pad_value)
 
-        block_list = padding_fn(block_list, _PAD_BLOCK_ID)
+        block_list = padding_fn(block_list, self._PAD_BLOCK_ID)
         block_groups = padding_fn(block_groups, -1)
         block_usage = padding_fn(block_usage, 1)
 
@@ -1062,8 +1062,9 @@ class HPUModelRunner:
             slot_mapping = torch.zeros((padded_batch_size, padded_prompt_len),
                                        dtype=torch.int32,
                                        device='cpu')
-            slot_mapping.fill_(_PAD_SLOT_ID)
-
+            dummy_slots = itertools.cycle(
+                range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
+            slot_mapping.apply_(lambda _: next(dummy_slots))
             # NOTE(kzawora): this has no right to work on prefix prefills
             iterable = zip(
                 prompt_lens, [0] *
@@ -1251,7 +1252,9 @@ class HPUModelRunner:
         # Set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
         slot_mapping = slot_mapping[:padded_batch_size]
-        slot_mapping[num_decodes:] = _PAD_SLOT_ID
+        dummy_slots = itertools.cycle(
+            range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
+        slot_mapping[num_decodes:].apply_(lambda _: next(dummy_slots))
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
         context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
         num_blocks = np.ceil(context_lens / self.block_size).astype(
@@ -1610,7 +1613,7 @@ class HPUModelRunner:
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
 
-        if False:
+        if True:
             for req_id in self.input_batch.req_ids[:num_reqs]:
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 if self.input_batch.token_ids_cpu[
@@ -2068,9 +2071,14 @@ class HPUModelRunner:
             assert tensor_config.size % layer_spec.page_size_bytes == 0
             num_blocks = tensor_config.size // layer_spec.page_size_bytes
             if isinstance(layer_spec, FullAttentionSpec):
+                # NOTE(kzawora): We allocate one block more than specified,
+                # the last one will be used as scratch space for padded
+                # sequences. This should never produce any OOM errors, as
+                # the additional memory needed for the scratch space was
+                # taken into account in the `determine_available_memory` method.
                 kv_cache_shape = HPUAttentionBackendV1.get_kv_cache_shape(
-                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
-                    layer_spec.head_size)
+                    num_blocks + 1, layer_spec.block_size,
+                    layer_spec.num_kv_heads, layer_spec.head_size)
                 dtype = layer_spec.dtype
                 if dtype == torch.float8_e4m3fn:
                     dtype = torch.uint8
@@ -2090,4 +2098,7 @@ class HPUModelRunner:
 
         if self.enable_bucketing:
             self.bucketing_ctx.num_hpu_blocks = num_blocks
+        self._PAD_BLOCK_ID = num_blocks
+        self._PAD_SLOT_ID = num_blocks * self.block_size
+
         htorch.hpu.synchronize()
