@@ -6,13 +6,13 @@ To create a new 4-bit quantized model, you can leverage [AutoAWQ](https://github
 Quantizing reduces the model's precision from FP16 to INT4 which effectively reduces the file size by ~70%.
 The main benefits are lower latency and memory usage.
 
-You can quantize your own models by installing AutoAWQ or picking one of the [400+ models on Huggingface](https://huggingface.co/models?sort=trending&search=awq).
+You can quantize your own models by installing AutoAWQ or picking one of the [6500+ models on Huggingface](https://huggingface.co/models?sort=trending&search=awq).
 
 ```console
 pip install autoawq
 ```
 
-After installing AutoAWQ, you are ready to quantize a model. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
+After installing AutoAWQ, you are ready to quantize a model. Please refer to the `AutoAWQ documentation <https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization>`_ for further details. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
 
 ```python
 from awq import AutoAWQForCausalLM
