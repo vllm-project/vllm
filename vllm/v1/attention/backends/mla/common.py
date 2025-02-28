@@ -234,6 +234,8 @@ try:
 except ImportError:
     flashinfer_available = False
 
+is_hip = current_platform.is_rocm()
+
 logger = init_logger(__name__)
 
 CUDNN_WORKSPACE_SIZE = 12800
