@@ -65,12 +65,12 @@ source worker_multi_nodes_source.sh
 
 From the vLLM root directory, navigate to the scripts folder and run the calibration script. This process runs the BF16 model on a calibration dataset to observe the range of model weights and inputs.
 
-
+- BF16 KVCache
 ```bash
 export QUANT_CONFIG=inc_measure_config.json
 # restart ray 
 cd vllm/scripts
-python inc_prepare_on_two_nodes.py
+python inc_quant_on_two_nodes.py
 ```
 
 ## Inference with FP8 Models on Two Nodes
@@ -82,6 +82,8 @@ export QUANT_CONFIG=inc_quant_config.json
 cd vllm/scripts
 python inc_quant_on_two_nodes.py
 ```
+
+- FP8 KVCache (WIP)
 
 ## Inference with FP8 Models on a Single Node
 
