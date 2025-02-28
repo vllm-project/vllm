@@ -8,8 +8,8 @@ from triton import cdiv
 from typing_extensions import Concatenate, ParamSpec
 
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import (MayMultiLayerBlockIDs, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
+                                        MayMultiLayerBlockIDs)
 
 logger = init_logger(__name__)
 

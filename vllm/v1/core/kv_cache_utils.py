@@ -8,9 +8,9 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import (KVCacheConfig, VirtualLayer,
-                                        KVCacheNewTensor, KVCacheReuseTensor,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheNewTensor,
+                                        KVCacheReuseTensor, KVCacheSpec,
+                                        VirtualLayer)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
