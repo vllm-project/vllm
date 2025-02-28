@@ -31,7 +31,7 @@ from vllm.platforms import current_platform
 USE_ROCM_AITER_LINEAR = envs.VLLM_ROCM_USE_AITER_LINEAR \
     and current_platform.is_rocm()
 if USE_ROCM_AITER_LINEAR:
-    from aiter.tuned_gemm import tgemm as aiter_tgemm
+    from aiter.tuned_gemm import tgemm as rocm_aiter_tgemm
 
 logger = init_logger(__name__)
 
@@ -146,7 +146,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if USE_ROCM_AITER_LINEAR:
-            return aiter_tgemm.mm(x, layer.weigt, bias)
+            return rocm_aiter_tgemm.mm(x, layer.weigt, bias)
 
         return F.linear(x, layer.weight, bias)
 

@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 USE_ROCM_AITER_NORM = envs.VLLM_ROCM_USE_AITER_NORM \
     and current_platform.is_rocm()
 if USE_ROCM_AITER_NORM:
-    import aiter
+    import aiter as rocm_aiter
 
 
 @CustomOp.register("rms_norm")
@@ -92,7 +92,7 @@ class RMSNorm(CustomOp):
 
         if residual is not None:
             if USE_ROCM_AITER_NORM:
-                aiter.rmsnorm2d_fwd_with_add(
+                rocm_aiter.rmsnorm2d_fwd_with_add(
                     x,
                     x,
                     residual,
