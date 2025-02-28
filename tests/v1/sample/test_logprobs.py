@@ -258,7 +258,7 @@ def _run_and_validate(
 def test_get_logprobs_and_prompt_logprobs(
     hf_model,
     vllm_model,
-    batch_logprobs_composition: str,
+    batch_logprobs_composition: BatchLogprobsComposition,
     temperature: float,
     example_prompts,
 ) -> None:
