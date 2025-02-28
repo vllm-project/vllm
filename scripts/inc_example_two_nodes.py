@@ -31,6 +31,7 @@ parser.add_argument("--smoke", action="store_true", help="Smoke test")
 parser.add_argument("--fp8_kvcache", action="store_true", help="Using FP8 KV cache.")
 args = parser.parse_args()
 
+max_num_seqs = 4
 
 # ==-------------------------------------------------------------------------==
 # Calibration parameters
@@ -97,6 +98,7 @@ if __name__ == "__main__":
                     weights_load_device="cpu",
                     kv_cache_dtype="fp8_inc",
                     max_model_len=16384,
+                    max_num_seqs=max_num_seqs,
                     dtype="bfloat16",
                 )
             else:
@@ -108,6 +110,7 @@ if __name__ == "__main__":
                     trust_remote_code=True,
                     quantization='inc',
                     weights_load_device="cpu",
+                    max_num_seqs=max_num_seqs,
                     max_model_len=16384,
                     dtype="bfloat16",
                 )
@@ -121,6 +124,7 @@ if __name__ == "__main__":
                 trust_remote_code=True,
                 quantization='inc',
                 max_model_len=16384,
+                max_num_seqs=max_num_seqs,
                 dtype="bfloat16",
             )
     else:

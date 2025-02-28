@@ -1,9 +1,23 @@
 # Note for Quantizing DeepSeek V3/R1 with vLLM and INC
 
-### Prerequisites
+This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1 on two nodes, and to perform quantization and inference on either two nodes or a single node.
 
-- Hardware: 2x8G2 or 2x8G3
-- Docker: 1.20.0-521
+### Support Matrix
+
+- Calibration Stage (Two Nodes)
+
+| KVCache Precision | Configuration File for Calibration |
+|---|---|
+| BF16              | `inc_measure_config.json`         |
+| FP8                | `inc_measure_with_fp8kv_config.json`|
+
+- Quantize/Inference Stage
+
+| KVCache Precision |  Two Nodes | One Node (WIP) |
+|---|---|---|
+| BF16              | `inc_quant_config.json`          | `inc_quant_one_node_config.json`|
+| FP8               | `inc_measure_with_fp8kv_config.json`| `inc_quant_with_fp8kv_one_node_config.json`|
+
 
 
 ### Setting Up 2 Nodes Environment
@@ -16,6 +30,11 @@ We use Ray to set up a cluster with two nodes, so that we can image a system wit
 - Start the Ray cluster on the head node and connect the worker node to it.
 
 For more details, please refer to the <https://github.com/yangulei/vllm-fork/blob/deepseek_r1_g2/scripts/multi_nodes_README.md>
+
+### Prerequisites
+
+- Hardware: 2x8G2 or 2x8G3
+- Docker: 1.20.0-521
 
 ### Install Dependencies
 
@@ -78,7 +97,7 @@ This script loads the BF16 model into DRAM, moves it to the HPU, and quantizes t
 ```bash
 # vllm root
 export QUANT_CONFIG=inc_quant_config.json
-# restart ray 
+# restart ray
 cd vllm/scripts
 python inc_example_two_nodes.py --mode quant
 ```
@@ -86,7 +105,7 @@ python inc_example_two_nodes.py --mode quant
 - FP8 KVCache (WIP)
 
 
-## Inference with FP8 Models on a Single Node
+## Inference with FP8 Models on a Single Node (WIP)
 
 In this section, we load the BF16 model on DRAM and quantize it to FP8 model using unified measurement results obtained from the two-node calibration.
 
