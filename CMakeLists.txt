@@ -419,9 +419,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND FP4_ARCHS)
     set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
-      "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu"
-    )
+      "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
@@ -434,6 +432,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(FP4_ARCHS)
   endif()
 
+  # FP8 Blackwell Archs 
+  cuda_archs_loose_intersection(BLACKWELL_ARCHS "10.0;10.1;12.0" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND BLACKWELL_ARCHS)
+    set(SRCS 
+      "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu"
+    )
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    message(STATUS "Building FP8 for archs: ${BLACKWELL_ARCHS}")
+  else()
+    # clear BLACKWELL_ARCHS
+    set(BLACKWELL_ARCHS)
+  endif()
+  
   #
   # Machete kernels
 
