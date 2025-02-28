@@ -34,7 +34,8 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
-from .interfaces import SupportsMultiModal, SupportsTranscription
+from .interfaces import (SupportsMultiModal, SupportsTranscription,
+                         SupportsV0Only)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     make_layers)
 
@@ -643,7 +644,7 @@ class WhisperMultiModalProcessor(
                                         info=WhisperProcessingInfo,
                                         dummy_inputs=WhisperDummyInputsBuilder)
 class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
-                                      SupportsMultiModal):
+                                      SupportsMultiModal, SupportsV0Only):
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
             "self_attn.q_proj",

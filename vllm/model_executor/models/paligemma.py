@@ -215,7 +215,7 @@ class PaliGemmaMultiModalProcessor(
     info=PaliGemmaProcessingInfo,
     dummy_inputs=PaliGemmaDummyInputsBuilder)
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+                                        SupportsPP, SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
