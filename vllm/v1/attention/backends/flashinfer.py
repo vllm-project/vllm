@@ -141,7 +141,7 @@ def infer_global_hyperparameters(
     return global_params
 
 
-class FlashInferState(AttentionState):
+class FlashInferState:
 
     def __init__(self, runner):
         self.runner = runner
