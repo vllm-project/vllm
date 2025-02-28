@@ -11,10 +11,10 @@ wheel
 jinja2
 datasets
 
-intel-extension-for-pytorch
-oneccl_bind_pt
-triton
-torch
-torchaudio
-torchvision
---extra-index-url=https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/
+pytorch-triton-xpu @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/pytorch_triton_xpu-3.2.0.dev0-cp310-cp310-linux_x86_64.whl
+torch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/torch-2.6.0.dev0%2Bxpu-cp310-cp310-linux_x86_64.whl
+torchaudio @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/torchaudio-2.6.0.dev0%2Bxpu-cp310-cp310-linux_x86_64.whl
+torchvision @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/torchvision-0.21.0.dev0%2Bxpu-cp310-cp310-linux_x86_64.whl
+intel-extension-for-pytorch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/intel_extension_for_pytorch-2.6.10.dev0%2Bxpu-cp310-cp310-linux_x86_64.whl
+oneccl_bind_pt @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/oneccl_bind_pt-2.6.0%2Bxpu-cp310-cp310-linux_x86_64.whl
+
