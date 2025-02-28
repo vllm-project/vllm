@@ -42,6 +42,7 @@ class FlashInferBackend:
         self.runner = runner
         self._workspace_buffer = None
         self._wrapper = None
+        self._cascade_wrapper = None
 
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
@@ -62,11 +63,13 @@ class FlashInferBackend:
                 self._get_workspace_buffer(), "NHD")
         return self._wrapper
 
-    def begin_forward(self, attn_metadata: "FlashInferMetadata"):
-        if self.global_hyperparameters is None:
-            self.global_hyperparameters = infer_global_hyperparameters(
-                    get_per_layer_parameters(self.vllm_config))
+    def _get_cascade_wrapper(self):
+        if self._cascade_wrapper is None:
+            self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
+                2, self._get_workspace_buffer(), "NHD")
+        return self._cascade_wrapper
 
+    def _get_normal_attn_args(self, attn_metadata: "FlashInferMetadata"):
         block_table_bounds = (
             (attn_metadata.seq_lens + attn_metadata.page_size - 1) // attn_metadata.page_size)
 
@@ -95,13 +98,74 @@ class FlashInferBackend:
         paged_kv_last_page_len = attn_metadata.seq_lens % attn_metadata.page_size
         paged_kv_last_page_len = torch.where(
             paged_kv_last_page_len == 0, attn_metadata.page_size, paged_kv_last_page_len)
+        
+        return attn_metadata.qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len
 
-        attn_metadata.wrapper = self._get_wrapper()
+    def _get_cascade_attn_args(self, attn_metadata: "FlashInferMetadata"):
+        seq_lens = attn_metadata.seq_lens
+        page_size = attn_metadata.page_size
+        block_table = attn_metadata.block_table
+
+        num_common_kv_blocks = attn_metadata.common_prefix_len // page_size
+        shared_kv_page_indptr = torch.tensor([0, num_common_kv_blocks],
+                                             dtype=torch.int32,
+                                             device=block_table.device)
+        shared_kv_page_indices = block_table[0, :num_common_kv_blocks]
+        shared_kv_last_page_len = torch.tensor([0], dtype=torch.int32,
+                                               device=block_table.device)
+        block_table = block_table[:, num_common_kv_blocks:]
+
+        qo_indptr_arr = [attn_metadata.cu_prefix_query_lens,
+                         attn_metadata.qo_indptr]
+
+        block_table_bounds = (seq_lens + page_size - 1) // page_size
+
+        # An example for paged_kv_indices, paged_kv_indptr:
+        # request 1, page indices [0, 5, 8]
+        # request 2, page indices [1, 6, 7]
+        # request 3, page indices [3, 4]
+
+        # paged_kv_indices is a concatenation of page indices of all requests:
+        # [0, 5, 8, 1, 6, 7, 3, 4]
+        mask = (torch.arange(block_table.size(1), dtype=block_table.dtype,
+                             device=block_table.device).unsqueeze(0)
+                < block_table_bounds.unsqueeze(1))
+        paged_kv_indices = block_table[mask]
+
+        # paged_kv_indptr is used to index into paged_kv_indices: [0, 3, 6, 8]
+        # Shape: [batch_size + 1]
+        paged_kv_indptr = torch.cat([
+            torch.zeros(1, dtype=block_table_bounds.dtype,
+                        device=block_table_bounds.device),
+            block_table_bounds.cumsum(dim=0, dtype=torch.int32)])
+
+        # The number of entries in the last page of each request in
+        # the paged kv cache, shape: [batch_size]
+        paged_kv_last_page_len = seq_lens % page_size
+        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
+                                             page_size, paged_kv_last_page_len)
+
+        return (
+            qo_indptr_arr,
+            [shared_kv_page_indptr, paged_kv_indptr],
+            [shared_kv_page_indices, paged_kv_indices],
+            [shared_kv_last_page_len, paged_kv_last_page_len],
+        )
+
+    def begin_forward(self, attn_metadata: "FlashInferMetadata"):
+        if self.global_hyperparameters is None:
+            self.global_hyperparameters = infer_global_hyperparameters(
+                    get_per_layer_parameters(self.vllm_config))
+
+        if not attn_metadata.use_cascade:
+            attn_metadata.wrapper = self._get_wrapper()
+            attn_args = self._get_normal_attn_args(attn_metadata)
+        else:
+            attn_metadata.wrapper = self._get_cascade_wrapper()
+            attn_args = self._get_cascade_attn_args(attn_metadata)
+
         attn_metadata.wrapper.plan(
-            attn_metadata.qo_indptr,
-            paged_kv_indptr,
-            paged_kv_indices,
-            paged_kv_last_page_len,
+            *attn_args,
             attn_metadata.num_qo_heads,
             attn_metadata.num_kv_heads,
             attn_metadata.head_dim,
@@ -111,7 +175,8 @@ class FlashInferBackend:
             window_left=self.global_hyperparameters.window_left,
             logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
             q_data_type=attn_metadata.q_data_type,
-            kv_data_type=attn_metadata.data_type)
+            #kv_data_type=attn_metadata.data_type,
+        )
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
@@ -144,7 +209,6 @@ class FlashInferBackend:
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
         return use_cascade_attention(*args, **kwargs)
 
 
@@ -236,6 +300,13 @@ class FlashInferMetadata:
     # Block size of vllm
     page_size: int
 
+    # For cascade attention.
+    use_cascade: bool
+    common_prefix_len: int
+    cu_prefix_query_lens: Optional[torch.Tensor]
+    prefix_kv_lens: Optional[torch.Tensor]
+    suffix_kv_lens: Optional[torch.Tensor]
+
     wrapper: BatchPrefillWithPagedKVCacheWrapper = None
 
     # For logging.
@@ -251,20 +322,20 @@ class FlashInferMetadata:
     # The FlashInfer backend currently supports only models in which all layers
     # share the same following hyperparameters:
 
-    # The left (inclusive) window size for the attention window, when
-    # set to `-1`, the window size will be set to the full length of
-    # the sequence. Defaults to `-1`.
-    window_left: int = -1
-    # The attention logits soft capping value (used in Gemini, Grok and
-    # Gemma-2, etc.), if not provided, will be set to `0`. If greater
-    # than 0, the logits will be capped according to formula:
-    # $$\texttt{logits\_soft\_cap} \times
-    # \mathrm{tanh}(x / \texttt{logits\_soft\_cap})$$,
-    # where $x$ is the input logits.
-    logits_soft_cap: Optional[float] = None
-    # The scale used in softmax, if not provided, will be set to
-    # `1.0 / sqrt(head_dim)`.
-    sm_scale: Optional[float] = None
+    # # The left (inclusive) window size for the attention window, when
+    # # set to `-1`, the window size will be set to the full length of
+    # # the sequence. Defaults to `-1`.
+    # window_left: int = -1
+    # # The attention logits soft capping value (used in Gemini, Grok and
+    # # Gemma-2, etc.), if not provided, will be set to `0`. If greater
+    # # than 0, the logits will be capped according to formula:
+    # # $$\texttt{logits\_soft\_cap} \times
+    # # \mathrm{tanh}(x / \texttt{logits\_soft\_cap})$$,
+    # # where $x$ is the input logits.
+    # logits_soft_cap: Optional[float] = None
+    # # The scale used in softmax, if not provided, will be set to
+    # # `1.0 / sqrt(head_dim)`.
+    # sm_scale: Optional[float] = None
 
     def __post_init__(self):
         # Refer to
@@ -383,18 +454,52 @@ class FlashInferImpl(AttentionImpl):
                        if self.sliding_window is not None else -1)
 
         assert attn_metadata.wrapper is not None
-        assert attn_metadata.wrapper._causal
-        assert attn_metadata.wrapper._window_left == window_left
-        assert attn_metadata.wrapper._logits_soft_cap == (
-            self.logits_soft_cap or 0.0)
-        assert attn_metadata.wrapper._sm_scale == self.scale
+        #assert attn_metadata.wrapper._causal
+        #assert attn_metadata.wrapper._window_left == window_left
+        #assert attn_metadata.wrapper._logits_soft_cap == (
+        #    self.logits_soft_cap or 0.0)
+        #assert attn_metadata.wrapper._sm_scale == self.scale
 
-        output = attn_metadata.wrapper.run(
+        if not attn_metadata.use_cascade:
+            # Regular attention (common case).
+            output = attn_metadata.wrapper.run(
+                query,
+                kv_cache,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                out=output,
+            )
+            return output
+
+        # Cascade attention (rare case).
+        print("CASCADE")
+        out = attn_metadata.wrapper.run(
             query,
             kv_cache,
-            k_scale=layer._k_scale_float,
-            v_scale=layer._v_scale_float,
-            out=output,
+            #k_scale=layer._k_scale_float,
+            #v_scale=layer._v_scale_float,
+            #out=output,
+        )
+        output.copy_(out)
+        return output
+        cascade_attention(
+            output[:attn_metadata.num_actual_tokens],
+            query[:attn_metadata.num_actual_tokens],
+            key_cache,
+            value_cache,
+            cu_query_lens=attn_metadata.query_start_loc,
+            max_query_len=attn_metadata.max_query_len,
+            cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
+            prefix_kv_lens=attn_metadata.prefix_kv_lens,
+            suffix_kv_lens=attn_metadata.suffix_kv_lens,
+            max_kv_len=attn_metadata.max_seq_len,
+            softmax_scale=self.scale,
+            alibi_slopes=self.alibi_slopes,
+            sliding_window=self.sliding_window,
+            logits_soft_cap=self.logits_soft_cap,
+            block_table=attn_metadata.block_table,
+            common_prefix_len=attn_metadata.common_prefix_len,
+            fa_version=self.vllm_flash_attn_version,
         )
 
         return output

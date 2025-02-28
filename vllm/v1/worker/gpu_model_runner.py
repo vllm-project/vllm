@@ -603,6 +603,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 page_size=self.cache_config.block_size,
                 data_type=self.kv_cache_dtype,
                 q_data_type=self.model_config.dtype,
+                use_cascade=use_cascade,
+                common_prefix_len=common_prefix_len,
+                cu_prefix_query_lens=cu_prefix_query_lens,
+                prefix_kv_lens=prefix_kv_lens,
+                suffix_kv_lens=suffix_kv_lens,
             )
             self.attn_backend.begin_forward(attn_metadata)
 
