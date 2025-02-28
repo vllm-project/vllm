@@ -5,9 +5,11 @@ import signal
 import threading
 import time
 from concurrent.futures import Future
+from inspect import isclass, signature
 from multiprocessing.connection import Connection
-from typing import Any, List, Optional, Tuple, Type
+from typing import Any, List, Optional, Set, Tuple, Type
 
+import msgspec
 import psutil
 import zmq
 import zmq.asyncio
@@ -21,13 +23,12 @@ from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType)
+                            EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -86,15 +87,6 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
-        # Setup speculative decode.
-        # TODO: find a better way to check if we are using ngram.
-        self.use_spec_decode = False
-        if self.scheduler.speculative_config:
-            assert self.scheduler.speculative_config.ngram_prompt_lookup_min \
-                    , "Only ngram spec decode is supported in V1."
-            self.proposer = NgramProposer()
-            self.use_spec_decode = True
-
     def _initialize_kv_caches(self,
                               vllm_config: VllmConfig) -> Tuple[int, int]:
         start = time.time()
@@ -118,7 +110,7 @@ class EngineCore:
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution
-        self.model_executor.initialize(kv_cache_configs)
+        self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
@@ -157,9 +149,6 @@ class EngineCore:
         if not self.scheduler.has_unfinished_requests():
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
-
-        if self.use_spec_decode:
-            self.propose_tokens()
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
@@ -221,28 +210,29 @@ class EngineCore:
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
-    def propose_tokens(self):
-        assert self.scheduler.speculative_config is not None
-        for req in self.scheduler.running:
-            # Ignore requests that are doing chunked prefill.
-            if req.num_computed_tokens < req.num_tokens - 1:
-                continue
-            # Ignore requests that already have spec tokens.
-            if req.spec_token_ids:
-                continue
-            spec_tokens = self.proposer.propose(
-                req.all_token_ids,
-                self.scheduler.speculative_config.ngram_prompt_lookup_min,
-                self.scheduler.speculative_config.num_speculative_tokens,
-            )
-            if spec_tokens:
-                req.append_spec_token_ids(spec_tokens)
-
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self.model_executor.add_lora(lora_request)
+    def sleep(self, level: int = 1):
+        self.model_executor.sleep(level)
+
+    def wake_up(self):
+        self.model_executor.wake_up()
+
+    def execute_dummy_batch(self):
+        self.model_executor.collective_rpc("execute_dummy_batch")
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_executor.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_executor.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.model_executor.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_executor.pin_lora(lora_id)
 
 
 class EngineCoreProc(EngineCore):
@@ -360,19 +350,39 @@ class EngineCoreProc(EngineCore):
             self.add_request(request)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
-        elif request_type == EngineCoreRequestType.RESET_PREFIX_CACHE:
-            self.reset_prefix_cache()
-        elif request_type == EngineCoreRequestType.PROFILE:
-            self.model_executor.profile(request)
-        elif request_type == EngineCoreRequestType.ADD_LORA:
-            self.model_executor.add_lora(request)
+        elif request_type == EngineCoreRequestType.UTILITY:
+            call_id, method_name, args = request
+            output = UtilityOutput(call_id)
+            try:
+                method = getattr(self, method_name)
+                output.result = method(
+                    *self._convert_msgspec_args(method, args))
+            except BaseException as e:
+                logger.exception("Invocation of %s method failed", method_name)
+                output.failure_message = (f"Call to {method_name} method"
+                                          f" failed: {str(e)}")
+            self.output_queue.put_nowait(
+                EngineCoreOutputs(utility_output=output))
+
+    @staticmethod
+    def _convert_msgspec_args(method, args):
+        """If a provided arg type doesn't match corresponding target method
+         arg type, try converting to msgspec object."""
+        if not args:
+            return args
+        arg_types = signature(method).parameters.values()
+        assert len(args) <= len(arg_types)
+        return tuple(
+            msgspec.convert(v, type=p.annotation) if isclass(p.annotation)
+            and issubclass(p.annotation, msgspec.Struct)
+            and not isinstance(v, p.annotation) else v
+            for v, p in zip(args, arg_types))
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
-        add_lora_decoder = MsgpackDecoder(LoRARequest)
         generic_decoder = MsgpackDecoder()
 
         with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
@@ -382,14 +392,9 @@ class EngineCoreProc(EngineCore):
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                 # Deserialize the request data.
-                decoder = None
-                if request_type == EngineCoreRequestType.ADD:
-                    decoder = add_request_decoder
-                elif request_type == EngineCoreRequestType.ADD_LORA:
-                    decoder = add_lora_decoder
-                else:
-                    decoder = generic_decoder
-
+                decoder = add_request_decoder if (
+                    request_type
+                    == EngineCoreRequestType.ADD) else generic_decoder
                 request = decoder.decode(data_frame.buffer)
 
                 # Push to input queue for core busy loop.
