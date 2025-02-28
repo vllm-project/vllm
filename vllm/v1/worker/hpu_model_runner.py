@@ -558,6 +558,7 @@ class HPUModelRunner:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        device: torch.device = 'hpu',
     ):
         #TODO(kzawora): remove this, this is ugly and only used for diagnostics
         self._ENGINE_ITER = 0
@@ -570,14 +571,13 @@ class HPUModelRunner:
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
-        self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
-        self.device = self.device_config.device
+        self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         if cache_config.cache_dtype == "auto":
