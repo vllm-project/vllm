@@ -19,7 +19,7 @@ OUTPUT_DIR=${5:-"$SCRIPT_DIR/benchmark_results"}
 mkdir -p "$OUTPUT_DIR"
 
 # Define QPS values to test
-QPS_VALUES=(1 5 10 15 20 25)
+QPS_VALUES=(70 60 50 25 20 15 10 5)
 
 # Common parameters
 COMMON_PARAMS="--backend $BACKEND \
@@ -45,12 +45,13 @@ for qps in "${QPS_VALUES[@]}"; do
   GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
   # Construct filename for this run
-  FILENAME="${GUIDED_BACKEND}_${BACKEND}_${qps}qps_$(basename $MODEL)_${DATASET}_${GIT_BRANCH}_${GIT_HASH}.txt"
+  FILENAME="${GUIDED_BACKEND}_${BACKEND}_${qps}qps_$(basename $MODEL)_${DATASET}_${GIT_HASH}.txt"
 
   # Run the benchmark
   python "$SCRIPT_DIR/benchmark_serving_guided.py" $COMMON_PARAMS \
     --request-rate $qps \
-    --result-filename "$FILENAME"
+    --result-filename "$FILENAME" \
+    --port ${PORT:-8000}
 
   echo "Completed benchmark with QPS: $qps"
   echo "----------------------------------------"
