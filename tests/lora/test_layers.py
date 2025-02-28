@@ -75,6 +75,14 @@ def v1(run_with_both_engines_lora):
     from vllm.lora.punica_wrapper import punica_gpu
     importlib.reload(punica_gpu)
 
+    # Release any memory we might be holding on to. CI runs OOMs otherwise.
+    from vllm.lora.ops.triton_ops.utils import (_LORA_A_PTR_DICT,
+                                                _LORA_B_PTR_DICT)
+    _LORA_B_PTR_DICT.clear()
+    _LORA_A_PTR_DICT.clear()
+
+    yield
+
 
 def get_random_id_to_index(num_loras: int,
                            num_slots: int,
