@@ -500,7 +500,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         import pkg_resources
         from packaging import version
 
-        required_version = version.parse("2.40")
+        required_version = version.parse("2.43.0")
         current_version = version.parse(
             pkg_resources.get_distribution("ray").version)
         if current_version < required_version:
@@ -512,20 +512,19 @@ class RayDistributedExecutor(DistributedExecutorBase):
             "ray.experimental.compiled_dag_ref")
         if cgraph_spec is None:
             raise ValueError("Ray Compiled Graph is not installed. "
-                             "Run `pip install ray[adag]` to install it.")
+                             "Run `pip install ray[cgraph]` to install it.")
 
         cupy_spec = importlib.util.find_spec("cupy")
         if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
             raise ValueError(
                 "cupy is not installed but required since "
                 "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set. "
-                "Run `pip install ray[adag]` and check cupy installation.")
+                "Run `pip install ray[cgraph]` and check cupy installation.")
 
     def _compiled_ray_dag(self, enable_asyncio: bool):
         assert self.parallel_config.use_ray
         self._check_ray_cgraph_installation()
         from ray.dag import InputNode, MultiOutputNode
-        from ray.experimental.channel.torch_tensor_type import TorchTensorType
 
         logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
@@ -574,8 +573,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                         if envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL \
                         else "auto"
                     outputs = [
-                        output.with_type_hint(
-                            TorchTensorType(transport=transport))
+                        output.with_tensor_transport(transport=transport)
                         for output in outputs
                     ]
 
