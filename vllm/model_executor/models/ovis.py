@@ -1,13 +1,13 @@
 from functools import cached_property
 import logging
 from typing import Any, Iterable, List, Literal, Mapping, Set, Tuple, TypeVar, TypedDict, Union, Optional, Dict
-import PIL
 
 import torch
 import torch.nn as nn
 from torch import Tensor, TensorType
+from PIL import Image
 
-from transformers import (ProcessorMixin,SiglipVisionConfig,BatchFeature,PretrainedConfig,PreTrainedTokenizer)
+from transformers import (ProcessorMixin,SiglipVisionConfig, SiglipImageProcessor,BatchFeature,PretrainedConfig,PreTrainedTokenizer)
 from torch.nn.functional import softmax, gumbel_softmax, pad
 
 from vllm.model_executor.models.vision import get_vision_encoder_info
@@ -51,7 +51,7 @@ class OvisProcessor:
         self,
         config: PretrainedConfig,
         tokenizer: PreTrainedTokenizer,
-        image_processor: ProcessorMixin,
+        image_processor: SiglipImageProcessor,
     ) -> None:
         self.config = config
         self.tokenizer = tokenizer
@@ -76,9 +76,8 @@ class OvisProcessor:
         image_placeholders.append(IMAGE_INDICATOR_IDS[4])
         return image_placeholders
 
-    def preprocess_image(self, image: PIL.Image.Image, max_partition=9, covering_threshold=0.9, convert_to_rgb=True):
-        self.image_processor = super().get_hf_image_processor()
-        def _preprocess(img: PIL.Image.Image, side):
+    def preprocess_image(self, image: Image.Image, max_partition=9, covering_threshold=0.9, convert_to_rgb=True):
+        def _preprocess(img: Image.Image, side):
             # first resize and preprocess
             w, h = img.size
             if w == h:
@@ -176,7 +175,7 @@ class OvisProcessor:
     def preprocess_inputs(
         self,
         text_or_conversations: Union[List[Dict], str],
-        images: Optional[List[PIL.Image.Image]],
+        images: Optional[List[Image.Image]],
         max_partition=9,
         generation_preface='',
         propagate_exception=True
@@ -229,7 +228,7 @@ class OvisProcessor:
     def __call__(
         self,
         text_or_conversations: Union[List[Dict], str],
-        images: Optional[List[PIL.Image.Image]],
+        images: Optional[List[Image.Image]],
         max_partition=9,
         generation_preface='',
         propagate_exception=True,
@@ -248,18 +247,11 @@ class OvisProcessor:
                             )
 
 class OvisProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self):
+    def get_hf_config(self) -> OvisConfig:
         return self.ctx.get_hf_config(OvisConfig)
     
     def get_hf_image_processor(self) -> ProcessorMixin:
-        visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config
-        image_processor = visual_tokenizer_config.backbone_config._name_or_path
-        
-        return cached_get_image_processor(image_processor)
-
-    def get_tokenizer(self):
-        text_tokenizer_config = self.get_hf_config().llm_config
-        return get_tokenizer(text_tokenizer_config._name_or_path)
+        return self.get_hf_processor().image_processor
     
     def get_hf_processor(self, **kwargs)-> OvisProcessor:
         return self.ctx.init_processor(
@@ -274,7 +266,7 @@ class OvisProcessingInfo(BaseProcessingInfo):
         visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config
         vision_encoder_config = visual_tokenizer_config.backbone_config
         
-        return get_vision_encoder_info(SiglipVisionConfig(**vision_encoder_config))
+        return get_vision_encoder_info(vision_encoder_config)
     
     def get_num_image_tokens(self)-> int:
         vision_encoder_info = self.get_vision_encoder_info()
@@ -284,7 +276,7 @@ class OvisProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str,Optional[int]]:
         return {"image" : None}
     
-    def get_mm_max_tokens_per_item(self, seq_len) -> Mapping[str,Optional[int]]:
+    def get_mm_max_tokens_per_item(self, seq_len, mm_counts) -> Mapping[str,Optional[int]]:
        vision_encoder_info = self.get_vision_encoder_info()
        
        return {"image" : vision_encoder_info.get_max_image_tokens()}
@@ -346,7 +338,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
     ) -> list[PromptReplacement]:
        image_token_id = IMAGE_TOKEN_ID
        
-       def get_replacement_ovis(image: PIL.Image.Image):
+       def get_replacement_ovis(image: Image.Image):
            _, image_placeholders = self.preprocess_image(image)
         
            return image_placeholders
