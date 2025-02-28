@@ -2,7 +2,7 @@
 
 import time
 from collections import deque
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
@@ -62,7 +62,7 @@ class Scheduler:
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
         # Priority queues for requests.
-        self.waiting: deque[Request] = deque()
+        self.waiting: Deque[Request] = deque()
         self.running: List[Request] = []
         # The requests that have been scheduled and are being executed
         # by the executor.
