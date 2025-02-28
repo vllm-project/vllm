@@ -25,7 +25,8 @@ from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        PromptInsertion, PromptUpdate)
+                                        PromptIndexTargets, PromptInsertion,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -864,7 +865,7 @@ class Florence2MultiModalProcessor(
         return [
             PromptInsertion(
                 modality="image",
-                target="",
+                target=PromptIndexTargets.start(),
                 insertion=image_tokens,
             )
         ]
