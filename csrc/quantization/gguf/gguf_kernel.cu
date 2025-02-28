@@ -266,86 +266,87 @@ torch::Tensor ggml_moe_a8(torch::Tensor X,  // input
   int padded = (col + 512 - 1) / 512 * 512;
   const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
   auto options =
-      torch::TensorOptions().dtype(torch::kFloat16).device(W.device());
+      torch::TensorOptions().dtype(X.dtype()).device(W.device());
   at::Tensor Y = torch::empty({tokens * top_k, row}, options);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
   at::Tensor quant_X = torch::empty({tokens, padded / 32 * 9}, options);
-  quantize_row_q8_1_cuda((half*)X.data_ptr(), (void*)quant_X.data_ptr(), col,
-                         tokens, stream);
-
-  switch (type) {
-    case 2:
-      ggml_moe_q4_0_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-    case 3:
-      ggml_moe_q4_1_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-    case 6:
-      ggml_moe_q5_0_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-    case 7:
-      ggml_moe_q5_1_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-    case 8:
-      ggml_moe_q8_0_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-    case 10:
-      ggml_moe_q2_K_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-    case 11:
-      ggml_moe_q3_K_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-    case 12:
-      ggml_moe_q4_K_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-    case 13:
-      ggml_moe_q5_K_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-    case 14:
-      ggml_moe_q6_K_q8_1_cuda(
-          (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (half*)Y.data_ptr(),
-          (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
-          W.stride(0), col, row, tokens, padded, row, top_k,
-          sorted_token_ids.sizes()[0], stream);
-      break;
-  }
+  VLLM_DISPATCH_FLOATING_TYPES(X.scalar_type(), "ggml_moe", [&] {
+      quantize_row_q8_1_cuda((scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(), col,
+                             tokens, stream);
+      switch (type) {
+        case 2:
+          ggml_moe_q4_0_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+        case 3:
+          ggml_moe_q4_1_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+        case 6:
+          ggml_moe_q5_0_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+        case 7:
+          ggml_moe_q5_1_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+        case 8:
+          ggml_moe_q8_0_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+        case 10:
+          ggml_moe_q2_K_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+        case 11:
+          ggml_moe_q3_K_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+        case 12:
+          ggml_moe_q4_K_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+        case 13:
+          ggml_moe_q5_K_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+        case 14:
+          ggml_moe_q6_K_q8_1_cuda(
+              (void*)quant_X.data_ptr(), (void*)W.data_ptr(), (scalar_t*)Y.data_ptr(),
+              (int*)sorted_token_ids.data_ptr(), (int*)expert_ids.data_ptr(),
+              W.stride(0), col, row, tokens, padded, row, top_k,
+              sorted_token_ids.sizes()[0], stream);
+          break;
+      }
+  });
   return Y;
 }
 

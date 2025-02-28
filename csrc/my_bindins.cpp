@@ -23,7 +23,17 @@ torch::Tensor ggml_mul_mat_vec_a8_k(torch::Tensor W, torch::Tensor X,
     return ggml_mul_mat_vec_a8(W, X, type, row);
 }
 
+torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X,
+                                  int64_t type, int64_t row);
+
+torch::Tensor ggml_mul_mat_a8_k(torch::Tensor W, torch::Tensor X,
+                                  int64_t type, int64_t row)
+{
+    return ggml_mul_mat_a8(W, X, type, row);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ggmp_moe_a8", &ggml_moe_kenel, "GGML moe kernel");
   m.def("ggml_mul_mat_vec_a8", &ggml_mul_mat_vec_a8_k, "matvedc");
+  m.def("ggml_mul_mat_a8", &ggml_mul_mat_a8_k, "matvedc");
 }

@@ -1,12 +1,12 @@
 #include <cstdint>
 
-template <int qk, int qr, int qi, bool need_sum, typename block_q_t, int mmq_x,
+template <typename scalar_t, int qk, int qr, int qi, bool need_sum, typename block_q_t, int mmq_x,
           int mmq_y, int nwarps, allocate_tiles_cuda_t allocate_tiles,
           load_tiles_cuda_t load_tiles, int vdr,
           vec_dot_q_mul_mat_cuda_t vec_dot>
 static __device__ __forceinline__ void moe_q(
     const void* __restrict__ vx, const void* __restrict__ vy,
-    half* __restrict__ dst, const int* __restrict__ sorted_token_ids,
+    scalar_t* __restrict__ dst, const int* __restrict__ sorted_token_ids,
     const int* __restrict__ expert_ids, const int exp_stride, const int ncols_x,
     const int nrows_x, const int ncols_y, const int nrows_y,
     const int nrows_dst, const int top_k) {
@@ -127,8 +127,7 @@ static __device__ __forceinline__ void moe_q(
       if (row_dst >= nrows_dst) {
         continue;
       }
-      dst[col_dst * nrows_dst + row_dst] =
-          __float2half(sum[i / WARP_SIZE_GGUF][j / nwarps]);
+      dst[col_dst * nrows_dst + row_dst] = sum[i / WARP_SIZE_GGUF][j / nwarps];
     }
   }
 }
@@ -143,13 +142,13 @@ static __device__ __forceinline__ void moe_q(
   #define NWARPS_Q4_0 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q4_0, 2)
 #endif
     moe_q4_0(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -157,14 +156,15 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q4_0, 2)
   const int mmq_y = MMQ_Y_Q4_0;
   const int nwarps = NWARPS_Q4_0;
 
-  moe_q<QK4_0, QR4_0, QI4_0, true, block_q4_0, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK4_0, QR4_0, QI4_0, true, block_q4_0, mmq_x, mmq_y, nwarps,
         allocate_tiles_q4_0<mmq_y>, load_tiles_q4_0<mmq_y, nwarps, need_check>,
         VDR_Q4_0_Q8_1_MMQ, vec_dot_q4_0_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q4_0_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q4_0_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -183,12 +183,12 @@ static void ggml_moe_q4_0_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q4_0<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q4_0<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q4_0<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q4_0<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
@@ -204,13 +204,13 @@ static void ggml_moe_q4_0_q8_1_cuda(const void* inp, const void* w, half* dst,
   #define NWARPS_Q4_1 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q4_1, 2)
 #endif
     moe_q4_1(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -218,14 +218,15 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q4_1, 2)
   const int mmq_y = MMQ_Y_Q4_1;
   const int nwarps = NWARPS_Q4_1;
 
-  moe_q<QK4_1, QR4_1, QI4_1, true, block_q4_1, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK4_1, QR4_1, QI4_1, true, block_q4_1, mmq_x, mmq_y, nwarps,
         allocate_tiles_q4_1<mmq_y>, load_tiles_q4_1<mmq_y, nwarps, need_check>,
         VDR_Q4_1_Q8_1_MMQ, vec_dot_q4_1_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q4_1_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q4_1_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -244,12 +245,12 @@ static void ggml_moe_q4_1_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q4_1<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q4_1<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q4_1<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q4_1<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
@@ -265,13 +266,13 @@ static void ggml_moe_q4_1_q8_1_cuda(const void* inp, const void* w, half* dst,
   #define NWARPS_Q5_0 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q5_0, 2)
 #endif
     moe_q5_0(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -279,14 +280,15 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q5_0, 2)
   const int mmq_y = MMQ_Y_Q5_0;
   const int nwarps = NWARPS_Q5_0;
 
-  moe_q<QK5_0, QR5_0, QI5_0, false, block_q5_0, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK5_0, QR5_0, QI5_0, false, block_q5_0, mmq_x, mmq_y, nwarps,
         allocate_tiles_q5_0<mmq_y>, load_tiles_q5_0<mmq_y, nwarps, need_check>,
         VDR_Q5_0_Q8_1_MMQ, vec_dot_q5_0_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q5_0_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q5_0_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -305,12 +307,12 @@ static void ggml_moe_q5_0_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q5_0<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q5_0<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q5_0<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q5_0<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
@@ -326,13 +328,13 @@ static void ggml_moe_q5_0_q8_1_cuda(const void* inp, const void* w, half* dst,
   #define NWARPS_Q5_1 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q5_1, 2)
 #endif
     moe_q5_1(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -340,14 +342,15 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q5_1, 2)
   const int mmq_y = MMQ_Y_Q5_1;
   const int nwarps = NWARPS_Q5_1;
 
-  moe_q<QK5_1, QR5_1, QI5_1, true, block_q5_1, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK5_1, QR5_1, QI5_1, true, block_q5_1, mmq_x, mmq_y, nwarps,
         allocate_tiles_q5_1<mmq_y>, load_tiles_q5_1<mmq_y, nwarps, need_check>,
         VDR_Q5_1_Q8_1_MMQ, vec_dot_q5_1_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q5_1_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q5_1_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -366,12 +369,12 @@ static void ggml_moe_q5_1_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q5_1<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q5_1<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q5_1<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q5_1<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
@@ -387,13 +390,13 @@ static void ggml_moe_q5_1_q8_1_cuda(const void* inp, const void* w, half* dst,
   #define NWARPS_Q8_0 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q8_0, 2)
 #endif
     moe_q8_0(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -401,14 +404,15 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q8_0, 2)
   const int mmq_y = MMQ_Y_Q8_0;
   const int nwarps = NWARPS_Q8_0;
 
-  moe_q<QK8_0, QR8_0, QI8_0, false, block_q8_0, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK8_0, QR8_0, QI8_0, false, block_q8_0, mmq_x, mmq_y, nwarps,
         allocate_tiles_q8_0<mmq_y>, load_tiles_q8_0<mmq_y, nwarps, need_check>,
         VDR_Q8_0_Q8_1_MMQ, vec_dot_q8_0_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q8_0_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q8_0_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -427,12 +431,12 @@ static void ggml_moe_q8_0_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q8_0<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q8_0<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q8_0<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q8_0<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
@@ -448,13 +452,13 @@ static void ggml_moe_q8_0_q8_1_cuda(const void* inp, const void* w, half* dst,
   #define NWARPS_Q2_K 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q2_K, 2)
 #endif
     moe_q2_K(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -462,14 +466,15 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q2_K, 2)
   const int mmq_y = MMQ_Y_Q2_K;
   const int nwarps = NWARPS_Q2_K;
 
-  moe_q<QK_K, QR2_K, QI2_K, false, block_q2_K, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK_K, QR2_K, QI2_K, false, block_q2_K, mmq_x, mmq_y, nwarps,
         allocate_tiles_q2_K<mmq_y>, load_tiles_q2_K<mmq_y, nwarps, need_check>,
         VDR_Q2_K_Q8_1_MMQ, vec_dot_q2_K_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q2_K_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q2_K_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -488,12 +493,12 @@ static void ggml_moe_q2_K_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q2_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q2_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q2_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q2_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
@@ -509,13 +514,13 @@ static void ggml_moe_q2_K_q8_1_cuda(const void* inp, const void* w, half* dst,
   #define NWARPS_Q3_K 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q3_K, 2)
 #endif
     moe_q3_K(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -524,13 +529,14 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q3_K, 2)
   const int mmq_y = MMQ_Y_Q3_K;
   const int nwarps = NWARPS_Q3_K;
 
-  moe_q<QK_K, QR3_K, QI3_K, false, block_q3_K, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK_K, QR3_K, QI3_K, false, block_q3_K, mmq_x, mmq_y, nwarps,
         allocate_tiles_q3_K<mmq_y>, load_tiles_q3_K<mmq_y, nwarps, need_check>,
         VDR_Q3_K_Q8_1_MMQ, vec_dot_q3_K_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
-static void ggml_moe_q3_K_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q3_K_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -549,12 +555,12 @@ static void ggml_moe_q3_K_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q3_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q3_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q3_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q3_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
@@ -570,13 +576,13 @@ static void ggml_moe_q3_K_q8_1_cuda(const void* inp, const void* w, half* dst,
   #define NWARPS_Q4_K 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q4_K, 2)
 #endif
     moe_q4_K(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -584,14 +590,15 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q4_K, 2)
   const int mmq_y = MMQ_Y_Q4_K;
   const int nwarps = NWARPS_Q4_K;
 
-  moe_q<QK_K, QR4_K, QI4_K, true, block_q4_K, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK_K, QR4_K, QI4_K, true, block_q4_K, mmq_x, mmq_y, nwarps,
         allocate_tiles_q4_K<mmq_y>, load_tiles_q4_K<mmq_y, nwarps, need_check>,
         VDR_Q4_K_Q8_1_MMQ, vec_dot_q4_K_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q4_K_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q4_K_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -610,12 +617,12 @@ static void ggml_moe_q4_K_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q4_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q4_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q4_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q4_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
@@ -631,13 +638,13 @@ static void ggml_moe_q4_K_q8_1_cuda(const void* inp, const void* w, half* dst,
   #define NWARPS_Q5_K 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q5_K, 2)
 #endif
     moe_q5_K(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -645,14 +652,15 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q5_K, 2)
   const int mmq_y = MMQ_Y_Q5_K;
   const int nwarps = NWARPS_Q5_K;
 
-  moe_q<QK_K, QR5_K, QI5_K, true, block_q5_K, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK_K, QR5_K, QI5_K, true, block_q5_K, mmq_x, mmq_y, nwarps,
         allocate_tiles_q5_K<mmq_y>, load_tiles_q5_K<mmq_y, nwarps, need_check>,
         VDR_Q5_K_Q8_1_MMQ, vec_dot_q5_K_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q5_K_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q5_K_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -671,12 +679,12 @@ static void ggml_moe_q5_K_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q5_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q5_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q5_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q5_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
@@ -692,13 +700,13 @@ static void ggml_moe_q5_K_q8_1_cuda(const void* inp, const void* w, half* dst,
   #define NWARPS_Q6_K 4
 #endif
 
-template <bool need_check>
+template<typename scalar_t, bool need_check>
 static __global__ void
 #if defined(USE_ROCM)
 __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q6_K, 2)
 #endif
     moe_q6_K(const void* __restrict__ vx, const void* __restrict__ vy,
-             half* __restrict__ dst, const int* sorted_token_ids,
+             scalar_t* __restrict__ dst, const int* sorted_token_ids,
              const int* expert_ids, const int exp_stride, const int ncols_x,
              const int nrows_x, const int ncols_y, const int nrows_y,
              const int nrows_dst, const int top_k) {
@@ -706,14 +714,15 @@ __launch_bounds__(WARP_SIZE_GGUF* NWARPS_Q6_K, 2)
   const int mmq_y = MMQ_Y_Q6_K;
   const int nwarps = NWARPS_Q6_K;
 
-  moe_q<QK_K, QR6_K, QI6_K, false, block_q6_K, mmq_x, mmq_y, nwarps,
+  moe_q<scalar_t, QK_K, QR6_K, QI6_K, false, block_q6_K, mmq_x, mmq_y, nwarps,
         allocate_tiles_q6_K<mmq_y>, load_tiles_q6_K<mmq_y, nwarps, need_check>,
         VDR_Q6_K_Q8_1_MMQ, vec_dot_q6_K_q8_1_mul_mat>(
       vx, vy, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
       ncols_y, nrows_y, nrows_dst, top_k);
 }
 
-static void ggml_moe_q6_K_q8_1_cuda(const void* inp, const void* w, half* dst,
+template<typename scalar_t>
+static void ggml_moe_q6_K_q8_1_cuda(const void* inp, const void* w, scalar_t* dst,
                                     const int* sorted_token_ids,
                                     const int* expert_ids, const int exp_stride,
                                     const int ncols_x, const int nrows_x,
@@ -732,12 +741,12 @@ static void ggml_moe_q6_K_q8_1_cuda(const void* inp, const void* w, half* dst,
 
   if (nrows_x % mmq_y == 0) {
     constexpr bool need_check = false;
-    moe_q6_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q6_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   } else {
     constexpr bool need_check = true;
-    moe_q6_K<need_check><<<block_nums, block_dims, 0, stream>>>(
+    moe_q6_K<scalar_t, need_check><<<block_nums, block_dims, 0, stream>>>(
         w, inp, dst, sorted_token_ids, expert_ids, exp_stride, ncols_x, nrows_x,
         ncols_y, nrows_y, nrows_dst, top_k);
   }
