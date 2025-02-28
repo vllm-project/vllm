@@ -315,12 +315,8 @@ class XPUModelRunner(GPUModelRunner):
         return attn_metadata, logits_indices
 
     def profile_run(self) -> None:
-        dummy_kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-            for _ in range(self.num_attn_layers)
-        ]
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens, dummy_kv_caches)
+        hidden_states = self._dummy_run(self.max_num_tokens)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         torch.xpu.synchronize()
