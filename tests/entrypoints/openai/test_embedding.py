@@ -27,7 +27,7 @@ def server():
         "bfloat16",
         "--enforce-eager",
         "--max-model-len",
-        "8192",
+        "512",
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
     ]
