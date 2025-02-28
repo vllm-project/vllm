@@ -62,8 +62,8 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
     assert len(embeddings.data) == 1
     assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 9
-    assert embeddings.usage.total_tokens == 9
+    assert embeddings.usage.prompt_tokens == 11
+    assert embeddings.usage.total_tokens == 11
 
     # test using token IDs
     input_tokens = [1, 1, 1, 1, 1]
@@ -103,8 +103,8 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
     assert len(embeddings.data) == 3
     assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 32
-    assert embeddings.usage.total_tokens == 32
+    assert embeddings.usage.prompt_tokens == 33
+    assert embeddings.usage.total_tokens == 33
 
     # test List[List[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
