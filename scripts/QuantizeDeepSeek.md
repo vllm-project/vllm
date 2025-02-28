@@ -166,7 +166,7 @@ Quantize model weights to FP8 and using BF16 KVCache(WIP)
 # vllm root
 cd vllm/scripts
 # Download the unified calibration results:
-huggingface-cli download TODO --local-dir nc_workspace_measure_one_node
+huggingface-cli download Yi30/inc-tp8-ep8-full-kvcache-from-tp16-ep16 --local-dir nc_workspace_measure_one_node
 QUANT_CONFIG=inc_quant_one_node_config.json python inc_example_one_node.py
 ```
 
