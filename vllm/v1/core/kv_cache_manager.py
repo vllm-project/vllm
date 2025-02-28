@@ -224,6 +224,8 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
+        # FIXME: `num_cached_blocks` is not correct when the prefix cache
+        # of a new request is hit.
         num_cached_blocks = self.num_cached_block[request.request_id]
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
