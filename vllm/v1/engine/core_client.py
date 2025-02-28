@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Set, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -97,7 +97,16 @@ class EngineCoreClient(ABC):
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError
+
+    def remove_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    def list_loras(self) -> Set[int]:
+        raise NotImplementedError
+
+    def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -121,7 +130,16 @@ class EngineCoreClient(ABC):
     async def abort_requests_async(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
-    async def add_lora_async(self, lora_request: LoRARequest) -> None:
+    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError
+
+    async def remove_lora_async(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    async def list_loras_async(self) -> Set[int]:
+        raise NotImplementedError
+
+    async def pin_lora_async(self, lora_id: int) -> bool:
         raise NotImplementedError
 
 
@@ -166,8 +184,17 @@ class InprocClient(EngineCoreClient):
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self.engine_core.add_lora(lora_request)
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.engine_core.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.engine_core.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.engine_core.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.engine_core.pin_lora(lora_id)
 
 
 @dataclass
@@ -356,8 +383,17 @@ class SyncMPClient(MPClient):
     def reset_prefix_cache(self) -> None:
         self._call_utility("reset_prefix_cache")
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self._call_utility("add_lora", lora_request)
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self._call_utility("add_lora", lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self._call_utility("remove_lora", lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self._call_utility("list_loras")
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self._call_utility("pin_lora", lora_id)
 
     def sleep(self, level: int = 1) -> None:
         self._call_utility("sleep", level)
@@ -454,5 +490,14 @@ class AsyncMPClient(MPClient):
     async def execute_dummy_batch_async(self) -> None:
         await self._call_utility_async("execute_dummy_batch")
 
-    async def add_lora_async(self, lora_request: LoRARequest) -> None:
-        await self._call_utility_async("add_lora", lora_request)
+    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        return await self._call_utility_async("add_lora", lora_request)
+
+    async def remove_lora_async(self, lora_id: int) -> bool:
+        return await self._call_utility_async("remove_lora", lora_id)
+
+    async def list_loras_async(self) -> Set[int]:
+        return await self._call_utility_async("list_loras")
+
+    async def pin_lora_async(self, lora_id: int) -> bool:
+        return await self._call_utility_async("pin_lora", lora_id)
