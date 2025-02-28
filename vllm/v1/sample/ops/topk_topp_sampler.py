@@ -107,7 +107,7 @@ def apply_top_k_top_p(
 
     if k is not None:
         # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k.to(torch.long) # shape: B
+        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
         # Get all the top_k values.
         top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
         top_k_mask = logits_sort < top_k_mask
