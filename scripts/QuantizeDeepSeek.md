@@ -4,45 +4,45 @@
 
 - [BKC for Quantizing DeepSeek V3/R1 with vLLM and INC](#bkc-for-quantizing-deepseek-v3r1-with-vllm-and-inc)
     - [Support Matrix](#support-matrix)
-    - [Setting Up Two Nodes Environment](#setting-up-two-nodes-environment)
+    - [Setting Up a Two-Node Environment](#setting-up-a-two-node-environment)
         - [Prerequisites](#prerequisites)
         - [Install Dependencies](#install-dependencies)
-        - [Exporting Environment variables](#exporting-environment-variables)
+        - [Exporting Environment Variables](#exporting-environment-variables)
     - [Calibration](#calibration)
     - [Inference with FP8 Models on Two Nodes](#inference-with-fp8-models-on-two-nodes)
     - [Inference with FP8 Models on a Single Node WIP](#inference-with-fp8-models-on-a-single-node-wip)
         - [Prerequisites](#prerequisites)
         - [Running the Example](#running-the-example)
-    - [Accuray Evaluation WIP](#accuray-evaluation-wip)
-    - [Calibration with Customize Dataset WIP](#calibration-with-customize-dataset-wip)
+    - [Accuracy Evaluation WIP](#accuracy-evaluation-wip)
+    - [Calibration with Custom Dataset WIP](#calibration-with-custom-dataset-wip)
 
 <!-- /TOC -->
 
-This document outlines the steps to use vLLM and INC for calibrating DeepSeek R1 on two nodes, as well as for performing quantization and inference on both two-node and single-node environments.
+This document outlines the steps to use vLLM and INC for calibrating DeepSeek R1 on two nodes environment, and performing quantization and inference on both two-node and single-node environments.
 
 ## Support Matrix
 
 - Calibration Stage (Two Nodes)
 
-| KVCache Precision | Configs |
+| KVCache Precision | Configurations |
 |---|---|
 | BF16              | `inc_measure_config.json`         |
 | FP8               | `inc_measure_with_fp8kv_config.json`|
 
 - Quantize/Inference Stage
 
-| KVCache Precision | Two Nodes Configs | One Node Configs |
+| KVCache Precision | Two Nodes Configurations | One Node Configurations |
 |---|---|---|
 | BF16              | `inc_quant_config.json`          | `inc_quant_one_node_config.json`|
 | FP8               | `inc_quant_with_fp8kv_config.json`| `inc_quant_with_fp8kv_one_node_config.json`|
 
 
-## Setting Up Two Nodes Environment
+## Setting Up a Two-Node Environment
 >
 > [!NOTE]
-> If you want to quantize the model using an existing calibration result, you can skip this step and proceed directly to the `Inference with FP8 Models on a Single Node` section.
+> If you want to quantize the model using existing calibration results, you can skip this section and proceed directly to the `Inference with FP8 Models on a Single Node` section.
 
-We use Ray to set up a cluster with two nodes, so that we can image a system with 16 cards and update the procedure accordingly. It is crucial that both nodes use an identical software stack. Docker containers are used to ensure a consistent environment. The high-level steps are as follows:
+We use Ray to establish a two-node cluster to simulate a system with 16 HPUs and update the procedure accordingly. It is crucial that both nodes use an identical software stack. Docker containers are used to ensure a consistent environment. The high-level steps are as follows:
 
 - Build and run Docker on each node.
 - Export the necessary environment variables within each Docker container.
@@ -80,10 +80,10 @@ VLLM_TARGET_DEVICE=hpu pip install -e .  --no-build-isolation
   - DeepSeek R1 (BF16)
   - Conversion Script: `convert_fp8_to_bf16_cpu.py`
 
-### Exporting Environment variables
+### Exporting Environment Variables
 >
 > [!NOTE]
-> Please update the `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` variables in the `head_node_source.sh` and `worker_node_source.sh` scripts with the name of network interface for your device.
+> Please update the `VLLM_HOST_IP`, `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` variables in the `head_node_source.sh` and `worker_node_source.sh` scripts to match your devices.
 
 - Head Node
 
@@ -99,51 +99,51 @@ source worker_node_source.sh
 
 > [!TIP]
 > - Ensure that Ray is started in the SAME directory within both Docker containers.
-> - If you modify the environment variables, please RESTART Ray.
+> - If you modify the environment variables, please RESTART Ray for the changes to take effect.
 
 ## Calibration
 
-This process runs the BF16 model on a calibration dataset to observe the range of model weights and inputs.
+This process runs the BF16 model on a calibration dataset to observe the ranges of model weights and inputs.
 
 - BF16 KVCache
 
 ```bash
 # vllm root
+cd vllm/scripts
 export QUANT_CONFIG=inc_measure_config.json
 # restart ray 
-cd vllm/scripts
 python inc_example_two_nodes.py --mode prepare
 ```
 
 - FP8 KVCache
 ```bash
 # vllm root
+cd vllm/scripts
 export QUANT_CONFIG=inc_measure_with_fp8kv_config.json
 # restart ray 
-cd vllm/scripts
 python inc_example_two_nodes.py --mode prepare
 ```
 
 
 ## Inference with FP8 Models on Two Nodes
 
-This script loads the BF16 model into DRAM, moves it to the HPU, and quantizes the model layer by layer.
+This script loads the BF16 model into DRAM, transfers  it to the HPU, and quantizes the model layer by layer.
 
 - BF16 KVCache
 ```bash
+cd vllm/scripts
 # vllm root
 export QUANT_CONFIG=inc_quant_config.json
 # restart ray
-cd vllm/scripts
 python inc_example_two_nodes.py --mode quant
 ```
 
 - FP8 KVCache
 ```bash
+cd vllm/scripts
 # vllm root
 export QUANT_CONFIG=inc_quant_with_fp8kv_config.json
 # restart ray
-cd vllm/scripts
 python inc_example_two_nodes.py --mode quant --fp8_kvcache
 ```
 
@@ -179,6 +179,6 @@ huggingface-cli download Yi30/inc-tp8-ep8-full-kvcache-from-tp16-ep16 --local-di
 QUANT_CONFIG=inc_quant_with_fp8kv_one_node_config.json python inc_example_one_node.py --fp8_kvcache
 ```
 
-## Accuray Evaluation (WIP)
+## Accuracy Evaluation (WIP)
 
-## Calibration with Customize Dataset (WIP)
+## Calibration with Custom Dataset (WIP)
