@@ -254,7 +254,7 @@ class ModelConfig:
         override_neuron_config: Optional[Dict[str, Any]] = None,
         override_pooler_config: Optional["PoolerConfig"] = None,
         logits_processor_pattern: Optional[str] = None,
-        generation_config: Optional[str] = "auto",
+        generation_config: str = "auto",
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[Dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
