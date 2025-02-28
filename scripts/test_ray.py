@@ -1,3 +1,7 @@
+"""
+QUANT_CONFIG=inc_measure_config.json python test_ray.py
+QUANT_CONFIG=inc_quant_config.json python test_ray.py
+"""
 from vllm import LLM, SamplingParams
 
 import argparse
@@ -219,7 +223,7 @@ if __name__ == "__main__":
         tensor_parallel_size=args.tp_size,
         distributed_executor_backend='ray',
         trust_remote_code=True,
-        quantization='inc_p',
+        quantization='inc',
         max_model_len=16384,
         dtype="bfloat16",
     )
