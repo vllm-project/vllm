@@ -717,7 +717,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         #     print(f"dump args into {filename}")
 
         # TEST ENVS
-        TEST_NEW_ENVS = os.getenv('TEST_NEW_ENVS', '0')
+        os.environ['TEST_NEW_ENVS'] = 'default'
+        TEST_NEW_ENVS = os.getenv('TEST_NEW_ENVS', 'default')
+        print(f"TEST_NEW_ENVS: {TEST_NEW_ENVS}")
         # dump envs into disk as json
         # filename with timestamp
         filename = f'envs_{timestamp}.json'
