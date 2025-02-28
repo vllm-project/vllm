@@ -914,7 +914,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if param_name + "." in k:
                     quant_state[k] = temp_state_dict[k]
 
-            return QuantState.from_dict(quant_state, device="cuda")
+            return QuantState.from_dict(quant_state,
+                                        device=current_platform.device_type)
 
         # Second iterate over all prequant and normal weights
         # pre quantized weights would have a quant_state
@@ -1087,7 +1088,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self.model_type = type(model).__name__
 
         logger.info("Loading weights with BitsAndBytes quantization. "
-                    " May take a while ...")
+                    "May take a while ...")
 
         quant_config = getattr(model_config.hf_config, "quantization_config",
                                None)
@@ -1244,9 +1245,24 @@ class GGUFModelLoader(BaseModelLoader):
         """
         config = model_config.hf_config
         model_type = config.model_type
+        gguf_to_hf_name_map = {}
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
+        if model_type in ("deepseek_v3", "deepseek_v2"):
+            model_type = "deepseek2"
+            # GGUF layer map assumes that we will have a merged expert weights
+            # so we need to map them manually
+            for idx in range(config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.exp_probs_b.bias"] = \
+                        f"model.layers.{idx}.mlp.gate.e_score_correction_bias"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
             if value == model_type:
@@ -1257,10 +1273,10 @@ class GGUFModelLoader(BaseModelLoader):
         num_layers = config.num_hidden_layers
         name_map = gguf.get_tensor_name_map(arch, num_layers)
         with torch.device("meta"):
-            dummy_model = AutoModelForCausalLM.from_config(config)
+            dummy_model = AutoModelForCausalLM.from_config(
+                config, trust_remote_code=model_config.trust_remote_code)
         state_dict = dummy_model.state_dict()
 
-        gguf_to_hf_name_map = {}
         for hf_name in state_dict:
             name, suffix = hf_name.rsplit(".", 1)
             gguf_name = name_map.get_name(name)

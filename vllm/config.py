@@ -9,6 +9,7 @@ import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
                     Final, List, Literal, Mapping, Optional, Protocol, Set,
@@ -228,6 +229,7 @@ class ModelConfig:
         trust_remote_code: bool,
         dtype: Union[str, torch.dtype],
         seed: int,
+        hf_config_path: Optional[str] = None,
         allowed_local_media_path: str = "",
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
@@ -258,6 +260,7 @@ class ModelConfig:
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
+        self.hf_config_path = hf_config_path
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
@@ -294,6 +297,14 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
 
+        if (backend := envs.VLLM_ATTENTION_BACKEND
+            ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
+            raise ValueError(
+                "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
+                "module was not found."
+                "See https://github.com/vllm-project/vllm/blob/main/Dockerfile"
+                "for instructions on how to install it.")
+
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -312,8 +323,9 @@ class ModelConfig:
         if self.enable_sleep_mode and not current_platform.is_cuda():
             raise ValueError("Sleep mode is only supported on CUDA devices.")
 
-        hf_config = get_config(self.model, trust_remote_code, revision,
-                               code_revision, config_format)
+        hf_config = get_config(self.hf_config_path or self.model,
+                               trust_remote_code, revision, code_revision,
+                               config_format)
 
         if hf_overrides_kw:
             logger.info("Overriding HF config with %s", hf_overrides_kw)
@@ -388,7 +400,7 @@ class ModelConfig:
         else:
             self.override_neuron_config = None
 
-        supported_tasks, task = self._resolve_task(task, self.hf_config)
+        supported_tasks, task = self._resolve_task(task)
         self.supported_tasks = supported_tasks
         self.task: Final = task
         if self.task in ("draft", "generate"):
@@ -405,6 +417,14 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    @property
+    def registry(self):
+        return ModelRegistry
+
+    @property
+    def architectures(self) -> list[str]:
+        return getattr(self.hf_config, "architectures", [])
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
@@ -434,8 +454,7 @@ class ModelConfig:
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
     ) -> Optional["MultiModalConfig"]:
-        architectures = getattr(self.hf_config, "architectures", [])
-        if ModelRegistry.is_multimodal_model(architectures):
+        if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
 
         if limit_mm_per_prompt:
@@ -468,16 +487,13 @@ class ModelConfig:
         return None
 
     def _init_attention_free(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.is_attention_free_model(architectures)
+        return self.registry.is_attention_free_model(self.architectures)
 
     def _init_is_hybrid(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.is_hybrid_model(architectures)
+        return self.registry.is_hybrid_model(self.architectures)
 
     def _init_has_inner_state(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.model_has_inner_state(architectures)
+        return self.registry.model_has_inner_state(self.architectures)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -495,9 +511,9 @@ class ModelConfig:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
-        if ModelRegistry.is_cross_encoder_model(architectures):
+        if self.registry.is_cross_encoder_model(architectures):
             return "score"
-        if ModelRegistry.is_transcription_model(architectures):
+        if self.registry.is_transcription_model(architectures):
             return "transcription"
 
         suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
@@ -510,7 +526,7 @@ class ModelConfig:
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
-        _, arch = ModelRegistry.inspect_model_cls(architectures)
+        _, arch = self.registry.inspect_model_cls(architectures)
 
         for suffix, pref_task in suffix_to_preferred_task:
             if arch.endswith(suffix) and pref_task in supported_tasks:
@@ -521,20 +537,19 @@ class ModelConfig:
     def _resolve_task(
         self,
         task_option: Union[TaskOption, Literal["draft"]],
-        hf_config: PretrainedConfig,
     ) -> Tuple[Set[_ResolvedTask], _ResolvedTask]:
         if task_option == "draft":
             return {"draft"}, "draft"
 
-        architectures = getattr(hf_config, "architectures", [])
+        registry = self.registry
+        architectures = self.architectures
 
         runner_support: Dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
-            "transcription":
-            ModelRegistry.is_transcription_model(architectures),
-            "generate": ModelRegistry.is_text_generation_model(architectures),
-            "pooling": ModelRegistry.is_pooling_model(architectures),
+            "transcription": registry.is_transcription_model(architectures),
+            "generate": registry.is_text_generation_model(architectures),
+            "pooling": registry.is_pooling_model(architectures),
         }
         supported_runner_types_lst: List[RunnerType] = [
             runner_type
@@ -677,6 +692,23 @@ class ModelConfig:
                 "fallback to the eager mode.")
             self.enforce_eager = True
 
+    def _verify_with_expert_parallelism(self) -> None:
+        num_expert_names = [
+            "moe_num_experts",  # Dbrx
+            "num_experts",  # Jamba
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+        num_experts = 0
+        for name in num_expert_names:
+            num_experts = getattr(self.hf_text_config, name, 0)
+            if num_experts > 0:
+                break
+        if num_experts < 1:
+            raise ValueError(
+                "Number of experts in the model must be greater than 0 "
+                "when expert parallelism is enabled.")
+
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config, use_v1: bool) -> None:
         if not self.use_async_output_proc:
@@ -684,8 +716,6 @@ class ModelConfig:
             return
 
         if parallel_config.pipeline_parallel_size > 1:
-            logger.warning("Async output processing can not be enabled "
-                           "with pipeline parallel")
             self.use_async_output_proc = False
             return
 
@@ -693,15 +723,10 @@ class ModelConfig:
         # If the feature combo become valid
         from vllm.platforms import current_platform
         if not current_platform.is_async_output_supported(self.enforce_eager):
-            logger.warning(
-                "Async output processing is not supported on the "
-                "current platform type %s.", current_platform.device_type)
             self.use_async_output_proc = False
             return
 
         if envs.VLLM_USE_RAY_SPMD_WORKER:
-            logger.warning(
-                "Async output processing can not be enabled with ray spmd")
             self.use_async_output_proc = False
             return
 
@@ -713,8 +738,6 @@ class ModelConfig:
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if speculative_config:
-            logger.warning("Async output processing is not supported with"
-                           " speculative decoding currently.")
             self.use_async_output_proc = False
 
     def verify_with_parallel_config(
@@ -730,17 +753,17 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
+        if envs.VLLM_TEST_ENABLE_EP:
+            self._verify_with_expert_parallelism()
+
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
-            architectures = getattr(self.hf_config, "architectures", [])
-            if not ModelRegistry.is_pp_supported_model(architectures):
+            if not self.registry.is_pp_supported_model(self.architectures):
                 raise NotImplementedError(
                     "Pipeline parallelism is not supported for this model. "
                     "Supported models implement the `SupportsPP` interface.")
 
             if self.use_async_output_proc:
-                logger.warning("Async output processor is not supported with "
-                               "pipeline parallelism currently. Disabling it.")
                 self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(
@@ -906,8 +929,8 @@ class ModelConfig:
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
             if layers_block_type_value is None:
-                raise ValueError("The model is an hybrid without a"
-                                 "layers_block_type in the hf_config,"
+                raise ValueError("The model is an hybrid without a "
+                                 "layers_block_type in the hf_config, "
                                  "cannot determine the num of "
                                  f"{block_type.value} layers")
 
@@ -929,7 +952,7 @@ class ModelConfig:
     def try_get_generation_config(self) -> Dict[str, Any]:
         if self.generation_config is None or self.generation_config == "auto":
             config = try_get_generation_config(
-                self.model,
+                self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
             )
@@ -1002,8 +1025,7 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.is_cross_encoder_model(architectures)
+        return self.registry.is_cross_encoder_model(self.architectures)
 
     @property
     def use_mla(self) -> bool:
@@ -1016,6 +1038,11 @@ class ModelConfig:
     @property
     def runner_type(self) -> RunnerType:
         return _TASK_RUNNER[self.task]
+
+    @property
+    def is_v1_compatible(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_v1_compatible(architectures)
 
 
 class CacheConfig:
@@ -1097,6 +1124,10 @@ class CacheConfig:
         return {key: str(value) for key, value in self.__dict__.items()}
 
     def _verify_args(self) -> None:
+        if self.cpu_offload_gb < 0:
+            raise ValueError("CPU offload space must be non-negative"
+                             f", but got {self.cpu_offload_gb}")
+
         if self.gpu_memory_utilization > 1.0:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
@@ -1958,13 +1989,12 @@ class SpeculativeConfig:
                 if num_speculative_tokens is None:
                     # Default to max value defined in draft model config.
                     num_speculative_tokens = n_predict
-                elif num_speculative_tokens > n_predict:
-                    # Verify provided value doesn't exceed the maximum
-                    # supported by the draft model.
+                elif num_speculative_tokens > n_predict and \
+                        num_speculative_tokens % n_predict != 0:
+                    # Ensure divisibility for MTP module reuse.
                     raise ValueError(
-                        "This speculative model supports a maximum of "
-                        f"num_speculative_tokens={n_predict}, but "
-                        f"{num_speculative_tokens=} was provided.")
+                        f"{num_speculative_tokens=} must be divisible by "
+                        f"{n_predict=}")
 
             speculative_draft_tensor_parallel_size = \
                 SpeculativeConfig._verify_and_get_draft_model_tensor_parallel_size(
@@ -2500,7 +2530,7 @@ def _get_and_verify_dtype(
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
-                    "For HPU, we cast models to bfloat16 instead of"
+                    "For HPU, we cast models to bfloat16 instead of "
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
                 torch_dtype = torch.bfloat16
@@ -2716,7 +2746,7 @@ class DecodingConfig:
             backend=self.guided_decoding_backend).backend_name
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
-                             f"must be one of {valid_guided_backends}")
+                             f" must be one of {valid_guided_backends}")
 
 
 @dataclass
@@ -2993,7 +3023,7 @@ class CompilationConfig(BaseModel):
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_reshape and self.enable_fusion:
                 logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled."
+                    "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + quant (fp8) fusion might not work")
 
     pass_config: PassConfig = Field(default_factory=PassConfig)
@@ -3407,6 +3437,20 @@ class VllmConfig:
                            "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        if self.model_config and self.model_config.use_mla and \
+            not current_platform.is_cuda():
+            logger.info(
+                "MLA is enabled on a non-cuda platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            self.scheduler_config.enable_chunked_prefill = False
+            self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.max_num_batched_tokens = max(
+                self.scheduler_config.max_model_len,
+                _DEFAULT_MAX_NUM_BATCHED_TOKENS)
+
+            if self.cache_config is not None:
+                self.cache_config.enable_prefix_caching = False
+
         current_platform.check_and_update_config(self)
 
         if not self.instance_id:
@@ -3548,7 +3592,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
             logger.warning(
                 "`torch.compile` is turned on, but the model %s"
                 " does not support it. Please open an issue on GitHub"
-                "if you want it to be supported.",
+                " if you want it to be supported.",
                 vllm_config.model_config.model)
         _current_vllm_config = old_vllm_config
 

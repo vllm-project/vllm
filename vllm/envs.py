@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
+    VLLM_TEST_ENABLE_EP: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -370,21 +371,22 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_SPMD_WORKER":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))),
 
-    # If the env var is set, it uses the Ray's compiled DAG API
-    # which optimizes the control plane overhead.
+    # If the env var is set, it uses the Ray's Compiled Graph
+    # (previously known as ADAG) API which optimizes the
+    # control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
 
     # If the env var is set, it uses NCCL for communication in
-    # Ray's compiled DAG. This flag is ignored if
+    # Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
                  ),
 
     # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's compiled DAG. This flag is ignored if
+    # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
@@ -569,6 +571,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
+
+    # If set, vLLM will use the experimental expert parallel implementation on
+    # the FusedMoE layer, using tensor parallelism size as expert parallelism
+    # size.
+    "VLLM_TEST_ENABLE_EP":
+    lambda: bool(int(os.getenv("VLLM_TEST_ENABLE_EP", "0"))),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
