@@ -703,6 +703,28 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
                                           'false').lower() == 'true'
 
+    def _inc_prepare(self, model: torch.nn.Module) -> torch.nn.Module:
+        # TEST ARGS
+        # dump args into disk as json
+        import time
+        import datetime
+        timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d_%H-%M-%S')
+        filename = f'args_{timestamp}.json'
+        import json
+        # with open(filename, 'w') as f:
+        #     json.dump(vars(args), f)
+        #     print(f"args: {vars(args)}")
+        #     print(f"dump args into {filename}")
+
+        # TEST ENVS
+        TEST_NEW_ENVS = os.getenv('TEST_NEW_ENVS', '0')
+        # dump envs into disk as json
+        # filename with timestamp
+        filename = f'envs_{timestamp}.json'
+        with open(filename, 'w') as f:
+            json.dump(dict(os.environ), f)
+            print(f"dump envs into {filename}")
+
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
         if self.model_config.quantization == 'inc' or \
