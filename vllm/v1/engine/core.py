@@ -302,8 +302,11 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        # EngineCoreProc sends a FAILED message over ready_pipe
-        # if startup fails, so it's kept outside try-except
+        # Error Handling works as follows:
+        # * If error in EngineCoreProc.__init__, we send message
+        #   over the ready_pipe to frontend and shut down.
+        # * If error in EngineCoreProc.run_busy_loop(), we send
+        #   message over ZMQ to frontend and shut down.
         engine_core = EngineCoreProc(*args, **kwargs)
         try:
             engine_core.run_busy_loop()
@@ -311,8 +314,7 @@ class EngineCoreProc(EngineCore):
             logger.exception("EngineCore got an Exception:", exc_info=e)
             engine_core._send_engine_dead()
         finally:
-            if engine_core is not None:
-                engine_core.shutdown()
+            engine_core.shutdown()
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
