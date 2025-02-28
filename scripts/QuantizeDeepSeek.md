@@ -22,17 +22,18 @@ This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1
 
 - Calibration Stage (Two Nodes)
 
-| KVCache Precision | Configuration File for Calibration |
+| KVCache Precision | Config |
 |---|---|
 | BF16              | `inc_measure_config.json`         |
 | FP8                | `inc_measure_with_fp8kv_config.json`|
 
 - Quantize/Inference Stage
 
-
+| KVCache Precision | Two Nodes configs | One Node config
 |---|---|---|
 | BF16              | `inc_quant_config.json`          | `inc_quant_one_node_config.json`|
 | FP8               | `inc_measure_with_fp8kv_config.json`| `inc_quant_with_fp8kv_one_node_config.json`|
+
 
 ## Setting Up 2 Nodes Environment
 >
