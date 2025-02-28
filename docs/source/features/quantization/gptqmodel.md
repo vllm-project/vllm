@@ -2,15 +2,19 @@
 
 # GPTQModel
 
-To create a new [2, 3, 4, 8]-bit quantized model, you can leverage [GPTQModel](https://github.com/ModelCloud/GPTQModel).
+To create a new [2, 3, 4, 8]-bit GPTQ quantized model, you can leverage [GPTQModel](https://github.com/ModelCloud/GPTQModel).
 
-Quantizing reduces the model's precision from BF16 (16-bits) to 2-to-8-bits range which can significantly reduces the 
-model memory footprint size while increasing inference performance.
+Quantizing reduces the model's precision from BF16 (16-bits) to 2-to-8-bits range which can significantly reduce the 
+model memory footprint while at-the-same-time increasing inference performance.
 
-Compatible GPTQModel quantized models can leverage the `Marlin` and `Machete` kernels to maximize batching 
+Compatible GPTQModel quantized models can leverage the `Marlin` and `Machete` vLLM custom kernels to maximize batching 
 transactions-per-second `tps` and token-latency performance for both Ampere (A100+) and Hopper (H100+) Nvidia GPUs. 
-These two kernels are highly optimized by vLLM teams to allow word-class inference performance of quantized GPTQModel 
+These two kernels are highly optimized by vLLM and NeuralMagic (now part of Redhat) to allow word-class inference performance of quantized GPTQ
 models. 
+
+GPTQModel is one of the few quantization toolkits in the world that allows `Dynamic` per-module quantization where different layers and/or modules within a llm model can be further optimized with custom quantization parameters. `Dynamic` quantization 
+is fully integrated into vLLM is backed up by support from the ModelCloud.AI team. Please refer to [GPTQModel readme](https://github.com/ModelCloud/GPTQModel?tab=readme-ov-file#dynamic-quantization-per-module-quantizeconfig-override) 
+for more details on this and other advanced features. 
 
 
 You can quantize your own models by installing [GPTQModel](https://github.com/ModelCloud/GPTQModel) or picking one of the [5000+ models on Huggingface](https://huggingface.co/models?sort=trending&search=gptq).
@@ -52,7 +56,7 @@ To run an GPTQModel quantized model with vLLM, you can use [DeepSeek-R1-Distill-
 python examples/offline_inference/llm_engine_example.py --model DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2 --quantization gptq
 ```
 
-AWQ models are also supported directly through the LLM entrypoint:
+GPTQModel quantized models are also supported directly through the LLM entrypoint:
 
 ```python
 from vllm import LLM, SamplingParams
