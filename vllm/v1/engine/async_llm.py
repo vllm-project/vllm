@@ -219,7 +219,7 @@ class AsyncLLM(EngineClient):
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() if q.qsize() > 0 else await q.get()
+                out = q.get_nowait() if not q.empty() else await q.get()
                 if isinstance(out, Exception):
                     raise out
 
