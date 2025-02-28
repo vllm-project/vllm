@@ -413,6 +413,8 @@ async def benchmark(
         int(len(input_requests) * guided_decoding_ratio))
 
     test_request = input_requests[0]
+    test_req_extra_body = (prepare_extra_body(test_request)
+                           if 0 in guided_decoding_req_idx else None)
     test_input = RequestFuncInput(
         model=model_id,
         prompt=test_request.prompt,
@@ -420,7 +422,7 @@ async def benchmark(
         prompt_len=test_request.prompt_len,
         output_len=test_request.expected_output_len,
         ignore_eos=ignore_eos,
-        extra_body=prepare_extra_body(test_request),
+        extra_body=test_req_extra_body,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -439,7 +441,7 @@ async def benchmark(
             prompt_len=test_request.prompt_len,
             output_len=test_request.expected_output_len,
             ignore_eos=ignore_eos,
-            extra_body=prepare_extra_body(test_request),
+            extra_body=test_req_extra_body,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
