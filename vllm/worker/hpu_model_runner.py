@@ -703,7 +703,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
                                           'false').lower() == 'true'
 
-    def _inc_prepare(self, model: torch.nn.Module) -> torch.nn.Module:
+    def _inc_preprocess(self, model: torch.nn.Module) -> torch.nn.Module:
         # TEST ARGS
         # dump args into disk as json
         import time
@@ -785,6 +785,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # ForkedPdb().set_trace()
             if self.model_config.quantization is not None and "inc" in self.model_config.quantization:
                 logger.info("Preparing model with INC..")
+                self._inc_preprocess()
                 with HabanaMemoryProfiler() as m_inc:
                     from neural_compressor.torch.quantization import (
                         FP8Config, convert, prepare)

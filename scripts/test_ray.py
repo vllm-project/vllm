@@ -16,6 +16,7 @@ model_path = "/data/models/DeepSeek-R1/"
 model_path = "/hf/hf_models/DeepSeek-R1"
 # model_path = "deepseek-ai/DeepSeek-V2-Lite"
 model_path = "/mnt/disk5/hf_models/DeepSeek-R1-BF16"
+model_path = "/mnt/disk2/hf_models/Mixtral-8x7B/"
 # Parse the command-line arguments.
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default=model_path, help="The model path.")
@@ -218,7 +219,7 @@ if __name__ == "__main__":
         tensor_parallel_size=args.tp_size,
         distributed_executor_backend='ray',
         trust_remote_code=True,
-        #quantization='inc_p',
+        quantization='inc_p',
         max_model_len=16384,
         dtype="bfloat16",
     )
