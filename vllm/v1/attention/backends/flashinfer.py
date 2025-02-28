@@ -17,19 +17,13 @@ except ImportError:
 import numpy as np
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer,
-                                              AttentionMetadata,
-                                              AttentionState, AttentionType)
+from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.layer import Attention
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
-if current_platform.is_cuda():
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 logger = init_logger(__name__)
 
@@ -41,8 +35,8 @@ class FlashInferBackend:
     def __init__(self, runner):
         self.runner = runner
         self._workspace_buffer = None
-        self._wrapper = None
-        self._cascade_wrapper = None
+        self._prefill_wrapper = None  # Wrapper for prefill/append
+        self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
@@ -57,11 +51,11 @@ class FlashInferBackend:
                 device=self.runner.device)
         return self._workspace_buffer
 
-    def _get_wrapper(self):
-        if self._wrapper is None:
-            self._wrapper = BatchPrefillWithPagedKVCacheWrapper(
+    def _get_prefill_wrapper(self):
+        if self._prefill_wrapper is None:
+            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(), "NHD")
-        return self._wrapper
+        return self._prefill_wrapper
 
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
@@ -69,54 +63,22 @@ class FlashInferBackend:
                 2, self._get_workspace_buffer(), "NHD")
         return self._cascade_wrapper
 
-    def _get_normal_attn_args(self, attn_metadata: "FlashInferMetadata"):
-        block_table_bounds = (
-            (attn_metadata.seq_lens + attn_metadata.page_size - 1) // attn_metadata.page_size)
-
-        # An example for paged_kv_indices, paged_kv_indptr:
-        # request 1, page indices [0, 5, 8]
-        # request 2, page indices [1, 6, 7]
-        # request 3, page indices [3, 4]
-
-        # paged_kv_indices is a concatenation of page indices of all requests:
-        # [0, 5, 8, 1, 6, 7, 3, 4]
-        mask = (torch.arange(attn_metadata.block_table.size(1),
-                             dtype=attn_metadata.block_table.dtype,
-                             device=attn_metadata.block_table.device).unsqueeze(0)
-                < block_table_bounds.unsqueeze(1))
-        paged_kv_indices = attn_metadata.block_table[mask]
-
-        # paged_kv_indptr is used to index into paged_kv_indices: [0, 3, 6, 8]
-        # Shape: [batch_size + 1]
-        paged_kv_indptr = torch.cat([
-            torch.zeros(1, dtype=block_table_bounds.dtype,
-                        device=block_table_bounds.device),
-            block_table_bounds.cumsum(dim=0, dtype=torch.int32)])
-
-        # The number of entries in the last page of each request in
-        # the paged kv cache, shape: [batch_size]
-        paged_kv_last_page_len = attn_metadata.seq_lens % attn_metadata.page_size
-        paged_kv_last_page_len = torch.where(
-            paged_kv_last_page_len == 0, attn_metadata.page_size, paged_kv_last_page_len)
-        
-        return attn_metadata.qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len
-
-    def _get_cascade_attn_args(self, attn_metadata: "FlashInferMetadata"):
+    def begin_forward(self, attn_metadata: "FlashInferMetadata"):
         seq_lens = attn_metadata.seq_lens
         page_size = attn_metadata.page_size
         block_table = attn_metadata.block_table
 
-        num_common_kv_blocks = attn_metadata.common_prefix_len // page_size
-        shared_kv_page_indptr = torch.tensor([0, num_common_kv_blocks],
-                                             dtype=torch.int32,
-                                             device=block_table.device)
-        shared_kv_page_indices = block_table[0, :num_common_kv_blocks]
-        shared_kv_last_page_len = torch.tensor([0], dtype=torch.int32,
-                                               device=block_table.device)
-        block_table = block_table[:, num_common_kv_blocks:]
-
-        qo_indptr_arr = [attn_metadata.cu_prefix_query_lens,
-                         attn_metadata.qo_indptr]
+        if attn_metadata.use_cascade:
+            # Grab the blocks of the shared prefix from the first request.
+            num_common_kv_blocks = attn_metadata.common_prefix_len // page_size
+            shared_kv_page_indptr = torch.tensor([0, num_common_kv_blocks],
+                                                 dtype=torch.int32,
+                                                 device=block_table.device)
+            shared_kv_page_indices = block_table[0, :num_common_kv_blocks]
+            shared_kv_last_page_len = torch.tensor([0], dtype=torch.int32,
+                                                   device=block_table.device)
+            # Remove the blocks of the shared prefix from all requests.
+            block_table = block_table[:, num_common_kv_blocks:]
 
         block_table_bounds = (seq_lens + page_size - 1) // page_size
 
@@ -145,38 +107,46 @@ class FlashInferBackend:
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
 
-        return (
-            qo_indptr_arr,
-            [shared_kv_page_indptr, paged_kv_indptr],
-            [shared_kv_page_indices, paged_kv_indices],
-            [shared_kv_last_page_len, paged_kv_last_page_len],
-        )
-
-    def begin_forward(self, attn_metadata: "FlashInferMetadata"):
         if self.global_hyperparameters is None:
             self.global_hyperparameters = infer_global_hyperparameters(
                     get_per_layer_parameters(self.vllm_config))
 
-        if not attn_metadata.use_cascade:
-            attn_metadata.wrapper = self._get_wrapper()
-            attn_args = self._get_normal_attn_args(attn_metadata)
+        if attn_metadata.use_cascade:
+            attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
+            attn_metadata.cascade_wrapper.plan(
+                [attn_metadata.cu_prefix_query_lens, attn_metadata.qo_indptr],
+                [shared_kv_page_indptr, paged_kv_indptr],
+                [shared_kv_page_indices, paged_kv_indices],
+                [shared_kv_last_page_len, paged_kv_last_page_len],
+                attn_metadata.num_qo_heads,
+                attn_metadata.num_kv_heads,
+                attn_metadata.head_dim,
+                attn_metadata.page_size,
+                causal=True,
+                sm_scale=self.global_hyperparameters.sm_scale,
+                window_left=self.global_hyperparameters.window_left,
+                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
+                q_data_type=attn_metadata.q_data_type,
+                #kv_data_type=attn_metadata.data_type,
+            )
         else:
-            attn_metadata.wrapper = self._get_cascade_wrapper()
-            attn_args = self._get_cascade_attn_args(attn_metadata)
-
-        attn_metadata.wrapper.plan(
-            *attn_args,
-            attn_metadata.num_qo_heads,
-            attn_metadata.num_kv_heads,
-            attn_metadata.head_dim,
-            attn_metadata.page_size,
-            causal=True,
-            sm_scale=self.global_hyperparameters.sm_scale,
-            window_left=self.global_hyperparameters.window_left,
-            logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
-            q_data_type=attn_metadata.q_data_type,
-            #kv_data_type=attn_metadata.data_type,
-        )
+            attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
+            attn_metadata.prefill_wrapper.plan(
+                attn_metadata.qo_indptr,
+                paged_kv_indptr,
+                paged_kv_indices,
+                paged_kv_last_page_len,
+                attn_metadata.num_qo_heads,
+                attn_metadata.num_kv_heads,
+                attn_metadata.head_dim,
+                attn_metadata.page_size,
+                causal=True,
+                sm_scale=self.global_hyperparameters.sm_scale,
+                window_left=self.global_hyperparameters.window_left,
+                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
+                q_data_type=attn_metadata.q_data_type,
+                kv_data_type=attn_metadata.data_type,
+            )
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
@@ -195,10 +165,6 @@ class FlashInferBackend:
         return FlashInferMetadata
 
     @staticmethod
-    def get_state_cls() -> Type["FlashInferState"]:
-        return FlashInferState
-
-    @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
@@ -207,8 +173,12 @@ class FlashInferBackend:
     ) -> Tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
+    #@staticmethod
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        if self.runner.kv_cache_dtype != self.runner.model_config.dtype:
+            # TODO: The cascade wrapper currently does not support setting
+            # kv cache dtype to something different from query dtype.
+            return False
         return use_cascade_attention(*args, **kwargs)
 
 
@@ -307,7 +277,8 @@ class FlashInferMetadata:
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
 
-    wrapper: BatchPrefillWithPagedKVCacheWrapper = None
+    prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper = None
+    cascade_wrapper: MultiLevelCascadeAttentionWrapper = None
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -318,24 +289,6 @@ class FlashInferMetadata:
     q_data_type: torch.dtype = None
     # FlashInfer 0.2 encourages passing host tensors
     device: torch.device = torch.device("cpu")
-
-    # The FlashInfer backend currently supports only models in which all layers
-    # share the same following hyperparameters:
-
-    # # The left (inclusive) window size for the attention window, when
-    # # set to `-1`, the window size will be set to the full length of
-    # # the sequence. Defaults to `-1`.
-    # window_left: int = -1
-    # # The attention logits soft capping value (used in Gemini, Grok and
-    # # Gemma-2, etc.), if not provided, will be set to `0`. If greater
-    # # than 0, the logits will be capped according to formula:
-    # # $$\texttt{logits\_soft\_cap} \times
-    # # \mathrm{tanh}(x / \texttt{logits\_soft\_cap})$$,
-    # # where $x$ is the input logits.
-    # logits_soft_cap: Optional[float] = None
-    # # The scale used in softmax, if not provided, will be set to
-    # # `1.0 / sqrt(head_dim)`.
-    # sm_scale: Optional[float] = None
 
     def __post_init__(self):
         # Refer to
@@ -453,16 +406,17 @@ class FlashInferImpl(AttentionImpl):
         window_left = (self.sliding_window[0]
                        if self.sliding_window is not None else -1)
 
-        assert attn_metadata.wrapper is not None
-        #assert attn_metadata.wrapper._causal
-        #assert attn_metadata.wrapper._window_left == window_left
-        #assert attn_metadata.wrapper._logits_soft_cap == (
-        #    self.logits_soft_cap or 0.0)
-        #assert attn_metadata.wrapper._sm_scale == self.scale
+        
 
         if not attn_metadata.use_cascade:
             # Regular attention (common case).
-            output = attn_metadata.wrapper.run(
+            assert attn_metadata.prefill_wrapper is not None
+            assert attn_metadata.prefill_wrapper._causal
+            assert attn_metadata.prefill_wrapper._window_left == window_left
+            assert attn_metadata.prefill_wrapper._logits_soft_cap == (
+               self.logits_soft_cap or 0.0)
+            assert attn_metadata.prefill_wrapper._sm_scale == self.scale
+            output = attn_metadata.prefill_wrapper.run(
                 query,
                 kv_cache,
                 k_scale=layer._k_scale_float,
@@ -472,36 +426,8 @@ class FlashInferImpl(AttentionImpl):
             return output
 
         # Cascade attention (rare case).
-        print("CASCADE")
-        out = attn_metadata.wrapper.run(
-            query,
-            kv_cache,
-            #k_scale=layer._k_scale_float,
-            #v_scale=layer._v_scale_float,
-            #out=output,
-        )
-        output.copy_(out)
-        return output
-        cascade_attention(
-            output[:attn_metadata.num_actual_tokens],
-            query[:attn_metadata.num_actual_tokens],
-            key_cache,
-            value_cache,
-            cu_query_lens=attn_metadata.query_start_loc,
-            max_query_len=attn_metadata.max_query_len,
-            cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
-            prefix_kv_lens=attn_metadata.prefix_kv_lens,
-            suffix_kv_lens=attn_metadata.suffix_kv_lens,
-            max_kv_len=attn_metadata.max_seq_len,
-            softmax_scale=self.scale,
-            alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window,
-            logits_soft_cap=self.logits_soft_cap,
-            block_table=attn_metadata.block_table,
-            common_prefix_len=attn_metadata.common_prefix_len,
-            fa_version=self.vllm_flash_attn_version,
-        )
-
+        assert attn_metadata.cascade_wrapper is not None
+        output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
         return output
 
 
@@ -571,74 +497,3 @@ def use_cascade_attention(
 
     # Use cascade attention if it is faster than FlashDecoding.
     return cascade_time < flash_decoding_time
-
-
-def cascade_attention(
-    output: torch.Tensor,
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    cu_query_lens: torch.Tensor,
-    max_query_len: int,
-    cu_prefix_query_lens: torch.Tensor,
-    prefix_kv_lens: torch.Tensor,
-    suffix_kv_lens: torch.Tensor,
-    max_kv_len: int,
-    softmax_scale: float,
-    alibi_slopes: Optional[torch.Tensor],
-    sliding_window: Tuple[int, int],
-    logits_soft_cap: float,
-    block_table: torch.Tensor,
-    common_prefix_len: int,
-    fa_version: int,
-) -> torch.Tensor:
-    assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
-    # TODO: Support sliding window.
-    assert sliding_window == (-1, -1), (
-        "Cascade attention does not support sliding window.")
-
-    num_tokens = query.shape[0]
-    block_size = key_cache.shape[-3]
-    assert common_prefix_len % block_size == 0
-    num_common_kv_blocks = common_prefix_len // block_size
-    assert num_common_kv_blocks > 0
-
-    # Process shared prefix.
-    prefix_output, prefix_lse = flash_attn_varlen_func(
-        q=query,
-        k=key_cache,
-        v=value_cache,
-        cu_seqlens_q=cu_prefix_query_lens,
-        seqused_k=prefix_kv_lens,
-        max_seqlen_q=num_tokens,
-        max_seqlen_k=common_prefix_len,
-        softmax_scale=softmax_scale,
-        causal=False,
-        window_size=sliding_window,
-        block_table=block_table[:1],
-        softcap=logits_soft_cap,
-        return_softmax_lse=True,
-        fa_version=fa_version,
-    )
-
-    # Process suffix per query.
-    suffix_output, suffix_lse = flash_attn_varlen_func(
-        q=query,
-        k=key_cache,
-        v=value_cache,
-        cu_seqlens_q=cu_query_lens,
-        seqused_k=suffix_kv_lens,
-        max_seqlen_q=max_query_len,
-        max_seqlen_k=max_kv_len - common_prefix_len,
-        softmax_scale=softmax_scale,
-        causal=True,
-        window_size=sliding_window,
-        block_table=block_table[:, num_common_kv_blocks:],
-        softcap=logits_soft_cap,
-        return_softmax_lse=True,
-        fa_version=fa_version,
-    )
-
-    # Merge prefix and suffix outputs, and store the result in output.
-    merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
-                      suffix_lse)
