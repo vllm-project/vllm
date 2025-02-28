@@ -124,7 +124,7 @@ class PaliGemmaMultiModalProcessor(
             prompt_ids = tokenizer.encode(prompt)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        processed_outputs = super()._call_hf_processor(
+        return super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
@@ -134,10 +134,10 @@ class PaliGemmaMultiModalProcessor(
         # Otherwise it will fail the language feature
         # This is for Paligemma 1 model only (tokenizier.add_bos_token == True)
         # Paligemma2 does NOT have this problem (add_bos_token == False)
-        if processed_outputs["input_ids"][0][0] == tokenizer.bos_token_id:
-            prompt_ids_without_bos = processed_outputs["input_ids"][0][1:]
-            processed_outputs["input_ids"] = prompt_ids_without_bos[None, :]
-        return processed_outputs
+        # if processed_outputs["input_ids"][0][0] == tokenizer.bos_token_id:
+        #     prompt_ids_without_bos = processed_outputs["input_ids"][0][1:]
+        #     processed_outputs["input_ids"] = prompt_ids_without_bos[None, :]
+        # return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -163,7 +163,7 @@ class PaliGemmaMultiModalProcessor(
         assert isinstance(bos_token_id, int)
 
         # Paligemma 1 and 2 have different tokenizer.add_bos_token
-        # Replace <bos> with <image>*n + <bos> for Paligemma 1
+        # Replace <bos> with <bos> + <image>*n + <bos> for Paligemma 1
         # Insert <image>*n + <bos> for Paligemma 2
         if tokenizer.add_bos_token:
             return [
@@ -171,7 +171,7 @@ class PaliGemmaMultiModalProcessor(
                     modality="image",
                     target=[bos_token_id],
                     replacement=PromptUpdateDetails(
-                        full=image_tokens + [bos_token_id],
+                        full=[bos_token_id] + image_tokens + [bos_token_id],
                         features=image_tokens,
                     ),
                 )
