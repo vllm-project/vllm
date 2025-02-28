@@ -1339,247 +1339,127 @@ class EngineArgs:
 
         return config
 
-    def _use_v1_oracle(self, model_config: ModelConfig) -> bool:
+    def _is_v1_supported_oracle(self, model_config: ModelConfig) -> bool:
         """Oracle for whether to use V0 or V1 Engine by default."""
-
-        # If VLLM_USE_V1=0, then use the V0 Engine.
-        if envs.is_set("VLLM_USE_V1") and not envs.VLLM_USE_V1:
-            return False
 
         #############################################################
         # Low priority feature flags that are not supported on V1.
 
-        # We raise a NotImplementedError is VLLM_USE_V1=1 is set
-        # when any of these features are enabled and default to V0.
-
         if (self.logits_processor_pattern
                 != EngineArgs.logits_processor_pattern):
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with "
-                    "--logits-processor-pattern.")
-            logger.info("--logits-processor-pattern is not supported by "
-                        "the V1 Engine. Falling back to V0 Engine.")
+
+            _raise_or_warning(feature_name="--logits-processor-pattern",
+                              recommend_to_remove=False)
             return False
 
         if self.preemption_mode != EngineArgs.preemption_mode:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with "
-                    "--preemption-mode.")
-            logger.info("Setting preemption mode is not supported by "
-                        "the V1 Engine. Falling back to V0 Engine. We suggest "
-                        "removing this argument from your deployment config.")
+            _raise_or_warning(feature_name="--preemption-mode",
+                              recommend_to_remove=True)
             return False
 
         if (self.disable_async_output_proc
                 != EngineArgs.disable_async_output_proc):
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with "
-                    "--disable-async-output-proc.")
-            logger.info("--disable-async-output-proc is not supported by "
-                        "the V1 Engine. Falling back to V0 Engine. We suggest "
-                        "removing this argument from your deployment config.")
+            _raise_or_warning(feature_name="--disable-async-output-proc",
+                              recommend_to_remove=True)
             return False
 
         if self.scheduling_policy != EngineArgs.scheduling_policy:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with "
-                    "--scheduling-policy.")
-            logger.info("--scheduling-policy is not supported by "
-                        "the V1 Engine. Falling back to V0 Engine.")
+            _raise_or_warning(feature_name="--scheduling-policy",
+                              recommend_to_remove=False)
             return False
 
         if self.scheduler_cls != EngineArgs.scheduler_cls:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with "
-                    "--scheduler-cls.")
-            logger.info("--scheduler-cls is not support by the V1 Engine "
-                        "Faling back to V0 Engine.")
+            _raise_or_warning(feature_name="--scheduler-cls",
+                              recommend_to_remove=False)
             return False
 
         if self.worker_cls != EngineArgs.worker_cls:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with --worker-cls.")
-            logger.info("--worker-cls is not support by the V1 Engine "
-                        "Faling back to V0 Engine.")
+            _raise_or_warning(feature_name="--worker-cls",
+                              recommend_to_remove=False)
             return False
 
         if self.num_scheduler_steps != EngineArgs.num_scheduler_steps:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with --num_scheduler_steps "
-                    "We recommend disabling multi-step scheduling "
-                    "in favor of the V1 Engine.")
-            logger.warning(
-                "Multistep scheduling is not supported by the V1 Engine. "
-                "Falling back to V0. We recommend removing --num-scheduler-"
-                "steps from your config in favor of the V1 Engine.")
+            _raise_or_warning(feature_name="--num-scheduler-steps",
+                              recommend_to_remove=True)
             return False
 
         if self.scheduler_delay_factor != EngineArgs.scheduler_delay_factor:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with "
-                    "--scheduler-delay-factor.")
-            logger.info(
-                "--scheduler-delay-factor is not supported by the V1 Engine."
-                "Falling back to V0. We recommend removing --scheduler-delay-"
-                "factor from your config in favor of the V1 Engine.")
+            _raise_or_warning(feature_name="--scheduler-delay-factor",
+                              recommend_to_remove=True)
             return False
 
         if self.additional_config != EngineArgs.additional_config:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with --additional-config.")
-            logger.info(
-                "--additional-config is not supported by the V1 Engine. "
-                "Falling back to V0 Engine.")
+            _raise_or_warning(feature_name="--additional-config",
+                              recommend_to_remove=False)
             return False
 
         #############################################################
-        # Important feature flags we plan to support on V1 but are
-        # currently not yet supported.
+        # Important feature flags we plan to support on V1 but not yet.
 
-        # TODO: this might be a problem right? Since we fall back
-        # dynamically at runtime even if xgrammar is specified.
+        # TODO: log a warning if V1 is on for
         if self.guided_decoding_backend != "xgrammar":
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Detected VLLM_USE_V1=1 with guided decoding backend "
-                    "other than xgrammar. This is currently unsupported.")
-            logger.info("Guided decoding is only supported with xgrammar "
-                        "for V1 Engine. Falling back to V0 Engine.")
+            _raise_or_warning(feature_name="--guided-decoding-backend",
+                              recommend_to_remove=False)
             return False
 
         # Require at least Ampere (Flash Attention needed for V1 so far).
         from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability().major < 8):
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Detected VLLM_USE_V1=1 on unsupported GPU capability. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
-            logger.info("GPU with compute capability < 8.0 not yet enabled "
-                        "for V1 Engine. Falling back to V0 Engine.")
+            _raise_or_warning(feature_name="Compute Capacity < 8.0",
+                              recommend_to_remove=False)
             return False
 
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Detected VLLM_USE_V1=1 with fp8 KV cache. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
-            logger.info("Fp8 KV cache is not yet supported by the V1 Engine. "
-                        "Falling back to V0 Engine.")
+            _raise_or_warning(feature_name="--kv_cache_dtype",
+                              recommend_to_remove=False)
             return False
 
         # No Prompt Adapter so far.
         if self.enable_prompt_adapter:
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Detected VLLM_USE_V1=1 with prompt adapter. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
-            logger.info(
-                "Prompt Adapter is not yet supported by the V1 Engine. "
-                "Falling back to V0 Engine.")
+            _raise_or_warning(feature_name="--enable_prompt_adapter",
+                              recommend_to_remove=False)
             return False
 
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
             if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Detected VLLM_USE_V1=1 on unsupported task. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
-            logger.info(
-                "Task %s is not yet supported by V1 Engine. "
-                "Falling back to V0 Engine.", model_config.task)
+                _raise_or_warning(feature_name=f"Task {model_config.task}",
+                                  recommend_to_remove=False)
             return False
 
-        # No Mamba, Encoder-Decoder, or MLA so far.
-        if (model_config.is_encoder_decoder or model_config.is_hybrid
-                or model_config.is_attention_free
-                or model_config.has_inner_state or model_config.use_mla):
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Detected VLLM_USE_V1=1 on unsupported model. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
-            logger.info("Mamba-style, Encoder-Decoder, and MLA models are not"
-                        "yet supported by the V1 Engine. Falling back to V0.")
+        # No Mamba or Encoder-Decoder.
+        if (not model_config.is_v1_compatible()):
+            _raise_or_warning(feature_name=model_config.architectures(),
+                              recommend_to_remove=False)
             return False
 
-        # No concurrent partial prefills so far.
+        # No Concurrent Partial Prefills.
         if (self.max_num_partial_prefills
                 != EngineArgs.max_num_partial_prefills
                 or self.max_long_partial_prefills
                 != EngineArgs.max_long_partial_prefills
                 or self.long_prefill_token_threshold
                 != EngineArgs.long_prefill_token_threshold):
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Detected VLLM_USE_V1=1 on unsupported scheduler params "
-                    "--max-num-partial-prefills, --max-long-partial-prefills, "
-                    "or --long-prefill-token-threshold. Usage should be "
-                    "considered experimental and you may encounter bugs."
-                    "Please report any issues on Github.")
-            logger.info("Concurrent partial prefills are not yet supported. "
-                        "by the V1 Engine. Falling back to V0.")
+            _raise_or_warning(feature_name="Concurrent Partial Prefill",
+                              recommend_to_remove=False)
             return False
 
         # No OTLP observability so far.
         if (self.otlp_traces_endpoint or self.collect_detailed_traces):
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Detected VLLM_USE_V1=1 on unsupported otlp observability "
-                    "features. Usage should be considered experimental and you "
-                    "may encounter bugs. Please report any issues on Github.")
-            logger.info("OTLP observability is not yet supported by the "
-                        "V1 Engine. Falling back to V0.")
+            _raise_or_warning(feature_name="--otlp_traces_endpoint",
+                              recommend_to_remove=False)
             return False
 
-        #############################################################
-        # Supported or partially supported features. We allow users
-        # to opt into this and log a warning if they do.
+        # Only Ngram speculative decoding so far.
+        if (self.speculative_model is not None
+                or self.num_speculative_tokens is not None):
+            # This is supported but experimental (handled below).
+            if self.speculative_model == "[ngram]":
+                pass
 
-        # LoRA is supported on V1, but off by default for now.
-        if self.enable_lora:
-            if envs.VLLM_USE_V1:
-                logger.warning(
-                    "Detected VLLM_USE_V1=1 with LoRA. Usage should be"
-                    "considered experimental and you may encounter bugs"
-                    "Please report any issues on Github.")
-            else:
-                logger.info(
-                    "LoRA is not yet enabled by default for V1 Engine. "
-                    "Falling back to V0 Engine.")
-                return False
-
-        # PP is supported on V1, but off by default for now.
-        if self.pipeline_parallel_size > 1:
-            if envs.VLLM_USE_V1:
-                logger.warning(
-                    "Detected VLLM_USE_V1=1 with pipeline parallelism. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
-            else:
-                logger.info(
-                    "Pipeline parallelism is not yet enabled by default for"
-                    "V1 Engine. Falling back to V0 Engine.")
-                return False
-
-        # ngram is supported on V1, but off by default for now.
-        if (self.speculative_model is None
-                and self.num_speculative_tokens is None):
-            if envs.VLLM_USE_V1:
+            elif envs.VLLM_USE_V1:
                 logger.warning(
                     "Detected VLLM_USE_V1=1 with speculative decoding. "
                     "Usage should be considered experimental and you may "
@@ -1590,28 +1470,47 @@ class EngineArgs:
                     "V1 Engine. Falling back to V0 Engine.")
                 return False
 
-        # ROCm is supported on V1, but off by default for now.
-        if (not current_platform.is_cuda() and not current_platform.is_tpu()):
+        if self.kv_transfer_config != EngineArgs.kv_transfer_config:
+            _raise_or_warning(feature_name="--kv-transfer-config",
+                              recommend_to_remove=False)
+            return False
+
+        #############################################################
+        # Experimental Features allow users
+        # to opt into this and log a warning if they do.
+
+        # LoRA is supported on V1, but off by default for now.
+        if self.enable_lora:
             if envs.VLLM_USE_V1:
-                logger.warning(
-                    "Detected VLLM_USE_V1=1 on unsupported platform. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
+                _experimental_warning(feature_name="LoRA")
             else:
-                logger.info(
-                    "Platform %s not yet enabled by default for V1 Engine. "
-                    "Falling back to V0 Engine.", current_platform.device_type)
+                _fallback_info(feature_name="LoRA")
                 return False
 
-        if self.kv_transfer_config != EngineArgs.kv_transfer_config:
+        # PP is supported on V1, but off by default for now.
+        if self.pipeline_parallel_size > 1:
             if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "VLLM_USE_V1=1 is not supported with --kv-transfer-config."
-                )
+                _experimental_warning(feature_name="Pipeline Parallel")
             else:
-                logger.info(
-                    "--kv-transfer-config is not supported by the V1 Engine."
-                    "Falling back to V0 Engine.")
+                _fallback_info(feature_name="Pipeline Parallel")
+                return False
+
+        # ngram is supported on V1, but off by default for now.
+        if self.speculative_model == "[ngram]":
+            if envs.VLLM_USE_V1:
+                _experimental_warning(
+                    feature_name="ngram Speculative Decoding")
+            else:
+                _fallback_info(feature_name="ngram Speculative Decoding")
+                return False
+
+        # Non-CUDA is supported on V1, but off by default for now.
+        if not current_platform.is_cuda():
+            if envs.VLLM_USE_V1:
+                _experimental_warning(
+                    feature_name=current_platform.device_type)
+            else:
+                _fallback_info(feature_name=current_platform.device_type)
                 return False
 
         logger.info(
@@ -1735,6 +1634,31 @@ class AsyncEngineArgs(EngineArgs):
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update(parser)
         return parser
+
+
+def _raise_or_warning(feature_name: str, recommend_to_remove: bool):
+    if envs.VLLM_USE_V1:
+        raise NotImplementedError(
+            f"VLLM_USE_V1=1 is not supported with {feature_name}")
+    msg = f"{feature_name} is not supported by the V1 Engine. "
+    msg += "Falling back to V0. "
+    if recommend_to_remove:
+        msg += f"We recommend to remove {feature_name} from your config"
+        msg += "in favor of the V1 Engine."
+    logger.warning(msg)
+
+
+def _experimental_warning(feature_name: str):
+    logger.warning(
+        "Detected VLLM_USE_V1=1 with %s. Usage should"
+        "be considered experimental. Please report any "
+        "issues on Github.", feature_name)
+
+
+def _fallback_info(feature_name: str):
+    logger.info(
+        "%s is experimental on VLLM_USE_V1=1. "
+        "Falling back to V0 Engine.", feature_name)
 
 
 # These functions are used by sphinx to build the documentation

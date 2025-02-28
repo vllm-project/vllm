@@ -3374,7 +3374,8 @@ class VllmConfig:
         if self.model_config is not None:
             self.model_config.verify_async_output_proc(self.parallel_config,
                                                        self.speculative_config,
-                                                       self.device_config)
+                                                       self.device_config,
+                                                       self.use_v1)
             self.model_config.verify_with_parallel_config(self.parallel_config)
 
         if self.cache_config is not None:
