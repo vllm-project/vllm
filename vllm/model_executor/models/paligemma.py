@@ -22,7 +22,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV0Only
 from .siglip import SiglipVisionModel, get_max_siglip_image_tokens
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -120,7 +120,6 @@ class PaliGemmaMultiModalProcessor(
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
         if not mm_data:
-            # HF processor always adds placeholders even when there's no image
             prompt_ids = tokenizer.encode(prompt)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -129,15 +128,6 @@ class PaliGemmaMultiModalProcessor(
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
-
-        # Remove <bos> token at the beginning of prompt added by HF processor
-        # Otherwise it will fail the language feature
-        # This is for Paligemma 1 model only (tokenizier.add_bos_token == True)
-        # Paligemma2 does NOT have this problem (add_bos_token == False)
-        # if processed_outputs["input_ids"][0][0] == tokenizer.bos_token_id:
-        #     prompt_ids_without_bos = processed_outputs["input_ids"][0][1:]
-        #     processed_outputs["input_ids"] = prompt_ids_without_bos[None, :]
-        # return processed_outputs
 
     def _get_mm_fields_config(
         self,
