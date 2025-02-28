@@ -55,21 +55,21 @@ For more details, please refer to the <https://github.com/yangulei/vllm-fork/blo
 
 ### Install Dependencies
 
-- INC TBD
+- INC https://github.com/intel/neural-compressor/tree/dev/ds_r1
 
 ```bash
-git clone TBD inc
+git clone https://github.com/intel/neural-compressor.git inc
 cd inc
-git checkout dev/yi/quant_ds
+git checkout dev/ds_r1
 python setup.py pt develop
 ```
 
-- vLLM TBD
+- vLLM https://github.com/yiliu30/vllm-fork/tree/p22-rebase-kvcache-tc
 
 ```
-git clone TBD vllm
+git clone https://github.com/yiliu30/vllm-fork.git vllm
 cd vllm
-git checkout TBD
+git checkout dev/yi/ds_r1
 pip install -r requirements-hpu.txt
 VLLM_TARGET_DEVICE=hpu pip install -e .  --no-build-isolation
 ```
