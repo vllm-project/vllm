@@ -4,12 +4,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 try:
-    from flashinfer import BatchPrefillWithPagedKVCacheWrapper
+    from flashinfer import (BatchPrefillWithPagedKVCacheWrapper,
+                            MultiLevelCascadeAttentionWrapper)
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 except ImportError:
     # Avoid turning these types into variables during type checking
     if not TYPE_CHECKING:
         BatchPrefillWithPagedKVCacheWrapper = None
+        MultiLevelCascadeAttentionWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 import numpy as np
@@ -31,13 +33,85 @@ if current_platform.is_cuda():
 
 logger = init_logger(__name__)
 
-FLASHINFER_WORKSPACE_BUFFER = None
-FLASHINFER_WRAPPER = None
 
-
-class FlashInferBackend(AttentionBackend):
+class FlashInferBackend:
 
     accept_output_buffer: bool = True
+
+    def __init__(self, runner):
+        self.runner = runner
+        self._workspace_buffer = None
+        self._wrapper = None
+
+        # Global hyperparameters shared by all attention layers
+        self.global_hyperparameters: Optional[PerLayerParameters] = None
+
+        self.vllm_config = get_current_vllm_config()
+
+    def _get_workspace_buffer(self):
+        if self._workspace_buffer is None:
+            self._workspace_buffer = torch.empty(
+                FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=self.runner.device)
+        return self._workspace_buffer
+
+    def _get_wrapper(self):
+        if self._wrapper is None:
+            self._wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(), "NHD")
+        return self._wrapper
+
+    def begin_forward(self, attn_metadata: "FlashInferMetadata"):
+        if self.global_hyperparameters is None:
+            self.global_hyperparameters = infer_global_hyperparameters(
+                    get_per_layer_parameters(self.vllm_config))
+
+        block_table_bounds = (
+            (attn_metadata.seq_lens + attn_metadata.page_size - 1) // attn_metadata.page_size)
+
+        # An example for paged_kv_indices, paged_kv_indptr:
+        # request 1, page indices [0, 5, 8]
+        # request 2, page indices [1, 6, 7]
+        # request 3, page indices [3, 4]
+
+        # paged_kv_indices is a concatenation of page indices of all requests:
+        # [0, 5, 8, 1, 6, 7, 3, 4]
+        mask = (torch.arange(attn_metadata.block_table.size(1),
+                             dtype=attn_metadata.block_table.dtype,
+                             device=attn_metadata.block_table.device).unsqueeze(0)
+                < block_table_bounds.unsqueeze(1))
+        paged_kv_indices = attn_metadata.block_table[mask]
+
+        # paged_kv_indptr is used to index into paged_kv_indices: [0, 3, 6, 8]
+        # Shape: [batch_size + 1]
+        paged_kv_indptr = torch.cat([
+            torch.zeros(1, dtype=block_table_bounds.dtype,
+                        device=block_table_bounds.device),
+            block_table_bounds.cumsum(dim=0, dtype=torch.int32)])
+
+        # The number of entries in the last page of each request in
+        # the paged kv cache, shape: [batch_size]
+        paged_kv_last_page_len = attn_metadata.seq_lens % attn_metadata.page_size
+        paged_kv_last_page_len = torch.where(
+            paged_kv_last_page_len == 0, attn_metadata.page_size, paged_kv_last_page_len)
+
+        attn_metadata.wrapper = self._get_wrapper()
+        attn_metadata.wrapper.plan(
+            attn_metadata.qo_indptr,
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+            attn_metadata.num_qo_heads,
+            attn_metadata.num_kv_heads,
+            attn_metadata.head_dim,
+            attn_metadata.page_size,
+            causal=True,
+            sm_scale=self.global_hyperparameters.sm_scale,
+            window_left=self.global_hyperparameters.window_left,
+            logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
+            q_data_type=attn_metadata.q_data_type,
+            kv_data_type=attn_metadata.data_type)
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
@@ -72,7 +146,6 @@ class FlashInferBackend(AttentionBackend):
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
         return use_cascade_attention(*args, **kwargs)
-
 
 
 @dataclass
@@ -141,38 +214,6 @@ def infer_global_hyperparameters(
     return global_params
 
 
-class FlashInferState:
-
-    def __init__(self, runner):
-        self.runner = runner
-        self._workspace_buffer = None
-        self._wrapper = None
-
-        # Global hyperparameters shared by all attention layers
-        self.global_hyperparameters: Optional[PerLayerParameters] = None
-
-        self.vllm_config = get_current_vllm_config()
-
-    def _get_workspace_buffer(self):
-        if self._workspace_buffer is None:
-            self._workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=torch.uint8,
-                device=self.runner.device)
-        return self._workspace_buffer
-
-    def _get_wrapper(self):
-        if self._wrapper is None:
-            self._wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), "NHD")
-        return self._wrapper
-
-    def begin_forward(self, attn_metadata: "FlashInferMetadata"):
-        attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
-        attn_metadata.decode_wrapper = self._get_decode_wrapper()
-        attn_metadata.begin_forward()
-
-
 @dataclass
 class FlashInferMetadata:
 
@@ -234,61 +275,6 @@ class FlashInferMetadata:
             raise ValueError(
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f" received {self.head_dim}.")
-
-    def plan(self):
-        global FLASHINFER_WORKSPACE_BUFFER, FLASHINFER_WRAPPER
-        block_table_bounds = (
-            (self.seq_lens + self.page_size - 1) // self.page_size)
-
-        # An example for paged_kv_indices, paged_kv_indptr:
-        # request 1, page indices [0, 5, 8]
-        # request 2, page indices [1, 6, 7]
-        # request 3, page indices [3, 4]
-
-        # paged_kv_indices is a concatenation of page indices of all requests:
-        # [0, 5, 8, 1, 6, 7, 3, 4]
-        mask = (torch.arange(self.block_table.size(1),
-                             dtype=self.block_table.dtype,
-                             device=self.block_table.device).unsqueeze(0)
-                < block_table_bounds.unsqueeze(1))
-        paged_kv_indices = self.block_table[mask]
-
-        # paged_kv_indptr is used to index into paged_kv_indices: [0, 3, 6, 8]
-        # Shape: [batch_size + 1]
-        paged_kv_indptr = torch.cat([
-            torch.zeros(1, dtype=block_table_bounds.dtype,
-                        device=block_table_bounds.device),
-            block_table_bounds.cumsum(dim=0, dtype=torch.int32)])
-
-        # The number of entries in the last page of each request in
-        # the paged kv cache, shape: [batch_size]
-        paged_kv_last_page_len = self.seq_lens % self.page_size
-        paged_kv_last_page_len = torch.where(
-            paged_kv_last_page_len == 0, self.page_size, paged_kv_last_page_len)
-
-        if FLASHINFER_WORKSPACE_BUFFER is None:
-            FLASHINFER_WORKSPACE_BUFFER = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=torch.uint8,
-                device="cuda")
-            FLASHINFER_WRAPPER = BatchPrefillWithPagedKVCacheWrapper(
-                FLASHINFER_WORKSPACE_BUFFER, "NHD")
-
-        FLASHINFER_WRAPPER.plan(
-            self.qo_indptr,
-            paged_kv_indptr,
-            paged_kv_indices,
-            paged_kv_last_page_len,
-            self.num_qo_heads,
-            self.num_kv_heads,
-            self.head_dim,
-            self.page_size,
-            causal=True,
-            #sm_scale=self.sm_scale,
-            #window_left=self.window_left,
-            #logits_soft_cap=self.logits_soft_cap,
-            q_data_type=self.q_data_type,
-            kv_data_type=self.data_type)
 
 
 class FlashInferImpl(AttentionImpl):
@@ -393,7 +379,17 @@ class FlashInferImpl(AttentionImpl):
             layer._v_scale,
         )
 
-        output = FLASHINFER_WRAPPER.run(
+        window_left = (self.sliding_window[0]
+                       if self.sliding_window is not None else -1)
+
+        assert attn_metadata.wrapper is not None
+        assert attn_metadata.wrapper._causal
+        assert attn_metadata.wrapper._window_left == window_left
+        assert attn_metadata.wrapper._logits_soft_cap == (
+            self.logits_soft_cap or 0.0)
+        assert attn_metadata.wrapper._sm_scale == self.scale
+
+        output = attn_metadata.wrapper.run(
             query,
             kv_cache,
             k_scale=layer._k_scale_float,

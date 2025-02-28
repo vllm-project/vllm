@@ -236,7 +236,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
-        self.attn_backend = get_attn_backend(
+        attn_backend_cls = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.kv_cache_dtype,
@@ -244,6 +244,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_config.is_attention_free,
             use_mla=self.model_config.use_mla,
         )
+        self.attn_backend = attn_backend_cls(self)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -603,7 +604,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 data_type=self.kv_cache_dtype,
                 q_data_type=self.model_config.dtype,
             )
-            attn_metadata.plan()
+            self.attn_backend.begin_forward(attn_metadata)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
