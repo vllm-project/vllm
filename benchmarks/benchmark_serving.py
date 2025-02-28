@@ -91,7 +91,9 @@ class BenchmarkMetrics:
     std_e2el_ms: float
     percentiles_e2el_ms: List[Tuple[float, float]]
 
+
 SHAREGPT_URL = "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
+
 
 def download_and_cache_file(url: str, filename: Optional[str] = None):
     """Read and cache a file from a url."""
@@ -125,6 +127,7 @@ def download_and_cache_file(url: str, filename: Optional[str] = None):
             bar.update(len(chunk))
 
     return filename
+
 
 def sample_sharegpt_requests(
     dataset_path: str,
@@ -442,7 +445,6 @@ def sample_random_requests(
         # Only keep the first two turns of each conversation.
         dataset = [(data["conversations"][0]["value"],
                     data["conversations"][1]["value"]) for data in dataset]
-
 
         # Shuffle the dataset.
         random.shuffle(dataset)
