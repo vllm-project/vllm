@@ -678,7 +678,7 @@ class ModelConfig:
             self.enforce_eager = True
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
-                                 device_config) -> None:
+                                 device_config, use_v1: bool) -> None:
         if not self.use_async_output_proc:
             # Nothing to check
             return

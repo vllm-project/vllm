@@ -15,7 +15,6 @@ from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
-from vllm import envs
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
@@ -365,6 +364,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.use_v1 = vllm_config.use_v1
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
@@ -501,7 +501,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         if multimodal_embeddings is not None:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
-            if not envs.VLLM_USE_V1:
+            if not self.use_v1:
                 merge_multimodal_embeddings_from_map(
                     inputs_embeds, multimodal_embeddings,
                     attn_metadata.multi_modal_placeholder_index_maps["audio"])
