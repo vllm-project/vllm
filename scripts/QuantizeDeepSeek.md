@@ -4,7 +4,7 @@
 
 - [BKC for Quantizing DeepSeek V3/R1 with vLLM and INC](#bkc-for-quantizing-deepseek-v3r1-with-vllm-and-inc)
     - [Support Matrix](#support-matrix)
-    - [Setting Up 2 Nodes Environment](#setting-up-2-nodes-environment)
+    - [Setting Up Two Nodes Environment](#setting-up-two-nodes-environment)
         - [Prerequisites](#prerequisites)
         - [Install Dependencies](#install-dependencies)
         - [Exporting Environment variables](#exporting-environment-variables)
@@ -13,7 +13,10 @@
     - [Inference with FP8 Models on a Single Node WIP](#inference-with-fp8-models-on-a-single-node-wip)
         - [Prerequisites](#prerequisites)
         - [Running the Example](#running-the-example)
+    - [Accuray Evaluation WIP](#accuray-evaluation-wip)
+    - [Calibration with Customize dataset WIP](#calibration-with-customize-dataset-wip)
 
+<!-- /TOC -->
 <!-- /TOC -->
 
 This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1 on two nodes, and to perform quantization and inference on either two nodes or a single node.
@@ -35,7 +38,7 @@ This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1
 | FP8               | `inc_quant_with_fp8kv_config.json`| `inc_quant_with_fp8kv_one_node_config.json`|
 
 
-## Setting Up 2 Nodes Environment
+## Setting Up Two Nodes Environment
 >
 > [!NOTE]
 > If you want to quantize the model using an existing calibration result, you can skip this step and proceed directly to the `Inference with FP8 Models on a Single Node` section.
