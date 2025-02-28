@@ -15,8 +15,8 @@
 # limitations under the License.
 """PyTorch Mllama model."""
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import numpy as np
 import torch
@@ -59,11 +59,11 @@ from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataDict, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .clip import CLIPMLP
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsV0Only
 from .llama import LlamaDecoderLayer, LlamaMLP
 from .utils import maybe_prefix
 
@@ -243,12 +243,12 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         image_token_id = self.info.get_hf_config().image_token_index
         return [image_token_id] * num_images
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         token_per_chunk = self.info.get_token_per_chunk_from_config()
         image_token_id = self.info.get_hf_config().image_token_index
 
@@ -1128,7 +1128,8 @@ class MllamaForCausalLM(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(MllamaMultiModalProcessor,
                                         info=MllamaProcessingInfo,
                                         dummy_inputs=MllamaDummyInputsBuilder)
-class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
+class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                     SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]

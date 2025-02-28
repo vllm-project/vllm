@@ -229,6 +229,7 @@ class ModelConfig:
         trust_remote_code: bool,
         dtype: Union[str, torch.dtype],
         seed: int,
+        hf_config_path: Optional[str] = None,
         allowed_local_media_path: str = "",
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
@@ -259,6 +260,7 @@ class ModelConfig:
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
+        self.hf_config_path = hf_config_path
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
@@ -321,8 +323,9 @@ class ModelConfig:
         if self.enable_sleep_mode and not current_platform.is_cuda():
             raise ValueError("Sleep mode is only supported on CUDA devices.")
 
-        hf_config = get_config(self.model, trust_remote_code, revision,
-                               code_revision, config_format)
+        hf_config = get_config(self.hf_config_path or self.model,
+                               trust_remote_code, revision, code_revision,
+                               config_format)
 
         if hf_overrides_kw:
             logger.info("Overriding HF config with %s", hf_overrides_kw)
@@ -397,7 +400,7 @@ class ModelConfig:
         else:
             self.override_neuron_config = None
 
-        supported_tasks, task = self._resolve_task(task, self.hf_config)
+        supported_tasks, task = self._resolve_task(task)
         self.supported_tasks = supported_tasks
         self.task: Final = task
         if self.task in ("draft", "generate"):
@@ -414,6 +417,14 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    @property
+    def registry(self):
+        return ModelRegistry
+
+    @property
+    def architectures(self) -> list[str]:
+        return getattr(self.hf_config, "architectures", [])
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
@@ -443,8 +454,7 @@ class ModelConfig:
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
     ) -> Optional["MultiModalConfig"]:
-        architectures = getattr(self.hf_config, "architectures", [])
-        if ModelRegistry.is_multimodal_model(architectures):
+        if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
 
         if limit_mm_per_prompt:
@@ -477,16 +487,13 @@ class ModelConfig:
         return None
 
     def _init_attention_free(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.is_attention_free_model(architectures)
+        return self.registry.is_attention_free_model(self.architectures)
 
     def _init_is_hybrid(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.is_hybrid_model(architectures)
+        return self.registry.is_hybrid_model(self.architectures)
 
     def _init_has_inner_state(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.model_has_inner_state(architectures)
+        return self.registry.model_has_inner_state(self.architectures)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -504,9 +511,9 @@ class ModelConfig:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
-        if ModelRegistry.is_cross_encoder_model(architectures):
+        if self.registry.is_cross_encoder_model(architectures):
             return "score"
-        if ModelRegistry.is_transcription_model(architectures):
+        if self.registry.is_transcription_model(architectures):
             return "transcription"
 
         suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
@@ -519,7 +526,7 @@ class ModelConfig:
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
-        _, arch = ModelRegistry.inspect_model_cls(architectures)
+        _, arch = self.registry.inspect_model_cls(architectures)
 
         for suffix, pref_task in suffix_to_preferred_task:
             if arch.endswith(suffix) and pref_task in supported_tasks:
@@ -530,20 +537,19 @@ class ModelConfig:
     def _resolve_task(
         self,
         task_option: Union[TaskOption, Literal["draft"]],
-        hf_config: PretrainedConfig,
     ) -> Tuple[Set[_ResolvedTask], _ResolvedTask]:
         if task_option == "draft":
             return {"draft"}, "draft"
 
-        architectures = getattr(hf_config, "architectures", [])
+        registry = self.registry
+        architectures = self.architectures
 
         runner_support: Dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
-            "transcription":
-            ModelRegistry.is_transcription_model(architectures),
-            "generate": ModelRegistry.is_text_generation_model(architectures),
-            "pooling": ModelRegistry.is_pooling_model(architectures),
+            "transcription": registry.is_transcription_model(architectures),
+            "generate": registry.is_text_generation_model(architectures),
+            "pooling": registry.is_pooling_model(architectures),
         }
         supported_runner_types_lst: List[RunnerType] = [
             runner_type
@@ -752,8 +758,7 @@ class ModelConfig:
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
-            architectures = getattr(self.hf_config, "architectures", [])
-            if not ModelRegistry.is_pp_supported_model(architectures):
+            if not self.registry.is_pp_supported_model(self.architectures):
                 raise NotImplementedError(
                     "Pipeline parallelism is not supported for this model. "
                     "Supported models implement the `SupportsPP` interface.")
@@ -947,7 +952,7 @@ class ModelConfig:
     def try_get_generation_config(self) -> Dict[str, Any]:
         if self.generation_config is None or self.generation_config == "auto":
             config = try_get_generation_config(
-                self.model,
+                self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
             )
@@ -1020,8 +1025,7 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return ModelRegistry.is_cross_encoder_model(architectures)
+        return self.registry.is_cross_encoder_model(self.architectures)
 
     @property
     def use_mla(self) -> bool:
@@ -1034,6 +1038,11 @@ class ModelConfig:
     @property
     def runner_type(self) -> RunnerType:
         return _TASK_RUNNER[self.task]
+
+    @property
+    def is_v1_compatible(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_v1_compatible(architectures)
 
 
 class CacheConfig:
@@ -1974,13 +1983,12 @@ class SpeculativeConfig:
                 if num_speculative_tokens is None:
                     # Default to max value defined in draft model config.
                     num_speculative_tokens = n_predict
-                elif num_speculative_tokens > n_predict:
-                    # Verify provided value doesn't exceed the maximum
-                    # supported by the draft model.
+                elif num_speculative_tokens > n_predict and \
+                        num_speculative_tokens % n_predict != 0:
+                    # Ensure divisibility for MTP module reuse.
                     raise ValueError(
-                        "This speculative model supports a maximum of "
-                        f"num_speculative_tokens={n_predict}, but "
-                        f"{num_speculative_tokens=} was provided.")
+                        f"{num_speculative_tokens=} must be divisible by "
+                        f"{n_predict=}")
 
             speculative_draft_tensor_parallel_size = \
                 SpeculativeConfig._verify_and_get_draft_model_tensor_parallel_size(
