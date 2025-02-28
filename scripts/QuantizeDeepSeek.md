@@ -18,7 +18,7 @@
 
 <!-- /TOC -->
 
-This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1 on two nodes, and to perform quantization and inference on either two nodes or a single node.
+This document outlines the steps to use vLLM and INC for calibrating DeepSeek R1 on two nodes, as well as for performing quantization and inference on both two-node and single-node environments.
 
 ## Support Matrix
 
@@ -27,7 +27,7 @@ This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1
 | KVCache Precision | Configs |
 |---|---|
 | BF16              | `inc_measure_config.json`         |
-| FP8                | `inc_measure_with_fp8kv_config.json`|
+| FP8               | `inc_measure_with_fp8kv_config.json`|
 
 - Quantize/Inference Stage
 
@@ -42,11 +42,11 @@ This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1
 > [!NOTE]
 > If you want to quantize the model using an existing calibration result, you can skip this step and proceed directly to the `Inference with FP8 Models on a Single Node` section.
 
-We use Ray to set up a cluster with two nodes, so that we can image a system with 16 cards and update the procedure accordingly. It is crucial to ensure that both nodes have the same software stack. Docker container are used to guarantee a consistent environment. The high-level steps are as follows:
+We use Ray to set up a cluster with two nodes, so that we can image a system with 16 cards and update the procedure accordingly. It is crucial that both nodes use an identical software stack. Docker containers are used to ensure a consistent environment. The high-level steps are as follows:
 
 - Build and run Docker on each node.
 - Export the necessary environment variables within each Docker container.
-- Start the Ray cluster on the head node and connect the worker node to it.
+- Start the Ray cluster on the head node, then connect the worker node to it.
 
 For more details, please refer to the <https://github.com/yangulei/vllm-fork/blob/deepseek_r1_g2/scripts/multi_nodes_README.md>
 
@@ -78,12 +78,12 @@ VLLM_TARGET_DEVICE=hpu pip install -e .  --no-build-isolation
 
 - Model
   - DeepSeek R1 (BF16)
-  - Script for converting original FP8 model to BF16 model: `convert_fp8_to_bf16_cpu.py`
+  - Conversion Script: `convert_fp8_to_bf16_cpu.py`
 
 ### Exporting Environment variables
 >
 > [!NOTE]
-> Please update the `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` variables in the `head_node_source.sh` and `worker_node_source.sh` scripts with the name of network interface of the device.
+> Please update the `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` variables in the `head_node_source.sh` and `worker_node_source.sh` scripts with the name of network interface for your device.
 
 - Head Node
 
@@ -98,12 +98,12 @@ source worker_node_source.sh
 ```
 
 > [!TIP]
-> - Please start Ray in the SAME directory within both Docker containers.
+> - Ensure that Ray is started in the SAME directory within both Docker containers.
 > - If you modify the environment variables, please RESTART Ray.
 
 ## Calibration
 
-From the vLLM root directory, navigate to the scripts folder and run the calibration script. This process runs the BF16 model on a calibration dataset to observe the range of model weights and inputs.
+This process runs the BF16 model on a calibration dataset to observe the range of model weights and inputs.
 
 - BF16 KVCache
 
@@ -158,14 +158,14 @@ In this section, we load the BF16 model on DRAM and quantize it to FP8 model usi
 
 ### Running the Example
 
-- Quantize model weights to FP8 and using BF16 KVCache(WIP)
+Quantize model weights to FP8 and using BF16 KVCache(WIP)
 
 
 - BF16 KVCache
 ```bash
 # vllm root
 cd vllm/scripts
-# Download the unified calibration results
+# Download the unified calibration results:
 huggingface-cli download TODO --local-dir nc_workspace_measure_one_node
 QUANT_CONFIG=inc_quant_one_node_config.json python inc_example_one_node.py
 ```
@@ -174,7 +174,7 @@ QUANT_CONFIG=inc_quant_one_node_config.json python inc_example_one_node.py
 ```bash
 # vllm root
 cd vllm/scripts
-# Download the unified calibration results
+# Download the unified calibration results:
 huggingface-cli download Yi30/inc-tp8-ep8-full-kvcache-from-tp16-ep16 --local-dir nc_workspace_measure_kvache_one_node
 QUANT_CONFIG=inc_quant_with_fp8kv_one_node_config.json python inc_example_one_node.py --fp8_kvcache
 ```
