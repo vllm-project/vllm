@@ -39,6 +39,7 @@ from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import requests
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
                                   RequestFuncOutput)
 from datasets import load_dataset
@@ -91,12 +92,54 @@ class BenchmarkMetrics:
     percentiles_e2el_ms: List[Tuple[float, float]]
 
 
+SHAREGPT_URL = "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
+
+
+def download_and_cache_file(url: str, filename: Optional[str] = None):
+    """Read and cache a file from a url."""
+    if filename is None:
+        filename = os.path.join("./", url.split("/")[-1])
+
+    # Check if the cache file already exists
+    if os.path.exists(filename):
+        return filename
+
+    print(f"Downloading from {url} to {filename}")
+
+    # Stream the response to show the progress bar
+    response = requests.get(url, stream=True)
+    response.raise_for_status()  # Check for request errors
+
+    # Total size of the file in bytes
+    total_size = int(response.headers.get("content-length", 0))
+    chunk_size = 1024  # Download in chunks of 1KB
+
+    # Use tqdm to display the progress bar
+    with open(filename, "wb") as f, tqdm(
+            desc=filename,
+            total=total_size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+    ) as bar:
+        for chunk in response.iter_content(chunk_size=chunk_size):
+            f.write(chunk)
+            bar.update(len(chunk))
+
+    return filename
+
+
 def sample_sharegpt_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int, None]]:
+
+    # Download sharegpt if necessary
+    if not os.path.isfile(dataset_path):
+        dataset_path = download_and_cache_file(SHAREGPT_URL)
+
     # Load the dataset.
     with open(dataset_path, encoding='utf-8') as f:
         dataset = json.load(f)
@@ -370,6 +413,7 @@ def sample_random_requests(
     num_prompts: int,
     range_ratio: float,
     tokenizer: PreTrainedTokenizerBase,
+    dataset_path: str,
 ) -> List[Tuple[str, int, int]]:
     prefix_token_ids = np.random.randint(0,
                                          tokenizer.vocab_size,
@@ -385,15 +429,61 @@ def sample_random_requests(
         output_len + 1,
         size=num_prompts,
     )
-    offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
-    input_requests = []
-    for i in range(num_prompts):
-        prompt = tokenizer.decode(prefix_token_ids +
-                                  [(offsets[i] + i + j) % tokenizer.vocab_size
-                                   for j in range(input_lens[i])])
 
-        input_requests.append((prompt, int(prefix_len + input_lens[i]),
-                               int(output_lens[i]), None))
+    if dataset_path is not None:
+        # From ShareGPT repeat/truncate them to satisfy the input_lens
+
+        # Download sharegpt if necessary
+        if not os.path.isfile(dataset_path):
+            dataset_path = download_and_cache_file(SHAREGPT_URL)
+
+        # Load the dataset.
+        with open(dataset_path) as f:
+            dataset = json.load(f)
+        # Filter out the conversations with less than 2 turns.
+        dataset = [data for data in dataset if len(data["conversations"]) >= 2]
+        # Only keep the first two turns of each conversation.
+        dataset = [(data["conversations"][0]["value"],
+                    data["conversations"][1]["value"]) for data in dataset]
+
+        # Shuffle the dataset.
+        random.shuffle(dataset)
+
+        # Filter out sequences that are too long or too short
+        input_requests: List[Tuple[str, int, int]] = []
+        for data in dataset:
+            i = len(input_requests)
+            if i == num_prompts:
+                break
+
+            # Tokenize the prompts and completions.
+            prompt = data[0]
+            prompt_token_ids = tokenizer.encode(prompt)
+            prompt_len = len(prompt_token_ids)
+
+            # Skip empty prompt
+            if prompt_len == 0:
+                continue
+
+            if prompt_len > input_lens[i]:
+                input_ids = prompt_token_ids[:input_lens[i]]
+            else:
+                ratio = (input_lens[i] + prompt_len - 1) // prompt_len
+                input_ids = (prompt_token_ids * ratio)[:input_lens[i]]
+            prompt = tokenizer.decode(input_ids)
+            input_requests.append(
+                (prompt, int(input_lens[i]), int(output_lens[i]), None))
+    else:
+        offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
+        input_requests = []
+        for i in range(num_prompts):
+            prompt = tokenizer.decode(prefix_token_ids +
+                                      [(offsets[i] + i + j) %
+                                       tokenizer.vocab_size
+                                       for j in range(input_lens[i])])
+
+            input_requests.append((prompt, int(prefix_len + input_lens[i]),
+                                   int(output_lens[i]), None))
 
     return input_requests
 
@@ -936,6 +1026,7 @@ def main(args: argparse.Namespace):
             num_prompts=args.num_prompts,
             range_ratio=args.random_range_ratio,
             tokenizer=tokenizer,
+            dataset_path=args.dataset_path,
         )
 
     else:
