@@ -15,6 +15,8 @@ GUIDED_BACKEND=${4:-"xgrammar"}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR=${5:-"$SCRIPT_DIR/benchmark_results"}
 
+GUIDED_RATIO=${6:-0.5}
+
 # Create output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
 
@@ -26,6 +28,7 @@ COMMON_PARAMS="--backend $BACKEND \
                --model $MODEL \
                --dataset $DATASET \
                --guided-decoding-backend $GUIDED_BACKEND \
+               --guided-decoding-ratio $GUIDED_RATIO \
                --save-results \
                --result-dir $OUTPUT_DIR"
 
