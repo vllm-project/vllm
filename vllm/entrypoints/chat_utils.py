@@ -52,6 +52,8 @@ from vllm.utils import deprecate_kwargs, random_uuid
 
 logger = init_logger(__name__)
 
+IMAGE_PLACEHOLDER = "<##IMAGE##>"
+
 
 class AudioURL(TypedDict, total=False):
     url: Required[str]
@@ -856,11 +858,37 @@ def load_chat_template(
     return _cached_load_chat_template(chat_template, is_literal=is_literal)
 
 
+def _list_replace(obj: list, old: Any, new: Any, n: int = 1) -> None:
+    for idx, elem in enumerate(obj):
+        if n <= 0:
+            break
+        if elem == old:
+            obj[idx] = new
+            n -= 1
+
+
+def _get_interleaved_text_prompt(placeholder_counts: dict[str, int],
+                                 texts: list[str]) -> str:
+    for placeholder, n in placeholder_counts.items():
+        _list_replace(texts, IMAGE_PLACEHOLDER, placeholder, n)
+
+    return "\n".join(texts)
+
+
 # TODO: Let user specify how to insert multimodal tokens into prompt
 # (similar to chat template)
 def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
-                                     text_prompt: str) -> str:
+                                     texts: list[str],
+                                     interleave_strings: bool
+                                     ) -> str:
     """Combine multimodal prompts for a multimodal language model."""
+
+    # Pass interleaved text further in case the user used image placeholders
+    # himself, but forgot to disable the 'interleave_strings' flag
+    if interleave_strings:
+        text_prompt = _get_interleaved_text_prompt(placeholder_counts, texts)
+    else:
+        text_prompt = "\n".join(texts)
 
     # Look through the text prompt to check for missing placeholders
     missing_placeholders: list[str] = []
@@ -870,6 +898,13 @@ def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
         placeholder_counts[placeholder] -= text_prompt.count(placeholder)
 
         if placeholder_counts[placeholder] < 0:
+            logger.error(
+                "Placeholder count is negative! "
+                "Ensure that the 'interleave_strings' flag is disabled "
+                "(current value: %s) "
+                "when manually placing image placeholders.", interleave_strings
+            )
+            logger.debug(text_prompt)
             raise ValueError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
                 "actual multimodal data items.")
@@ -988,6 +1023,7 @@ def _parse_chat_message_content_parts(
     mm_tracker: BaseMultiModalItemTracker,
     *,
     wrap_dicts: bool,
+    interleave_strings: bool,
 ) -> list[ConversationMessage]:
     content = list[_ContentPart]()
 
@@ -998,6 +1034,7 @@ def _parse_chat_message_content_parts(
             part,
             mm_parser,
             wrap_dicts=wrap_dicts,
+            interleave_strings=interleave_strings
         )
         if parse_res:
             content.append(parse_res)
@@ -1007,11 +1044,14 @@ def _parse_chat_message_content_parts(
         return [ConversationMessage(role=role,
                                     content=content)]  # type: ignore
     texts = cast(list[str], content)
-    text_prompt = "\n".join(texts)
     mm_placeholder_counts = mm_parser.mm_placeholder_counts()
     if mm_placeholder_counts:
         text_prompt = _get_full_multimodal_text_prompt(mm_placeholder_counts,
-                                                       text_prompt)
+                                                       texts,
+                                                       interleave_strings)
+    else:
+        text_prompt = "\n".join(texts)
+
     return [ConversationMessage(role=role, content=text_prompt)]
 
 
@@ -1020,6 +1060,7 @@ def _parse_chat_message_content_part(
     mm_parser: BaseMultiModalContentParser,
     *,
     wrap_dicts: bool,
+    interleave_strings: bool,
 ) -> Optional[_ContentPart]:
     """Parses a single part of a conversation. If wrap_dicts is True,
     structured dictionary pieces for texts and images will be
@@ -1056,7 +1097,9 @@ def _parse_chat_message_content_part(
     if part_type == "image_url":
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
-        return {'type': 'image'} if wrap_dicts else None
+        return {'type': 'image'} if wrap_dicts else (
+            IMAGE_PLACEHOLDER if interleave_strings else None
+        )
     if part_type == "image_embeds":
         content = cast(Union[str, dict[str, str]], content)
         mm_parser.parse_image_embeds(content)
@@ -1088,6 +1131,7 @@ def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
     content_format: _ChatTemplateContentFormat,
+    interleave_strings: bool,
 ) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
@@ -1103,6 +1147,7 @@ def _parse_chat_message_content(
         content,  # type: ignore
         mm_tracker,
         wrap_dicts=(content_format == "openai"),
+        interleave_strings=interleave_strings,
     )
 
     for result_msg in result:
@@ -1155,6 +1200,10 @@ def parse_chat_messages(
             msg,
             mm_tracker,
             content_format,
+            interleave_strings=(
+                content_format == "string"
+                and model_config.multimodal_config.interleave_mm_strings
+            )
         )
 
         conversation.extend(sub_messages)
@@ -1178,6 +1227,10 @@ def parse_chat_messages_futures(
             msg,
             mm_tracker,
             content_format,
+            interleave_strings=(
+                content_format == "string"
+                and model_config.multimodal_config.interleave_mm_strings
+            )
         )
 
         conversation.extend(sub_messages)
