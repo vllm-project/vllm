@@ -135,7 +135,10 @@ class DeepseekV2MoE(nn.Module):
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias)
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            num_shared_experts=config.n_shared_experts,
+            routed_scaling_factor=self.routed_scaling_factor,
+        )
 
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
@@ -715,7 +718,9 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts)
+            num_experts=self.config.n_routed_experts,
+            num_shared_experts=self.config.n_shared_experts,
+        )
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
