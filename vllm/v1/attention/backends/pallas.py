@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
-import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
@@ -84,9 +83,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
-            raise ValueError(
-                "Paged attention Pallas kernel does not support block-sparse attention."
-            )
+            raise ValueError("Paged attention Pallas kernel does "
+                             "not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -130,7 +128,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = ([num_kv_heads, num_blocks, block_size, head_size], [num_kv_heads, num_blocks, block_size, head_size])
+            kv_cache = ([num_kv_heads, num_blocks, block_size, head_size], 
+                        [num_kv_heads, num_blocks, block_size, head_size])
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]

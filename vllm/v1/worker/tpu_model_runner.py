@@ -25,7 +25,7 @@ from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
                                                PallasMetadata)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -37,11 +37,6 @@ logger = init_logger(__name__)
 # Here we utilize the behavior that out-of-bound index is ignored.
 # FIXME(woosuk): Find a more reliable way to prevent possible bugs.
 _PAD_SLOT_ID = 1_000_000_000
-# FIXME(woosuk): Temporarily disabled top-p sampling since it's too slow.
-_ENABLE_TOP_P = False
-# FIXME(woosuk): A temporary hack to support `n > 1`.
-# This can significantly affect the performance if too large.
-_MAX_NUM_SAMPLES = 128
 INVALID_TOKEN_ID = -1
 
 
@@ -126,9 +121,12 @@ class TPUModelRunner:
                                             device="cpu")
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
-        # self.input_batch.block_table has a shape of [max_num_reqs, max_num_blocks_per_req].
-        # To reduce the number of recompilation, we want the block_table.shape[0] to be num_tokens.
-        # To make the block_table to be compatible with the paged attention kernel, we want the block_table[1] to be multiple of NUM_KV_PAGES_PER_BLOCK.
+        # self.input_batch.block_table has a shape of [max_num_reqs,
+        # max_num_blocks_per_req]. To reduce the number of recompilation,
+        # we want the block_table.shape[0] to be num_tokens.
+        # To make the block_table to be compatible with the paged attention
+        # kernel, we want the block_table[1] to be multiple of
+        # NUM_KV_PAGES_PER_BLOCK.
         padded_max_num_blocks_per_req = _get_padded_number(
             self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
         self.block_table_cpu = torch.zeros(
@@ -160,7 +158,7 @@ class TPUModelRunner:
         the input GPU tensors for the model.
 
         Returns:
-            True if there is a new/resumed/paused/finished request in the batch.
+            True if there is a new/resumed/paused/finished request.
             If False, we can skip copying SamplingMetadata to the GPU.
         """
         # Remove finished requests from the cached states.
@@ -338,7 +336,7 @@ class TPUModelRunner:
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # For each scheduled token, what is its position in the corresponding req.
+        # For each scheduled token, what is its position in corresponding req.
         arange = np.concatenate(
             [self.arange_np[:n] for n in num_scheduled_tokens_per_req])
 
@@ -406,9 +404,8 @@ class TPUModelRunner:
                                                  self.device)
         padded_block_table = self.block_table_cpu[:
                                                   padded_total_num_scheduled_tokens]
-        padded_block_table[:num_reqs, :self.
-                           max_num_blocks_per_req] = self.input_batch.block_table.get_cpu_tensor(
-                           )[:num_reqs]
+        padded_block_table[:num_reqs, :self.max_num_blocks_per_req] = (
+            self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
         padded_block_table = padded_block_table.to(self.device)
         query_start_loc = self.query_start_loc_cpu[:
                                                    padded_total_num_scheduled_tokens
@@ -480,7 +477,7 @@ class TPUModelRunner:
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
 
-        prompt_logprobs_dict = {}
+        prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]] = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
