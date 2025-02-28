@@ -1,4 +1,3 @@
-    "UltravoxConfig",
 # SPDX-License-Identifier: Apache-2.0
 
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig

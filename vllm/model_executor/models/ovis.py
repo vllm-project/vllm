@@ -361,18 +361,21 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
 
 
 class SiglipVisualTokenizer(nn.Module):
-    def __init__(self, config: PretrainedConfig, hidden_size: int):
+    def __init__(self, config: OvisConfig):
         super().__init__()
         self.config = config
-        self.backbone_config: SiglipVisionConfig = config.backbone_config
 
-        self.hidden_stride = config.
+        self.visual_tokenizer_config = config.visual_tokenizer_config
+        self.backbone_config: SiglipVisionConfig = self.visual_tokenizer_config.backbone_config
+
+        self.hidden_stride = self.config.hidden_stride
+        self.hidden_size = self.config.hidden_size
 
         self.backbone = SiglipVisionModel(self.backbone_config)
         head_dim = self.config.vocab_size - len(IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
         self.head = torch.nn.Sequential(
             torch.nn.Linear(
-                hidden_size * self.config.hidden_stride ** 2, head_dim,
+                self.hidden_size * self.hidden_stride ** 2, head_dim,
                 bias=False
             ),
             torch.nn.LayerNorm(head_dim)
@@ -460,7 +463,7 @@ class Ovis(nn.Module,SupportsMultiModal,SupportsPP):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.llm = init_vllm_registered_model(
+        self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.llm_config,
             prefix=maybe_prefix(prefix,"language_model")
@@ -473,7 +476,7 @@ class Ovis(nn.Module,SupportsMultiModal,SupportsPP):
             device=self.visual_tokenizer.device,
             dtype=self.visual_tokenizer.dtype
         )
-        
+    
         self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
     
     @cached_property
@@ -582,7 +585,7 @@ class Ovis(nn.Module,SupportsMultiModal,SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.llm.compute_logits(hidden_states, sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
     
     def sample(
         self,
@@ -593,4 +596,4 @@ class Ovis(nn.Module,SupportsMultiModal,SupportsPP):
     
     def load_weights(self,weights:Iterable[Tuple[str,torch.Tensor]])->Set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights) 
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper) 
