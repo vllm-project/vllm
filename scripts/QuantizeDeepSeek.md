@@ -95,7 +95,7 @@ In this mode, we load the BF16 model on DRAM and quantize it to FP8 model using 
 cd vllm/scripts
 # Download the unified calibration results
 huggingface-cli download Yi30/nc_workspace_tmp_mla_merged_from_16_to_8 --local-dir nc_workspace_measure
-QUANT_CONFIG=inc_quant_config.json python inc_quant_one_node.py
+QUANT_CONFIG=inc_quant_config.json python inc_quant_on_one_node.py
 ```
 
 
@@ -106,5 +106,5 @@ QUANT_CONFIG=inc_quant_config.json python inc_quant_one_node.py
 cd vllm/scripts
 # Download the unified calibration results
 huggingface-cli download Yi30/inc-tp8-ep8-full-kvcache-from-tp16-ep16 --local-dir nc_workspace_measure_kvache
-QUANT_CONFIG=inc_quant_with_fp8kv_config.json python inc_quant_one_node.py --fp8kv
+QUANT_CONFIG=inc_quant_with_fp8kv_config.json python inc_quant_on_one_node.py --fp8kv
 ```
