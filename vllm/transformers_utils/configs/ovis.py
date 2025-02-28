@@ -1,7 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# copied from https://huggingface.co/AIDC-AI/Ovis1.6-Llama3.2-3B/blob/main/configuration_ovis.py
+# and https://huggingface.co/AIDC-AI/Ovis1.6-Gemma2-9B/blob/main/config.json
+
 from abc import ABC, abstractmethod
 from typing import List, Dict, Union, Optional
 
 from transformers import PretrainedConfig, AutoConfig
+
+IGNORE_ID = -100
+IMAGE_TOKEN_ID = -200
+IMAGE_TOKEN = "<image>"
+IMAGE_ATOM_ID = -300
+IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
 
 class BaseVisualTokenizerConfig(PretrainedConfig):
     def __init__(
@@ -164,6 +175,74 @@ class GemmaConversationFormatter(ConversationFormatter):
             if frm == "gpt":
                 # learning `\n` following `im_end` is meaningless, so the last `\n` token is ignored in label
                 label_ids[self.gpt_token_num:-1] = token_ids[self.gpt_token_num:-1]
+            labels.extend(label_ids)
+
+        assert self._tokenize_with_image_symbol(prompt) == input_ids
+        assert len(input_ids) == len(labels)
+
+        return prompt, input_ids, labels
+
+    def format_query(self, query, generation_preface=""):
+        prompt, input_ids, _ = self.format([{
+            "from": "human",
+            "value": query
+        }], generation_preface=generation_preface)
+
+        return prompt, input_ids
+
+
+class Llama3ConversationFormatter(ConversationFormatter):
+    support_tokenizer_types = ['PreTrainedTokenizerFast']
+
+    def __init__(self, tokenizer):
+        super().__init__(tokenizer)
+        self.from2role = {
+            "system": "<|start_header_id|>system<|end_header_id|>\n\n",
+            "human": "<|start_header_id|>user<|end_header_id|>\n\n",
+            "gpt": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+        }
+        self.gpt_token_num = None
+        self.im_end = "<|eot_id|>"
+        self.default_system_prompt = "You are a helpful and honest multimodal assistant."
+        self.bos_token = "<|begin_of_text|>"
+        self.bos_token_ids = None
+
+    def format(self, conversations: List[Dict], generation_preface=None):
+        if self.gpt_token_num is None:
+            self.gpt_token_num = len(self.tokenizer(self.from2role["gpt"], add_special_tokens=False).input_ids)
+
+        if self.bos_token_ids is None:
+            self.bos_token_ids = self.tokenizer(self.bos_token, add_special_tokens=False).input_ids
+
+        if conversations[0]["from"] != "system":
+            conversations.insert(0, {
+                "from": "system",
+                "value": self.default_system_prompt
+            })
+
+        if generation_preface is not None:
+            conversations.append({
+                "from": "gpt",
+                "value": generation_preface
+            })
+
+        prompt = "" + self.bos_token
+        input_ids = [] + self.bos_token_ids
+        labels = [] + [IGNORE_ID] * len(input_ids)
+        num_conversation = len(conversations)
+        for i, conversation in enumerate(conversations):
+            frm = conversation["from"]
+            role = self.from2role[frm]
+            message = conversation["value"].strip()
+            text = role + message
+            if i < num_conversation - 1 or generation_preface is None:
+                text += self.im_end
+            prompt += text
+            token_ids = self._tokenize_with_image_symbol(text)
+            input_ids.extend(token_ids)
+            label_ids = [self.ignore_id] * len(token_ids)
+            if frm == "gpt":
+                label_ids[self.gpt_token_num:] = token_ids[self.gpt_token_num:]
             labels.extend(label_ids)
 
         assert self._tokenize_with_image_symbol(prompt) == input_ids

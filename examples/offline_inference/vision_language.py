@@ -417,12 +417,12 @@ def run_nvlm_d(question: str, modality: str):
 def run_ovis(question: str, modality: str):
     assert modality == "image"
     
-    model_name = "AIDC-AI/Ovis1.6-Gemma2-9B"
+    model_name = "AIDC-AI/Ovis1.6-Llama3.2-3B"
     
     llm = LLM(
         model=model_name,
-        dtype="bfloat16",
-        max_modal_len=8192,
+        dtype="float16",
+        max_model_len=8192,
         trust_remote_code=True,
     )
     stop_token_ids = [1,107]

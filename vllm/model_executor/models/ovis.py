@@ -1,15 +1,11 @@
 from functools import cached_property
-import os
 import logging
-from packaging import version
-from importlib import import_module
 from typing import Any, Iterable, List, Literal, Mapping, Set, Tuple, TypeVar, TypedDict, Union, Optional, Dict
 import PIL
 
 import torch
 import torch.nn as nn
 from torch import Tensor, TensorType
-from torch.nn import init
 
 from transformers import (ProcessorMixin,SiglipVisionConfig,BatchFeature,PretrainedConfig,PreTrainedTokenizer)
 from torch.nn.functional import softmax, gumbel_softmax, pad
@@ -19,7 +15,7 @@ from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs,Neste
 from vllm.multimodal.parse import ImageEmbeddingItems, ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import BaseMultiModalProcessor, BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.transformers_utils.configs.ovis import ConversationFormatter, GemmaConversationFormatter,OvisConfig
+from vllm.transformers_utils.configs.ovis import ConversationFormatter, GemmaConversationFormatter, OvisConfig, Llama3ConversationFormatter
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -63,7 +59,8 @@ class OvisProcessor:
         self.visual_tokenizer = SiglipVisualTokenizer(config)
     
     def get_conversation_formatter(self) -> ConversationFormatter:
-        return GemmaConversationFormatter(self.tokenizer)
+        return Llama3ConversationFormatter(self.tokenizer)
+        # return GemmaConversationFormatter(self.tokenizer)
     
     @staticmethod
     def construct_image_placeholders(grid):
@@ -362,25 +359,26 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[_I]):
                replacement=get_replacement_ovis
            )
        ]
-            
+
+
 class SiglipVisualTokenizer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig,**kwargs):
+    def __init__(self, config: PretrainedConfig, hidden_size: int):
         super().__init__()
-        quant_config = vllm_config.quant_config
-        config = vllm_config.model_config.hf_config.visual_tokenizer_config
         self.config = config
-        self.backbone = SiglipVisionModel(config.backbone_config._name_or_path,
-                                              quant_config, 
-                                              prefix="vision_backbone")
+        self.backbone_config = config.backbone_config
+
+        self.hidden_stride = config.
+
+        self.backbone = SiglipVisionModel(self.backbone_config)
         head_dim = self.config.vocab_size - len(IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
         self.head = torch.nn.Sequential(
             torch.nn.Linear(
-                self.backbone.config.hidden_size * self.config.hidden_stride * self.config.hidden_stride, head_dim,
+                hidden_size * self.config.hidden_stride ** 2, head_dim,
                 bias=False
             ),
             torch.nn.LayerNorm(head_dim)
         )
-        
+
     def tokenize(self, logits):
         def st_argmax(y_soft, dim):  # straight-through softmax
             index = y_soft.max(dim, keepdim=True)[1]
@@ -445,7 +443,16 @@ class VisualEmbedding(torch.nn.Embedding):
             return super().forward(visual_tokens)
         return torch.matmul(visual_tokens, self.weight)
  
-class OvisForConditionalGeneration(nn.Module,SupportsMultiModal,SupportsPP):
+
+@MULTIMODAL_REGISTRY.register_processor(
+    DeepseekVL2MultiModalProcessor,
+    info=DeepseekVL2ProcessingInfo,
+    dummy_inputs=DeepseekVL2DummyInputsBuilder)
+class Ovis(nn.Module,SupportsMultiModal,SupportsPP):
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
+        "language.": "language_model.",
+    })
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -453,15 +460,14 @@ class OvisForConditionalGeneration(nn.Module,SupportsMultiModal,SupportsPP):
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-        
+
         self.llm = init_vllm_registered_model(
             vllm_config=vllm_config,
-            hf_config=config.text_config,
+            hf_config=config.llm_config,
             prefix=maybe_prefix(prefix,"language_model")
         )
         self.text_tokenizer = get_tokenizer(self.config.name_or_path)
-        self.visual_tokenizer = SiglipVisualTokenizer(self.config,
-                                                      image_processor_name_or_path=self.config.name_or_path)
+        self.visual_tokenizer = SiglipVisualTokenizer(self.config.visual_tokenizer_config)
         self.vte = VisualEmbedding(
             self.config.visual_tokenizer_config.vocab_size,
             self.config.hidden_size,

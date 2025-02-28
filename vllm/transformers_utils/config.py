@@ -38,7 +38,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              NemotronConfig, NVLM_D_Config,
                                              Olmo2Config, RWConfig,
                                              SolarConfig, Telechat2Config,
-                                             UltravoxConfig,OvisConfig)
+                                             UltravoxConfig, OvisConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
@@ -75,10 +75,10 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
     "olmo2": Olmo2Config,
+    # "ovis":OvisConfig,
     "solar": SolarConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
-    "ovis":OvisConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
