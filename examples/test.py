@@ -33,5 +33,5 @@ print(res)
 
 print("t_elap: %.2f seconds" % (np.median(res)))
 
-#print(responses)
+print(responses[0])
 
