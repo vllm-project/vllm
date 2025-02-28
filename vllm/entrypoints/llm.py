@@ -96,6 +96,7 @@ class LLM:
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
+        # TODO: How to rewrite this
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
