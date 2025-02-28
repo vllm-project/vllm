@@ -8,7 +8,7 @@ import pytest
 from vllm import LLM, PoolingParams, PoolingRequestOutput
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
+MODEL_NAME = "intfloat/multilingual-e5-small"
 
 PROMPTS = [
     "Hello, my name is",
