@@ -205,7 +205,7 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
-    generation_config: Optional[str] = None
+    generation_config: Optional[str] = "auto"
     override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
     model_impl: str = "auto"
