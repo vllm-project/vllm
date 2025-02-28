@@ -1138,13 +1138,10 @@ class EngineArgs:
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
-        use_v1_if_supported: bool = False,
+        use_v1_if_supported: bool = True,
     ) -> VllmConfig:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
-
-        if envs.VLLM_USE_V1:
-            self._override_v1_engine_args(usage_context)
 
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
@@ -1156,7 +1153,23 @@ class EngineArgs:
         # separately from this method. In fact, this method is
         # usually called from AsyncLLMEngine.from_engine_args.
         try_v1 = use_v1_if_supported or envs.VLLM_USE_V1
-        use_v1 = try_v1 and self._use_v1_oracle(model_config)
+        use_v1 = False
+        if self._is_v1_supported_oracle(model_config):
+            if not try_v1:
+                logger.info(
+                    "Detected that your EngineConfig is compatible with "
+                    "VLLM V1. Launch with VLLM_USE_V1=1 to enable the V1"
+                    "Engine.")
+            else:
+                logger.info(
+                    "Detected that your EngineConfig is compatible with "
+                    "VLLM V1. Launch with VLLM_USE_V1=0 to disable the V1 "
+                    "Engine.")
+                logger.warning(
+                    "VLLM V1 only supports xgrammar for guided decoding. "
+                    "See [LINK TO DOCS] for more details on the implications.")
+                use_v1 = True
+
         if envs.is_set("VLLM_USE_V1"):
             # If the user explicitly set VLLM_USE_V1, make
             # sure that we have forced things properly.
@@ -1165,7 +1178,6 @@ class EngineArgs:
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
             self._set_default_args_v1(usage_context)
-            self.compilation_config.set_splitting_ops_for_v1()
         else:
             self._set_default_args_v0(model_config)
 
@@ -1424,13 +1436,12 @@ class EngineArgs:
 
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
-            if envs.VLLM_USE_V1:
-                _raise_or_warning(feature_name=f"Task {model_config.task}",
-                                  recommend_to_remove=False)
+            _raise_or_warning(feature_name=f"Task {model_config.task}",
+                              recommend_to_remove=False)
             return False
 
-        # No Mamba or Encoder-Decoder.
-        if (not model_config.is_v1_compatible()):
+        # No Mamba or Encoder-Decoder so far.
+        if not model_config.is_v1_compatible:
             _raise_or_warning(feature_name=model_config.architectures(),
                               recommend_to_remove=False)
             return False
@@ -1612,6 +1623,9 @@ class EngineArgs:
             self.max_num_seqs = default_max_num_seqs
             logger.info("Setting max_num_seqs to %d for %s usage context.",
                         self.max_num_seqs, usage_context.value)
+
+        if self.compilation_config:
+            self.compilation_config.set_splitting_ops_for_v1()
 
 
 @dataclass
