@@ -689,6 +689,7 @@ class DeepseekV3Model(nn.Module):
                                             attn_metadata, residual)
             if is_hpu:
                 htorch.core.mark_step()
+            show_mem_info(logger, msg=f"After layer {i}")
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
