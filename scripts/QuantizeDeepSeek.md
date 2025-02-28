@@ -17,7 +17,6 @@
     - [Calibration with Customize dataset WIP](#calibration-with-customize-dataset-wip)
 
 <!-- /TOC -->
-<!-- /TOC -->
 
 This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1 on two nodes, and to perform quantization and inference on either two nodes or a single node.
 
