@@ -57,6 +57,10 @@ source  head_node_source.sh
 source worker_node_souce.sh
 ```
 
+> [!TIP]
+> Please start Ray in the same directory within both Docker containers.
+> Please restart Ray if you need to modify the environment variables.
+
 ## Calibration
 
 From the vLLM root directory, navigate to the scripts folder and run the calibration script. This process runs the BF16 model on a calibration dataset to observe the range of model weights and inputs.
