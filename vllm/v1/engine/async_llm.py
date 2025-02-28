@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import os
 from typing import AsyncGenerator, List, Mapping, Optional, Set, Type, Union
 
 import numpy as np
@@ -259,6 +258,7 @@ class AsyncLLM(EngineClient):
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
+
     def generate(
         self,
         prompt: PromptType,

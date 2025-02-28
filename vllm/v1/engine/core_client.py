@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import os
 import queue
-import signal
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -18,8 +16,7 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
-                        make_zmq_socket)
+from vllm.utils import get_open_zmq_ipc_path, make_zmq_socket
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
@@ -429,7 +426,7 @@ class AsyncMPClient(MPClient):
             executor_class=executor_class,
             log_stats=log_stats,
         )
-        self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs, 
+        self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs,
                                                 Exception]] = asyncio.Queue()
         self.queue_task: Optional[asyncio.Task] = None
 
@@ -452,8 +449,7 @@ class AsyncMPClient(MPClient):
             # to overlap with this task (run_output_handler).
             try:
                 while True:
-                    (frame, ) = await output_socket.recv_multipart(
-                        copy=False)
+                    (frame, ) = await output_socket.recv_multipart(copy=False)
                     self._validate_alive(frame.buffer)
                     outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
@@ -478,7 +474,6 @@ class AsyncMPClient(MPClient):
             raise self._format_exception(outputs) from None
 
         return self.decoder.decode(outputs)
-
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
