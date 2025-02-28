@@ -172,12 +172,6 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        # Currently we will broadcast the bitmask. It is populated during
-        # each schedule() run.
-        if len(self.guided_decoding_manager.requests) > 0:
-            scheduler_output.grammar_bitmask = \
-                self.guided_decoding_manager.grammar_bitmask
-
         output = self.model_executor.execute_model(scheduler_output)
 
         engine_core_outputs = self.scheduler.update_from_output(
