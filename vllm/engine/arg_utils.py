@@ -1138,7 +1138,6 @@ class EngineArgs:
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
-        use_v1_if_supported: bool = True,
     ) -> VllmConfig:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
@@ -1146,31 +1145,17 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        # Attempt to use the V1 Engine if prompted.
-        # NOTE: we need to be careful to opt-in, since the
-        # user is in control of whether they use V0's
-        # AsyncLLMEngine or V1's AsyncLLM, which is imported
-        # separately from this method. In fact, this method is
-        # usually called from AsyncLLMEngine.from_engine_args.
-        try_v1 = use_v1_if_supported or envs.VLLM_USE_V1
+        # TODO(rob): when we want to make V1 the default,
+        # we simply modify the logic here.
         use_v1 = False
         if self._is_v1_supported_oracle(model_config):
-            if not try_v1:
+            if envs.VLLM_USE_V1:
+                use_v1 = True
+            else:
                 logger.info(
                     "Detected that your EngineConfig is compatible with "
                     "VLLM V1. Launch with VLLM_USE_V1=1 to enable the V1"
                     "Engine.")
-            else:
-                logger.info(
-                    "Detected that your EngineConfig is compatible with "
-                    "VLLM V1. Launch with VLLM_USE_V1=0 to disable the V1 "
-                    "Engine.")
-                use_v1 = True
-
-        if envs.is_set("VLLM_USE_V1"):
-            # If the user explicitly set VLLM_USE_V1, make
-            # sure that we have forced things properly.
-            assert use_v1 == envs.VLLM_USE_V1
 
         # Set default arguments for V0 or V1 Engine.
         if use_v1:

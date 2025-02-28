@@ -99,6 +99,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.block_size,
             self.model_config.is_attention_free,
             use_mla=self.model_config.use_mla,
+            use_v1=self.vllm_config.use_v1,
         )
         if self.attn_backend is None:
             error_msg = (
