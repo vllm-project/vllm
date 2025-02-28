@@ -2,7 +2,7 @@
 
 # GPTQModel
 
-To create a new [2, 3, 4, 8]-bit GPTQ quantized model, you can leverage [GPTQModel](https://github.com/ModelCloud/GPTQModel).
+To create a new [2, 3, 4, 8]-bit GPTQ quantized model, you can leverage [GPTQModel](https://github.com/ModelCloud/GPTQModel) from ModelCloud.AI.
 
 Quantizing reduces the model's precision from BF16 (16-bits) to 2-to-8-bits range which can significantly reduce the 
 model memory footprint while at-the-same-time increasing inference performance.
