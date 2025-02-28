@@ -133,9 +133,6 @@ def sample_sharegpt_requests(
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int, None]]:
 
-    print(dataset_path)
-    print(dataset_path)
-    print(dataset_path)
     # Download sharegpt if necessary
     if not os.path.isfile(dataset_path):
         dataset_path = download_and_cache_file(SHAREGPT_URL)
