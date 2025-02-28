@@ -7,6 +7,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
 
+
 @pytest.fixture
 def model_runner():
     scheduler_config = SchedulerConfig(
@@ -41,6 +42,7 @@ def model_runner():
     else:
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
         return GPUModelRunner(vllm_config, 'cuda')
+
 
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
     new_reqs = []
