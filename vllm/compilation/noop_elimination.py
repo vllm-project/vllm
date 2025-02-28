@@ -13,7 +13,7 @@ from .vllm_inductor_pass import VllmInductorPass
 logger = init_logger(__name__)
 
 
-class RedundantReshapesPass(VllmInductorPass):
+class NoOpEliminationPass(VllmInductorPass):
     """
     This is an inductor pass that removes redundant reshape/slice operations.
     It is required for RMSNorm-quant fusion to work properly.
@@ -33,14 +33,14 @@ class RedundantReshapesPass(VllmInductorPass):
     out: "f8e4m3fn[s0, 4096]" = at[1]
 
     Example graph 2:
-    arg0: "s0" = ...
+    arg0: "s0" = SymInt(s0)
     scaled_mm: "f16[s0, 4096]" = ...
     slice_1: "f16[s0, 4096]" = torch.slice(scaled_mm, -1, 0, arg0)
     at = auto_functionalized(fused_add_rms_norm, input = slice_1, ...)
     out: "f16[s0, 4096]" = torch.slice_scatter(scaled_mm, at[1], 0, 0, arg0)
 
     Can be replaced with:
-    arg0: "s0" = ...
+    arg0: "s0" = SymInt(s0)
     scaled_mm: "f16[s0, 4096]" = ...
     at = auto_functionalized(fused_add_rms_norm, input = scaled_mm, ...)
     out: "f16[s0, 4096]" = at[1]
@@ -51,7 +51,7 @@ class RedundantReshapesPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        self.dump_graph(graph, "before_reshapes")
+        self.dump_graph(graph, "before_noop_elimination")
         count = 0
         # Remove no-op reshapes/views:
         for node in graph.nodes:
@@ -98,9 +98,8 @@ class RedundantReshapesPass(VllmInductorPass):
                     graph.erase_node(node)
                     count += 1
 
-        logger.debug("Removed %s no-op reshapes", count)
-
-        self.dump_graph(graph, "after_reshapes")
+        logger.debug("Removed %s no-op reshapes and slices", count)
+        self.dump_graph(graph, "after_noop_elimination")
         self.end_and_log()
 
     def all_dims_equivalent(self, dims: Iterable[Union[int, torch.fx.Node]],
@@ -112,7 +111,7 @@ class RedundantReshapesPass(VllmInductorPass):
                         i_dim: Union[int, SymInt]) -> bool:
         """
         This function checks if two dimensions are equivalent.
-        :param dim: The dimension arg to reshape
+        :param dim: The dimension arg to reshape/slice
         :param i_dim: The corresponding dimension in the input tensor
         :return: Are the dimensions equivalent?
 
