@@ -275,8 +275,7 @@ class KVCacheManager:
         if self.block_pool.reset_prefix_cache():
             self.prefix_cache_stats.reset = True
             return True
-        else:
-            return False
+        return False
 
     def get_num_common_prefix_blocks(
         self,
