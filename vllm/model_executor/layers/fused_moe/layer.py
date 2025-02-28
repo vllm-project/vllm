@@ -853,7 +853,7 @@ class FusedMoE(torch.nn.Module):
 def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
                 layer_name: str) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
-    self = forward_context.attn_layers[layer_name]
+    self = forward_context.smuggled_layers[layer_name]
     assert self.quant_method is not None
 
     return self.forward_impl(hidden_states, router_logits)

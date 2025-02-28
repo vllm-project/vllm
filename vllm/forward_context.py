@@ -28,7 +28,7 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 @dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
-    attn_layers: Dict[str, Any]
+    smuggled_layers: Dict[str, Any]
     # TODO: extend to support per-layer dynamic forward context
     attn_metadata: "AttentionMetadata"  # set dynamically for each forward pass
     # TODO: remove after making all virtual_engines share the same kv cache
@@ -87,7 +87,7 @@ def set_forward_context(attn_metadata: Any,
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
-        attn_layers=vllm_config.compilation_config.static_forward_context,
+        smuggled_layers=vllm_config.compilation_config.static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         cumsum_tokens_across_dp=cumsum_tokens_across_dp)
