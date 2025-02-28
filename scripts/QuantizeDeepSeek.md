@@ -64,17 +64,23 @@ source worker_multi_nodes_source.sh
 ## Calibration
 
 From the vLLM root directory, navigate to the scripts folder and run the calibration script. This process runs the BF16 model on a calibration dataset to observe the range of model weights and inputs.
+
+
 ```bash
+export QUANT_CONFIG=inc_measure_config.json
+# restart ray 
 cd vllm/scripts
-python n2_prepare.py
+python inc_prepare_on_two_nodes.py
 ```
 
 ## Inference with FP8 Models on Two Nodes
 This script loads the BF16 model into DRAM, moves it to the HPU, and quantizes the model layer by layer.
 ```bash
 # vllm root
+export QUANT_CONFIG=inc_quant_config.json
+# restart ray 
 cd vllm/scripts
-python n2_quant.py
+python inc_quant_on_two_nodes.py
 ```
 
 ## Inference with FP8 Models on a Single Node
@@ -88,7 +94,7 @@ In this mode, we load the BF16 model on DRAM and quantize it to FP8 model using 
 
 ### Running the Example
 
-- Quantize model weights to FP8
+- Quantize model weights to FP8 and using BF16 KVCache(WIP)
 
 ```bash
 # vllm root
