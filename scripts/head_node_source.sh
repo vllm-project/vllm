@@ -42,6 +42,9 @@ export VLLM_GRAPH_PROMPT_RATIO=0
 # input_max=4096
 # output_max=1024
 
+# INC
+unset QUANT_CONFIG
+
 # Fot prepare
 max_num_batched_tokens=2048
 max_num_seqs=1024

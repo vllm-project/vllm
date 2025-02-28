@@ -34,6 +34,9 @@ export VLLM_GPU_MEMORY_UTILIZATION=0.98
 export VLLM_GRAPH_RESERVED_MEM=0.35
 export VLLM_GRAPH_PROMPT_RATIO=0
 
+# INC
+unset QUANT_CONFIG
+
 # params
 # max_num_batched_tokens=2048
 # max_num_seqs=1024
