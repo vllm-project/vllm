@@ -167,6 +167,7 @@ class GraniteMoeSharedModel(nn.Module):
             self.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
+            quant_config=quant_config,
         )
         self.embedding_multiplier = config.embedding_multiplier
 
@@ -228,15 +229,6 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "embed_tokens",
-        "lm_head",
-        "layer",
-        "input_linear",
-        "output_linear",
-    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
@@ -268,7 +260,7 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA):
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
-        )
+            prefix=maybe_prefix(prefix, "lm_head"))
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
