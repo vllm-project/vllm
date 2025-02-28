@@ -200,7 +200,7 @@ class PromptInsertion(PromptUpdate):
                 insertion="<image>" * image_feature_size,
             )
 
-        Insert these tokens after a prefix `Images:`:
+        Insert these tokens after a prefix ``Images:``:
 
         .. code-block:: python
 
