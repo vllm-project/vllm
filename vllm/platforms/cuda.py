@@ -205,6 +205,7 @@ class CudaPlatformBase(Platform):
                 f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         target_backend = _Backend.FLASH_ATTN
+        print(f"{kv_cache_dtype=}")
         if not cls.has_device_capability(80):
             # Volta and Turing NVIDIA GPUs.
             logger.info(
@@ -216,6 +217,7 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for dtype other than "
                 "torch.float16 or torch.bfloat16.")
             target_backend = _Backend.XFORMERS
+
         elif kv_cache_dtype is not None and \
             kv_cache_dtype.startswith("fp8"):
             logger.info(
