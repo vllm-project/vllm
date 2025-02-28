@@ -573,7 +573,6 @@ class Scheduler:
         # Only for testing purposes.
         if seq_group in self.waiting:
             self._waiting_tokens -= self._get_seq_group_tokens(seq_group)
-            self.waiting.remove(seq_group)
         self.running.append(seq_group)
 
     def _add_seq_group_to_swapped(self, seq_group: SequenceGroup) -> None:
@@ -1817,7 +1816,6 @@ class Scheduler:
             seq.reset_state_for_recompute()
         self._free_seq_group_cross_attn_blocks(seq_group)
         self._waiting_tokens += self._get_seq_group_tokens(seq_group)
-        self.waiting.append(seq_group)
 
     def _preempt_by_swap(
         self,
