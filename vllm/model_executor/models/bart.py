@@ -43,6 +43,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsV0Only
 from .utils import maybe_prefix
 
 logger = logging.get_logger(__name__)
@@ -776,7 +777,7 @@ class BartModel(nn.Module):
         return decoder_outputs
 
 
-class BartForConditionalGeneration(nn.Module):
+class BartForConditionalGeneration(nn.Module, SupportsV0Only):
     base_model_prefix = "model"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
