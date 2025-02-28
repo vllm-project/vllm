@@ -2,6 +2,7 @@
 
 import gc
 import time
+import weakref
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -9,8 +10,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm.attention import get_attn_backend
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
@@ -25,10 +25,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
-from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
-                                                   FlashAttentionMetadata)
-from vllm.v1.attention.backends.flashinfer import (FlashInferBackend,
-                                                   FlashInferMetadata)
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -94,6 +91,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
+
+        self.attn_backend = get_attn_backend(
+            self.head_size,
+            self.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+            self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
+        )
+        if self.attn_backend is None:
+            error_msg = (
+                f"Error with get_att_backend: {self.head_size=}, "
+                f"{self.dtype=}, {self.kv_cache_dtype=}, {self.block_size=}, "
+                f"{self.model_config.is_attention_free=}, "
+                f"{self.model_config.use_mla=}")
+            logger.error(error_msg)
+            raise NotImplementedError(
+                "Non-Attention backend is not supported by V1 GPUModelRunner.")
+
+        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
+            weakref.proxy(self))
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -446,6 +464,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        # Some attention backends (namely MLA) may want to separate requests
+        # based on if the attention computation will be compute-bound or
+        # memory-bound. This gives them a hook to do that.
+        self.attn_metadata_builder.reorder_batch(self.input_batch,
+                                                 scheduler_output)
+
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
@@ -528,7 +552,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
-        max_seq_len = self.seq_lens_np[:num_reqs].max()
 
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
@@ -543,73 +566,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.positions[:total_num_scheduled_tokens].copy_(
                 self.positions_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
-        query_start_loc = self.query_start_loc_cpu[:num_reqs + 1].to(
-            self.device, non_blocking=True)
-        seq_lens = self.seq_lens_cpu[:num_reqs].to(self.device,
-                                                   non_blocking=True)
-        slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
-            self.device, non_blocking=True).long()
 
         # Prepare for cascade attention if needed.
         common_prefix_len = self._compute_cascade_attn_prefix_len(
             num_scheduled_tokens,
             scheduler_output.num_common_prefix_blocks,
         )
-        use_cascade = common_prefix_len > 0
-        if use_cascade:
-            # TODO: Optimize.
-            cu_prefix_query_lens = torch.tensor(
-                [0, total_num_scheduled_tokens],
-                dtype=torch.int32,
-                device=self.device)
-            prefix_kv_lens = torch.tensor([common_prefix_len],
-                                          dtype=torch.int32,
-                                          device=self.device)
-            suffix_kv_lens = (self.seq_lens_np[:num_reqs] - common_prefix_len)
-            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(self.device)
-        else:
-            cu_prefix_query_lens = None
-            prefix_kv_lens = None
-            suffix_kv_lens = None
-
-        attn_metadata_cls = self.attn_backend.get_metadata_cls()
-        if attn_metadata_cls is FlashAttentionMetadata:
-            attn_metadata = FlashAttentionMetadata(
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                query_start_loc=query_start_loc,
-                max_seq_len=max_seq_len,
-                seq_lens=seq_lens,
-                block_table=(
-                    self.input_batch.block_table.get_device_tensor()[:num_reqs]),
-                slot_mapping=slot_mapping,
-                use_cascade=use_cascade,
-                common_prefix_len=common_prefix_len,
-                cu_prefix_query_lens=cu_prefix_query_lens,
-                prefix_kv_lens=prefix_kv_lens,
-                suffix_kv_lens=suffix_kv_lens,
-            )
-        elif attn_metadata_cls is FlashInferMetadata:
-            attn_metadata = FlashInferMetadata(
-                num_actual_tokens=total_num_scheduled_tokens,
-                seq_lens=seq_lens,
-                block_table=(
-                    self.input_batch.block_table.get_device_tensor()[:num_reqs]),
-                slot_mapping=slot_mapping,
-                qo_indptr=query_start_loc,
-                num_qo_heads=self.model_config.get_num_attention_heads(self.parallel_config),
-                num_kv_heads=self.model_config.get_num_kv_heads(self.parallel_config),
-                head_dim=self.model_config.get_head_size(),
-                page_size=self.cache_config.block_size,
-                data_type=self.kv_cache_dtype,
-                q_data_type=self.model_config.dtype,
-                use_cascade=use_cascade,
-                common_prefix_len=common_prefix_len,
-                cu_prefix_query_lens=cu_prefix_query_lens,
-                prefix_kv_lens=prefix_kv_lens,
-                suffix_kv_lens=suffix_kv_lens,
-            )
-            self.attn_backend.begin_forward(attn_metadata)
+        attn_metadata = self.attn_metadata_builder.build(
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            common_prefix_len=common_prefix_len,
+        )
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -622,7 +590,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            logits_indices = query_start_loc[1:] - 1
+            logits_indices = attn_metadata.query_start_loc[1:] - 1
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1229,8 +1197,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
             # it supports multiple.
-            max_tokens_by_modality_dict = MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
-                self.model_config)
+            max_tokens_by_modality_dict = (
+                MULTIMODAL_REGISTRY.
+                get_max_tokens_per_item_by_nonzero_modality(self.model_config))
             dummy_data_modality, max_tokens_per_mm_item = max(
                 max_tokens_by_modality_dict.items(), key=lambda item: item[1])
 
@@ -1317,15 +1286,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # maximum num_tokens.
         num_reqs = self.scheduler_config.max_num_seqs
         num_tokens = self.max_num_tokens
-        min_tokens_per_req: int = num_tokens // num_reqs
+        min_tokens_per_req = num_tokens // num_reqs
 
-        num_scheduled_tokens_list: List[int] = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
 
-        num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
-                                                    dtype=np.int32)
+        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
+                                        dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
 
         with self.maybe_profile_with_lora(self.lora_config,

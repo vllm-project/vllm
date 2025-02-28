@@ -19,6 +19,7 @@ except ImportError:
     xgr_installed = False
     pass
 
+from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
                                                        grammar_is_likely_lark)
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
 
     from vllm.config import ModelConfig
     from vllm.sampling_params import GuidedDecodingParams
+
+logger = init_logger(__name__)
 
 
 # TODO: passing batch size to max threads here
@@ -161,6 +164,7 @@ class GrammarConfig:
     json_str: str | None = None
     grammar_str: str | None = None
     json_object: bool | None = None
+    any_whitespace: bool = True
     max_threads: int = 8
     tokenizer_data: TokenizerData | None = None
 
@@ -180,11 +184,33 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
+            any_whitespace = 'disable-any-whitespace' not in \
+                    guided_params.backend_options()
+
+            # Check and log if model with xgrammar and whitespace have history
+            # of runaway generation of whitespaces.
+            # References:
+            # https://github.com/vllm-project/vllm/pull/12744
+            # https://github.com/mlc-ai/xgrammar/issues/212
+            model_with_warn = None
+
+            if 'Mistral' in model_config.model:
+                model_with_warn = 'Mistral'
+            elif 'Qwen' in model_config.model:
+                model_with_warn = 'Qwen'
+
+            if model_with_warn is not None and any_whitespace:
+                msg = (f"{model_with_warn} "
+                       f"model detected, consider set "
+                       f"`guided_backend=xgrammar:disable-any-whitespace` "
+                       f"to prevent runaway generation of whitespaces.")
+                logger.info_once(msg)
             # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
             try:
-                xgr.Grammar.from_json_schema(json_str)
+                xgr.Grammar.from_json_schema(json_str,
+                                             any_whitespace=any_whitespace)
             except RuntimeError as err:
                 raise ValueError(str(err)) from err
 
@@ -192,7 +218,8 @@ class GrammarConfig:
                        vocab_size=model_config.hf_text_config.vocab_size,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
-                       tokenizer_data=tokenizer_data)
+                       tokenizer_data=tokenizer_data,
+                       any_whitespace=any_whitespace)
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -290,7 +317,10 @@ class XGrammarLogitsProcessor:
         if self.ctx is None:
             compiler = GrammarCompilerCache.get_compiler(self.config)
             if self.config.json_str is not None:
-                self.ctx = compiler.compile_json_schema(self.config.json_str)
+                any_whitespace = self.config.any_whitespace
+                self.ctx = compiler\
+                    .compile_json_schema(self.config.json_str,
+                                         any_whitespace=any_whitespace)
             elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
             elif self.config.json_object:
