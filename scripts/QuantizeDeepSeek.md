@@ -70,7 +70,7 @@ From the vLLM root directory, navigate to the scripts folder and run the calibra
 export QUANT_CONFIG=inc_measure_config.json
 # restart ray 
 cd vllm/scripts
-python inc_quant_on_two_nodes.py
+python inc_example_two_nodes.py
 ```
 
 ## Inference with FP8 Models on Two Nodes
@@ -80,7 +80,7 @@ This script loads the BF16 model into DRAM, moves it to the HPU, and quantizes t
 export QUANT_CONFIG=inc_quant_config.json
 # restart ray 
 cd vllm/scripts
-python inc_quant_on_two_nodes.py
+python inc_example_two_nodes.py
 ```
 
 - FP8 KVCache (WIP)
@@ -103,7 +103,7 @@ In this mode, we load the BF16 model on DRAM and quantize it to FP8 model using 
 cd vllm/scripts
 # Download the unified calibration results
 huggingface-cli download Yi30/nc_workspace_tmp_mla_merged_from_16_to_8 --local-dir nc_workspace_measure
-QUANT_CONFIG=inc_quant_config.json python inc_quant_on_one_node.py
+QUANT_CONFIG=inc_quant_config.json python inc_example_one_node.py
 ```
 
 
@@ -114,5 +114,5 @@ QUANT_CONFIG=inc_quant_config.json python inc_quant_on_one_node.py
 cd vllm/scripts
 # Download the unified calibration results
 huggingface-cli download Yi30/inc-tp8-ep8-full-kvcache-from-tp16-ep16 --local-dir nc_workspace_measure_kvache
-QUANT_CONFIG=inc_quant_with_fp8kv_config.json python inc_quant_on_one_node.py --fp8_kvcache
+QUANT_CONFIG=inc_quant_with_fp8kv_config.json python inc_example_one_node.py  --fp8_kvcache
 ```
