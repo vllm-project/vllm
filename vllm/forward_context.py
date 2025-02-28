@@ -4,7 +4,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 import torch.distributed as dist
@@ -33,8 +33,8 @@ class ForwardContext:
     attn_metadata: "AttentionMetadata"  # set dynamically for each forward pass
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
-    num_tokens_across_dp: Optional[
-        List[int]] = None  # set dynamically for each forward pass
+    cumsum_tokens_across_dp: Optional[
+        torch.Tensor] = None  # set dynamically for each forward pass
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -61,7 +61,7 @@ def set_forward_context(attn_metadata: Any,
     need_to_track_batchsize = track_batchsize and attn_metadata is not None
     if need_to_track_batchsize:
         forward_start_time = time.perf_counter()
-    num_tokens_across_dp = None
+    cumsum_tokens_across_dp = None
     if vllm_config.parallel_config.data_parallel_size > 1:
         dp_size = vllm_config.parallel_config.data_parallel_size
         dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -82,7 +82,7 @@ def set_forward_context(attn_metadata: Any,
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
-        num_tokens_across_dp = num_tokens_tensor.tolist()
+        cumsum_tokens_across_dp = torch.cumsum(num_tokens_tensor, dim=0)
 
     global _forward_context
     prev_context = _forward_context
@@ -90,7 +90,7 @@ def set_forward_context(attn_metadata: Any,
         attn_layers=vllm_config.compilation_config.static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        num_tokens_across_dp=num_tokens_across_dp)
+        cumsum_tokens_across_dp=cumsum_tokens_across_dp)
     try:
         yield
     finally:

@@ -348,9 +348,6 @@ class FusedMoE(torch.nn.Module):
         self.layer_name = prefix
         self.use_direct_call = not envs.VLLM_TEST_ENABLE_EP
 
-        self.max_num_batched_tokens = get_current_vllm_config(
-        ).scheduler_config.max_num_batched_tokens
-
         self.tp_size = (tp_size if tp_size is not None else
                         get_tensor_model_parallel_world_size())
         self.dp_size = get_dp_group().world_size
@@ -697,19 +694,22 @@ class FusedMoE(torch.nn.Module):
 
         return topk_weights, topk_ids
 
-    def naive_multicast(self, x: torch.Tensor):
+    def naive_multicast(self, x: torch.Tensor,
+                        num_tokens_cumsum: torch.Tensor):
         assert (len(x.shape) == 2)
-        num_tokens = x.size(0)
-        buffer = torch.zeros(
-            (self.dp_size, self.max_num_batched_tokens, x.size(1)),
-            device=x.device,
-            dtype=x.dtype)
+        buffer = torch.empty((num_tokens_cumsum[-1], x.size(1)),
+                             device=x.device,
+                             dtype=x.dtype)
 
-        buffer[self.dp_rank, :num_tokens, :].copy_(x)
+        start = 0 if self.dp_rank == 0 else num_tokens_cumsum[self.dp_rank - 1]
+        end = num_tokens_cumsum[self.dp_rank]
+        buffer[start:end, :].copy_(x)
+        for idx in range(get_dp_group().world_size):
+            start = 0 if idx == 0 else num_tokens_cumsum[idx - 1]
+            end = num_tokens_cumsum[idx]
+            get_dp_group().broadcast(buffer[start:end, :], idx)
 
-        x = get_dp_group().all_reduce(buffer)
-        x = x.view(-1, x.size(-1))
-        return x
+        return buffer
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
@@ -724,10 +724,13 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
 
         if self.dp_size > 1:
-            num_tokens = hidden_states.size(0)
+            cumsum_tokens_across_dp = get_forward_context(
+            ).cumsum_tokens_across_dp
 
-            hidden_states = self.naive_multicast(hidden_states)
-            router_logits = self.naive_multicast(router_logits)
+            hidden_states = self.naive_multicast(hidden_states,
+                                                 cumsum_tokens_across_dp)
+            router_logits = self.naive_multicast(router_logits,
+                                                 cumsum_tokens_across_dp)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -748,17 +751,12 @@ class FusedMoE(torch.nn.Module):
         )
 
         if self.dp_size > 1:
-            if True:
-                all_hidden_states = get_dp_group().all_reduce(
-                    final_hidden_states)
-                all_hidden_states = all_hidden_states.view(
-                    self.dp_size, -1, all_hidden_states.size(-1))
-                final_hidden_states = all_hidden_states[
-                    self.dp_rank, :num_tokens, :]
-            else:
-                final_hidden_states = get_dp_group().reduce_scatter(
-                    final_hidden_states, 0)
-                final_hidden_states = final_hidden_states[:num_tokens, :]
+            start = 0 if self.dp_rank == 0 else cumsum_tokens_across_dp[
+                self.dp_rank - 1]
+            end = cumsum_tokens_across_dp[self.dp_rank]
+
+            all_hidden_states = get_dp_group().all_reduce(final_hidden_states)
+            final_hidden_states = all_hidden_states[start:end, :]
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.)
