@@ -247,7 +247,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe import cutlass_moe
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -261,26 +260,43 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        # TODO
-        x_q, x_scale = ops.scaled_fp8_quant(x, use_per_token_if_dynamic=False)
-        return cutlass_moe(
-            x_q,
-            x_scale,
-            layer.w13_weight.transpose(1, 2),
-            layer.w2_weight.transpose(1, 2),
-            layer.w13_weight_scale,
-            layer.w2_weight_scale,
-            topk_weights,
-            topk_ids,
-            x.shape[0],
-            layer.w2_weight.shape[2],
-            x.shape[1],
-            layer.w13_weight.shape[0],
-            layer.ab_strides1,
-            layer.c_strides1,
-            layer.ab_strides2,
-            layer.c_strides2,
-        ).bfloat16()
+        #TODO should the codepath be decided here?
+        dev_capability = current_platform.get_device_capability().to_int()
+        if dev_capability == 90:
+            from vllm.model_executor.layers.fused_moe import cutlass_moe
+            x_q, x_scale = ops.scaled_fp8_quant(x,
+                                                use_per_token_if_dynamic=False)
+            return cutlass_moe(
+                x_q,
+                x_scale,
+                layer.w13_weight.transpose(1, 2),
+                layer.w2_weight.transpose(1, 2),
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                topk_weights,
+                topk_ids,
+                x.shape[0],
+                layer.w2_weight.shape[2],
+                x.shape[1],
+                layer.w13_weight.shape[0],
+                layer.ab_strides1,
+                layer.c_strides1,
+                layer.ab_strides2,
+                layer.c_strides2,
+            ).to(x.dtype)
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+            return fused_experts(x,
+                                 layer.w13_weight,
+                                 layer.w2_weight,
+                                 topk_weights=topk_weights,
+                                 topk_ids=topk_ids,
+                                 inplace=True,
+                                 use_fp8_w8a8=True,
+                                 w1_scale=layer.w13_weight_scale,
+                                 w2_scale=layer.w2_weight_scale,
+                                 a1_scale=layer.w13_input_scale,
+                                 a2_scale=layer.w2_input_scale)
 
 
 class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):

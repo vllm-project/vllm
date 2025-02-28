@@ -173,9 +173,18 @@ void cutlass_grouped_mm(
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
+  int32_t version_num = get_sm_version_num();
+#if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
   cutlass_grouped_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
                           expert_offsets, problem_sizes, a_strides, b_strides,
                           c_strides);
+  return;
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "No compiled cutlass_grouped_mm for a compute capability less than "
+      "CUDA device capability: ",
+      version_num);
 }
 
 void get_grouped_mm_data(const torch::Tensor& topk_ids,
@@ -185,9 +194,18 @@ void get_grouped_mm_data(const torch::Tensor& topk_ids,
                          torch::Tensor& arg_sort_prim,
                          const int64_t num_experts, const int64_t n,
                          const int64_t k) {
+  int32_t version_num = get_sm_version_num();
+#if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
   get_grouped_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
                              problem_sizes2, arg_sort, arg_sort_prim,
                              num_experts, n, k);
+  return;
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "No compiled cutlass_grouped_mm for a compute capability less than "
+      "CUDA device capability: ",
+      version_num);
 }
 
 void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
