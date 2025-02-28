@@ -73,7 +73,6 @@ if __name__ == "__main__":
         truncate_prompt_tokens=least_tokens,
     )
     model = args.model
-    assert args.mode in ["p", "q", None], f"Invalid mode: {args.mode}"
     print(f"Running in {args.mode} mode")
     if args.mode is None:
         llm = LLM(
