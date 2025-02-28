@@ -10,13 +10,13 @@ from vllm import LLM, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils import GiB_bytes, cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
 
 def evil_forward(self, *args, **kwargs):
-    """Evil forward method that raise an exception after 10 calls."""
+    """Evil forward method that raises an exception after 10 calls."""
     NUMBER_OF_GOOD_PASSES = 10
 
     if not hasattr(self, "num_calls"):
@@ -41,7 +41,7 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
         m.setenv("VLLM_USE_V1", "1")
 
         # Monkeypatch an error in the model.
-        monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
+        m.setattr(LlamaForCausalLM, "forward", evil_forward)
 
         engine_args = AsyncEngineArgs(
             model="meta-llama/Llama-3.2-1B",
@@ -81,7 +81,7 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
         # Confirm all the processes are cleaned up.
         wait_for_gpu_memory_to_clear(
             devices=list(range(tensor_parallel_size)),
-            threshold_bytes=2 * 2**30,
+            threshold_bytes=2 * GiB_bytes,
             timeout_s=60,
         )
 
@@ -100,9 +100,8 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size,
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-
-        MP_VALUE = "1" if enable_multiprocessing else "0"
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING",
+                 "1" if enable_multiprocessing else "0")
 
         # Monkeypatch an error in the model.
         m.setattr(LlamaForCausalLM, "forward", evil_forward)
@@ -117,6 +116,6 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size,
     # Confirm all the processes are cleaned up.
     wait_for_gpu_memory_to_clear(
         devices=list(range(tensor_parallel_size)),
-        threshold_bytes=2 * 2**30,
+        threshold_bytes=2 * GiB_bytes,
         timeout_s=60,
     )

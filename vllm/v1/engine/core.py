@@ -10,7 +10,6 @@ from multiprocessing.connection import Connection
 from typing import Any, List, Optional, Set, Tuple, Type, Union
 
 import msgspec
-import psutil
 import zmq
 import zmq.asyncio
 
@@ -19,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import get_exception_traceback, zmq_socket_ctx
+from vllm.utils import zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -303,6 +302,8 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        # EngineCoreProc sends a FAILED message over ready_pipe
+        # if startup fails, so it's kept outside try-except
         engine_core = EngineCoreProc(*args, **kwargs)
         try:
             engine_core.run_busy_loop()
