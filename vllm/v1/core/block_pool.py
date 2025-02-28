@@ -96,6 +96,7 @@ class BlockPool:
         if num_cached_blocks == num_full_blocks:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
+        assert len(block_hashes) >= num_cached_blocks
         new_block_hashes = block_hashes[num_cached_blocks:]
 
         # Update the new blocks with the block hashes through the chain.
