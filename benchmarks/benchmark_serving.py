@@ -428,8 +428,7 @@ def sample_random_requests(
     )
 
     if dataset_path is not None:
-        # Sample token ids from ShareGPT and 
-        # repeat/truncate them to satisfy the input_lens
+        # From ShareGPT repeat/truncate them to satisfy the input_lens
 
         # Download sharegpt if necessary
         if not os.path.isfile(dataset_path):
@@ -441,11 +440,10 @@ def sample_random_requests(
         # Filter out the conversations with less than 2 turns.
         dataset = [data for data in dataset if len(data["conversations"]) >= 2]
         # Only keep the first two turns of each conversation.
-        dataset = [
-            (data["conversations"][0]["value"], 
-                data["conversations"][1]["value"])
-            for data in dataset
-        ]
+        dataset = [(data["conversations"][0]["value"],
+                    data["conversations"][1]["value"]) for data in dataset]
+
+
         # Shuffle the dataset.
         random.shuffle(dataset)
 
@@ -466,19 +464,20 @@ def sample_random_requests(
                 continue
 
             if prompt_len > input_lens[i]:
-                input_ids = prompt_token_ids[: input_lens[i]]
+                input_ids = prompt_token_ids[:input_lens[i]]
             else:
                 ratio = (input_lens[i] + prompt_len - 1) // prompt_len
-                input_ids = (prompt_token_ids * ratio)[: input_lens[i]]
+                input_ids = (prompt_token_ids * ratio)[:input_lens[i]]
             prompt = tokenizer.decode(input_ids)
-            input_requests.append((prompt, int(input_lens[i]), 
-                int(output_lens[i]), None))
+            input_requests.append(
+                (prompt, int(input_lens[i]), int(output_lens[i]), None))
     else:
         offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
         input_requests = []
         for i in range(num_prompts):
             prompt = tokenizer.decode(prefix_token_ids +
-                                      [(offsets[i] + i + j) % tokenizer.vocab_size
+                                      [(offsets[i] + i + j) %
+                                       tokenizer.vocab_size
                                        for j in range(input_lens[i])])
 
             input_requests.append((prompt, int(prefix_len + input_lens[i]),
