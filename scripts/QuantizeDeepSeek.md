@@ -88,7 +88,7 @@ python inc_example_two_nodes.py --mode quant
 
 ## Inference with FP8 Models on a Single Node
 
-In this mode, we load the BF16 model on DRAM and quantize it to FP8 model using unified measurement results obtained from the two-node calibration.
+In this section, we load the BF16 model on DRAM and quantize it to FP8 model using unified measurement results obtained from the two-node calibration.
 
 ### Prerequisites
 
