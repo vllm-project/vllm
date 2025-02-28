@@ -26,7 +26,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding
+from .interfaces import SupportsCrossEncoding, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -385,7 +385,7 @@ class BertModel(nn.Module):
         return loaded_params
 
 
-class BertEmbeddingModel(nn.Module):
+class BertEmbeddingModel(nn.Module, SupportsV0Only):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for

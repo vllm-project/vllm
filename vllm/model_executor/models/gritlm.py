@@ -19,6 +19,8 @@ from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            PoolingSequenceGroupOutput)
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
+from .interfaces import SupportsV0Only
+
 logger = init_logger(__name__)
 
 
@@ -177,7 +179,7 @@ class GritLMPooler(nn.Module):
         return PoolerOutput(outputs=pooled_outputs)
 
 
-class GritLM(LlamaForCausalLM):
+class GritLM(LlamaForCausalLM, SupportsV0Only):
     """This class implements the embedding model for parasail-ai/GritLM-7B-vllm.
 
     The class inherits from LlamaForCausalLM and provides a custom pooling

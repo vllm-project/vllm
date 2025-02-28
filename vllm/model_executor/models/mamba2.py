@@ -22,7 +22,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (HasInnerState,
-                                                   IsAttentionFree)
+                                                   IsAttentionFree,
+                                                   SupportsV0Only)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -174,7 +175,8 @@ class Mamba2Model(nn.Module):
         return hidden_states
 
 
-class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
+class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree,
+                        SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config

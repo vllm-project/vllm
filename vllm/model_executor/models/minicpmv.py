@@ -63,7 +63,8 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsV0Only)
 from .utils import AutoWeightsLoader, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
@@ -804,7 +805,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         return result
 
 
-class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
+class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
+                        SupportsV0Only):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.

@@ -25,7 +25,8 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (IsAttentionFree,
-                                                   SupportsMultiModal)
+                                                   SupportsMultiModal,
+                                                   SupportsV0Only)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -111,7 +112,8 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     PrithviGeoSpatialMAEMultiModalProcessor,
     info=PrithviGeoSpatialMAEProcessingInfo,
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
-class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
+class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
+                           SupportsV0Only):
     """ Prithvi Masked Autoencoder"""
 
     def _instantiate_model(self, config: dict) -> Optional[nn.Module]:
