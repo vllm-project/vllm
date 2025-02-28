@@ -61,7 +61,7 @@ def run_mllama():
         },
         {   # Explicit prompt
             "encoder_prompt": {
-                "prompt": "",
+                "prompt": "<|image|>",
                 "multi_modal_data": {
                     "image": ImageAsset("stop_sign").pil_image,
                 },
