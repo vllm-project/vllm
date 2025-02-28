@@ -649,5 +649,5 @@ def __dir__():
 def is_set(name: str):
     """Check if an environment variable is explicitly set."""
     if name in environment_variables:
-        return os.environ.get(name, "UNSET") != "UNSET"
+        return name in os.environ
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
