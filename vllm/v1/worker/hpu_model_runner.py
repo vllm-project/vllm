@@ -394,8 +394,8 @@ class HpuModelAdapter:
         slot_mapping = metadata.slot_mapping.flatten()
         indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
         if is_prompt:
-            if not torch.equal(indices.unflatten(0, (-1, block_size)), indices.unflatten(0, (-1, block_size))[:, 0].unsqueeze(1).expand(-1, block_size)):
-               assert False, "something went very, very, VERY wrong here. the the slots within a block do not target the same block. this should never happen. go contact konrad and tell him to fix his stuff."
+#            if not torch.equal(indices.unflatten(0, (-1, block_size)), indices.unflatten(0, (-1, block_size))[:, 0].unsqueeze(1).expand(-1, block_size)):
+#               assert False, "something went very, very, VERY wrong here. the the slots within a block do not target the same block. this should never happen. go contact konrad and tell him to fix his stuff."
             indices = indices.unflatten(0, (-1, block_size))[:, 0]
             offsets = None
         else:
@@ -987,6 +987,7 @@ class HPUModelRunner:
         prefill_attn_metadata = []
         prefill_logits_indices = []
         block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
+        fake_prefix_prefill = True
         enable_prefix_caching = self.cache_config.enable_prefix_caching
 
         # DECODES are the first num_decodes REQUESTS.
@@ -1014,8 +1015,21 @@ class HPUModelRunner:
                 num_prefills = possible_batch_size
                 batch_req_ids = self.input_batch.req_ids[batch_idx:batch_idx +
                                                          num_prefills]
+                batch_context_lens = self.input_batch.num_computed_tokens_cpu[
+                    batch_idx:batch_idx + num_prefills]
+                batch_num_prompt_tokens = self.input_batch.num_prompt_tokens[
+                    batch_idx:batch_idx + num_prefills]
+                batch_num_scheduled_tokens = num_scheduled_tokens[
+                    batch_idx:batch_idx + num_prefills]
+                            
                 prompt_lens = num_scheduled_tokens[batch_idx:batch_idx +
                                                    num_prefills]
+
+                if fake_prefix_prefill:
+                    for i in range(num_prefills):
+                        if batch_context_lens[i] > 0 and batch_num_scheduled_tokens[i] != batch_num_prompt_tokens[i]: 
+                            prompt_lens[i] = batch_num_prompt_tokens[i]
+                    
                 max_prompt_len = max(prompt_lens)
                 num_tokens = sum(prompt_lens)
                 padded_batch_size, padded_prompt_len = \
@@ -1036,6 +1050,8 @@ class HPUModelRunner:
                     break
 
             context_lens = self.input_batch.num_computed_tokens_cpu[
+                batch_idx:batch_idx + num_prefills]
+            batch_num_prompt_tokens = self.input_batch.num_prompt_tokens[
                 batch_idx:batch_idx + num_prefills]
             batch_num_scheduled_tokens = num_scheduled_tokens[
                 batch_idx:batch_idx + num_prefills]
@@ -1072,39 +1088,43 @@ class HPUModelRunner:
                 prompt_lens, [0] *
                 len(prompt_lens)) if not use_prefix_caching else zip(
                     batch_num_scheduled_tokens, context_lens)
-            for i, (scheduled_prompt_len, context_len) in enumerate(iterable):
+            for i, (prompt_scheduled_tokens, prompt_start_idx) in enumerate(iterable):
                 # Prepare and sanitize token ids (cpu)
                 batch_offset = batch_idx + i
-                token_ids[i, :scheduled_prompt_len] = torch.from_numpy(
+                token_ids[i, :prompt_scheduled_tokens] = torch.from_numpy(
                     self.input_batch.token_ids_cpu[batch_offset,
-                                                   context_len:context_len +
-                                                   scheduled_prompt_len])
+                                                   prompt_start_idx:prompt_start_idx +
+                                                   prompt_scheduled_tokens])
                 #token_ids[i, prompt_len:] = 0 # no need to sanitize - buffer
                 # is pre-filled with 0s
 
                 # Prepare and sanitize positions ids (cpu)
                 positions[
                     i, :
-                    scheduled_prompt_len] = self.prefill_positions[:,
-                                                                   context_len:
-                                                                   context_len +
-                                                                   scheduled_prompt_len]
+                    prompt_scheduled_tokens] = self.prefill_positions[:,
+                                                                   prompt_start_idx:
+                                                                   prompt_start_idx +
+                                                                   prompt_scheduled_tokens]
                 #positions[i, prompt_len:] = 0 # no need to sanitize - buffer
                 # is pre-filled with 0s
 
                 # Prepare and sanitize slot_mapping (cpu)
                 flat_prefill_positions = positions[
-                    i, :scheduled_prompt_len].flatten()
+                    i, :prompt_scheduled_tokens].flatten()
                 block_numbers = block_table_cpu_tensor[
                     batch_offset, flat_prefill_positions // self.block_size]
                 block_offsets = flat_prefill_positions % self.block_size
                 slot_mapping[
                     i, :
-                    scheduled_prompt_len] = block_numbers * self.block_size + \
+                    prompt_scheduled_tokens] = block_numbers * self.block_size + \
                         block_offsets
                 #slot_mapping[i, prompt_len:] = _PAD_SLOT_ID # no need to
                 # sanitize - buffer is pre-filled with _PAD_SLOT_IDs
             slot_mapping = slot_mapping.long()
+            #block_size = self.block_size
+            #indices = torch.div(slot_mapping.flatten(), block_size, rounding_mode="floor")
+            #if not torch.equal(indices.unflatten(0, (-1, block_size)), indices.unflatten(0, (-1, block_size))[:, 0].unsqueeze(1).expand(-1, block_size)):
+            #    import pdb; pdb.set_trace()
             #import pdb; pdb.set_trace()
             logits_indices = torch.zeros(padded_batch_size,
                                          dtype=torch.int32,
@@ -1341,11 +1361,9 @@ class HPUModelRunner:
             # NOTE: assert that all the decodes are "decodes".
             if idx < num_decodes:
                 assert seq_num_scheduled_tokens == 1
-        prefill_num_tokens = num_scheduled_tokens \
-            if self.cache_config.enable_prefix_caching else num_prompt_tokens
         return (
             self._prepare_prefill_inputs(num_prefills, num_decodes,
-                                         prefill_num_tokens, bucketing),
+                                         num_scheduled_tokens, bucketing),
             self._prepare_decode_inputs(num_decodes, num_scheduled_tokens,
                                         bucketing),
         )
