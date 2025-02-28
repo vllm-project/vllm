@@ -114,11 +114,11 @@ def download_and_cache_file(url: str, filename: Optional[str] = None):
 
     # Use tqdm to display the progress bar
     with open(filename, "wb") as f, tqdm(
-        desc=filename,
-        total=total_size,
-        unit="B",
-        unit_scale=True,
-        unit_divisor=1024,
+            desc=filename,
+            total=total_size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
     ) as bar:
         for chunk in response.iter_content(chunk_size=chunk_size):
             f.write(chunk)
