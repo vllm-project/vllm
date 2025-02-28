@@ -10,7 +10,7 @@
 > [!NOTE] 
 > If you want to quantize the model using an existing calibration result, you can skip this step and proceed directly to the `Inference with FP8 Models on a Single Node` section.
 
-We use Ray to set up a cluster with two nodes, so that we can image the system includes 16 cards and update the procedure corresponding. It is crucial to ensure that both nodes have the same software stack. Docker images are used to guarantee a consistent environment. The high-level steps are as follows:
+We use Ray to set up a cluster with two nodes, so that we can image a system with 16 cards and update the procedure accordingly. It is crucial to ensure that both nodes have the same software stack. Docker container are used to guarantee a consistent environment. The high-level steps are as follows:
 - Build and run Docker on each node.
 - Export the necessary environment variables within each Docker container.
 - Start the Ray cluster on the head node and connect the worker node to it.
