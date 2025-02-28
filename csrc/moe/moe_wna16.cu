@@ -80,7 +80,7 @@ __global__ void moe_wna16_gemm_kernel(
           origin_k = BLOCK_SIZE_N * i + threadIdx.x / 8 * 8 + order;
         } else {
           // [0, 2, 1, 3]
-          int8_t order = (threadIdx.x % 2) * 4 + ((threadIdx.x % 8) / 2);
+          int8_t order = (threadIdx.x % 2) * 2 + ((threadIdx.x % 4) / 2);
           origin_k = BLOCK_SIZE_N * i + threadIdx.x / 4 * 4 + order;
         }
 
@@ -135,7 +135,7 @@ __global__ void moe_wna16_gemm_kernel(
         qzero_f2 = Dtype::num2num2(Dtype::int2num(128));
       }
     } else {
-      int qzeros_offset_tmp = (offset_n / 2) * (size_k / group_size / GROUPS) +
+      int qzeros_offset_tmp = (offset_n / (8 / bit)) * (size_k / group_size / GROUPS) +
                               offset_k / group_size / GROUPS;
       if constexpr (GROUPS == 1) {
         uint8_t* expert_qzeros_groups_tmp =
@@ -178,7 +178,9 @@ __global__ void moe_wna16_gemm_kernel(
         if (has_zp) {
           uint8_t qzero =
               expert_qzeros_groups[tmp_k / (group_size / pack_factor)];
-          qzero = (qzero >> ((threadIdx.x % 2) * 4)) & 0xF;
+          if constexpr (bit == 4) {
+              qzero = (qzero >> ((threadIdx.x % 2) * 4)) & 0xF;
+          }
           qzero_f2 = Dtype::num2num2(Dtype::int2num(qzero));
         }
       }
