@@ -2275,7 +2275,7 @@ def warn_for_unimplemented_methods(cls: _TT) -> _TT:
     in the subclass.
     """
 
-    original_init = cls.__init__
+    original_init = cls.__init__  # type: ignore[misc]
 
     def find_unimplemented_methods(self: object):
         unimplemented_method_names = list[str]()
