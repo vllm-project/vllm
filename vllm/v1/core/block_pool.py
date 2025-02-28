@@ -107,8 +107,9 @@ class BlockPool:
             assert prev_block.block_hash is not None
             prev_block_hash_value = prev_block.block_hash.hash_value
 
-        # Find the first uncached block. This case should only happen when
-        # speculative decoding is used.
+        # Find the first uncached block.
+        # FIXME: num_cached_blocks should be corrected by the caller
+        # so this should never happen.
         offset = 0
         for blk in new_full_blocks:
             if blk.block_hash is None:
