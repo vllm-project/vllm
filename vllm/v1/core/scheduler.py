@@ -245,6 +245,12 @@ class Scheduler:
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(request)
+
+                #print("[schedule] request_id:          ", request.request_id)
+                #print("[schedule] num_tokens:          ", request.num_tokens)
+                #print("[schedule] num_computed_tokens: ", num_computed_tokens)
+
+
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
@@ -312,6 +318,8 @@ class Scheduler:
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
+        #print("[schedule] total_num_scheduled_tokens: ", total_num_scheduled_tokens)
+
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
