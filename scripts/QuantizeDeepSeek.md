@@ -1,18 +1,25 @@
-# Note for Quantizing DeepSeek V3/R1 with vLLM and INC
+# BKC for Quantizing DeepSeek V3/R1 with vLLM and INC
+
 <!-- TOC -->
 
-- [Support Matrix](#support-matrix)
-- [Setting Up 2 Nodes Environment](#setting-up-2-nodes-environment)
-    - [Prerequisites](#prerequisites)
-    - [Install Dependencies](#install-dependencies)
-    - [Exporting Environment variables](#exporting-environment-variables)
-- [Calibration](#calibration)
-- [Inference with FP8 Models on Two Nodes](#inference-with-fp8-models-on-two-nodes)
-- [Inference with FP8 Models on a Single Node WIP](#inference-with-fp8-models-on-a-single-node-wip)
-    - [Prerequisites](#prerequisites)
-    - [Running the Example](#running-the-example)
+- [BKC for Quantizing DeepSeek V3/R1 with vLLM and INC](#bkc-for-quantizing-deepseek-v3r1-with-vllm-and-inc)
+    - [Support Matrix](#support-matrix)
+    - [Setting Up 2 Nodes Environment](#setting-up-2-nodes-environment)
+        - [Prerequisites](#prerequisites)
+        - [Install Dependencies](#install-dependencies)
+        - [Exporting Environment variables](#exporting-environment-variables)
+    - [Calibration](#calibration)
+    - [Inference with FP8 Models on Two Nodes](#inference-with-fp8-models-on-two-nodes)
+    - [Inference with FP8 Models on a Single Node WIP](#inference-with-fp8-models-on-a-single-node-wip)
+        - [Prerequisites](#prerequisites)
+        - [Running the Example](#running-the-example)
 
 <!-- /TOC -->
+
+This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1 on two nodes, and to perform quantization and inference on either two nodes or a single node.
+
+## Support Matrix
+
 - Calibration Stage (Two Nodes)
 
 | KVCache Precision | Configuration File for Calibration |
@@ -22,7 +29,7 @@
 
 - Quantize/Inference Stage
 
-| KVCache Precision |  Two Nodes | One Node (WIP) |
+
 |---|---|---|
 | BF16              | `inc_quant_config.json`          | `inc_quant_one_node_config.json`|
 | FP8               | `inc_measure_with_fp8kv_config.json`| `inc_quant_with_fp8kv_one_node_config.json`|
