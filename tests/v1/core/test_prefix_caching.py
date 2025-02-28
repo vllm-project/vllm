@@ -63,14 +63,14 @@ def test_prefill():
     for block_id in (0, 1, 2):
         block_tokens = tuple(all_token_ids[block_id * 16:(block_id + 1) * 16])
         block_hash = hash_block_tokens(parent_block_hash, block_tokens)
-        assert manager.block_pool._blocks[block_id].block_hash == block_hash
-        assert manager.block_pool._blocks[block_id].ref_cnt == 1
+        assert manager.block_pool.blocks[block_id].block_hash == block_hash
+        assert manager.block_pool.blocks[block_id].ref_cnt == 1
         parent_block_hash = block_hash.hash_value
 
     # Check partial/preallocated block metadata
     for block_id in (3, 4):
-        assert manager.block_pool._blocks[block_id].block_hash is None
-        assert manager.block_pool._blocks[block_id].ref_cnt == 1
+        assert manager.block_pool.blocks[block_id].block_hash is None
+        assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
     # Cache hit in the common prefix when the original block is still in use.
     # Incomplete 1 block (5 tokens)
@@ -87,13 +87,13 @@ def test_prefill():
         assert block.ref_cnt == 2
 
     # At this point, we should have 3 free blocks left.
-    assert manager.block_pool._free_block_queue.num_free_blocks == 3
+    assert manager.block_pool.free_block_queue.num_free_blocks == 3
 
     manager.free(req0)
     manager.free(req1)
 
     # All blocks should be available.
-    assert manager.block_pool._free_block_queue.num_free_blocks == 10
+    assert manager.block_pool.free_block_queue.num_free_blocks == 10
     # The order should be
     # [unallocated (7, 8, 9)]
     # [unique_req0 (4, 3)]
@@ -101,7 +101,7 @@ def test_prefill():
     # [common (2, 1, 0)]
     assert [
         b.block_id
-        for b in manager.block_pool._free_block_queue.get_all_free_blocks()
+        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [7, 8, 9, 4, 3, 6, 5, 2, 1, 0]
 
     # Cache hit in the common prefix when the original block is already free.
@@ -118,13 +118,13 @@ def test_prefill():
 
     # Although we only have 5 free blocks, we have 8 blocks in
     # the free block queue due to lazy removal.
-    assert manager.block_pool._free_block_queue.num_free_blocks == 5
+    assert manager.block_pool.free_block_queue.num_free_blocks == 5
     assert all([
         b.ref_cnt == 0
-        for b in manager.block_pool._free_block_queue.get_all_free_blocks()
+        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ])
     assert len([
-        b for b in manager.block_pool._free_block_queue.get_all_free_blocks()
+        b for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ]) == 5
 
     manager.free(req2)
@@ -137,9 +137,9 @@ def test_prefill():
     blocks = manager.allocate_slots(req3, 16 * 9, computed_blocks)
     # This block ID order also checks the eviction order.
     assert [b.block_id for b in blocks] == [9, 4, 3, 6, 5, 8, 7, 2, 1, 0]
-    assert manager.block_pool._free_block_queue.num_free_blocks == 0
-    assert manager.block_pool._free_block_queue.free_list_head is None
-    assert manager.block_pool._free_block_queue.free_list_tail is None
+    assert manager.block_pool.free_block_queue.num_free_blocks == 0
+    assert manager.block_pool.free_block_queue.free_list_head is None
+    assert manager.block_pool.free_block_queue.free_list_tail is None
 
 
 def test_decode():
@@ -223,14 +223,14 @@ def test_evict():
     assert len(blocks) == 3  # 3 full blocks
     last_token_id += 3 * 16
 
-    assert manager.block_pool._free_block_queue.num_free_blocks == 0
+    assert manager.block_pool.free_block_queue.num_free_blocks == 0
 
     manager.free(req0)
     manager.free(req1)
-    assert manager.block_pool._free_block_queue.num_free_blocks == 10
+    assert manager.block_pool.free_block_queue.num_free_blocks == 10
     assert [
         b.block_id
-        for b in manager.block_pool._free_block_queue.get_all_free_blocks()
+        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [6, 5, 4, 3, 2, 1, 0, 9, 8, 7]
 
     # Touch the first 2 blocks.
@@ -240,7 +240,7 @@ def test_evict():
     assert num_computed_tokens == 2 * 16
     blocks = manager.allocate_slots(req2, 3, computed_blocks)
     assert [b.block_id for b in blocks] == [6, 5]
-    assert manager.block_pool._free_block_queue.num_free_blocks == 6
+    assert manager.block_pool.free_block_queue.num_free_blocks == 6
 
 
 def test_hash_block_correct_reuse():
@@ -279,7 +279,7 @@ def test_hash_block_correct_reuse():
     blocks = manager.allocate_slots(req, num_tokens - 1, computed_blocks)
     assert len(blocks) == 1
 
-    assert manager.block_pool._blocks[blocks[0].block_id].block_hash is None
+    assert manager.block_pool.blocks[blocks[0].block_id].block_hash is None
 
 
 def test_computed_blocks_not_evicted():
@@ -442,7 +442,7 @@ def test_cache_blocks():
         block_size=block_size,
     )
 
-    assert len(block_pool._cached_block_hash_to_block) == 2
+    assert len(block_pool.cached_block_hash_to_block) == 2
     assert all([block.block_hash is not None for block in blocks])
 
     # Test that blocks that don't start from the beginning are cached correctly.
@@ -455,7 +455,7 @@ def test_cache_blocks():
         num_full_blocks=3,
         block_size=block_size,
     )
-    assert len(block_pool._cached_block_hash_to_block) == 3
+    assert len(block_pool.cached_block_hash_to_block) == 3
     assert blocks[0].block_hash is not None
 
 
@@ -586,7 +586,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     # Req3 is Req2 + 3 new blocks, so the first 6 blocks are computed,
     # but it cannot be allocated due to insufficient free blocks (2).
     # In this case, the ref_cnt of the computed blocks should not be changed.
-    assert manager.block_pool._free_block_queue.num_free_blocks == 5
+    assert manager.block_pool.free_block_queue.num_free_blocks == 5
     req3 = make_request("3", common_token_ids * 3)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
     assert computed_blocks == block_part1
@@ -627,12 +627,12 @@ def test_reset_prefix_cache():
 
     # Failed to reset prefix cache because some blocks are not freed yet.
     assert not manager.reset_prefix_cache()
-    assert manager.block_pool._cached_block_hash_to_block
+    assert manager.block_pool.cached_block_hash_to_block
 
     # Free the blocks.
     manager.free(req0)
     manager.free(req1)
 
     assert manager.reset_prefix_cache()
-    assert not manager.block_pool._cached_block_hash_to_block
-    assert all([blk.block_hash is None for blk in manager.block_pool._blocks])
+    assert not manager.block_pool.cached_block_hash_to_block
+    assert all([blk.block_hash is None for blk in manager.block_pool.blocks])
