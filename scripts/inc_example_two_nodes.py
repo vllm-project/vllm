@@ -68,9 +68,9 @@ if __name__ == "__main__":
         prompts = get_prompts()
     else:
         prompts = get_pile_prompts(args.model, num_samples)
-        prompt_token_ids = get_prompt_token_ids(
-            args.model, prompts, least_tokens
-        )
+    prompt_token_ids = get_prompt_token_ids(
+        args.model, prompts, least_tokens
+    )
     gt = None
     # Create a sampling params object.
     sampling_params = SamplingParams(
