@@ -70,7 +70,7 @@ From the vLLM root directory, navigate to the scripts folder and run the calibra
 export QUANT_CONFIG=inc_measure_config.json
 # restart ray 
 cd vllm/scripts
-python inc_example_two_nodes.py
+python inc_example_two_nodes.py --mode prepare
 ```
 
 ## Inference with FP8 Models on Two Nodes
@@ -80,7 +80,7 @@ This script loads the BF16 model into DRAM, moves it to the HPU, and quantizes t
 export QUANT_CONFIG=inc_quant_config.json
 # restart ray 
 cd vllm/scripts
-python inc_example_two_nodes.py
+python inc_example_two_nodes.py --mode quant
 ```
 
 - FP8 KVCache (WIP)
