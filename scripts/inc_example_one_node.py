@@ -33,6 +33,7 @@ parser.add_argument("--osl", type=int, default=128, help="output sequence length
 parser.add_argument("--nprompts", type=int, default=4, help="The number of prompts.")
 parser.add_argument("--random", action="store_true", help="Randomly sample prompts.")
 parser.add_argument("--mode", type=str, default="quant", required=False, help="The mode.")
+parser.add_argument("--smoke", action="store_true", help="Smoke test")
 parser.add_argument("--fp8_kvcache", action="store_true", help="Using FP8 KV cache.")
 args = parser.parse_args()
 
