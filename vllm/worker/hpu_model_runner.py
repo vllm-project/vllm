@@ -704,11 +704,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                           'false').lower() == 'true'
 
     def _remove_duplicate_submodules_(self, model, inc_config):
-        blocklist = inc_config.blocklist
-        #ForkedPdb().set_trace()
-        # FIXME: (Yi)  "VLLMKVCache" in blocklist and Deepseek v3
-        #if not ("VLLMKVCache" not in blocklist["types"]):
-        #    return
+        # FIXME: (Yi)  for deepseek v3 only
         self_attn = model.model.layers[0].self_attn
         for layer in model.model.layers:
             self_attn = layer.self_attn
