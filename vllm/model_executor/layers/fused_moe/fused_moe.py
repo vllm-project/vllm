@@ -722,8 +722,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(
             num_valid_tokens=topk_ids.numel(),
             group_size=block_shape[1],
-            num_experts=B.shape[0],
-            bit=4 if use_int4_w4a16 else 8)
+            num_experts=B.shape[0])
         config = config.copy()
         config.update(
             get_moe_wna16_block_config(config=config,
@@ -885,13 +884,19 @@ def get_moe_wna16_block_config(config: Dict[str,
                                num_experts: int, group_size: int,
                                real_top_k: int, block_size_m: int):
     if "BLOCK_SIZE_N" in config and "BLOCK_SIZE_K" in config:
+        # optimal block config is set
         return {}
     if not use_moe_wna16_cuda:
+        # triton moe wna16 kernel
         if num_valid_tokens // real_top_k == 1:
+            # if bs=1, use a smaller BLOCK_SIZE_N
             return {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64}
         else:
             return {"BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32}
     else:
+        # cuda moe wna16 kernel
+        # set default block_size 128, and increase them when num_blocks
+        # is too large.
         block_size_n = 128
         block_size_k = 128
         if block_size_k <= group_size:
@@ -922,15 +927,18 @@ def get_moe_wna16_block_config(config: Dict[str,
             num_blocks = num_blocks // 2
 
         if size_n <= 1024 and num_blocks >= 1024:
+            # The kernel performance got much better with BLOCK_SIZE_N=1024
+            # when num_blocks is large, event when N is small.
+            # Not sure why, maybe it force the CUDA SM process only one block
+            # at the same time.
             block_size_n = 1024
 
         return {"BLOCK_SIZE_N": block_size_n, "BLOCK_SIZE_K": block_size_k}
 
 
 def should_moe_wna16_use_cuda(num_valid_tokens: int, group_size: int,
-                              num_experts: int, bit: int):
-    return bit == 4 and group_size in [32, 64, 128] and \
-        num_valid_tokens / num_experts <= 8
+                              num_experts: int):
+    return group_size in [32, 64, 128] and num_valid_tokens / num_experts <= 8
 
 
 def get_default_config(
@@ -958,9 +966,8 @@ def get_default_config(
         # moe wna16 kernels
         # only set BLOCK_SIZE_M
         # BLOCK_SIZE_N and BLOCK_SIZE_K would be set later
-        bit = 4 if dtype == "int4_w4a16" else 8
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(M * topk,
-                                                       block_shape[1], E, bit)
+                                                       block_shape[1], E)
         if use_moe_wna16_cuda:
             config = {"BLOCK_SIZE_M": min(16, M)}
         elif M <= 20:
