@@ -81,8 +81,8 @@ if __name__ == "__main__":
     )
     model = args.model
     quant = True
-    if _apply_inc():
-        if _apply_inc_quant():
+    if args.mode is not None:
+        if args.mode == "quant":
             # quantize
             if args.fp8_kvcache:
                 print(f">>>>>>>>>>>>>> Using FP8 KV cache.")
