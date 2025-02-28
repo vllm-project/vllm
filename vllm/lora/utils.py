@@ -80,6 +80,7 @@ def from_layer(layer: nn.Module,
             instance_layer.create_lora_weights(max_loras, lora_config,
                                                model_config)
             return instance_layer
+    return layer
 
 
 def from_layer_logits_processor(
