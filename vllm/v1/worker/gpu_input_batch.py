@@ -10,7 +10,7 @@ import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.v1.kv_cache_interface import KVCacheConfig, MayGroupedBlockIDs
+from vllm.v1.kv_cache_interface import KVCacheConfig, MayMultiLayerBlockIDs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import initialize_block_table
 
@@ -29,7 +29,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: MayGroupedBlockIDs
+    block_ids: MayMultiLayerBlockIDs
     num_computed_tokens: int
     output_token_ids: List[int]
 

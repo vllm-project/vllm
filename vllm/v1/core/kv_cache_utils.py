@@ -8,7 +8,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroup,
+from vllm.v1.kv_cache_interface import (KVCacheConfig, VirtualLayer,
                                         KVCacheNewTensor, KVCacheReuseTensor,
                                         KVCacheSpec)
 from vllm.v1.request import Request
@@ -27,8 +27,8 @@ class BlockHashType(NamedTuple):
     hash_value: int
     # Token IDs in the block.
     token_ids: Tuple[int, ...]
-    # The KV cache group that the block belongs to.
-    kv_cache_group_id: int
+    # The virtual layer that the block belongs to.
+    virtual_layer_id: int
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
 
@@ -85,13 +85,13 @@ class KVCacheBlock:
 
 
 """When a model needs different types of kv_caches (e.g., full attention + 
-sliding window attention), the attention layers will be split to multiple 
-"KV cache groups", where layers in the same group has the same kv cache type and
-can use the same KVCacheBlock. There will be only one group if all layers use 
-the same type of KV cache.
-See KVCacheConfig class for more examples of "KV cache group".
-KVCacheBlocks: the blocks of one group of layer in one request
-ReqKVCacheBlocks: the blocks of all groups of layers in one request.
+sliding window attention), the attention layers will be represented by multiple 
+"virtual layers", where layers represented by the same virtual layer has the 
+same kv cache type and can use the same KVCacheBlock. There will be only one 
+virtual layer if all layers use the same type of KV cache.
+See KVCacheConfig class for more examples of "virtual layer".
+KVCacheBlocks: the blocks of one virtual layer in one request
+ReqKVCacheBlocks: the blocks of all virtual layers in one request.
 """
 KVCacheBlocks = List[KVCacheBlock]
 ReqKVCacheBlocks = List[KVCacheBlocks]
@@ -275,7 +275,7 @@ def generate_block_hash_extra_keys(
 def hash_block_tokens(
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
-        kv_cache_group_id: int,
+        virtual_layer_id: int,
         extra_keys: Optional[Tuple[Any, ...]] = None) -> BlockHashType:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
@@ -307,20 +307,20 @@ def hash_block_tokens(
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHashType(
-        hash((parent_block_hash, curr_block_token_ids_tuple, kv_cache_group_id,
-              extra_keys)), curr_block_token_ids_tuple, kv_cache_group_id,
+        hash((parent_block_hash, curr_block_token_ids_tuple, virtual_layer_id,
+              extra_keys)), curr_block_token_ids_tuple, virtual_layer_id,
         extra_keys)
 
 
 def hash_request_tokens(block_size: int, request: Request,
-                        kv_cache_group_id: int) -> List[BlockHashType]:
+                        virtual_layer_id: int) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
     Args:
         block_size: The size of each block.
         request: The request object.
-        kv_cache_group_id: The KV cache group that the blocks belong to
+        virtual_layer_id: The virtual layer that the blocks belong to
 
     Returns:
         The list of computed hash values.
@@ -351,7 +351,7 @@ def hash_request_tokens(block_size: int, request: Request,
                 request, start, end, curr_mm_idx)
 
         block_hash = hash_block_tokens(parent_block_hash_value,
-                                       block_token_ids, kv_cache_group_id,
+                                       block_token_ids, virtual_layer_id,
                                        extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
@@ -425,32 +425,35 @@ def is_kv_cache_page_size_uniform(
     return len(page_sizes) == 1
 
 
-def _create_kv_cache_groups(
+def _create_virtual_layer(
         kv_cache_spec: Dict[str, KVCacheSpec],
-        grouped_layers: List[List[str]]) -> List[KVCacheGroup]:
+        virtual_layer_map: List[List[str]]) -> List[VirtualLayer]:
     """
-    Create KVCacheGroup objects for each group of layers.
-    The layers in one group should share the same KVCacheSpec.
+    Create VirtualLayer objects for each virtual layers.
+    The layers represented by one virtual layer should share the same 
+    KVCacheSpec.
 
     Args:
         kv_cache_spec (Dict[str, KVCacheSpec]):
             A mapping from each layer name to its corresponding KVCacheSpec.
-        grouped_layers (List[List[str]]):
-            A list of layer groups, where each element is a list of layer names
-            that belongs to one group and should share the same KVCacheSpec.
+        virtual_layer_map (List[List[str]]):
+            A list of virtual layers, where each element is a list of layer 
+            names that represented by the same virtual layer and should share 
+            the same KVCacheSpec.
 
     Returns:
-        A list of KVCacheGroup objects, one for each group of layers.
+        A list of VirtualLayer objects, one for each virtual layer.
     """
-    kv_cache_groups = []
-    for layer_names in grouped_layers:
-        group_spec = kv_cache_spec[layer_names[0]]
+    virtual_layers = []
+    for layer_names in virtual_layer_map:
+        layer_spec = kv_cache_spec[layer_names[0]]
         assert all(
-            kv_cache_spec[layer_name] == group_spec
-            for layer_name in layer_names[1:]), (
-                "All layers in a group must share the same KVCacheSpec.")
-        kv_cache_groups.append(KVCacheGroup(layer_names, group_spec))
-    return kv_cache_groups
+            kv_cache_spec[layer_name] == layer_spec
+            for layer_name in layer_names[1:]
+        ), ("All layers represented by one virtual layer must share the same KVCacheSpec."
+            )
+        virtual_layers.append(VirtualLayer(layer_names, layer_spec))
+    return virtual_layers
 
 
 def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
@@ -491,7 +494,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
                 vllm_config.model_config.max_model_len, max_concurrency)
 
     per_layer_size = page_size * num_blocks
-    grouped_layers = [[layer_name for layer_name in kv_cache_spec]]
+    virtual_layer_map = [[layer_name for layer_name in kv_cache_spec]]
 
     kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
                                     tensors={
@@ -499,8 +502,8 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
                                         KVCacheNewTensor(size=per_layer_size)
                                         for layer_name in kv_cache_spec
                                     },
-                                    groups=_create_kv_cache_groups(
-                                        kv_cache_spec, grouped_layers))
+                                    virtual_layers=_create_virtual_layer(
+                                        kv_cache_spec, virtual_layer_map))
     return kv_cache_config
 
 
@@ -508,6 +511,7 @@ def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: Dict[str, KVCacheSpec],
         available_memory: int) -> KVCacheConfig:
     """
+    TODO: remove the group concept
     Generates the KV cache configuration for a model with one page size.
 
     Args:
@@ -559,8 +563,8 @@ def _get_kv_cache_config_uniform_page_size(
             kv_cache_config.tensors[layer_name] = KVCacheReuseTensor(
                 reused_layer_name=layer_name_first_group)
 
-    kv_cache_config.groups = _create_kv_cache_groups(kv_cache_spec,
-                                                     grouped_layers)
+    kv_cache_config.virtual_layers = _create_virtual_layer(
+        kv_cache_spec, grouped_layers)
     return kv_cache_config
 
 

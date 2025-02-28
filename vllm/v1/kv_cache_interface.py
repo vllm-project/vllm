@@ -126,13 +126,14 @@ class KVCacheReuseTensor(KVCacheTensorBase):
 
 
 @dataclass
-class KVCacheGroup:
+class VirtualLayer:
     """
-    A dataclass for specifying the KV cache group of a model.
+    A dataclass for specifying a virtual layer, which represents multiple layers 
+    that can share the same block_table.
     """
-    # The names of layers in this group
+    # The names of layers represented by this virtual layer
     layer_names: List[str]
-    # The KV cache spec of this group
+    # The KV cache spec of this virtual layer
     kv_cache_spec: KVCacheSpec
 
 
@@ -146,23 +147,28 @@ class KVCacheConfig:
     """layer_name -> how to initialize KV cache for that layer"""
     tensors: Dict[str, KVCacheTensorBase]
     """
-    A list of kv-cache groups. Each group includes a set of layers with
-    the same kv-cache spec, and the total page_size of layers inside a group
-    is same across all groups (as the KVCacheManager only supports allocating
-    pages of the same size). For example:
-    1. A model only uses full attention: one group with all layers in the model.
-    2. (not implemented yet) A model with the same number of full attention
-    layers and sliding window attention layers: two groups, one for full
-    attention layers and one for sliding window attention layers.
-    3. (not implemented yet) A model with 2 full attention layers and 4 sliding 
-    window attention layers: three groups, (full * 2), (sw * 2), (sw * 2).
+    The virtual_layers of the model.
+    The layers in the models are repeated with some patterns, e.g., a model
+    with 10 full attention layers and 20 sliding window attention layers can be
+    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. And we regard
+    this pattern as virtual layers (e.g., 3 virtual layers in this case, each
+    representing 10 layers).
+    The KVCacheManager allocates the blocks for each virtual layer, and the
+    model runner applies the block table of the virtual layer to all layers 
+    represented by it.
+    For example:
+    1. A model only uses full attention, then there is only one virtual layer, 
+    and the block table is shared by all layers.
+    2. A model with 10 full attention layers and 20 sliding window attention,
+    then there are 3 virtual layers (1 * full, 2 * sw), and the block table of
+    each virtual layer is shared by 10 layers of the same type.
     """
-    groups: List[KVCacheGroup]
+    virtual_layers: List[VirtualLayer]
 
 
 @dataclass
-class GroupedBlockIDs:
-    # A list of block IDs for each group of KV cache blocks
+class MultiLayerBlockIDs:
+    # A list of block IDs for each virtual layer
     _block_ids: List[List[int]]
 
     def __init__(self, block_ids: List[List[int]]):
@@ -171,48 +177,49 @@ class GroupedBlockIDs:
     @classmethod
     def from_kv_cache_blocks(cls, kv_cache_blocks: "ReqKVCacheBlocks"):
         return cls(
-            block_ids=[[blk.block_id for blk in kv_cache_blocks_one_group]
-                       for kv_cache_blocks_one_group in kv_cache_blocks])
+            block_ids=[[blk.block_id for blk in kv_cache_blocks_one_layer]
+                       for kv_cache_blocks_one_layer in kv_cache_blocks])
 
-    def extend(self, new_block_ids: "GroupedBlockIDs") -> None:
+    def extend(self, new_block_ids: "MultiLayerBlockIDs") -> None:
         for i, block_ids in enumerate(new_block_ids._block_ids):
             self._block_ids[i].extend(block_ids)
 
-    def __add__(self, other: "GroupedBlockIDs") -> "GroupedBlockIDs":
-        return GroupedBlockIDs(block_ids=[
+    def __add__(self, other: "MultiLayerBlockIDs") -> "MultiLayerBlockIDs":
+        return MultiLayerBlockIDs(block_ids=[
             a + b for a, b in zip(self._block_ids, other._block_ids)
         ])
 
-    def get_group(self, group_idx: int) -> List[int]:
-        return self._block_ids[group_idx]
+    def get_virtual_layer(self, virtual_layer_idx: int) -> List[int]:
+        return self._block_ids[virtual_layer_idx]
 
 
-MayGroupedBlockIDs = Union[GroupedBlockIDs, List[int]]
-MayGroupedInt = Union[int, List[int]]
+MayMultiLayerBlockIDs = Union[MultiLayerBlockIDs, List[int]]
+MayMultipleInt = Union[int, List[int]]
 
 
 class BlockIDGenerator:
-    num_kv_cache_groups: int
+    num_virtual_layers: int
 
     @overload
     @classmethod
-    def generate(cls, kv_cache_blocks: List[KVCacheBlock]) -> List[int]:
+    def generate(cls, kv_cache_blocks: List["KVCacheBlock"]) -> List[int]:
         ...
 
     @overload
     @classmethod
-    def generate(cls,
-                 kv_cache_blocks: List[List[KVCacheBlock]]) -> GroupedBlockIDs:
+    def generate(
+            cls, kv_cache_blocks: List[List["KVCacheBlock"]]
+    ) -> MayMultiLayerBlockIDs:
         ...
 
     @classmethod
     def generate(
         cls, kv_cache_blocks: Union[List["KVCacheBlock"],
                                     List[List["KVCacheBlock"]]]
-    ) -> MayGroupedBlockIDs:
-        if cls.num_kv_cache_groups == 1:
+    ) -> MayMultiLayerBlockIDs:
+        if cls.num_virtual_layers == 1:
             kv_cache_blocks = cast(List["KVCacheBlock"], kv_cache_blocks)
             return [blk.block_id for blk in kv_cache_blocks]
         else:
             kv_cache_blocks = cast(List[List["KVCacheBlock"]], kv_cache_blocks)
-            return GroupedBlockIDs.from_kv_cache_blocks(kv_cache_blocks)
+            return MultiLayerBlockIDs.from_kv_cache_blocks(kv_cache_blocks)

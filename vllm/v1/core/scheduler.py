@@ -13,7 +13,7 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
 from vllm.v1.core.kv_cache_manager import init_kv_cache_manager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (BlockIDGenerator, FullAttentionSpec,
-                                        KVCacheConfig, MayGroupedBlockIDs)
+                                        KVCacheConfig, MayMultiLayerBlockIDs)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -55,7 +55,8 @@ class Scheduler:
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching)
         self.block_size = self.cache_config.block_size
-        BlockIDGenerator.num_kv_cache_groups = len(kv_cache_config.groups)
+        BlockIDGenerator.num_virtual_layers = len(
+            kv_cache_config.virtual_layers)
 
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
@@ -109,7 +110,7 @@ class Scheduler:
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
 
-        req_to_new_block_ids: Dict[str, MayGroupedBlockIDs] = {}
+        req_to_new_block_ids: Dict[str, MayMultiLayerBlockIDs] = {}
         num_scheduled_tokens: Dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -205,18 +206,18 @@ class Scheduler:
                     # is always a multiple of the block size. This limitation
                     # can potentially be removed in the future to slightly
                     # improve the performance.
-                    kv_groups = self.kv_cache_manager.kv_cache_config.groups
-                    if len(kv_groups) > 1 or \
-                        not isinstance(kv_groups[0].kv_cache_spec,
+                    virtual_layers = self.kv_cache_manager.kv_cache_config.virtual_layers
+                    if len(virtual_layers) > 1 or \
+                        not isinstance(virtual_layers[0].kv_cache_spec,
                                        FullAttentionSpec):
                         # It is difficult to handle the last block problem
                         # for hybrid models. Ignore all computed tokens as
                         # a temporary solution.
                         num_computed_tokens = 0
                         num_new_tokens = request.num_tokens
-                        computed_blocks = [[] for _ in kv_groups]
+                        computed_blocks = [[] for _ in virtual_layers]
                     else:
-                        block_size = kv_groups[0].kv_cache_spec.block_size
+                        block_size = virtual_layers[0].kv_cache_spec.block_size
                         num_computed_tokens -= block_size
                         num_new_tokens = block_size
                         computed_blocks.pop()
@@ -332,7 +333,7 @@ class Scheduler:
     def _make_cached_request_data(
         self,
         request: Request,
-        new_block_ids: MayGroupedBlockIDs,
+        new_block_ids: MayMultiLayerBlockIDs,
         num_computed_tokens: int,
         resumed_from_preemption: bool,
     ) -> "CachedRequestData":
@@ -584,14 +585,14 @@ class NewRequestData:
     mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
-    block_ids: MayGroupedBlockIDs
+    block_ids: MayMultiLayerBlockIDs
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: MayGroupedBlockIDs,
+        block_ids: MayMultiLayerBlockIDs,
         num_computed_tokens: int,
     ) -> "NewRequestData":
         return cls(
@@ -615,7 +616,7 @@ class CachedRequestData:
     # the request's block IDs. If True, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
-    new_block_ids: MayGroupedBlockIDs
+    new_block_ids: MayMultiLayerBlockIDs
     num_computed_tokens: int
 
     @classmethod
@@ -623,7 +624,7 @@ class CachedRequestData:
         cls,
         request: Request,
         resumed_from_preemption: bool,
-        new_block_ids: MayGroupedBlockIDs,
+        new_block_ids: MayMultiLayerBlockIDs,
         num_computed_tokens: int,
     ) -> "CachedRequestData":
         return cls(
@@ -643,8 +644,8 @@ class SchedulerOutput:
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
-    # Number of common prefix blocks per kv cache group
-    # See KVCacheConfig class for the meaning of "group"
+    # Number of common prefix blocks per virtual layer
+    # See KVCacheConfig class for the meaning of "virtual layer"
     num_common_prefix_blocks: List[int]
 
     finished_req_ids: Set[str]

@@ -8,7 +8,7 @@ from triton import cdiv
 from typing_extensions import Concatenate, ParamSpec
 
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import (GroupedBlockIDs, KVCacheConfig,
+from vllm.v1.kv_cache_interface import (MayMultiLayerBlockIDs, KVCacheConfig,
                                         KVCacheSpec)
 
 logger = init_logger(__name__)
@@ -99,48 +99,49 @@ class BlockTable:
 P = ParamSpec("P")
 
 
-class GroupedBlockTable:
+class MultiLayerBlockTable:
     move_row: Callable[P, None]
     commit: Callable[P, None]
     clear: Callable[P, None]
 
-    append_row: Callable[Concatenate["GroupedBlockIDs", P], None]
-    add_row: Callable[Concatenate["GroupedBlockIDs", P], None]
+    append_row: Callable[Concatenate["MayMultiLayerBlockIDs", P], None]
+    add_row: Callable[Concatenate["MayMultiLayerBlockIDs", P], None]
 
     def __init__(self, max_num_reqs: int, max_model_len: int,
                  max_num_tokens: int, pin_memory: bool, device: torch.device,
                  kv_cache_config: KVCacheConfig) -> None:
         self.block_tables = [
             BlockTable(max_num_reqs, max_model_len, max_num_tokens, pin_memory,
-                       device, g.kv_cache_spec) for g in kv_cache_config.groups
+                       device, g.kv_cache_spec)
+            for g in kv_cache_config.virtual_layers
         ]
         # For methods that just pass the arguments to each BlockTable.
         for f_name in ("move_row", "commit", "clear"):
-            setattr(self, f_name, self._make_grouped_func(f_name))
+            setattr(self, f_name, self._make_broadcast_func(f_name))
         # For methods that require a block_ids as the first argument.
         for f_name in ("append_row", "add_row"):
             setattr(self, f_name,
-                    self._make_grouped_func_with_block_ids(f_name))
+                    self._make_broadcast_func_with_block_ids(f_name))
 
-    def _make_grouped_func(self, f_name: str) -> Callable[P, None]:
+    def _make_broadcast_func(self, f_name: str) -> Callable[P, None]:
 
-        def grouped_func(*args: P.args, **kwargs: P.kwargs) -> None:
+        def broadcast_func(*args: P.args, **kwargs: P.kwargs) -> None:
             for block_table in self.block_tables:
                 getattr(block_table, f_name)(*args, **kwargs)
 
-        return grouped_func
+        return broadcast_func
 
-    def _make_grouped_func_with_block_ids(
-            self,
-            f_name: str) -> Callable[Concatenate["GroupedBlockIDs", P], None]:
+    def _make_broadcast_func_with_block_ids(
+        self, f_name: str
+    ) -> Callable[Concatenate["MayMultiLayerBlockIDs", P], None]:
 
-        def grouped_func(block_ids: "GroupedBlockIDs", *args: P.args,
-                         **kwargs: P.kwargs) -> None:
+        def broadcast_func(block_ids: "MayMultiLayerBlockIDs", *args: P.args,
+                           **kwargs: P.kwargs) -> None:
             for i, block_table in enumerate(self.block_tables):
-                getattr(block_table, f_name)(block_ids.get_group(i), *args,
-                                             **kwargs)
+                getattr(block_table, f_name)(block_ids.get_virtual_layer(i),
+                                             *args, **kwargs)
 
-        return grouped_func
+        return broadcast_func
 
     def __getitem__(self, idx: int) -> "BlockTable":
         return self.block_tables[idx]
@@ -153,11 +154,12 @@ def initialize_block_table(
     pin_memory: bool,
     device: torch.device,
     kv_cache_config: KVCacheConfig,
-) -> Union[BlockTable, GroupedBlockTable]:
-    if len(kv_cache_config.groups) == 1:
+) -> Union[BlockTable, MultiLayerBlockTable]:
+    if len(kv_cache_config.virtual_layers) == 1:
         return BlockTable(max_num_reqs, max_model_len, max_num_tokens,
                           pin_memory, device,
-                          kv_cache_config.groups[0].kv_cache_spec)
+                          kv_cache_config.virtual_layers[0].kv_cache_spec)
     else:
-        return GroupedBlockTable(max_num_reqs, max_model_len, max_num_tokens,
-                                 pin_memory, device, kv_cache_config)
+        return MultiLayerBlockTable(max_num_reqs, max_model_len,
+                                    max_num_tokens, pin_memory, device,
+                                    kv_cache_config)

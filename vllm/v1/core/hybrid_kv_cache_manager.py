@@ -21,8 +21,8 @@ logger = init_logger(__name__)
 class HybridKVCacheManager:
     """
     The HybridKVCacheManager for models with multiple KV cache types
-     (e.g., Gemma-2) and thus multiple kv cache group (Refer to class 
-     `KVCacheConfig` for the meaning of kv cache group).
+     (e.g., Gemma-2) and thus multiple virtual layers (Refer to class 
+     `KVCacheConfig` for the meaning of virtual layers).
     """
 
     def __init__(
@@ -36,8 +36,8 @@ class HybridKVCacheManager:
         self.num_gpu_blocks = kv_cache_config.num_blocks
         self.max_model_len = max_model_len
         self.max_num_blocks_per_req = [
-            cdiv(max_model_len, g.kv_cache_spec.block_size)
-            for g in kv_cache_config.groups
+            cdiv(max_model_len, l.kv_cache_spec.block_size)
+            for l in kv_cache_config.virtual_layers
         ]
         self.enable_caching = enable_caching
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
@@ -51,37 +51,38 @@ class HybridKVCacheManager:
         # further allocation. When it uses up all the N empty blocks, it gets
         # N new empty blocks.
         # NOTE(Chen): For simplicity, we keep the number of preallocated blocks
-        # the same for all kv cache groups, which will result in different
-        # preallocated tokens for different groups if their block sizes are
+        # the same for all layers, which will result in different
+        # preallocated tokens for different layers if their block sizes are
         # different.
         self.num_preallocate_tokens = num_preallocate_tokens
         self.num_preallocate_blocks = cdiv(
             num_preallocate_tokens,
-            max(g.kv_cache_spec.block_size for g in kv_cache_config.groups))
+            max(l.kv_cache_spec.block_size
+                for l in kv_cache_config.virtual_layers))
         self.block_pool = BlockPool(self.num_gpu_blocks, self.enable_caching)
 
-        # Specialized managers for each kv cache group, which handle the
+        # Specialized managers for each layer, which handle the
         # different kv cache management logic of different attention layers.
         self.managers = [
             get_specialized_manager(
-                g.kv_cache_spec,
+                l.kv_cache_spec,
                 block_pool=self.block_pool,
-            ) for g in kv_cache_config.groups
+            ) for l in kv_cache_config.virtual_layers
         ]
-        self.num_kv_cache_groups = len(self.kv_cache_config.groups)
+        self.num_virtual_layers = len(self.kv_cache_config.virtual_layers)
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
         self.req_to_blocks: DefaultDict[str, ReqKVCacheBlocks] = defaultdict(
-            lambda: [[] for _ in range(self.num_kv_cache_groups)])
+            lambda: [[] for _ in range(self.num_virtual_layers)])
 
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
         self.req_to_block_hashes: DefaultDict[
             str, List[List[BlockHashType]]] = defaultdict(
-                lambda: [[] for _ in range(self.num_kv_cache_groups)])
+                lambda: [[] for _ in range(self.num_virtual_layers)])
 
     usage = KVCacheManager.usage
     reset_prefix_cache = KVCacheManager.reset_prefix_cache
@@ -114,9 +115,9 @@ class HybridKVCacheManager:
             ]
             self.req_to_block_hashes[request.request_id] = block_hashes
 
-        computed_blocks: ReqKVCacheBlocks = []  # computed blocks of each group
+        computed_blocks: ReqKVCacheBlocks = []  # computed blocks of each layer
         prefix_length: List[PrefixLength] = [
-        ]  # possible cached prefix length of each group
+        ]  # possible cached prefix length of each layer
 
         for i, manager in enumerate(self.managers):
             prefix_length_i, computed_blocks_i = (
@@ -124,12 +125,12 @@ class HybridKVCacheManager:
             computed_blocks.append(computed_blocks_i)
             prefix_length.append(prefix_length_i)
 
-        # Find the common cached prefix of all groups.
+        # Find the common cached prefix of all layers.
         num_computed_tokens = self._get_common_computed_tokens(prefix_length)
 
         # Truncate the computed blocks to the number of computed tokens.
-        # E.g., group 0 has 3 computed blocks, and group 1 has 4 computed
-        # blocks with the same block size, we truncate both groups to 3 blocks.
+        # E.g., layer 0 has 3 computed blocks, and layer 1 has 4 computed
+        # blocks with the same block size, we truncate both layers to 3 blocks.
         for i, manager in enumerate(self.managers):
             computed_blocks[i] = computed_blocks[i][:num_computed_tokens //
                                                     manager.block_size]
@@ -149,7 +150,7 @@ class HybridKVCacheManager:
             num_tokens: The number of tokens to allocate. Note that this does
                 not include the tokens that have already been computed.
             new_computed_blocks_all_groups: A list of new computed blocks 
-                just hitting the prefix caching.
+                just hitting the prefix caching. TODO update
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -177,7 +178,7 @@ class HybridKVCacheManager:
         self._free_useless_blocks(req_blocks, request.num_computed_tokens)
 
         new_computed_blocks = new_computed_blocks or [
-            [] for _ in range(self.num_kv_cache_groups)
+            [] for _ in range(self.num_virtual_layers)
         ]
 
         # The number of computed tokens is the number of computed tokens plus
@@ -198,7 +199,7 @@ class HybridKVCacheManager:
         # free queue and ref_cnt == 0), it cannot be counted as a free block
         # when allocating this request.
         num_evictable_computed_blocks = sum(
-            1 for blk_group in new_computed_blocks for blk in blk_group
+            1 for blk_one_layer in new_computed_blocks for blk in blk_one_layer
             if blk.ref_cnt == 0)
 
         if (total_new_blocks > self.block_pool.get_num_free_blocks() -
@@ -217,20 +218,20 @@ class HybridKVCacheManager:
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
-        for i, new_computed_blocks_of_group in enumerate(new_computed_blocks):
-            req_blocks[i].extend(new_computed_blocks_of_group)
+        for i, new_computed_blocks_one_layer in enumerate(new_computed_blocks):
+            req_blocks[i].extend(new_computed_blocks_one_layer)
 
         # Start to handle new blocks
         new_blocks: ReqKVCacheBlocks = []
 
         # Truncate the number of pre-allocated blocks to ensure that we can
-        # have at least `num_new_blocks` free blocks for each group.
+        # have at least `num_new_blocks` free blocks for each layer.
         num_preallocate_blocks = min(
             self.num_preallocate_blocks,
             (self.block_pool.get_num_free_blocks() - total_new_blocks) //
             len(self.managers))
 
-        for i in range(self.num_kv_cache_groups):
+        for i in range(self.num_virtual_layers):
             if num_new_blocks[i] <= 0:
                 # No new block is needed.
                 new_blocks.append([])
@@ -251,10 +252,10 @@ class HybridKVCacheManager:
                 assert num_block_to_allocate <= \
                     self.block_pool.get_num_free_blocks()
 
-                new_blocks_of_group = self.block_pool.get_new_blocks(
+                new_blocks_this_layer = self.block_pool.get_new_blocks(
                     num_block_to_allocate)
-                new_blocks.append(new_blocks_of_group)
-                req_blocks[i].extend(new_blocks_of_group)
+                new_blocks.append(new_blocks_this_layer)
+                req_blocks[i].extend(new_blocks_this_layer)
 
         if not self.enable_caching:
             return new_blocks
@@ -273,7 +274,7 @@ class HybridKVCacheManager:
                 old_num_computed_tokens=num_computed_tokens,
                 new_num_computed_tokens=num_computed_tokens + num_tokens,
                 block_size=manager.block_size,
-                kv_cache_group_id=i,
+                virtual_layer_id=i,
             )
 
         return new_blocks
@@ -338,20 +339,20 @@ class HybridKVCacheManager:
                 requests in the current step.
 
         Returns:
-            List[int]: The number of common prefix blocks per KV cache group.
+            List[int]: The number of common prefix blocks per virtual layer.
         """
         assert request.status == RequestStatus.RUNNING
         blocks = self.req_to_blocks[request.request_id]
-        num_common_blocks_per_group = []
-        for blocks_of_group in blocks:
+        num_common_blocks_per_layer = []
+        for blocks_one_layer in blocks:
             num_common_blocks = 0
-            for block in blocks_of_group:
+            for block in blocks_one_layer:
                 if block.ref_cnt == num_running_requests:
                     num_common_blocks += 1
                 else:
                     break
-            num_common_blocks_per_group.append(num_common_blocks)
-        return num_common_blocks_per_group
+            num_common_blocks_per_layer.append(num_common_blocks)
+        return num_common_blocks_per_layer
 
     def _free_useless_blocks(self, req_blocks: ReqKVCacheBlocks,
                              num_computed_tokens: int) -> None:
@@ -366,21 +367,21 @@ class HybridKVCacheManager:
             num_computed_tokens: The number of computed tokens.
         """
         removed_blocks = []
-        for manager, req_blocks_of_group in zip(self.managers, req_blocks):
+        for manager, req_blocks_one_layer in zip(self.managers, req_blocks):
             removed_blocks.append(
-                manager.remove_useless_blocks(req_blocks_of_group,
+                manager.remove_useless_blocks(req_blocks_one_layer,
                                               num_computed_tokens))
         self._free_blocks(removed_blocks)
 
     def _get_common_computed_tokens(self,
                                     prefix_length: List[PrefixLength]) -> int:
         """
-        Find the longest prefix that is cached by all KV cache groups. Returns 
+        Find the longest prefix that is cached by all virtual layers. Returns 
         the number of tokens in that prefix.
 
         Args:
             prefix_length (List[PrefixLength]): The valid cached prefix lengths 
-            of each KV cache group.
+            of each virtual layer.
     
         Returns:
             The number of tokens in the common prefix.
@@ -406,12 +407,12 @@ class HybridKVCacheManager:
     def _merge_blocks_by_eviction_order(
             self, blocks: ReqKVCacheBlocks) -> List[KVCacheBlock]:
         """
-        Merge the blocks of different groups to one list. The returned blocks 
+        Merge the blocks of different layers to one list. The returned blocks 
         are sorted by eviction order, with the first block having the highest 
         eviction priority.
 
         Args:
-            blocks: the blocks of each kv cache group, ordered by eviction 
+            blocks: the blocks of each virtual layer, ordered by eviction 
             priority.
 
         Returns:
@@ -420,17 +421,17 @@ class HybridKVCacheManager:
 
         if self.enable_caching:
             # NOTE (Chen): A simple strategy that interleaves the blocks of
-            # different KV cache groups. We can investigate more advanced
-            # strategies in the future.
+            # each layer. We can investigate more advanced strategies
+            # in the future.
             ordered_blocks = []
-            max_len = max(len(blocks_of_group) for blocks_of_group in blocks)
+            max_len = max(len(blocks_one_layer) for blocks_one_layer in blocks)
             for i in range(max_len):
-                for blocks_of_group in blocks:
-                    if i < len(blocks_of_group):
-                        ordered_blocks.append(blocks_of_group[i])
+                for blocks_one_layer in blocks:
+                    if i < len(blocks_one_layer):
+                        ordered_blocks.append(blocks_one_layer[i])
         else:
             ordered_blocks = []
-            for blocks_of_group in blocks:
-                ordered_blocks.extend(blocks_of_group)
+            for blocks_one_layer in blocks:
+                ordered_blocks.extend(blocks_one_layer)
 
         return ordered_blocks

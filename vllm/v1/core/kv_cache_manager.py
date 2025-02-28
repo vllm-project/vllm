@@ -24,7 +24,7 @@ class KVCacheManager:
         enable_caching: bool = True,
         num_preallocate_tokens: int = 64,
     ) -> None:
-        kv_cache_spec = kv_cache_config.groups[0].kv_cache_spec
+        kv_cache_spec = kv_cache_config.virtual_layers[0].kv_cache_spec
         self.block_size = kv_cache_spec.block_size
         self.num_gpu_blocks = kv_cache_config.num_blocks
         self.max_model_len = max_model_len
@@ -324,7 +324,7 @@ def init_kv_cache_manager(kv_cache_config: KVCacheConfig,
                           num_preallocate_tokens: int = 64):
     from vllm.v1.core.hybrid_kv_cache_manager import HybridKVCacheManager
     print("kv_cache_config", kv_cache_config)
-    if len(kv_cache_config.groups) > 1:
+    if len(kv_cache_config.virtual_layers) > 1:
         logger.info("Using HybridKVCacheManager")
         return HybridKVCacheManager(
             kv_cache_config=kv_cache_config,

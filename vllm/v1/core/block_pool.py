@@ -64,7 +64,7 @@ class BlockPool:
                           old_num_computed_tokens: int,
                           new_num_computed_tokens: int,
                           block_size: int,
-                          kv_cache_group_id: int = 0) -> None:
+                          virtual_layer_id: int = 0) -> None:
         """Cache a list of full blocks for prefix caching.
 
         This function takes a list of blocks that will have their block hash
@@ -139,7 +139,7 @@ class BlockPool:
 
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(prev_block_hash_value,
-                                               block_tokens, kv_cache_group_id,
+                                               block_tokens, virtual_layer_id,
                                                extra_keys)
                 block_hashes.append(block_hash)
 

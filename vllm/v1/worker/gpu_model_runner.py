@@ -440,15 +440,16 @@ class GPUModelRunner:
 
         attn_metadata: Dict[str, FlashAttentionMetadata] = {}
 
-        if len(self.kv_cache_config.groups) == 1:
-            may_grouped_unwrapper = lambda x, _group_id: x
+        if len(self.kv_cache_config.virtual_layers) == 1:
+            may_multi_layer_unwrapper = lambda x, _group_id: x
         else:
-            may_grouped_unwrapper = lambda x, group_id: x[group_id]
+            may_multi_layer_unwrapper = lambda x, group_id: x[group_id]
 
-        for group_id, kv_cache_group in enumerate(self.kv_cache_config.groups):
-            block_size = kv_cache_group.kv_cache_spec.block_size
-            block_table: BlockTable = may_grouped_unwrapper(
-                self.input_batch.block_table, group_id)
+        for vlayer_id, virtual_layer in enumerate(
+                self.kv_cache_config.virtual_layers):
+            block_size = virtual_layer.kv_cache_spec.block_size
+            block_table: BlockTable = may_multi_layer_unwrapper(
+                self.input_batch.block_table, vlayer_id)
 
             # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
@@ -475,8 +476,8 @@ class GPUModelRunner:
                 .to(self.device, non_blocking=True).long()
 
             # Prepare for cascade attention if needed.
-            common_prefix_len = (may_grouped_unwrapper(
-                scheduler_output.num_common_prefix_blocks, group_id) *
+            common_prefix_len = (may_multi_layer_unwrapper(
+                scheduler_output.num_common_prefix_blocks, vlayer_id) *
                                  block_size)
             if common_prefix_len == 0:
                 # Common case.
@@ -527,7 +528,7 @@ class GPUModelRunner:
                 # common_prefix_len should be a multiple of the block size.
                 common_prefix_len = (common_prefix_len // block_size *
                                      block_size)
-                kv_cache_spec = kv_cache_group.kv_cache_spec
+                kv_cache_spec = virtual_layer.kv_cache_spec
                 assert isinstance(kv_cache_spec,
                                   (FullAttentionSpec, SlidingWindowSpec))
                 use_cascade = FlashAttentionBackend.use_cascade_attention(
@@ -558,7 +559,7 @@ class GPUModelRunner:
                 prefix_kv_lens = None
                 suffix_kv_lens = None
 
-            attn_metadata_of_group = FlashAttentionMetadata(
+            attn_metadata_of_virtual_layer = FlashAttentionMetadata(
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
                 query_start_loc=query_start_loc,
@@ -573,8 +574,8 @@ class GPUModelRunner:
                 suffix_kv_lens=suffix_kv_lens,
             )
 
-            for layer_name in kv_cache_group.layer_names:
-                attn_metadata[layer_name] = attn_metadata_of_group
+            for layer_name in virtual_layer.layer_names:
+                attn_metadata[layer_name] = attn_metadata_of_virtual_layer
         # NOTE(woosuk): Due to chunked prefills, the batch may contain partial
         # requests. While we should not sample any token from these partial
         # requests, we do so for simplicity. We will ignore the sampled
@@ -1104,9 +1105,9 @@ class GPUModelRunner:
             corresponding memory buffer for KV cache.
         """
         kv_caches: Dict[str, torch.Tensor] = {}
-        for kv_cache_group in kv_cache_config.groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
+        for virtual_layer in kv_cache_config.virtual_layers:
+            kv_cache_spec = virtual_layer.kv_cache_spec
+            for layer_name in virtual_layer.layer_names:
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                 num_blocks = raw_tensor.numel(
