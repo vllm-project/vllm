@@ -171,9 +171,7 @@ class OpenAIServingCompletion(OpenAIServing):
         # Similar to the OpenAI API, when n != best_of, we do not stream the
         # results. In addition, we do not stream the results when use
         # beam search.
-        stream = (request.stream
-                  and (request.best_of is None or request.n == request.best_of)
-                  and not request.use_beam_search)
+        stream = (request.stream and not request.use_beam_search)
 
         # Streaming response
         if stream:
