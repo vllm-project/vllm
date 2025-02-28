@@ -82,6 +82,7 @@ if __name__ == "__main__":
     model = args.model
     quant = True
     if args.mode is not None:
+        print(f"Mode is {args.mode}.")
         if args.mode == "quant":
             # quantize
             if args.fp8_kvcache:
