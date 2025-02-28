@@ -11,7 +11,6 @@ vLLM uses a “right-shifted” versioning scheme where a new patch release is o
 * _patch_ features and backwards-compatible bug fixes
 * _post1_ or _patch-1_ backwards-compatible bug fixes, either explicit or implicit post release
 
-
 ## Release Cadence
 
 Patch release is released on bi-weekly basis. Post release 1-3 days after patch release and uses same branch as patch release.
