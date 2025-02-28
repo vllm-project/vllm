@@ -224,6 +224,7 @@ if __name__ == "__main__":
         distributed_executor_backend='ray',
         trust_remote_code=True,
         quantization='inc',
+        kv_cache_dtype="fp8_inc",
         max_model_len=16384,
         dtype="bfloat16",
     )
