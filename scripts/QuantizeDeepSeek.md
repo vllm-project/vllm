@@ -48,18 +48,18 @@ VLLM_TARGET_DEVICE=hpu pip install -e .  --no-build-isolation
 - Head Node
 
 ```bash
-source  head_node_source.sh
+source  head_multi_nodes_source.sh
 ```
 
 - Worker Node
 
 ```bash
-source worker_node_souce.sh
+source worker_multi_nodes_source.sh
 ```
 
 > [!TIP]
-> Please start Ray in the same directory within both Docker containers.
-> Please restart Ray if you need to modify the environment variables.
+> Please start Ray in the SAME directory within both Docker containers.
+> Please RESTART Ray if you need to modify the environment variables.
 
 ## Calibration
 
