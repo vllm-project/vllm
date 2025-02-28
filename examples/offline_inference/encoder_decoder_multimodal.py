@@ -11,6 +11,37 @@ from vllm.assets.image import ImageAsset
 from vllm.utils import FlexibleArgumentParser
 
 
+def run_florence2():
+    # Create a Florence-2 encoder/decoder model instance
+    llm = LLM(
+        model="microsoft/Florence-2-large",
+        tokenizer="facebook/bart-large",
+        max_num_seqs=8,
+        trust_remote_code=True,
+        limit_mm_per_prompt={"image": 1},
+        dtype="half",
+    )
+
+    prompts = [
+        {   # implicit prompt with task token
+            "prompt": "<DETAILED_CAPTION>",
+            "multi_modal_data": {
+                "image": ImageAsset("stop_sign").pil_image
+            },
+        },
+        {   # explicit encoder/decoder prompt
+            "encoder_prompt": {
+                "prompt": "Describe in detail what is shown in the image.",
+                "multi_modal_data": {
+                    "image": ImageAsset("cherry_blossom").pil_image
+                },
+            },
+            "decoder_prompt": "",
+        },
+    ]
+    return llm, prompts
+
+
 def run_mllama():
     # Create a Mllama encoder/decoder model instance
     llm = LLM(
@@ -50,7 +81,7 @@ def run_whisper():
     llm = LLM(
         model="openai/whisper-large-v3",
         max_model_len=448,
-        max_num_seqs=2,
+        max_num_seqs=16,
         limit_mm_per_prompt={"audio": 1},
         dtype="half",
     )
@@ -78,6 +109,7 @@ def run_whisper():
 
 
 model_example_map = {
+    "florence2": run_florence2,
     "mllama": run_mllama,
     "whisper": run_whisper,
 }
