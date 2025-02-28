@@ -80,7 +80,14 @@ class InputBatch:
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens_cpu_tensor = torch.zeros(
+            (max_num_reqs, ),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.num_computed_tokens_cpu = \
+            self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
         self.block_table = BlockTable(
@@ -143,7 +150,7 @@ class InputBatch:
             device="cpu",
             pin_memory=pin_memory)
         self.frequency_penalties_cpu = \
-                self.frequency_penalties_cpu_tensor.numpy()
+            self.frequency_penalties_cpu_tensor.numpy()
         self.frequency_penalties_reqs: Set[str] = set()
 
         # Presence penalty related data structures
@@ -168,7 +175,7 @@ class InputBatch:
             device="cpu",
             pin_memory=pin_memory)
         self.repetition_penalties_cpu = \
-                self.repetition_penalties_cpu_tensor.numpy()
+            self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: Set[str] = set()
 
         # req_index -> (min_tokens, stop_token_ids)
@@ -192,6 +199,9 @@ class InputBatch:
 
         self.logit_bias: List[Optional[Dict[int,
                                             float]]] = [None] * max_num_reqs
+        self.has_allowed_token_ids: Set[str] = set()
+        self.allowed_token_ids_mask: Optional[torch.Tensor] = None
+        self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
 
         self.req_output_token_ids: List[Optional[List[int]]] = []
 
@@ -242,10 +252,12 @@ class InputBatch:
         self.block_table.add_row(req_index, request.block_ids)
 
         sampling_params = request.sampling_params
-        self.temperature_cpu[req_index] = sampling_params.temperature
         if sampling_params.sampling_type == SamplingType.GREEDY:
+            # Avoid later division by zero.
+            self.temperature_cpu[req_index] = -1.0
             self.greedy_reqs.add(req_id)
         else:
+            self.temperature_cpu[req_index] = sampling_params.temperature
             self.random_reqs.add(req_id)
 
         self.top_p_cpu[req_index] = sampling_params.top_p
@@ -284,6 +296,22 @@ class InputBatch:
             self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
         if sampling_params.logit_bias is not None:
             self.logit_bias[req_index] = sampling_params.logit_bias
+
+        if sampling_params.allowed_token_ids:
+            self.has_allowed_token_ids.add(req_id)
+            if self.allowed_token_ids_mask_cpu_tensor is None:
+                # Lazy allocation for this tensor, which can be large.
+                self.allowed_token_ids_mask = torch.zeros(self.max_num_reqs,
+                                                          self.vocab_size,
+                                                          dtype=torch.bool,
+                                                          device=self.device)
+                self.allowed_token_ids_mask_cpu_tensor = torch.zeros(
+                    self.max_num_reqs,
+                    self.vocab_size,
+                    dtype=torch.bool,
+                    device="cpu")
+            self.allowed_token_ids_mask_cpu_tensor[req_index][
+                sampling_params.allowed_token_ids] = True
 
         # Add request lora ID
         if request.lora_request:
@@ -330,7 +358,65 @@ class InputBatch:
             self.request_lora_mapping[req_index] = 0
 
         self.logit_bias[req_index] = None
+        self.has_allowed_token_ids.discard(req_id)
+        if self.allowed_token_ids_mask_cpu_tensor is not None:
+            self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         return req_index
+
+    def swap_states(self, i1: int, i2: int) -> None:
+        old_id_i1 = self._req_ids[i1]
+        old_id_i2 = self._req_ids[i2]
+        self._req_ids[i1], self._req_ids[i2] =\
+            self._req_ids[i2], self._req_ids[i1] # noqa
+        self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
+            self.req_output_token_ids[i2], self.req_output_token_ids[i1]
+        assert old_id_i1 is not None and old_id_i2 is not None
+        self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] =\
+            self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
+        self.num_tokens[i1], self.num_tokens[i2] =\
+            self.num_tokens[i2], self.num_tokens[i1]
+        self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
+            self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
+        self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
+            self.num_tokens_no_spec[i2], self.num_tokens_no_spec[i1]
+        self.num_prompt_tokens[i1], self.num_prompt_tokens[i2] =\
+            self.num_prompt_tokens[i2], self.num_prompt_tokens[i1]
+        self.num_computed_tokens_cpu[i1], self.num_computed_tokens_cpu[i2] =\
+            self.num_computed_tokens_cpu[i2], self.num_computed_tokens_cpu[i1]
+        self.temperature_cpu[i1], self.temperature_cpu[i2] =\
+            self.temperature_cpu[i2], self.temperature_cpu[i1]
+        self.top_p_cpu[i1], self.top_p_cpu[i2] =\
+            self.top_p_cpu[i2], self.top_p_cpu[i1]
+        self.top_k_cpu[i1], self.top_k_cpu[i2] =\
+            self.top_k_cpu[i2], self.top_k_cpu[i1]
+        self.frequency_penalties_cpu[i1], self.frequency_penalties_cpu[i2] =\
+            self.frequency_penalties_cpu[i2], self.frequency_penalties_cpu[i1]
+        self.presence_penalties_cpu[i1], self.presence_penalties_cpu[i2] =\
+            self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
+        self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
+            self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+        self.min_p_cpu[i1], self.min_p_cpu[i2] =\
+            self.min_p_cpu[i2], self.min_p_cpu[i1]
+
+        g1 = self.generators.get(i1)
+        g2 = self.generators.get(i2)
+        if g1 is not None:
+            self.generators[i2] = g1
+        if g2 is not None:
+            self.generators[i1] = g2
+
+        t1 = self.min_tokens.get(i1)
+        t2 = self.min_tokens.get(i2)
+        if t1 is not None:
+            self.min_tokens[i2] = t1
+        if t2 is not None:
+            self.min_tokens[i1] = t2
+
+        self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
+            self.request_lora_mapping[i2], self.request_lora_mapping[i1]
+        self.logit_bias[i1], self.logit_bias[i2] =\
+            self.logit_bias[i2], self.logit_bias[i1]
+        self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: List[int]) -> None:
         num_reqs = self.num_reqs
@@ -398,6 +484,11 @@ class InputBatch:
 
             self.logit_bias[empty_index] = self.logit_bias[last_req_index]
 
+            if self.allowed_token_ids_mask_cpu_tensor is not None:
+                self.allowed_token_ids_mask_cpu_tensor[
+                    empty_index] = self.allowed_token_ids_mask_cpu_tensor[
+                        last_req_index]
+
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
@@ -410,7 +501,11 @@ class InputBatch:
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
-        copy_slice(self.temperature_cpu_tensor, self.temperature, num_reqs)
+        if not self.all_greedy:
+            temperature = copy_slice(self.temperature_cpu_tensor,
+                                     self.temperature, num_reqs)
+        else:
+            temperature = None
         if not self.no_top_p:
             copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
         if not self.no_top_k:
@@ -436,8 +531,15 @@ class InputBatch:
         else:
             prompt_token_ids = None
 
+        allowed_token_ids_mask: Optional[torch.Tensor] = None
+        if not self.no_allowed_token_ids:
+            assert self.allowed_token_ids_mask is not None
+            copy_slice(self.allowed_token_ids_mask_cpu_tensor,
+                       self.allowed_token_ids_mask, num_reqs)
+            allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
+
         return SamplingMetadata(
-            temperature=self.temperature[:num_reqs],
+            temperature=temperature,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
@@ -450,21 +552,11 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(List[List[int]], self.req_output_token_ids),
-            spec_token_ids=None,
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
+            allowed_token_ids_mask=allowed_token_ids_mask,
         )
-
-    def get_sampling_metadata(
-        self,
-        req_id_to_spec_token_ids: Dict[str, List[int]],
-    ) -> SamplingMetadata:
-        # Set the new spec token ids in the cached sampling metadata.
-        self.sampling_metadata.spec_token_ids = [
-            req_id_to_spec_token_ids.get(req_id, []) for req_id in self.req_ids
-        ] if req_id_to_spec_token_ids else None
-        return self.sampling_metadata
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
         max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
@@ -544,3 +636,7 @@ class InputBatch:
     @property
     def no_prompt_logprob(self) -> bool:
         return not self.num_prompt_logprobs
+
+    @property
+    def no_allowed_token_ids(self) -> bool:
+        return len(self.has_allowed_token_ids) == 0

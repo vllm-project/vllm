@@ -47,7 +47,7 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.utils import resolve_obj_by_qualname
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
 
@@ -118,7 +118,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
 
 # Reminder: Please update docs/source/features/compatibility_matrix.md
 # If the feature combo become valid
-class SpecDecodeWorker(LoraNotSupportedWorkerBase):
+class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     """Worker which implements speculative decoding.
 
     Speculative decoding reduces decoding per-token latency by using a proposal
@@ -184,8 +184,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             elif draft_model_config.hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
-                if draft_tp == 1 or draft_model_config.hf_config.model_type ==\
-                        "deepseek_mtp":
+                if draft_tp == 1:
                     if current_platform.is_cuda_alike():
                         draft_worker_kwargs[
                             "model_runner_cls"] = TP1DraftModelRunner
@@ -203,7 +202,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
                 if draft_model_config.hf_config.model_type == "deepseek_mtp":
-                    num_spec_prefill_steps = num_speculative_tokens
+                    num_spec_prefill_steps = \
+                        draft_model_config.hf_config.n_predict
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
