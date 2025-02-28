@@ -18,7 +18,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.transformers_utils.configs.ovis import ConversationFormatter, GemmaConversationFormatter, OvisConfig, Llama3ConversationFormatter
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.attention import AttentionMetadata
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.config import VllmConfig
 from vllm.inputs import InputContext
@@ -368,11 +368,11 @@ class SiglipVisualTokenizer(nn.Module):
         self.visual_tokenizer_config = config.visual_tokenizer_config
         self.backbone_config: SiglipVisionConfig = self.visual_tokenizer_config.backbone_config
 
-        self.hidden_stride = self.config.hidden_stride
+        self.hidden_stride = self.visual_tokenizer_config.hidden_stride
         self.hidden_size = self.config.hidden_size
 
         self.backbone = SiglipVisionModel(self.backbone_config)
-        head_dim = self.config.vocab_size - len(IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
+        head_dim = self.visual_tokenizer_config.vocab_size - len(IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
         self.head = torch.nn.Sequential(
             torch.nn.Linear(
                 self.hidden_size * self.hidden_stride ** 2, head_dim,
@@ -469,21 +469,19 @@ class Ovis(nn.Module,SupportsMultiModal,SupportsPP):
             prefix=maybe_prefix(prefix,"language_model")
         )
         self.text_tokenizer = get_tokenizer(self.config.name_or_path)
-        self.visual_tokenizer = SiglipVisualTokenizer(self.config.visual_tokenizer_config)
+        self.visual_tokenizer = SiglipVisualTokenizer(self.config)
         self.vte = VisualEmbedding(
             self.config.visual_tokenizer_config.vocab_size,
             self.config.hidden_size,
-            device=self.visual_tokenizer.device,
-            dtype=self.visual_tokenizer.dtype
         )
     
-        self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
     
     @cached_property
     def sampler(self):
-        if hasattr(self.llm,"sampler"):
-            return self.llm.sampler
-        return None
+        if hasattr(self.language_model,"sampler"):
+            return self.language_model.sampler
+        return get_sampler()
     
     def _validate_pixel_values(self, pixel_values: Union[torch.Tensor,List[torch.Tensor]]) -> Union[torch.Tensor,List[torch.Tensor]]:
         h = w = self.config.visual_tokenizer.backbone_config.image_size
