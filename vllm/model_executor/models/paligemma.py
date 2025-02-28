@@ -118,23 +118,26 @@ class PaliGemmaMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        tokenizer = self.info.get_tokenizer()
         if not mm_data:
             # HF processor always adds placeholders even when there's no image
-            tokenizer = self.info.get_tokenizer()
             prompt_ids = tokenizer.encode(prompt)
-            # Paligemma2 is NOT adding <bos> token at the beginning
-            # Adding <bos> (tokenizer.bos_token_id) for prompt replacement
-            # if len(prompt_ids) == 0:
-            #     prompt_ids = [tokenizer.bos_token_id]
-            # elif prompt_ids[0] != tokenizer.bos_token_id:
-            #     prompt_ids = [tokenizer.bos_token_id] + prompt_ids
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        return super()._call_hf_processor(
+        processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
+
+        # Remove <bos> token at the beginning of prompt added by HF processor
+        # Otherwise it will fail the language feature
+        # This is for Paligemma 1 model only (tokenizier.add_bos_token == True)
+        # Paligemma2 does NOT have this problem (add_bos_token == False)
+        if processed_outputs["input_ids"][0][0] == tokenizer.bos_token_id:
+            prompt_ids_without_bos = processed_outputs["input_ids"][0][1:]
+            processed_outputs["input_ids"] = prompt_ids_without_bos[None, :]
+        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -159,16 +162,16 @@ class PaliGemmaMultiModalProcessor(
         bos_token_id = tokenizer.bos_token_id
         assert isinstance(bos_token_id, int)
 
-        # Adding <bos> token at the beginning based on add_bos_token variable.
-        # Always adding <bos> token at the end of the images tokens
-        # and before the text prompt according to Paligemma's format
+        # Paligemma 1 and 2 have different tokenizer.add_bos_token
+        # Replace <bos> with <image>*n + <bos> for Paligemma 1
+        # Insert <image>*n + <bos> for Paligemma 2
         if tokenizer.add_bos_token:
             return [
                 PromptReplacement(
                     modality="image",
                     target=[bos_token_id],
                     replacement=PromptUpdateDetails(
-                        full=[bos_token_id] + image_tokens + [bos_token_id],
+                        full=image_tokens + [bos_token_id],
                         features=image_tokens,
                     ),
                 )
@@ -198,10 +201,12 @@ class PaliGemmaMultiModalProcessor(
         newline_prompt = "\n"
         newline_token_id = tokenizer.encode(newline_prompt)[-1]  # 108
         # Force to add newline at the end of prompt for paligemma's format
+        # This step can NOT be replacemented by current PromptUpdate methods
         if len(prompt_token_ids) and prompt_token_ids[-1] != newline_token_id:
             prompt_token_ids.append(newline_token_id)
             mm_inputs["prompt_token_ids"] = prompt_token_ids
             mm_inputs["prompt"] += newline_prompt
+
         return mm_inputs
 
 
