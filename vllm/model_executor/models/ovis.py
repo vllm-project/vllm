@@ -28,7 +28,7 @@ from vllm.sequence import IntermediateTensors
 
 from .siglip import SiglipVisionModel
 from .interfaces import SupportsMultiModal,SupportsPP  
-from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,init_vllm_registered_model, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,init_vllm_registered_model, merge_multimodal_embeddings)
 
 IGNORE_ID = -100
 IMAGE_TOKEN_ID = -200
@@ -291,10 +291,9 @@ class OvisProcessingInfo(BaseProcessingInfo):
     
     def get_image_size_with_most_features(self) -> ImageSize:
         return ImageSize(height=384,width=384)
-        
-_I = TypeVar("_I",bound=OvisProcessingInfo)
 
-class OvisDummyInputsBuilder(BaseDummyInputsBuilder[_I]):   
+
+class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):   
     
     def get_dummy_processor_inputs(self, seq_len, mm_counts) -> ProcessorInputs:
         num_images = mm_counts.get("image",0)
@@ -316,7 +315,7 @@ class OvisDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         )
 
 
-class OvisMultiModalProcessor(BaseMultiModalProcessor[_I]):
+class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         
     def _get_mm_fields_config(
         self,
@@ -365,7 +364,7 @@ class SiglipVisualTokenizer(nn.Module):
     def __init__(self, config: PretrainedConfig, hidden_size: int):
         super().__init__()
         self.config = config
-        self.backbone_config = config.backbone_config
+        self.backbone_config: SiglipVisionConfig = config.backbone_config
 
         self.hidden_stride = config.
 
@@ -445,13 +444,13 @@ class VisualEmbedding(torch.nn.Embedding):
  
 
 @MULTIMODAL_REGISTRY.register_processor(
-    DeepseekVL2MultiModalProcessor,
-    info=DeepseekVL2ProcessingInfo,
-    dummy_inputs=DeepseekVL2DummyInputsBuilder)
+    OvisMultiModalProcessor,
+    info=OvisProcessingInfo,
+    dummy_inputs=OvisDummyInputsBuilder)
 class Ovis(nn.Module,SupportsMultiModal,SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
-        "language.": "language_model.",
+        "llm.": "language_model.",
     })
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
