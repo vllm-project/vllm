@@ -9,6 +9,7 @@ import datasets
 from vllm.utils import reset_seed
 reset_seed()
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["VLLM_EP_SIZE"] = "8"
 os.environ["VLLM_TP_SIZE"] = "8"
 
@@ -31,193 +32,38 @@ parser.add_argument("--isl", type=int, default=1024, help="input sequence length
 parser.add_argument("--osl", type=int, default=128, help="output sequence length.")
 parser.add_argument("--nprompts", type=int, default=4, help="The number of prompts.")
 parser.add_argument("--random", action="store_true", help="Randomly sample prompts.")
-# add mode
-parser.add_argument("--mode", type=str, default="q", required=False, help="The mode.")
+parser.add_argument("--mode", type=str, default="quant", required=False, help="The mode.")
 parser.add_argument("--fp8_kvcache", action="store_true", help="Using FP8 KV cache.")
 args = parser.parse_args()
 
-# os.environ["VLLM_SKIP_WARMUP"] = "true"
-# os.environ["HABANA_VISIBLE_DEVICES"] = "ALL"
-# os.environ['HABANA_VISIBLE_MODULES'] ='0,1,2,3,4,5,6,7'
-# os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] = "true"
-# os.environ["PT_HPU_WEIGHT_SHARING"] = "0"
-# os.environ['PT_HPUGRAPH_DISABLE_TENSOR_CACHE']='1'
-# os.environ['GLOO_SOCKET_IFNAME']='eth0'
-
-# os.environ["VLLM_MOE_N_SLICE"] = "1" if args.ep_size > 1 else "4"
-
-# os.environ["VLLM_MLA_DISABLE_REQUANTIZATION"] = "1"
-
-# os.environ["VLLM_RAY_DISABLE_LOG_TO_DRIVER"] = "0"
-# os.environ["RAY_IGNORE_UNHANDLED_ERRORS"] = "0"
-# os.environ["RAY_DEDUP_LOGS"] = "1"
-# os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"
+max_num_seqs = 4
 
 # ==-------------------------------------------------------------------------==
 # Calibration parameters
+# ==-------------------------------------------------------------------------==
 least_tokens = 1024
 num_samples = 512
 max_new_tokens = 32
 seed = 42
 # https://github.com/deepseek-ai/DeepSeek-R1/blob/main/README.md#deepseek-r1-evaluation
-"""
-... benchmarks requiring sampling, we use a temperature of 0.6, a top-p value of 0.95...
-"""
+# ... benchmarks requiring sampling, we use a temperature of 0.6, a top-p value of 0.95...
 temperature = 0.6
 temperature = 0 # greedy sample
 top_p = 0.95
-# ==-------------------------------------------------------------------------==
 
-
-def sample_sonnet_requests(
-    dataset_path: str,
-    num_requests: int,
-    input_len: int,
-    prefix_len: int,
-    tokenizer: PreTrainedTokenizerBase,
-) -> List[Tuple[str, str, int, int, None]]:
-    assert (
-        input_len > prefix_len
-    ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
-
-    # Load the dataset.
-    with open(dataset_path, encoding='utf-8') as f:
-        poem_lines = f.readlines()
-
-    # Tokenize the poem lines.
-    poem_token_ids = tokenizer(poem_lines).input_ids
-    average_poem_len = sum(
-        len(token_ids) for token_ids in poem_token_ids) / len(poem_token_ids)
-
-    # Base prefix for all requests.
-    base_prompt = "Pick as many lines as you can from these poem lines:\n"
-    base_message = [{
-        "role": "user",
-        "content": base_prompt,
-    }]
-    base_prompt_formatted = tokenizer.apply_chat_template(
-        base_message, add_generation_prompt=True, tokenize=False)
-    base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
-
-    assert (
-        input_len > base_prompt_offset
-    ), f"Please set 'args.sonnet-input-len' higher than {base_prompt_offset}."
-    num_input_lines = round(
-        (input_len - base_prompt_offset) / average_poem_len)
-
-    # First approximately `prefix_len` number of tokens in the
-    # prompt are fixed poem lines.
-    assert (
-        prefix_len > base_prompt_offset
-    ), f"Please set 'args.sonnet-prefix-len' higher than {base_prompt_offset}."
-
-    num_prefix_lines = round(
-        (prefix_len - base_prompt_offset) / average_poem_len)
-    prefix_lines = poem_lines[:num_prefix_lines]
-
-    # Sample the rest of lines per request.
-    sampled_requests: List = []
-    for _ in range(num_requests):
-        num_lines_needed = num_input_lines - num_prefix_lines
-        sampled_lines = "".join(prefix_lines +
-                                random.choices(poem_lines, k=num_lines_needed))
-        
-
-        prompt = f"{base_prompt}{sampled_lines}"
-        message = [
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ]
-        prompt_formatted = tokenizer.apply_chat_template(
-            message, add_generation_prompt=True, tokenize=False)
-        sampled_requests.append(prompt_formatted)
-
-    return sampled_requests, None
-
-def sample_gsm8k_requests(
-    num_requests: int, tokenizer: PreTrainedTokenizerBase, do_random: bool = False
-) -> List[Tuple[str, str]]:
-    # Load the dataset from huggingface.
-    dataset = datasets.load_dataset("openai/gsm8k", "main")
-    prompts = dataset["train"]["question"]
-    expected_responses = dataset["train"]["answer"]
-    few_shots = 5
-    base_prompt = [f"Question: {prompts[i]}\nAnswer: {expected_responses[i]}\n" for i in range(few_shots)]
-    base_prompt = "\n".join(base_prompt)
-    base_prompt = f"{base_prompt}\n"
-    
-    # Sample the requests.
-    sampled_requests: List = []
-    sampled_response: List = []
-    for j in range(num_requests):
-        i = random.choice(range(len(prompts[few_shots:]))) if do_random else j + few_shots
-        prompt = f"{base_prompt}Question: {prompts[i]}\nAnswer: "
-        # message = [
-        #     {
-        #         "role": "user",
-        #         "content": prompt,
-        #     },
-        # ]
-        # prompt = tokenizer.apply_chat_template(
-        #     message, add_generation_prompt=True, tokenize=False)
-        expected_response = expected_responses[i]
-        sampled_requests.append(prompt)
-        sampled_response.append(expected_response)
-
-    return sampled_requests, sampled_response
 
 if __name__ == "__main__":
 
-    # Sample prompts.
-    
-    if args.dataset == "sonnet":
-        # Sample sonnet requests.
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-        prompts, gt = sample_sonnet_requests(
-            dataset_path=f"{dataset_path}/sonnet.txt",
-            num_requests=args.nprompts,
-            input_len=args.isl,
-            prefix_len=200,
-            tokenizer=tokenizer,
-        )
-    elif args.dataset == "gsm8k":
-        # Sample GSM8K requests.
-        args.osl=128
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-        prompts, gt = sample_gsm8k_requests(
-            num_requests=args.nprompts,
-            tokenizer=tokenizer,
-            do_random=args.random,
-        )
+    from utils import get_prompts, get_prompt_token_ids, get_pile_prompts
+    if args.smoke:
+        prompts = get_prompts()
     else:
-        prompts = [
-            "Hello, my name is",
-            # "The president of the United States is",
-            # "The capital of France is",
-            "The future of AI is",
-        ]
-
-        from utils import get_prompts, get_prompt_token_ids, get_pile_prompts
-
-        # prompts = get_prompts()
-        # Got the unseen prompts.
-        # smoke_num_samples = 10
-        # prompts = get_pile_prompts(args.model, num_samples * 2)
-        # smoke_prompts = [
-        #     "Hello, my name is",
-        #     "The president of the United States is",
-        #     "The capital of France is",
-        #     "The future of AI is",
-        # ]
-
-        # smoke_prompts = smoke_prompts + prompts[-smoke_num_samples:]
-        smoke_prompts = get_prompts()
-        prompt_token_ids = get_prompt_token_ids(
-            args.model, smoke_prompts, least_tokens
-        )
-        gt = None
+        prompts = get_pile_prompts(args.model, num_samples)
+    prompt_token_ids = get_prompt_token_ids(
+        args.model, prompts, least_tokens
+    )
+    gt = None
+    
     # Create a sampling params object.
     sampling_params = SamplingParams(
         temperature=temperature,
@@ -235,7 +81,7 @@ if __name__ == "__main__":
             tensor_parallel_size=args.tp_size,
             distributed_executor_backend='mp',
             trust_remote_code=True,
-            # quantization=quantization,
+            max_num_seqs=max_num_seqs,
             max_model_len=16384,
             dtype="bfloat16",
         )
@@ -252,6 +98,7 @@ if __name__ == "__main__":
                 quantization=quantization,
                 weights_load_device="cpu",
                 kv_cache_dtype="fp8_inc",
+                max_num_seqs=max_num_seqs,
                 max_model_len=16384,
                 dtype="bfloat16",
             )
@@ -264,6 +111,7 @@ if __name__ == "__main__":
                 trust_remote_code=True,
                 quantization=quantization,
                 weights_load_device="cpu",
+                max_num_seqs=max_num_seqs,
                 max_model_len=16384,
                 dtype="bfloat16",
             )

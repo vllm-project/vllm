@@ -2,12 +2,10 @@ from vllm import LLM, SamplingParams
 
 import argparse
 import os
-from typing import Any, List, Tuple
-from transformers import PreTrainedTokenizerBase, AutoTokenizer
-import random
-import datasets
 from vllm.utils import reset_seed
 reset_seed()
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 # get file location
 file_path = os.path.abspath(__file__)
 dataset_path = os.path.join(os.path.dirname(file_path), "../benchmarks")
@@ -35,6 +33,7 @@ max_num_seqs = 4
 
 # ==-------------------------------------------------------------------------==
 # Calibration parameters
+# ==-------------------------------------------------------------------------==
 least_tokens = 1024
 num_samples = 512
 max_new_tokens = 32
@@ -44,17 +43,7 @@ seed = 42
 temperature = 0.6
 temperature = 0 # greedy sample
 top_p = 0.95
-# ==-------------------------------------------------------------------------==
 
-def _apply_inc():
-    return os.getenv("QUANT_CONFIG", None) is not None
-
-def _apply_inc_quant():
-    INC_QUANT_CONFIG = os.getenv("QUANT_CONFIG", None)
-    assert INC_QUANT_CONFIG is not None, "Please set the environment variable QUANT_CONFIG."
-    from neural_compressor.torch.quantization import FP8Config
-    config = FP8Config.from_json_file(INC_QUANT_CONFIG)
-    return config.quantize
 
 if __name__ == "__main__":
 
