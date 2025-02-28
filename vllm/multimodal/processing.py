@@ -674,34 +674,33 @@ def _apply_matches(
     for match in _resolve_matches(prompt, mm_matches):
         modality = match.modality
 
-        item_idx = next_idx_by_modality[modality]
-        if item_idx >= mm_item_counts.get(modality, 0):
+        item_start_idx = next_idx_by_modality[modality]
+        max_item_count = mm_item_counts.get(modality, 0)
+        if item_start_idx >= max_item_count:
             continue
 
         start_idx = match.start_idx
         end_idx = match.end_idx
         origin = match._origin
-        content = origin.get_content(item_idx)
         mode = origin.mode
 
         if mode == UpdateMode.INSERT:
             out_seqs.append(prompt[prev_end_idx:end_idx])
-            num_inserts = mm_item_counts.get(modality, 0)
+            num_inserts = max_item_count
         elif mode == UpdateMode.REPLACE:
             out_seqs.append(prompt[prev_end_idx:start_idx])
-            num_inserts = (mm_item_counts.get(modality, 0)
-                           if start_idx == end_idx else 1)
+            num_inserts = max_item_count if start_idx == end_idx else 1
         else:
             assert_never(mode)
 
-        num_inserts = min(num_inserts,
-                          mm_item_counts.get(modality, 0) - item_idx)
+        item_end_idx = min(item_start_idx + num_inserts, max_item_count)
 
-        for _ in range(num_inserts):
-            if isinstance(prompt, str):
-                out_seqs.append(content.full.text)
-            else:
-                out_seqs.append(content.full.token_ids)
+        for item_idx in range(item_start_idx, item_end_idx):
+            content = origin.get_content(item_idx)
+            insert_seq = (content.full.text if isinstance(prompt, str) else
+                          content.full.token_ids)
+
+            out_seqs.append(insert_seq)
 
         prev_end_idx = end_idx
         next_idx_by_modality[modality] += num_inserts

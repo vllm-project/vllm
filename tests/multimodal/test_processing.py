@@ -391,7 +391,7 @@ def test_find_text_matches(
                 },
             },
         ),
-        # Test start/end replacement
+        # Test index targets
         (
             "",
             {
@@ -439,6 +439,49 @@ def test_find_text_matches(
                     0: "<image>",
                     1: "1<image>23",
                     2: "11<image>2233",
+                },
+            },
+        ),
+        # Test different replacement per item
+        (
+            "<image><image><image>",
+            {
+                "pattern_1": "<image>",
+            },
+            {
+                "pattern_1": lambda idx: str(idx + 1),
+            },
+            {
+                PromptInsertion: {
+                    0: "<image><image><image>",
+                    1: "<image>1<image><image>",
+                    2: "<image>12<image><image>",
+                },
+                PromptReplacement: {
+                    0: "<image><image><image>",
+                    1: "1<image><image>",
+                    2: "12<image>",
+                },
+            },
+        ),
+        (
+            "<image><image><image>",
+            {
+                "pattern_1": PromptIndexTargets.prefix("<image>"),
+            },
+            {
+                "pattern_1": lambda idx: str(idx + 1),
+            },
+            {
+                PromptInsertion: {
+                    0: "<image><image><image>",
+                    1: "<image>1<image><image>",
+                    2: "<image>12<image><image>",
+                },
+                PromptReplacement: {
+                    0: "<image><image><image>",
+                    1: "<image>1<image><image>",
+                    2: "<image>12<image><image>",
                 },
             },
         ),
@@ -522,7 +565,7 @@ def test_find_update_text(
                 },
             },
         ),
-        # Test start/end replacement
+        # Test index targets
         (
             [],
             {
@@ -570,6 +613,49 @@ def test_find_update_text(
                     0: [32000],
                     1: [-1, 32000, -2, -3],
                     2: [-1, -1, 32000, -2, -2, -3, -3],
+                },
+            },
+        ),
+        # Test different replacement per item
+        (
+            [32000, 32000, 32000],
+            {
+                "pattern_1": [32000],
+            },
+            {
+                "pattern_1": lambda idx: [-(idx + 1)],
+            },
+            {
+                PromptInsertion: {
+                    0: [32000, 32000, 32000],
+                    1: [32000, -1, 32000, 32000],
+                    2: [32000, -1, -2, 32000, 32000],
+                },
+                PromptReplacement: {
+                    0: [32000, 32000, 32000],
+                    1: [-1, 32000, 32000],
+                    2: [-1, -2, 32000],
+                },
+            },
+        ),
+        (
+            [32000, 32000, 32000],
+            {
+                "pattern_1": PromptIndexTargets.prefix([32000]),
+            },
+            {
+                "pattern_1": lambda idx: [-(idx + 1)],
+            },
+            {
+                PromptInsertion: {
+                    0: [32000, 32000, 32000],
+                    1: [32000, -1, 32000, 32000],
+                    2: [32000, -1, -2, 32000, 32000],
+                },
+                PromptReplacement: {
+                    0: [32000, 32000, 32000],
+                    1: [32000, -1, 32000, 32000],
+                    2: [32000, -1, -2, 32000, 32000],
                 },
             },
         ),
