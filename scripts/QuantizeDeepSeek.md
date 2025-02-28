@@ -14,7 +14,7 @@
         - [Prerequisites](#prerequisites)
         - [Running the Example](#running-the-example)
     - [Accuray Evaluation WIP](#accuray-evaluation-wip)
-    - [Calibration with Customize dataset WIP](#calibration-with-customize-dataset-wip)
+    - [Calibration with Customize Dataset WIP](#calibration-with-customize-dataset-wip)
 
 <!-- /TOC -->
 
@@ -181,4 +181,4 @@ QUANT_CONFIG=inc_quant_with_fp8kv_one_node_config.json python inc_example_one_no
 
 ## Accuray Evaluation (WIP)
 
-## Calibration with Customize dataset (WIP)
+## Calibration with Customize Dataset (WIP)
