@@ -1426,7 +1426,7 @@ class EngineArgs:
         if not model_config.is_v1_compatible:
             _raise_or_warning(feature_name=model_config.architectures(),
                               recommend_to_remove=False)
-            return False
+            return False  #
 
         # No Concurrent Partial Prefills.
         if (self.max_num_partial_prefills
@@ -1451,16 +1451,9 @@ class EngineArgs:
             # This is supported but experimental (handled below).
             if self.speculative_model == "[ngram]":
                 pass
-
-            elif envs.VLLM_USE_V1:
-                logger.warning(
-                    "Detected VLLM_USE_V1=1 with speculative decoding. "
-                    "Usage should be considered experimental and you may "
-                    "encounter bugs. Please report any issues on Github.")
             else:
-                logger.info(
-                    "Speculative decoding is not yet enabled by default for"
-                    "V1 Engine. Falling back to V0 Engine.")
+                _raise_or_warning(feature_name="Speculative Decoding",
+                                  recommend_to_remove=False)
                 return False
 
         if self.kv_transfer_config != EngineArgs.kv_transfer_config:
@@ -1471,6 +1464,14 @@ class EngineArgs:
         #############################################################
         # Experimental Features allow users
         # to opt into this and log a warning if they do.
+
+        # MLA is is supported on V1, but off by default for now.
+        if model_config.use_mla:
+            if envs.VLLM_USE_V1:
+                _experimental_warning(feature_name="MLA")
+            else:
+                _fallback_info(feature_name="MLA")
+                return False
 
         # LoRA is supported on V1, but off by default for now.
         if self.enable_lora:
