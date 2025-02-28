@@ -168,9 +168,7 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name = self._get_model_name(request.model, lora_request)
         num_prompts = len(engine_prompts)
 
-        # Similar to the OpenAI API, when n != best_of, we do not stream the
-        # results. In addition, we do not stream the results when use
-        # beam search.
+        # We do not stream the results when use beam search.
         stream = (request.stream and not request.use_beam_search)
 
         # Streaming response

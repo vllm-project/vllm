@@ -303,20 +303,6 @@ class SamplingParams(
         )
 
     def __post_init__(self) -> None:
-        # how we deal with `best_of``:
-        # if `best_of`` is not set, we default to `n`;
-        # if `best_of`` is set, we set `n`` to `best_of`,
-        # and set `_real_n`` to the original `n`.
-        # when we return the result, we will check
-        # if we need to return `n` or `_real_n` results
-        if self.best_of:
-            if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}.")
-            if not self._real_n:
-                self._real_n = self.n
-                self.n = self.best_of
 
         if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
@@ -423,9 +409,6 @@ class SamplingParams(
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop.")
-        if self.best_of != self._real_n and self.output_kind == (
-                RequestOutputKind.DELTA):
-            raise ValueError("best_of must equal n to use output_kind=DELTA")
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

@@ -98,9 +98,6 @@ class LLM:
             memory (OOM) errors.
         # TODO: How to rewrite this
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
-            This can be used for temporarily storing the states of the requests
-            when their `best_of` sampling parameters are larger than 1. If all
-            requests will have `best_of=1`, you can safely set this to 0.
             Otherwise, too small values may cause out-of-memory (OOM) errors.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
