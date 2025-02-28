@@ -1418,7 +1418,7 @@ class EngineArgs:
 
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
-            _raise_or_warning(feature_name=f"Task {model_config.task}",
+            _raise_or_warning(feature_name=f"--task {model_config.task}",
                               recommend_to_remove=False)
             return False
 
