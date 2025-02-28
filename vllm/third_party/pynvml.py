@@ -1119,7 +1119,7 @@ class _PrintableStructure(Structure):
     e.g. class that has _field_ 'hex_value', c_uint could be formatted with
       _fmt_ = {"hex_value" : "%08X"}
     to produce nicer output.
-    Default fomratting string for all fields can be set with key "<default>" like:
+    Default formatting string for all fields can be set with key "<default>" like:
       _fmt_ = {"<default>" : "%d MHz"} # e.g all values are numbers in MHz.
     If not set it's assumed to be just "%s"
 
@@ -3356,7 +3356,7 @@ def nvmlDeviceGetComputeRunningProcesses_v2(handle):
         return []
     elif (ret == NVML_ERROR_INSUFFICIENT_SIZE):
         # typical case
-        # oversize the array incase more processes are created
+        # oversize the array in case more processes are created
         c_count.value = c_count.value * 2 + 5
         proc_array = c_nvmlProcessInfo_v2_t * c_count.value
         c_procs = proc_array()
@@ -3388,7 +3388,7 @@ def nvmlDeviceGetComputeRunningProcesses_v3(handle):
         return []
     elif (ret == NVML_ERROR_INSUFFICIENT_SIZE):
         # typical case
-        # oversize the array incase more processes are created
+        # oversize the array in case more processes are created
         c_count.value = c_count.value * 2 + 5
         proc_array = c_nvmlProcessInfo_v3_t * c_count.value
         c_procs = proc_array()
@@ -3425,7 +3425,7 @@ def nvmlDeviceGetGraphicsRunningProcesses_v2(handle):
         return []
     elif (ret == NVML_ERROR_INSUFFICIENT_SIZE):
         # typical case
-        # oversize the array incase more processes are created
+        # oversize the array in case more processes are created
         c_count.value = c_count.value * 2 + 5
         proc_array = c_nvmlProcessInfo_v2_t * c_count.value
         c_procs = proc_array()
@@ -3456,7 +3456,7 @@ def nvmlDeviceGetGraphicsRunningProcesses_v3(handle):
         return []
     elif (ret == NVML_ERROR_INSUFFICIENT_SIZE):
         # typical case
-        # oversize the array incase more processes are created
+        # oversize the array in case more processes are created
         c_count.value = c_count.value * 2 + 5
         proc_array = c_nvmlProcessInfo_v3_t * c_count.value
         c_procs = proc_array()
@@ -3498,7 +3498,7 @@ def nvmlDeviceGetMPSComputeRunningProcesses_v2(handle):
         return []
     elif (ret == NVML_ERROR_INSUFFICIENT_SIZE):
         # typical case
-        # oversize the array incase more processes are created
+        # oversize the array in case more processes are created
         c_count.value = c_count.value * 2 + 5
         proc_array = c_nvmlProcessInfo_v2_t * c_count.value
         c_procs = proc_array()
@@ -3532,7 +3532,7 @@ def nvmlDeviceGetMPSComputeRunningProcesses_v3(handle):
         return []
     elif (ret == NVML_ERROR_INSUFFICIENT_SIZE):
         # typical case
-        # oversize the array incase more processes are created
+        # oversize the array in case more processes are created
         c_count.value = c_count.value * 2 + 5
         proc_array = c_nvmlProcessInfo_v3_t * c_count.value
         c_procs = proc_array()
