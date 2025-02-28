@@ -61,6 +61,7 @@ class Scheduler:
 
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
+        # Priority queues for requests.
         self.waiting: deque[Request] = deque()
         self.running: List[Request] = []
         # The requests that have been scheduled and are being executed
@@ -241,16 +242,16 @@ class Scheduler:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                request = self.waiting.popleft()
+                request = self.waiting[0]
 
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     if request.grammar and request.is_grammar_ready:
                         request.status = RequestStatus.WAITING
                     else:
-                        still_waiting.append(request)
+                        guided_req = self.waiting.popleft()
+                        still_waiting.append(guided_req)
                         continue
 
-                #
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if self.lora_config and request.lora_request:
@@ -304,6 +305,7 @@ class Scheduler:
                     # The request cannot be scheduled.
                     break
 
+                self.waiting.popleft()
                 # Request is already popped from self.waiting
                 if request.use_guided_decoding:
                     guided_decoding_request_ids[request.request_id] = req_index
