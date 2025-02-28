@@ -1570,7 +1570,6 @@ class EngineArgs:
 
         # V1 always uses chunked prefills.
         self.enable_chunked_prefill = True
-
         # When no user override, set the default values based on the usage
         # context.
         # Use different default values for different hardware.
@@ -1602,9 +1601,6 @@ class EngineArgs:
             self.max_num_seqs = default_max_num_seqs
             logger.debug("Setting max_num_seqs to %d for %s usage context.",
                          self.max_num_seqs, usage_context.value)
-
-        if self.compilation_config:
-            self.compilation_config.set_splitting_ops_for_v1()
 
 
 @dataclass
