@@ -29,11 +29,26 @@ parser.add_argument("--nprompts", type=int, default=4, help="The number of promp
 parser.add_argument("--random", action="store_true", help="Randomly sample prompts.")
 args = parser.parse_args()
 
+# TEST ARGS
 # dump args into disk as json
+import time
+import datetime
+timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d_%H:%M:%S')
+filename = f'args_{timestamp}.json'
 import json
-with open('args.json', 'w') as f:
+with open(filename, 'w') as f:
     json.dump(vars(args), f)
     print(f"args: {vars(args)}")
+    print(f"dump args into {filename}")
+
+# TEST ENVS
+TEST_NEW_ENVS = os.getenv('TEST_NEW_ENVS', '0')
+# dump envs into disk as json
+# filename with timestamp
+filename = f'envs_{timestamp}.json'
+with open(filename, 'w') as f:
+    json.dump(dict(os.environ), f)
+    print(f"dump envs into {filename}")
 
 # os.environ["VLLM_SKIP_WARMUP"] = "true"
 # os.environ["HABANA_VISIBLE_DEVICES"] = "ALL"
