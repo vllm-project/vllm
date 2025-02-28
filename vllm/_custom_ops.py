@@ -1020,7 +1020,7 @@ def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indicies: torch.Tensor,
-                 gating_output: float) -> None:
+                 gating_output: torch.Tensor) -> None:
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
                                   token_expert_indicies, gating_output)
 

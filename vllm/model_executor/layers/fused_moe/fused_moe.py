@@ -950,7 +950,7 @@ def fused_topk(
         topk_weights,
         topk_ids,
         token_expert_indicies,
-        gating_output.float(),  # TODO(woosuk): Optimize this.
+        gating_output.type(torch.float32),
     )
     del token_expert_indicies  # Not used. Will be used in the future.
 
@@ -975,9 +975,9 @@ def grouped_topk(hidden_states: torch.Tensor,
         "Number of tokens mismatch")
 
     if scoring_func == "softmax":
-        scores = torch.softmax(gating_output, dim=-1)
+        scores = torch.softmax(gating_output, dim=-1, dtype=torch.float32)
     elif scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
+        scores = gating_output.type(torch.float32).sigmoid()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
