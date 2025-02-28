@@ -79,4 +79,4 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
-    prompt_logprobs_dict: Dict[str, LogprobsTensors]
+    prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]]
