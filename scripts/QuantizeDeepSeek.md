@@ -76,6 +76,7 @@ VLLM_TARGET_DEVICE=hpu pip install -e .  --no-build-isolation
 
 - Model
   - DeepSeek R1 (BF16)
+  - Script for converting original FP8 model to BF16 model: `convert_fp8_to_bf16_cpu.py`
 
 ### Exporting Environment variables
 >
@@ -173,6 +174,6 @@ QUANT_CONFIG=inc_quant_one_node_config.json python inc_example_one_node.py
 cd vllm/scripts
 # Download the unified calibration results
 huggingface-cli download Yi30/inc-tp8-ep8-full-kvcache-from-tp16-ep16 --local-dir nc_workspace_measure_kvache_one_node
-QUANT_CONFIG=inc_quant_with_fp8kv_one_node_config.json python inc_example_one_node.py
+QUANT_CONFIG=inc_quant_with_fp8kv_one_node_config.json python inc_example_one_node.py --fp8_kvcache
 ```
 ## Calibration with Customize dataset (WIP)
