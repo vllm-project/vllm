@@ -152,7 +152,7 @@ def get_local_guided_decoding_logits_processor(
             get_local_outlines_guided_decoding_logits_processor)
         return get_local_outlines_guided_decoding_logits_processor(
             guided_params, tokenizer, reasoner)
-    if guided_params.backend == 'lm-format-enforcer':
+    if guided_params.backend_name == 'lm-format-enforcer':
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
