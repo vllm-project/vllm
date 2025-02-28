@@ -26,6 +26,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -254,15 +255,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
-        attn_backend_cls = get_attn_backend(
-            self.model_config.get_head_size(),
-            self.model_config.dtype,
-            self.kv_cache_dtype,
-            self.block_size,
-            self.model_config.is_attention_free,
-            use_mla=self.model_config.use_mla,
-        )
-        self.attn_backend = attn_backend_cls(self)
+        # Instantiate the backend class.
+        # FIXME: clean up after deciding if the backend should be instantiable.
+        self.attn_backend = self.attn_backend(self)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -578,6 +573,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_num_scheduled_tokens,
             common_prefix_len=common_prefix_len,
         )
+        if isinstance(attn_metadata, FlashInferMetadata):
+            # FIXME: abstract this away so it's not flashinfer-specific
+            self.attn_backend.begin_forward(attn_metadata)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -590,7 +588,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            logits_indices = attn_metadata.query_start_loc[1:] - 1
+            if isinstance(attn_metadata, FlashInferMetadata):
+                # FIXME: abstract this away so it's not flashinfer-specific.
+                # This code should not rely on knowing the internals of the
+                # attention metadata.
+                logits_indices = attn_metadata.qo_indptr[1:] - 1
+            else:
+                logits_indices = attn_metadata.query_start_loc[1:] - 1
 
         # Hot-Swap lora model
         if self.lora_config:

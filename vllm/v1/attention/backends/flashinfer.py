@@ -24,6 +24,10 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 
+if TYPE_CHECKING:
+    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -64,60 +68,19 @@ class FlashInferBackend:
         return self._cascade_wrapper
 
     def begin_forward(self, attn_metadata: "FlashInferMetadata"):
-        seq_lens = attn_metadata.seq_lens
-        page_size = attn_metadata.page_size
-        block_table = attn_metadata.block_table
-
-        if attn_metadata.use_cascade:
-            # Grab the blocks of the shared prefix from the first request.
-            num_common_kv_blocks = attn_metadata.common_prefix_len // page_size
-            shared_kv_page_indptr = torch.tensor([0, num_common_kv_blocks],
-                                                 dtype=torch.int32,
-                                                 device=block_table.device)
-            shared_kv_page_indices = block_table[0, :num_common_kv_blocks]
-            shared_kv_last_page_len = torch.tensor([0], dtype=torch.int32,
-                                                   device=block_table.device)
-            # Remove the blocks of the shared prefix from all requests.
-            block_table = block_table[:, num_common_kv_blocks:]
-
-        block_table_bounds = (seq_lens + page_size - 1) // page_size
-
-        # An example for paged_kv_indices, paged_kv_indptr:
-        # request 1, page indices [0, 5, 8]
-        # request 2, page indices [1, 6, 7]
-        # request 3, page indices [3, 4]
-
-        # paged_kv_indices is a concatenation of page indices of all requests:
-        # [0, 5, 8, 1, 6, 7, 3, 4]
-        mask = (torch.arange(block_table.size(1), dtype=block_table.dtype,
-                             device=block_table.device).unsqueeze(0)
-                < block_table_bounds.unsqueeze(1))
-        paged_kv_indices = block_table[mask]
-
-        # paged_kv_indptr is used to index into paged_kv_indices: [0, 3, 6, 8]
-        # Shape: [batch_size + 1]
-        paged_kv_indptr = torch.cat([
-            torch.zeros(1, dtype=block_table_bounds.dtype,
-                        device=block_table_bounds.device),
-            block_table_bounds.cumsum(dim=0, dtype=torch.int32)])
-
-        # The number of entries in the last page of each request in
-        # the paged kv cache, shape: [batch_size]
-        paged_kv_last_page_len = seq_lens % page_size
-        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
-                                             page_size, paged_kv_last_page_len)
-
         if self.global_hyperparameters is None:
             self.global_hyperparameters = infer_global_hyperparameters(
                     get_per_layer_parameters(self.vllm_config))
-
         if attn_metadata.use_cascade:
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
-                [attn_metadata.cu_prefix_query_lens, attn_metadata.qo_indptr],
-                [shared_kv_page_indptr, paged_kv_indptr],
-                [shared_kv_page_indices, paged_kv_indices],
-                [shared_kv_last_page_len, paged_kv_last_page_len],
+                [attn_metadata.shared_qo_indptr, attn_metadata.qo_indptr],
+                [attn_metadata.shared_kv_page_indptr,
+                 attn_metadata.paged_kv_indptr],
+                [attn_metadata.shared_kv_page_indices,
+                 attn_metadata.paged_kv_indices],
+                [attn_metadata.shared_kv_last_page_len,
+                 attn_metadata.paged_kv_last_page_len],
                 attn_metadata.num_qo_heads,
                 attn_metadata.num_kv_heads,
                 attn_metadata.head_dim,
@@ -127,15 +90,14 @@ class FlashInferBackend:
                 window_left=self.global_hyperparameters.window_left,
                 logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
                 q_data_type=attn_metadata.q_data_type,
-                #kv_data_type=attn_metadata.data_type,
             )
         else:
             attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
             attn_metadata.prefill_wrapper.plan(
                 attn_metadata.qo_indptr,
-                paged_kv_indptr,
-                paged_kv_indices,
-                paged_kv_last_page_len,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                attn_metadata.paged_kv_last_page_len,
                 attn_metadata.num_qo_heads,
                 attn_metadata.num_kv_heads,
                 attn_metadata.head_dim,
@@ -163,6 +125,10 @@ class FlashInferBackend:
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return FlashInferMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["FlashInferMetadataBuilder"]:
+        return FlashInferMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -253,14 +219,25 @@ class FlashInferMetadata:
 
     num_actual_tokens: int  # Number of tokens excluding padding.
 
-    seq_lens: torch.Tensor
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
-
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
     qo_indptr: torch.Tensor
+    # An example for paged_kv_indices, paged_kv_indptr:
+    # request 1, page indices [0, 5, 8]
+    # request 2, page indices [1, 6, 7]
+    # request 3, page indices [3, 4]
+    # paged_kv_indices is a concatenation of page indices of all requests:
+    # [0, 5, 8, 1, 6, 7, 3, 4]
+    # paged_kv_indptr is used to index into paged_kv_indices:
+    # [0, 3, 6, 8]
+    # The indptr of the paged kv cache, shape: [batch_size + 1]
+    paged_kv_indptr: torch.Tensor
+    # The page indices of the paged kv cache
+    paged_kv_indices: torch.Tensor
+    # The number of entries in the last page of each request in
+    # the paged kv cache, shape: [batch_size]
+    paged_kv_last_page_len: torch.Tensor
     # The number of query/output heads
     num_qo_heads: int
     # The number of key/value heads
@@ -269,26 +246,25 @@ class FlashInferMetadata:
     head_dim: int
     # Block size of vllm
     page_size: int
+    # The data type of the paged kv cache
+    data_type: torch.dtype
+    # The data type of the query
+    q_data_type: torch.dtype
+
+    slot_mapping: torch.Tensor
 
     # For cascade attention.
     use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: Optional[torch.Tensor]
-    prefix_kv_lens: Optional[torch.Tensor]
-    suffix_kv_lens: Optional[torch.Tensor]
+    shared_qo_indptr: Optional[torch.Tensor] = None
+    shared_kv_page_indptr: Optional[torch.Tensor] = None
+    shared_kv_page_indices: Optional[torch.Tensor] = None
+    shared_kv_last_page_len: Optional[torch.Tensor] = None
 
     prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper = None
     cascade_wrapper: MultiLevelCascadeAttentionWrapper = None
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
-
-    # The data type of the paged kv cache
-    data_type: torch.dtype = None
-    # The data type of the query
-    q_data_type: torch.dtype = None
-    # FlashInfer 0.2 encourages passing host tensors
-    device: torch.device = torch.device("cpu")
 
     def __post_init__(self):
         # Refer to
@@ -299,6 +275,87 @@ class FlashInferMetadata:
             raise ValueError(
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f" received {self.head_dim}.")
+
+
+class FlashInferMetadataBuilder:
+
+    def __init__(self, runner: "GPUModelRunner"):
+        self.runner = runner
+
+    def reorder_batch(self, input_batch: "InputBatch",
+                      scheduler_output: "SchedulerOutput"):
+        pass
+
+    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+              common_prefix_len: int):
+        page_size = self.runner.block_size
+        device = self.runner.device
+        qo_indptr = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
+            self.runner.device, non_blocking=True)
+        seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
+                                                          non_blocking=True)
+        block_table = (
+            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
+            self.runner.device, non_blocking=True).long()
+
+        use_cascade = common_prefix_len > 0
+        if use_cascade:
+            # Grab the blocks of the shared prefix from the first request.
+            num_common_kv_blocks = common_prefix_len // page_size
+            shared_qo_indptr = torch.tensor([0, num_actual_tokens],
+                                            dtype=torch.int32,
+                                            device=device)
+            shared_kv_page_indptr = torch.tensor([0, num_common_kv_blocks],
+                                                 dtype=torch.int32,
+                                                 device=device)
+            shared_kv_page_indices = block_table[0, :num_common_kv_blocks]
+            shared_kv_last_page_len = torch.tensor([0], dtype=torch.int32,
+                                                   device=device)
+            # Remove the blocks of the shared prefix from all requests.
+            block_table = block_table[:, num_common_kv_blocks:]
+        else:
+            shared_qo_indptr = None
+            shared_kv_page_indptr = None
+            shared_kv_page_indices = None
+            shared_kv_last_page_len = None
+
+        block_table_bounds = (seq_lens + page_size - 1) // page_size
+
+        mask = (torch.arange(block_table.size(1), dtype=block_table.dtype,
+                             device=block_table.device).unsqueeze(0)
+                < block_table_bounds.unsqueeze(1))
+        paged_kv_indices = block_table[mask]
+
+        paged_kv_indptr = torch.cat([
+            torch.zeros(1, dtype=block_table_bounds.dtype,
+                        device=block_table_bounds.device),
+            block_table_bounds.cumsum(dim=0, dtype=torch.int32)])
+
+        paged_kv_last_page_len = seq_lens % page_size
+        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
+                                             page_size, paged_kv_last_page_len)
+
+        attn_metadata = FlashInferMetadata(
+            num_actual_tokens=num_actual_tokens,
+            qo_indptr=qo_indptr,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            num_qo_heads=self.runner.num_query_heads,
+            num_kv_heads=self.runner.num_kv_heads,
+            head_dim=self.runner.head_size,
+            page_size=page_size,
+            data_type=self.runner.kv_cache_dtype,
+            q_data_type=self.runner.dtype,
+            slot_mapping=slot_mapping,
+            use_cascade=use_cascade,
+            shared_qo_indptr=shared_qo_indptr,
+            shared_kv_page_indptr=shared_kv_page_indptr,
+            shared_kv_page_indices=shared_kv_page_indices,
+            shared_kv_last_page_len=shared_kv_last_page_len,
+        )
+        return attn_metadata
 
 
 class FlashInferImpl(AttentionImpl):
