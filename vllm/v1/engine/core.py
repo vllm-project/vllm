@@ -145,12 +145,11 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def step(self) -> EngineCoreOutputs:
+    def step(self) -> Optional[EngineCoreOutputs]:
         """Schedule, execute, and make output."""
 
         if not self.scheduler.has_unfinished_requests():
-            return EngineCoreOutputs(
-                outputs=[], scheduler_stats=self.scheduler.make_stats())
+            return None
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
@@ -199,10 +198,8 @@ class EngineCore:
                 engine_core_outputs = self.scheduler.update_from_output(
                     scheduler_output, model_output)
             except queue.Empty:
-                # If the queue is empty (timeout at .get), return
-                # an empty EngineCoreOutputs for logging.
-                engine_core_outputs = EngineCoreOutputs(
-                    outputs=[], scheduler_stats=self.scheduler.make_stats())
+                # The queue is empty (timeout at .get)
+                return None
 
         return engine_core_outputs
 
@@ -270,7 +267,10 @@ class EngineCoreProc(EngineCore):
         self.dp_group = None if dp_size <= 1 else (
             vllm_config.parallel_config.stateless_init_dp_group())
 
-        self.has_unfinished_reqs = False
+        self.global_unfinished_reqs = False
+
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
 
         # Send Readiness signal to EngineClient.
         ready_pipe.send({"status": "READY"})
@@ -320,7 +320,10 @@ class EngineCoreProc(EngineCore):
         engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
-            engine_core.run_busy_loop()
+            if parallel_config.data_parallel_size > 1:
+                engine_core.run_dp_busy_loop()
+            else:
+                engine_core.run_busy_loop()
 
         except SystemExit:
             logger.debug("EngineCore interrupted.")
@@ -334,56 +337,74 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
 
-    def _has_global_unfinished_dp(self, has_unfinished: bool) -> bool:
-        return ParallelConfig.has_unfinished_dp(self.dp_group, has_unfinished)
+    def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
+        return ParallelConfig.has_unfinished_dp(self.dp_group,
+                                                local_unfinished)
+
+    def _process_input_queue(self):
+        """Exits when an engine step needs to be performed."""
+
+        while not self.global_unfinished_reqs and not (
+                self.scheduler.has_unfinished_requests()):
+            logger.debug("EngineCore busy loop waiting.")
+            req = self.input_queue.get()
+            self._handle_client_request(*req)
+
+        # Handle any client requests.
+        while not self.input_queue.empty():
+            req = self.input_queue.get_nowait()
+            self._handle_client_request(*req)
+
+    def _process_engine_step(self):
+        """Called only when there are unfinished local requests."""
+
+        # Step the engine core.
+        outputs = self.step_fn()
+        # We'll definitely have outputs if there are unfinished reqs.
+        assert outputs is not None
+        # Put EngineCoreOutputs into the output queue.
+        self.output_queue.put_nowait(outputs)
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        step_fn = (self.step
-                   if self.batch_queue is None else self.step_with_batch_queue)
+        # Loop until process is sent a SIGINT or SIGTERM
+        while True:
+            # 1) Poll the input queue until there is work to do.
+            self._process_input_queue()
+            # 2) Step the engine core and return the outputs.
+            self._process_engine_step()
+
+    def run_dp_busy_loop(self):
+        """Core busy loop of the EngineCore for data parallel case."""
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
-            if not self.has_unfinished_reqs:
-                while True:
-                    try:
-                        req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
-                        self._handle_client_request(*req)
-                        break
-                    except queue.Empty:
-                        logger.debug("EngineCore busy loop waiting.")
-                        # Break out the loop so we can log_stats in step().
-                        if self.log_stats:
-                            break
+            self._process_input_queue()
 
-            # 2) Handle any new client requests.
-            while not self.input_queue.empty():
-                req = self.input_queue.get_nowait()
-                self._handle_client_request(*req)
+            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+            if local_unfinished_reqs:
+                # 2) Step the engine core.
+                self._process_engine_step()
 
-            dp_forward = False
-            if self.dp_group is not None:
-                if self.scheduler.has_unfinished_requests():
-                    dp_forward = True
-                elif self.has_unfinished_reqs:
-                    # There must be unfinished requests in DP peers, run a
-                    # dummy forward pass.
-                    self.execute_dummy_batch()
-                    dp_forward = True
+                # Check if we have now finished all requests.
+                local_unfinished_reqs = (
+                    self.scheduler.has_unfinished_requests())
+            else:
+                assert self.global_unfinished_reqs
+                # There must be unfinished requests in DP peers, run a
+                # dummy forward pass.
+                self.execute_dummy_batch()
 
-            # 3) Step the engine core.
-            outputs = step_fn()
+            # All-reduce operation to determine global unfinished reqs.
+            self.global_unfinished_reqs = self._has_global_unfinished_reqs(
+                local_unfinished_reqs)
 
-            # 4) Put EngineCoreOutputs into the output queue.
-            if outputs is not None:
-                self.output_queue.put_nowait(outputs)
-
-            self.has_unfinished_reqs = self.scheduler.has_unfinished_requests()
-            if dp_forward:
-                self.has_unfinished_reqs = self._has_global_unfinished_dp(
-                    self.has_unfinished_reqs)
+            if not self.global_unfinished_reqs:
+                # Notify client that we are pausing the loop.
+                self.output_queue.put_nowait(
+                    EngineCoreOutputs(global_finished=True))
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -394,7 +415,7 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.START_DP:
-            self.has_unfinished_reqs = True
+            self.global_unfinished_reqs = True
         elif request_type == EngineCoreRequestType.UTILITY:
             call_id, method_name, args = request
             output = UtilityOutput(call_id)

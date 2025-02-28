@@ -134,6 +134,8 @@ class EngineCoreOutputs(
 
     utility_output: Optional[UtilityOutput] = None
     finished_requests: List[str] = []
+    # In DP case, used to signal that the engine is paused.
+    global_finished: bool = False
 
     def __post_init__(self):
         if self.timestamp == 0.0:

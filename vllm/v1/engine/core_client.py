@@ -70,7 +70,7 @@ class EngineCoreClient(ABC):
     def shutdown(self):
         ...
 
-    def get_output(self) -> EngineCoreOutputs:
+    def get_output(self) -> Optional[EngineCoreOutputs]:
         raise NotImplementedError
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -156,7 +156,7 @@ class InprocClient(EngineCoreClient):
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
 
-    def get_output(self) -> EngineCoreOutputs:
+    def get_output(self) -> Optional[EngineCoreOutputs]:
         return self.engine_core.step()
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -331,6 +331,8 @@ class MPClient(EngineCoreClient):
         self.output_socket = resources.output_socket
         self.core_engines = resources.core_engines
         self.utility_results: Dict[int, AnyFuture] = {}
+
+        self.num_engines_running = 0
         self.reqs_in_flight: Dict[str, CoreEngine] = {}
 
     def shutdown(self):
@@ -471,7 +473,9 @@ class AsyncMPClient(MPClient):
         output_socket = self.output_socket
         decoder = self.decoder
         utility_results = self.utility_results
+        reqs_in_flight = self.reqs_in_flight
         outputs_queue = self.outputs_queue
+        _self_ref = weakref.ref(self)
 
         async def process_outputs_socket():
             while True:
@@ -481,13 +485,40 @@ class AsyncMPClient(MPClient):
                     _process_utility_output(outputs.utility_output,
                                             utility_results)
                     continue
-                outputs_queue.put_nowait(outputs)
-                if self.reqs_in_flight:
+
+                if reqs_in_flight:
+                    # This only applies in DP case.
                     for req_id in outputs.finished_requests:
-                        if engine := self.reqs_in_flight.pop(req_id, None):
+                        if engine := reqs_in_flight.pop(req_id, None):
                             engine.num_reqs_in_flight -= 1
 
+                if outputs.global_finished and (_self := _self_ref()):
+                    # This only applies in DP case.
+                    await AsyncMPClient._handle_all_engines_finished(_self)
+                    if not outputs.outputs:
+                        continue
+
+                outputs_queue.put_nowait(outputs)
+
         self.queue_task = asyncio.create_task(process_outputs_socket())
+
+    @staticmethod
+    async def _handle_all_engines_finished(self: "AsyncMPClient"):
+        assert self.num_engines_running >= 1
+        self.num_engines_running -= 1
+        if self.num_engines_running == 0 and self.reqs_in_flight:
+            # If there are requests in flight here, they must have
+            # been sent after the engines paused. We must make
+            # sure to start the other engines:
+            self.num_engines_running = len(self.core_engines)
+            coros = [
+                engine.input_socket.send_multipart(
+                    self.start_dp_msg, copy=False)
+                for engine in self.core_engines
+                if not engine.num_reqs_in_flight
+            ]
+            if coros:
+                await asyncio.gather(*coros)
 
     async def get_output_async(self) -> EngineCoreOutputs:
         if self.outputs_queue is None:
@@ -548,14 +579,14 @@ class AsyncMPClient(MPClient):
 
         # Data-parallel case.
         chosen_engine = self.get_core_engine_for_request()
-        first_request = len(self.reqs_in_flight) == 0
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1
-        if not first_request:
+        if self.num_engines_running >= len(self.core_engines):
             await chosen_engine.input_socket.send_multipart(msg, copy=False)
         else:
             # Send request to chosen engine and dp start loop
             # control message to all other engines.
+            self.num_engines_running += len(self.core_engines)
             await asyncio.gather(*[
                 engine.input_socket.send_multipart(
                     msg if engine is chosen_engine else self.start_dp_msg,
