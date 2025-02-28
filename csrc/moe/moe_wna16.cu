@@ -135,8 +135,9 @@ __global__ void moe_wna16_gemm_kernel(
         qzero_f2 = Dtype::num2num2(Dtype::int2num(128));
       }
     } else {
-      int qzeros_offset_tmp = (offset_n / (8 / bit)) * (size_k / group_size / GROUPS) +
-                              offset_k / group_size / GROUPS;
+      int qzeros_offset_tmp =
+          (offset_n / (8 / bit)) * (size_k / group_size / GROUPS) +
+          offset_k / group_size / GROUPS;
       if constexpr (GROUPS == 1) {
         uint8_t* expert_qzeros_groups_tmp =
             reinterpret_cast<uint8_t*>(expert_qzeros_groups);
@@ -179,7 +180,7 @@ __global__ void moe_wna16_gemm_kernel(
           uint8_t qzero =
               expert_qzeros_groups[tmp_k / (group_size / pack_factor)];
           if constexpr (bit == 4) {
-              qzero = (qzero >> ((threadIdx.x % 2) * 4)) & 0xF;
+            qzero = (qzero >> ((threadIdx.x % 2) * 4)) & 0xF;
           }
           qzero_f2 = Dtype::num2num2(Dtype::int2num(qzero));
         }
