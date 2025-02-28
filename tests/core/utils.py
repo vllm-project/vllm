@@ -31,16 +31,19 @@ def create_dummy_prompt(
         prompt_tokens = list(range(prompt_length))
 
     prompt_str = " ".join([str(t) for t in prompt_tokens])
-    prompt = Sequence(int(request_id),
-                      inputs=token_inputs(prompt_tokens, prompt=prompt_str),
-                      block_size=block_size)
-    seq_group = SequenceGroup(request_id=request_id,
-                              seqs=[prompt],
-                              arrival_time=time.time(),
-                              sampling_params=SamplingParams(
-                                  max_tokens=max_tokens,
-                                  min_tokens=min_tokens),
-                              lora_request=lora_request)
+    prompt = Sequence(
+        int(request_id),
+        inputs=token_inputs(prompt_tokens, prompt=prompt_str),
+        block_size=block_size,
+    )
+    seq_group = SequenceGroup(
+        request_id=request_id,
+        seqs=[prompt],
+        arrival_time=time.time(),
+        sampling_params=SamplingParams(max_tokens=max_tokens,
+                                       min_tokens=min_tokens),
+        lora_request=lora_request,
+    )
 
     return prompt, seq_group
 
