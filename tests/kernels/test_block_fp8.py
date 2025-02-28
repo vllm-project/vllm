@@ -229,8 +229,7 @@ def p(s, t):
 
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
-    #itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    itertools.product([4], [128], [128], [8], [2], [[128, 128]], DTYPES, SEEDS))
+    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     torch.manual_seed(seed)
@@ -314,8 +313,8 @@ def per_block_cast_to_fp8(
     assert x.dim() == 2
     m, n = x.shape
     x_padded = torch.zeros(
-        (deep_gemm.cell_div(m, 128) * 128,
-         deep_gemm.cell_div(n, block_size_n) * block_size_n),
+        (deep_gemm.ceil_div(m, 128) * 128,
+         deep_gemm.ceil_div(n, block_size_n) * block_size_n),
         dtype=x.dtype,
         device=x.device)
     x_padded[:m, :n] = x
@@ -334,7 +333,7 @@ def per_block_cast_to_fp8(
 def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     # only aligned sizes
     if M % 4 != 0 or K % 128 != 0 or N % 64 != 0:
-        return
+        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
 
     torch.manual_seed(seed)
     fp8_info = torch.finfo(torch.float8_e4m3fn)
@@ -399,8 +398,15 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
 
     m_indices = torch.arange(0, num_groups, dtype=torch.int)
     m_indices = m_indices.unsqueeze(-1).expand(
-        num_groups, max(M // num_groups, 1)).contiguous().view(-1)
+        num_groups, max((topk * M) // num_groups, 1)).contiguous().view(-1)
+    #m_indices = torch.IntTensor([0, 1])
     p("m_indices", m_indices)
+    print(m_indices)
+
+    print("topk", topk_ids)
+    print(topk_ids)
+    print("topk_weight", topk_weight)
+    print(topk_weight)
 
     if True:
         deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
@@ -409,6 +415,8 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
         topk_ids = topk_ids.to(dtype=torch.int32)
         deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a_q, a_s), (w1, w1_s),
                                                         inter_out, topk_ids, M)
+
+    print(f"DG {inter_out.shape} {inter_out}")
 
     act_out = SiluAndMul().forward_native(inter_out)
     act_out_q, act_out_s = per_token_group_quant_fp8(act_out, block_k)
@@ -441,8 +449,9 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
 
     # only aligned sizes
     if (N % 128 != 0 or K % 128 != 0):
-        print(f"skip {N}, {K}")
-        return
+        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
+
+    torch.set_printoptions(profile="full")
 
     vllm_config = VllmConfig()
 
@@ -490,11 +499,12 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     w1_sa = deep_gemm.get_col_major_tma_aligned_tensor(w1_s).contiguous()
     w2_sa = deep_gemm.get_col_major_tma_aligned_tensor(w2_s).contiguous()
 
+    # TODO: move size alignment further up when setting up all shapes
     if w1_sa.shape != w1_s.shape or w2_sa.shape != w2_s.shape:
         p("w1_sa", w1_sa)
         p("w2_sa", w2_sa)
-        print(f"UNALIGNED")
-        return
+        print("UNALIGNED")
+        pytest.skip("UNALIGNED")
 
     w1_s = w1_sa
     w2_s = w2_sa
