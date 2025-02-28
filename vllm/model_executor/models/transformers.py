@@ -103,7 +103,7 @@ def replace_linear_class(
         """
         # NOTE: The LoRA layer needs to use `parent_cls`.
         @property
-        def parent_cls(self):
+        def parent_cls(self) -> type:
             return vllm_linear_cls
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
