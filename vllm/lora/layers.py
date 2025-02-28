@@ -74,12 +74,6 @@ def _not_fully_sharded_can_replace(can_replace):
     return dec
 
 
-def _is_hf_linear(layer: nn.Module, father_cls: type) -> bool:
-    # Specify for `TransformersModel`
-    return layer.__class__.__name__ == "HFCompatibleLinear" and isinstance(
-        layer, father_cls)
-
-
 @dataclass
 class LoRAMapping(AdapterMapping):
     is_prefill: bool = False
@@ -407,6 +401,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                                             self.output_slices)
         return output
 
+    @classmethod
+    def get_source_layer(cls, source_layer: nn.Module) -> nn.Module:
+        # Check parent_cls in case source_layer is a HFCompatibleLinear.
+        return getattr(source_layer, "parent_cls", source_layer)
+
 
 class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
@@ -449,8 +448,8 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return type(source_layer) is ReplicatedLinear or _is_hf_linear(
-            source_layer, ReplicatedLinear)
+        source_layer = cls.get_source_layer(source_layer)
+        return type(source_layer) is ReplicatedLinear
 
 
 class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
@@ -546,10 +545,10 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
+        source_layer = cls.get_source_layer(source_layer)
         return type(source_layer) is ColumnParallelLinear or (
             type(source_layer) is MergedColumnParallelLinear
-            and len(packed_modules_list) == 1) or _is_hf_linear(
-                source_layer, ColumnParallelLinear)
+            and len(packed_modules_list) == 1)
 
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -690,6 +689,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
+        source_layer = cls.get_source_layer(source_layer)
         return (type(source_layer) is MergedColumnParallelLinear
                 and len(packed_modules_list) == 2)
 
@@ -819,6 +819,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
+        source_layer = cls.get_source_layer(source_layer)
         return (type(source_layer) is QKVParallelLinear
                 and len(packed_modules_list) == 3)
 
@@ -904,8 +905,8 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return type(source_layer) is RowParallelLinear or _is_hf_linear(
-            source_layer, RowParallelLinear)
+        source_layer = cls.get_source_layer(source_layer)
+        return type(source_layer) is RowParallelLinear
 
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
