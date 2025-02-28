@@ -64,4 +64,4 @@ model = LLM("llama3-8b-fp8")
 outputs = model.generate("What is artificial intelligence?")
 ```
 
-For more information about Quark's capabilities and advanced options, refer to the [Quark documentation](https://rocm.docs.amd.com/projects/quark/en/latest/). 
+For more information about Quark's capabilities and advanced options, refer to the [Quark documentation](https://rocm.docs.amd.com/projects/quark/en/latest/).
