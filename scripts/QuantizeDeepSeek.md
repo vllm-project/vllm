@@ -1,9 +1,18 @@
 # Note for Quantizing DeepSeek V3/R1 with vLLM and INC
+<!-- TOC -->
 
-This document outlines the steps for using vLLM and INC to calibrate DeepSeek R1 on two nodes, and to perform quantization and inference on either two nodes or a single node.
+- [Support Matrix](#support-matrix)
+- [Setting Up 2 Nodes Environment](#setting-up-2-nodes-environment)
+    - [Prerequisites](#prerequisites)
+    - [Install Dependencies](#install-dependencies)
+    - [Exporting Environment variables](#exporting-environment-variables)
+- [Calibration](#calibration)
+- [Inference with FP8 Models on Two Nodes](#inference-with-fp8-models-on-two-nodes)
+- [Inference with FP8 Models on a Single Node WIP](#inference-with-fp8-models-on-a-single-node-wip)
+    - [Prerequisites](#prerequisites)
+    - [Running the Example](#running-the-example)
 
-## Support Matrix
-
+<!-- /TOC -->
 - Calibration Stage (Two Nodes)
 
 | KVCache Precision | Configuration File for Calibration |
