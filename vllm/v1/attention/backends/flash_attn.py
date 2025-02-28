@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -13,6 +13,11 @@ from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -39,6 +44,10 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return FlashAttentionMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["FlashAttentionMetadataBuilder"]:
+        return FlashAttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -83,6 +92,62 @@ class FlashAttentionMetadata:
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
+
+
+class FlashAttentionMetadataBuilder:
+
+    def __init__(self, runner: "GPUModelRunner"):
+        self.runner = runner
+
+    def reorder_batch(self, input_batch: "InputBatch",
+                      scheduler_output: "SchedulerOutput"):
+        pass
+
+    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+              common_prefix_len: int):
+        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
+        query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
+            self.runner.device, non_blocking=True)
+        seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
+                                                          non_blocking=True)
+        block_table = (
+            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
+            self.runner.device, non_blocking=True).long()
+
+        use_cascade = common_prefix_len > 0
+        if use_cascade:
+            # TODO: Optimize.
+            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
+                                                dtype=torch.int32,
+                                                device=self.runner.device)
+            prefix_kv_lens = torch.tensor([common_prefix_len],
+                                          dtype=torch.int32,
+                                          device=self.runner.device)
+            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
+                              common_prefix_len)
+            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
+                self.runner.device)
+        else:
+            cu_prefix_query_lens = None
+            prefix_kv_lens = None
+            suffix_kv_lens = None
+
+        attn_metadata = FlashAttentionMetadata(
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=max_query_len,
+            query_start_loc=query_start_loc,
+            max_seq_len=max_seq_len,
+            seq_lens=seq_lens,
+            block_table=block_table,
+            slot_mapping=slot_mapping,
+            use_cascade=use_cascade,
+            common_prefix_len=common_prefix_len,
+            cu_prefix_query_lens=cu_prefix_query_lens,
+            prefix_kv_lens=prefix_kv_lens,
+            suffix_kv_lens=suffix_kv_lens,
+        )
+        return attn_metadata
 
 
 class FlashAttentionImpl(AttentionImpl):
