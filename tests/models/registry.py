@@ -193,11 +193,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
-    # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
-    # Therefore, we borrow the BartTokenizer from the original Bart model
-    "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
-                                                         tokenizer="facebook/bart-base",
-                                                         trust_remote_code=True),  # noqa: E501
 }
 
 _EMBEDDING_EXAMPLE_MODELS = {
@@ -288,6 +283,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                      extras={"v0.5": "fixie-ai/ultravox-v0_5-llama-3_2-1b"},  # noqa: E501
                                      trust_remote_code=True),
     # [Encoder-decoder]
+    # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
+    # Therefore, we borrow the BartTokenizer from the original Bart model
+    "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
+                                                         tokenizer="facebook/bart-base",
+                                                         trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 }

@@ -498,3 +498,29 @@ def supports_transcription(
         return isinstance(model, SupportsTranscription)
 
     return isinstance(model, SupportsTranscription)
+
+
+@runtime_checkable
+class SupportsV0Only(Protocol):
+    """Models with this interface are not compatible with V1 vLLM."""
+
+    supports_v0_only: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_v0_only(model: Type[object]) -> TypeIs[Type[SupportsV0Only]]:
+    ...
+
+
+@overload
+def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]:
+    ...
+
+
+def supports_v0_only(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
+    if isinstance(model, type):
+        return isinstance(model, SupportsV0Only)
+
+    return isinstance(model, SupportsV0Only)
