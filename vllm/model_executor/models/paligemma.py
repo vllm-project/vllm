@@ -18,7 +18,7 @@ from vllm.multimodal.inputs import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsV0Only
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
@@ -136,7 +136,7 @@ class PaliGemmaMultiModalProjector(nn.Module):
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_paligemma)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_paligemma)
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+                                        SupportsPP, SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

@@ -17,7 +17,7 @@ from vllm.model_executor.layers.pooler import Pooler, PoolingType, SimplePooler
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsV0Only
 from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -33,7 +33,8 @@ class ReLU(nn.Module):
         return self.activation(input)
 
 
-class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
+class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP,
+                           SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

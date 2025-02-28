@@ -1039,6 +1039,11 @@ class ModelConfig:
     def runner_type(self) -> RunnerType:
         return _TASK_RUNNER[self.task]
 
+    @property
+    def is_v1_compatible(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_v1_compatible(architectures)
+
 
 class CacheConfig:
     """Configuration for the KV cache.

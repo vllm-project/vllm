@@ -29,7 +29,7 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsV0Only
 from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 
@@ -651,7 +651,7 @@ class Florence2LanguageModel(nn.Module):
         return decoder_outputs
 
 
-class Florence2LanguageForConditionalGeneration(nn.Module):
+class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
