@@ -7,9 +7,9 @@
         "names": []
     },
     "blacklist": {
-        "types": [],
+        "types": ["KVCache", "VLLMKVCache"],
         "names": ["lm_head"]
     },
     "quantize_weight": false,
-    "dump_stats_path": "./nc_workspace_tmp/inc_measure_output"
+    "dump_stats_path": "./nc_workspace_measure/inc_measure_output"
 }

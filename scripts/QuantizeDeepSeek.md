@@ -83,15 +83,28 @@ In this mode, we load the BF16 model on DRAM and quantize it to FP8 model using 
 
 ### Prerequisites
 
-- Hardware: 1x8G3 or 1x8G2 WIP
+- Hardware: 1x8G3 or 1x8G2(WIP), 2T DRAM
 - Docker: 1.20.0-521
 
 ### Running the Example
 
+- Quantize model weights to FP8
+
 ```bash
 # vllm root
 cd vllm/scripts
-# Make sure that the `nc_workspace_tmp` is under the `scripts` folder.
 # Download the unified calibration results
-python n2_ep8_tp8.py --mode q
+huggingface-cli download Yi30/nc_workspace_tmp_mla_merged_from_16_to_8 --local-dir nc_workspace_measure
+QUANT_CONFIG=inc_quant_config.json python inc_quant_one_node.py
+```
+
+
+- Quantize model weights to FP8 and using FP8 KVCache
+
+```bash
+# vllm root
+cd vllm/scripts
+# Download the unified calibration results
+huggingface-cli download Yi30/inc-tp8-ep8-full-kvcache-from-tp16-ep16 --local-dir nc_workspace_measure_kvache
+QUANT_CONFIG=inc_quant_with_fp8kv_config.json python inc_quant_one_node.py --fp8kv
 ```
