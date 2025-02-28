@@ -703,7 +703,7 @@ def _apply_matches(
             out_seqs.append(insert_seq)
 
         prev_end_idx = end_idx
-        next_idx_by_modality[modality] += num_inserts
+        next_idx_by_modality[modality] += item_end_idx - item_start_idx
 
     out_seqs.append(prompt[prev_end_idx:])
 
