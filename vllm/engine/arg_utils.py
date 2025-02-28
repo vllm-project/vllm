@@ -1424,9 +1424,9 @@ class EngineArgs:
 
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
-            _raise_or_warning(feature_name=model_config.architectures(),
+            _raise_or_warning(feature_name=model_config.architectures,
                               recommend_to_remove=False)
-            return False  #
+            return False
 
         # No Concurrent Partial Prefills.
         if (self.max_num_partial_prefills
