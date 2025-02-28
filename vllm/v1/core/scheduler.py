@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
+from collections import deque
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
@@ -60,12 +61,7 @@ class Scheduler:
 
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
-        # NOTE: Priority queues for requests.
-        # With list, we can safely pop the index
-        # of a request that are yet to be ready (in this case,
-        # the one that uses guided decoding) while still maintaining
-        # the order of all requests in existing waiting queue.
-        self.waiting: List[Request] = []
+        self.waiting: deque[Request] = deque()
         self.running: List[Request] = []
         # The requests that have been scheduled and are being executed
         # by the executor.
@@ -184,7 +180,7 @@ class Scheduler:
                     preempted_req.num_computed_tokens = 0
                     self.request_preempted(preempted_req, scheduled_timestamp)
 
-                    self.waiting.insert(0, preempted_req)
+                    self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt.
@@ -238,21 +234,20 @@ class Scheduler:
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
-            # NOTE: We uses num_to_skip to determine
-            # which guided request within the waiting queue to skip
-            # over if the FSM of said request are yet to be ready.
-            num_to_skip: int = 0
-            while num_to_skip < len(self.waiting) and token_budget > 0:
+            # Use a temporary deque to collect requests that need to be skipped
+            # and put back at the head of the waiting queue later
+            still_waiting: deque[Request] = deque()
+            while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                request = self.waiting[num_to_skip]
+                request = self.waiting.popleft()
 
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     if request.grammar and request.is_grammar_ready:
                         request.status = RequestStatus.WAITING
                     else:
-                        num_to_skip += 1
+                        still_waiting.append(request)
                         continue
 
                 #
@@ -309,7 +304,7 @@ class Scheduler:
                     # The request cannot be scheduled.
                     break
 
-                self.waiting.pop(num_to_skip)
+                # Request is already popped from self.waiting
                 if request.use_guided_decoding:
                     guided_decoding_request_ids[request.request_id] = req_index
                 req_index += 1
@@ -342,6 +337,10 @@ class Scheduler:
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_budget = new_encoder_budget
+
+        # Put back any skipped requests at the head of the waiting queue
+        if still_waiting:
+            self.waiting = still_waiting + self.waiting
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
