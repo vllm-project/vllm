@@ -3,9 +3,9 @@
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -13,7 +13,6 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers import BatchFeature
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
@@ -26,7 +25,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, ProcessingCache,
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
@@ -139,18 +139,24 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_num_image_tokens(self, *, image_width: int,
-                             image_height: int) -> int:
+    def get_num_image_tokens(self,
+                             *,
+                             image_width: int,
+                             image_height: int,
+                             cropping: bool = True) -> int:
         hf_processor = self.get_hf_processor()
         image_size = hf_processor.image_size
         patch_size = hf_processor.patch_size
         downsample_ratio = hf_processor.downsample_ratio
 
-        best_width, best_height = hf_processor.select_best_resolution(
-            (image_width, image_height))
+        if cropping:
+            best_width, best_height = hf_processor.select_best_resolution(
+                (image_width, image_height))
+            num_width_tiles, num_height_tiles = (best_width // image_size,
+                                                 best_height // image_size)
+        else:
+            num_width_tiles = num_height_tiles = 1
 
-        num_width_tiles, num_height_tiles = (best_width // image_size,
-                                             best_height // image_size)
         h = w = math.ceil((image_size // patch_size) / downsample_ratio)
 
         global_views_tokens = h * (w + 1)
@@ -170,10 +176,12 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
+        num_images = mm_counts.get("image", 0)
         max_image_size = self.get_image_size_with_most_features()
         max_image_tokens = self.get_num_image_tokens(
             image_height=max_image_size.height,
-            image_width=max_image_size.width)
+            image_width=max_image_size.width,
+            cropping=num_images <= 2)
 
         return {"image": max_image_tokens}
 
@@ -207,6 +215,30 @@ class DeepseekVL2DummyInputsBuilder(
 
 class DeepseekVL2MultiModalProcessor(
         BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]):
+
+    def __init__(
+            self,
+            info: DeepseekVL2ProcessingInfo,
+            dummy_inputs: "BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]",
+            *,
+            cache: Optional[ProcessingCache] = None,
+            enable_sanity_checks: bool = True) -> None:
+        super().__init__(
+            info,
+            dummy_inputs,
+            cache=cache,
+            enable_sanity_checks=enable_sanity_checks,
+        )
+
+        mm_limit = self.info.ctx.model_config.multimodal_config.limit_per_prompt
+        if self.cache is not None and mm_limit["image"] > 2:
+            # The processor output depends on the number of images passed,
+            # making it incompatible with processing cache which is supposed
+            # to be invariant of how many images are passed per prompt
+            self.cache = None
+            logger.warning_once(
+                f"{type(self).__name__} does not support processing cache with "
+                "image limit larger than 2.")
 
     def _call_hf_processor(
         self,
@@ -249,12 +281,12 @@ class DeepseekVL2MultiModalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         image_token_id = hf_processor.image_token_id
@@ -272,6 +304,7 @@ class DeepseekVL2MultiModalProcessor(
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
+                    cropping=len(images) <= 2,
                 )
             return [image_token_id] * num_image_tokens
 
@@ -563,7 +596,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 # 3D tensor
                 return list(torch.unbind(image_data, dim=0))
             raise ValueError(
-                "We expect batched 2D tensors;"
+                "We expect batched 2D tensors; "
                 "this can be either a list of 2D tensors or a single 3D tensor."
             )
 
@@ -595,8 +628,6 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs: object):
@@ -614,8 +645,6 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         hidden_states = self.language_model(input_ids,
                                             positions,
-                                            kv_caches,
-                                            attn_metadata,
                                             intermediate_tensors,
                                             inputs_embeds=inputs_embeds)
 
