@@ -703,7 +703,21 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
                                           'false').lower() == 'true'
 
-    def _inc_preprocess(self, model: torch.nn.Module) -> torch.nn.Module:
+    def _remove_duplicate_submodules_(self, model, inc_config):
+        blocklist = inc_config.blocklist
+        # "VLLMKVCache" in blocklist and Deepseek v3
+        if not ("VLLMKVCache" in blocklist["types"]):
+            return
+        self_attn = model.model.layers[0].self_attn
+        for layer in model.model.layers:
+            self_attn = layer.self_attn
+            # delete attrs: q_b_proj, kv_b_proj, o_proj in self_attn
+            delattr(self_attn, "q_b_proj")
+            delattr(self_attn, "kv_b_proj")
+            delattr(self_attn, "o_proj")
+
+    def _inc_preprocess(self, model: torch.nn.Module, inc_config) -> torch.nn.Module:
+        self._remove_duplicate_submodules_(model, inc_config)
         # TEST ARGS
         # dump args into disk as json
         import time
@@ -778,14 +792,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     max_position_embeddings=max_pos_embeddings,
                 )
                 self.model = self.lora_manager.create_lora_manager(self.model)
-            self_attn = self.model.model.layers[0].self_attn
-            for layer in self.model.model.layers:
-                self_attn = layer.self_attn
-                # delete attrs: q_b_proj, kv_b_proj, o_proj in self_attn
-                delattr(self_attn, "q_b_proj")
-                delattr(self_attn, "kv_b_proj")
-                delattr(self_attn, "o_proj") 
-            # ForkedPdb().set_trace()
             if self.model_config.quantization is not None and "inc" in self.model_config.quantization:
                 logger.info("Preparing model with INC..")
                 self._inc_preprocess(self.model)
@@ -809,6 +815,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         else:
                             raise ValueError(f"Invalid quantization method: {quant_method}")
                         config = FP8Config.from_json_file(config_path)
+                    self._inc_preprocess(self.model, config)
                     if config.measure:
                         self.model = prepare(self.model, config)
                     elif config.quantize:
