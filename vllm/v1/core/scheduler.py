@@ -306,7 +306,6 @@ class Scheduler:
                     break
 
                 self.waiting.popleft()
-                # Request is already popped from self.waiting
                 if request.use_guided_decoding:
                     guided_decoding_request_ids[request.request_id] = req_index
                 req_index += 1
