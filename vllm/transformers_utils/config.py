@@ -75,7 +75,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
     "olmo2": Olmo2Config,
-    # "ovis":OvisConfig,
+    "ovis": OvisConfig,
     "solar": SolarConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,

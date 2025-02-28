@@ -16,7 +16,7 @@ from vllm.multimodal.parse import ImageEmbeddingItems, ImageProcessorItems, Imag
 from vllm.multimodal.processing import BaseMultiModalProcessor, BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.transformers_utils.configs.ovis import ConversationFormatter, GemmaConversationFormatter, OvisConfig, Llama3ConversationFormatter
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -369,7 +369,7 @@ class SiglipVisualTokenizer(nn.Module):
         self.backbone_config: SiglipVisionConfig = self.visual_tokenizer_config.backbone_config
 
         self.hidden_stride = self.visual_tokenizer_config.hidden_stride
-        self.hidden_size = self.config.hidden_size
+        self.hidden_size = self.backbone_config.hidden_size
 
         self.backbone = SiglipVisionModel(self.backbone_config)
         head_dim = self.visual_tokenizer_config.vocab_size - len(IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
@@ -465,10 +465,10 @@ class Ovis(nn.Module,SupportsMultiModal,SupportsPP):
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            hf_config=config.llm_config,
+            hf_config=config.text_config,
             prefix=maybe_prefix(prefix,"language_model")
         )
-        self.text_tokenizer = get_tokenizer(self.config.name_or_path)
+        self.text_tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.visual_tokenizer = SiglipVisualTokenizer(self.config)
         self.vte = VisualEmbedding(
             self.config.visual_tokenizer_config.vocab_size,

@@ -79,14 +79,12 @@ class OvisConfig(PretrainedConfig):
                 model_type = llm_config['model_type']
                 llm_config.pop('model_type')
                 llm_config = AutoConfig.for_model(model_type, **llm_config)
-        self.llm_config = llm_config
+        self.text_config = llm_config
         if visual_tokenizer_config is not None:
             assert isinstance(visual_tokenizer_config, (PretrainedConfig, dict)), \
                 f"expect `visual_tokenizer_config` to be instance of PretrainedConfig or dict, but got {type(visual_tokenizer_config)} type"
             if not isinstance(visual_tokenizer_config, PretrainedConfig):
-                model_type = visual_tokenizer_config['model_type']
-                visual_tokenizer_config.pop('model_type')
-                visual_tokenizer_config = AutoConfig.for_model(model_type, **visual_tokenizer_config)
+                visual_tokenizer_config = SiglipVisualTokenizerConfig(**visual_tokenizer_config)
         self.visual_tokenizer_config = visual_tokenizer_config
         self.multimodal_max_length = multimodal_max_length
         self.hidden_size = hidden_size
