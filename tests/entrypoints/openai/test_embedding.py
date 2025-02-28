@@ -60,7 +60,7 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 9
     assert embeddings.usage.total_tokens == 9
@@ -77,7 +77,7 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 5
     assert embeddings.usage.total_tokens == 5
@@ -101,7 +101,7 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 3
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 32
     assert embeddings.usage.total_tokens == 32
@@ -119,7 +119,7 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 4
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 17
     assert embeddings.usage.total_tokens == 17
@@ -234,7 +234,7 @@ async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 10
     assert embeddings.usage.total_tokens == 10
@@ -252,7 +252,7 @@ async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 10
     assert embeddings.usage.total_tokens == 10
