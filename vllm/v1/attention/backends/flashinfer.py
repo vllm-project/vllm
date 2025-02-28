@@ -282,7 +282,7 @@ class FlashInferMetadata:
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
-    
+
     # The data type of the paged kv cache
     data_type: torch.dtype = None
     # The data type of the query
@@ -405,8 +405,6 @@ class FlashInferImpl(AttentionImpl):
 
         window_left = (self.sliding_window[0]
                        if self.sliding_window is not None else -1)
-
-        
 
         if not attn_metadata.use_cascade:
             # Regular attention (common case).
