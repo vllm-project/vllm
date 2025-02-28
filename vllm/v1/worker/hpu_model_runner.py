@@ -394,6 +394,8 @@ class HpuModelAdapter:
         slot_mapping = metadata.slot_mapping.flatten()
         indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
         if is_prompt:
+            if not torch.equal(indices.unflatten(0, (-1, block_size)), indices.unflatten(0, (-1, block_size))[:, 0].unsqueeze(1).expand(-1, block_size)):
+               assert False, "something went very, very, VERY wrong here. the the slots within a block do not target the same block. this should never happen. go contact konrad and tell him to fix his stuff."
             indices = indices.unflatten(0, (-1, block_size))[:, 0]
             offsets = None
         else:
@@ -482,9 +484,10 @@ class HpuModelAdapter:
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
-    return htorch.hpu.wrap_in_hpu_graph(
-        HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
-    ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(*args, **kwargs)
+    return HpuModelAdapter(*args, **kwargs)
+#    return htorch.hpu.wrap_in_hpu_graph(
+#        HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
+#    ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(*args, **kwargs)
 
 
 def subtuple(obj: object,
@@ -909,7 +912,6 @@ class HPUModelRunner:
         block_usage = [[self.block_size] * (len(bt) - 1) + [lbu]
                        for bt, lbu in zip(block_tables, last_block_usage)
                        if bt]
-
         block_list = flatten(block_tables)
         block_groups = flatten(block_groups)
         block_usage = flatten(block_usage)
@@ -1240,7 +1242,7 @@ class HPUModelRunner:
         # The "slot" is the "physical index" of a token in the KV cache.
         # Look up the block_idx in the block table (logical<>physical map)
         # to compute this.
-        block_number = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
+        block_number = torch.ones((padded_batch_size, 1), dtype=torch.int32) * self._PAD_BLOCK_ID
         block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor,
                                                   dim=1,
                                                   index=(index //
@@ -1249,6 +1251,7 @@ class HPUModelRunner:
         # properly and have good accuracy - why? beats me...
         block_offsets = (padded_index - 1) % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
+        #import pdb; pdb.set_trace()
         # Set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
         slot_mapping = slot_mapping[:padded_batch_size]
@@ -1310,6 +1313,7 @@ class HPUModelRunner:
                 num_decode_tokens=num_decode_tokens_device,
                 slot_mapping=slot_mapping_device,
             ))
+
 
     def _prepare_inputs(
             self,
@@ -1508,25 +1512,6 @@ class HPUModelRunner:
         prefill_output_tokens = []
         prefill_output_device = None
         decode_output_device = None
-
-        ######################### DECODES #########################
-        # Decodes run as one single batch with [padded_decode_bs, 1]
-        if num_decodes > 0:
-            htorch.core.mark_step()
-            logits_device = self._execute_model_generic(
-                decode_data.token_ids, decode_data.position_ids,
-                decode_data.attn_metadata, decode_data.logits_indices,
-                self.kv_caches)
-            htorch.core.mark_step()
-            sampling_metadata = self._prepare_sampling(
-                batch_changed,
-                pd_info.decode_req_ids,
-                pad_to=logits_device.shape[0])
-            sampler_output = self.model.sample(
-                logits=logits_device, sampling_metadata=sampling_metadata)
-            decode_output_device = sampler_output.sampled_token_ids
-            htorch.core.mark_step()
-
         ######################### PREFILLS #########################
         # Prefills run with shape [padded_prefill_bs, padded_prefill_len]
         if num_prefills > 0:
@@ -1556,6 +1541,26 @@ class HPUModelRunner:
                     dtype=prefill_output_tokens[0].dtype)
                 #torch.cat(prefill_output_tokens, dim=0)
             htorch.core.mark_step()
+
+        ######################### DECODES #########################
+        # Decodes run as one single batch with [padded_decode_bs, 1]
+        if num_decodes > 0:
+            htorch.core.mark_step()
+            logits_device = self._execute_model_generic(
+                decode_data.token_ids, decode_data.position_ids,
+                decode_data.attn_metadata, decode_data.logits_indices,
+                self.kv_caches)
+            htorch.core.mark_step()
+            sampling_metadata = self._prepare_sampling(
+                batch_changed,
+                pd_info.decode_req_ids,
+                pad_to=logits_device.shape[0])
+            sampler_output = self.model.sample(
+                logits=logits_device, sampling_metadata=sampling_metadata)
+            decode_output_device = sampler_output.sampled_token_ids
+            htorch.core.mark_step()
+
+
 
         # From this point onward, all operations are done on CPU.
         # If sampler was split, we already have tokens. Let's copy the data to
@@ -1635,7 +1640,7 @@ class HPUModelRunner:
                 #                logger.info(
                 #                    f'[ENGINE_ITER {self._ENGINE_ITER}] REQ:{req_id} IDX:{req_idx} {phase} generated token: {self._tokenizer.decode(sampled_token_ids_cpu[req_idx])!r}, all generated so far: {generated!r}'  # noqa
                 #                )
-                if 'The final answer is' not in generated:
+                if True:# 'The final answer is' not in generated:
                     logger.info(
                         f'[ENGINE_ITER {self._ENGINE_ITER}] REQ:{req_id} IDX:{req_idx} finished: {generated!r}'  # noqa
                     )
