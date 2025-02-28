@@ -22,7 +22,7 @@ def run_prefill(prefill_done):
     # and 3 and do prefilling on request 2.
     prompts = [
         "Hello, my name is",
-        # "Hi, your name is",
+        "Hi, your name is",
         # The decode node will actually "prefill" this request.
         "Tell me a very long story",
     ]

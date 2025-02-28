@@ -17,7 +17,7 @@ class ExpertsInt8Config(QuantizationConfig):
     """Config class for Int8 experts quantization."""
 
     def __init__(self) -> None:
-        pass
+        super().__init__()
 
     @classmethod
     def get_name(cls) -> str:
@@ -108,9 +108,12 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -132,7 +135,10 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                              topk_weights=topk_weights,
                              topk_ids=topk_ids,
                              inplace=True,
+                             activation=activation,
                              use_int8_w8a16=True,
+                             global_num_experts=global_num_experts,
+                             expert_map=expert_map,
                              w1_scale=layer.w13_scale,
                              w2_scale=layer.w2_scale)
 
