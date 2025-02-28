@@ -45,7 +45,7 @@ for qps in "${QPS_VALUES[@]}"; do
   GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
   # Construct filename for this run
-  FILENAME="${GUIDED_BACKEND}_${BACKEND}_${qps}qps_$(basename $MODEL)_${DATASET}_${GIT_HASH}.txt"
+  FILENAME="${GUIDED_BACKEND}_${BACKEND}_${qps}qps_$(basename $MODEL)_${DATASET}_${GIT_HASH}.json"
 
   # Run the benchmark
   python "$SCRIPT_DIR/benchmark_serving_guided.py" $COMMON_PARAMS \
