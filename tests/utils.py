@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import copy
 import functools
@@ -44,8 +46,9 @@ if current_platform.is_rocm():
         finally:
             amdsmi_shut_down()
 elif current_platform.is_cuda():
-    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
-                        nvmlInit, nvmlShutdown)
+    from vllm.third_party.pynvml import (nvmlDeviceGetHandleByIndex,
+                                         nvmlDeviceGetMemoryInfo, nvmlInit,
+                                         nvmlShutdown)
 
     @contextmanager
     def _nvml():
@@ -157,13 +160,19 @@ class RemoteOpenAIServer:
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
 
-    def get_client(self):
+    def get_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
         return openai.OpenAI(
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
         )
 
     def get_async_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
         return openai.AsyncOpenAI(base_url=self.url_for("v1"),
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
@@ -288,12 +297,12 @@ def _test_completion_close(
                                            logprobs=5,
                                            temperature=0.0)
 
-    logporbs = completion.choices[0].logprobs.top_logprobs[0]
-    logporbs = {k: round(v, 2) for k, v in logporbs.items()}
+    logprobs = completion.choices[0].logprobs.top_logprobs[0]
+    logprobs = {k: round(v, 2) for k, v in logprobs.items()}
 
     results.append({
         "test": "completion_close",
-        "logprobs": logporbs,
+        "logprobs": logprobs,
     })
 
     return results
@@ -780,7 +789,6 @@ async def completions_with_server_args(
     assert len(max_tokens) == len(prompts)
 
     outputs = None
-    max_wait_seconds = 240 * 3  # 240 is default
     with RemoteOpenAIServer(model_name,
                             server_cli_args,
                             max_wait_seconds=max_wait_seconds) as server:

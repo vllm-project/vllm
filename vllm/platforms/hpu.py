@@ -1,7 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import os
 from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum, _Backend
@@ -19,10 +23,16 @@ class HpuPlatform(Platform):
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
+    ray_device_key: str = "HPU"
+    device_control_env_var: str = "HABANA_VISIBLE_MODULES"
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
-        return _Backend.HPU_ATTN
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool,
+                             use_mla: bool) -> str:
+        logger.info("Using HPUAttention backend.")
+        return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -53,8 +63,32 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
+        if (parallel_config.distributed_executor_backend == 'mp'
+                and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
+            if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD",
+                              None) is not None:
+                logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
+                               "might cause application hangs on exit. Using "
+                               "VLLM_WORKER_MULTIPROC_METHOD=fork anyway, "
+                               "as it was explicitly requested.")
+            else:
+                logger.warning(
+                    "On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
+                    "might cause application hangs on exit. Setting "
+                    "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                    "To override that behavior, please set "
+                    "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
+                os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on HPU.")
         return False
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.hpu_communicator.HpuCommunicator"  # noqa

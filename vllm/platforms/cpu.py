@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import os
 from typing import TYPE_CHECKING, Optional
 
 import psutil
@@ -28,10 +31,14 @@ class CpuPlatform(Platform):
         return "cpu"
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
-        if selected_backend != _Backend.TORCH_SDPA:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool,
+                             use_mla: bool) -> str:
+        if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
-        return _Backend.TORCH_SDPA
+        logger.info("Using Torch SDPA backend.")
+        return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -50,7 +57,7 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
             logger.warning(
@@ -102,7 +109,47 @@ class CpuPlatform(Platform):
             else:
                 parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
 
+        assert vllm_config.device_config.device_type == "cpu"
+
+        #
+        # Environment variables for CPU executor
+        #
+
+        # Set default threads num for OpenMP parallel
+        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+
+        # Disable torch async compiling which won't work with daemonic processes
+        os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+
+        # Intel OpenMP setting
+        ld_prealod_str = os.getenv("LD_PRELOAD", "")
+        if "libiomp5.so" in ld_prealod_str:
+            # The time(milliseconds) that a thread should wait after
+            # completing the execution of a parallel region, before sleeping.
+            os.environ['KMP_BLOCKTIME'] = "1"
+            # Prevents the CPU to run into low performance state
+            os.environ['KMP_TPAUSE'] = "0"
+            # Provides fine granularity parallelism
+            os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
+            os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
+            os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
+
+        # To hint IPEX uses shared memory based AllReduce
+        os.environ["LOCAL_WORLD_SIZE"] = str(
+            vllm_config.parallel_config.tensor_parallel_size)
+
     @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on CPU.")
         return False
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        """
+        Get device specific communicator class for distributed communication.
+        """
+        return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa

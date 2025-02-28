@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
 Run `pytest tests/models/test_models.py`.
@@ -26,6 +27,9 @@ from ...utils import check_logprobs_close
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
+            "THUDM/chatglm3-6b",  # chatglm (text-only)
+        ),
+        pytest.param(
             "meta-llama/Llama-3.2-1B-Instruct",  # llama
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
@@ -43,11 +47,18 @@ from ...utils import check_logprobs_close
             marks=[pytest.mark.core_model],
         ),
         pytest.param(
+            "Qwen/Qwen-7B",  # qwen (text-only)
+        ),
+        pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
             marks=[pytest.mark.core_model],
         ),
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
+        pytest.param(
+            "ehristoforu/Falcon3-MoE-2x7B-Insruct",  # mixtral
+            marks=[pytest.mark.cpu_model],
+        )
     ])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -63,16 +74,23 @@ def test_models(
 ) -> None:
 
     with hf_runner(model, dtype=dtype) as hf_model:
+        if model.startswith("THUDM/chatglm3"):
+            hf_model.model.get_output_embeddings = lambda: \
+                hf_model.model.transformer.output_layer
+
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
+
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        print(vllm_model.model.llm_engine.model_executor.driver_worker.
-              model_runner.model)
+        def print_model(model):
+            print(model)
+
+        vllm_model.apply_model(print_model)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 import math
 import os
@@ -63,7 +65,7 @@ torch::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
 
 
 static inline std::optional<at::ScalarType> maybe_scalartype(
-    c10::optional<at::Tensor> const& t) {
+    std::optional<at::Tensor> const& t) {
     if (!t) {
       return std::nullopt;
     } else {

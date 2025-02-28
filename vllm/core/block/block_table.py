@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from typing import List, Optional
 
@@ -23,7 +25,7 @@ class BlockTable:
             blocks to initialize the BlockTable with. If not provided, an empty
             BlockTable is created.
         max_block_sliding_window (Optional[int], optional): The number of
-            blocks to keep around for each sequance. If None, all blocks
+            blocks to keep around for each sequence. If None, all blocks
             are kept (eg., when sliding window is not used).
             It should at least fit the sliding window size of the model.
 

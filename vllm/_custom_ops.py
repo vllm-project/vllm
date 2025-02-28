@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import contextlib
 import importlib
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -34,37 +36,6 @@ else:
         from torch.library import impl_abstract as register_fake
 
 
-# activation ops
-def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.silu_and_mul(out, x)
-
-
-def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_and_mul(out, x)
-
-
-def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_tanh_and_mul(out, x)
-
-
-def fatrelu_and_mul(out: torch.Tensor,
-                    x: torch.Tensor,
-                    threshold: float = 0.0) -> None:
-    torch.ops._C.fatrelu_and_mul(out, x, threshold)
-
-
-def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_fast(out, x)
-
-
-def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_new(out, x)
-
-
-def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_quick(out, x)
-
-
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,
@@ -79,8 +50,8 @@ def paged_attention_v1(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -111,8 +82,8 @@ def paged_attention_v2(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -143,8 +114,8 @@ def paged_attention_rocm(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
@@ -462,8 +433,25 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
 
 
 # cutlass
+def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
+                          block_scale_a: torch.Tensor,
+                          block_scale_b: torch.Tensor, alpha: torch.Tensor,
+                          out_dtype: torch.dtype) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2
+    m, n = a.shape[0], b.shape[0]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+    torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b,
+                                       alpha)
+    return out
+
+
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
+
+
+def cutlass_scaled_mm_supports_block_fp8(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(
+        cuda_device_capability)
 
 
 def cutlass_scaled_mm(a: torch.Tensor,
@@ -472,6 +460,28 @@ def cutlass_scaled_mm(a: torch.Tensor,
                       scale_b: torch.Tensor,
                       out_dtype: torch.dtype,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    `cutlass_scaled_mm` implements a fused version of 
+        `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
+    where scale_a * a and scale_b * b are implemented using numpy-style 
+    broadcasting. 
+    
+    In order to support blockwise scaling like found in DeepSeek V3 we also 
+    support extended "group" broadcast rules. We extend the numpy-style 
+    broadcasting rules with the following rule: 
+        "if the extent of a dimension in the source shape is between 1 and 
+        corresponding extent in the target shape we repeat each element along 
+        that dimension  src_shape[dim] // target_shape[dim] times consecutively"
+    example if we have:
+          a = [[1, 2], and target_shape = (2, 4)
+               [3, 4]]
+    then we would expand a to:
+          a = [[1, 1, 2, 2],
+               [3, 3, 4, 4]]
+    currently we only support the case:
+        scale_a.shape * [1, 128] == a.shape
+        scale_b.shape * [128, 128] == b.shape
+    """
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.shape[0] == b.shape[
@@ -566,22 +576,9 @@ def cutlass_sparse_compress(a: torch.Tensor) \
 
     # a_meta.dtype: torch.uint8 so elemsPerMetaElem = 8b / 2b_per_nz = 4
     elemsPerMetaElem = 4
+    assert (a.shape[1] % (2 * elemsPerMetaElem) == 0)
 
-    m = a.shape[0]
-    k = a.shape[1]
-    assert (k % 2 == 0)
-    a_nzs = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
-    a_meta = torch.empty((m, k // 2 // elemsPerMetaElem),
-                         dtype=torch.uint8,
-                         device=a.device)
-
-    if not (torch.ops._C.cutlass_sparse_compress_entry(a_nzs, a_meta, a)):
-        raise ValueError
-
-    assert (a_nzs.is_contiguous())
-    assert (a_meta.is_contiguous())
-
-    return a_nzs, a_meta
+    return torch.ops._C.cutlass_sparse_compress(a)
 
 
 def cutlass_scaled_sparse_mm(
@@ -767,6 +764,64 @@ def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.permute_cols(a, perm)
 
 
+# fp4
+def scaled_fp4_quant(
+        input: torch.Tensor,
+        input_global_scale: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize input tensor to FP4 and return quantized tensor and scale.
+
+    This function quantizes the last dimension of the given tensor `input`. For
+    every 16 consecutive elements, a single dynamically computed scaling factor
+    is shared. This scaling factor is quantized using the `input_global_scale`
+    and is stored in a swizzled layout (see
+    https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x).
+
+    Args:
+        input: The input tensor to be quantized to FP4
+        input_global_scale: A scalar scaling factor for the entire tensor.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
+            two values are packed into a uint8 and float8_e4m3 scaling factors
+            in the sizzled layout.
+    """
+    assert not current_platform.is_rocm()
+    assert input.ndim >= 1, (
+        f'input.ndim needs to be >= 1, but got {input.ndim}.')
+    other_dims = 1 if input.ndim == 1 else -1
+    input = input.reshape(other_dims, input.shape[-1])
+    m, n = input.shape
+    block_size = 16
+    device = input.device
+
+    assert n % block_size == 0, (
+        f'last dim has to be multiple of 16, but got {n}.')
+    assert input.dtype in (torch.float16, torch.bfloat16), (
+        f'input.dtype needs to be fp16 or bf16 but got {input.dtype}.')
+
+    # Two fp4 values will be packed into an uint8.
+    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+
+    # We use the rounded values to store the swizzled values. Due to the
+    # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
+    # So, we first pad the scales to multiples of 128 and 4. Then, the scales
+    # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
+    # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+    round_up = lambda x, y: (x + y - 1) // y * y
+    rounded_m = round_up(m, 128)
+    scale_n = n // block_size
+    rounded_n = round_up(scale_n, 4)
+    output_scale = torch.empty((rounded_m, rounded_n // 4),
+                               device=device,
+                               dtype=torch.int32)
+
+    torch.ops._C.scaled_fp4_quant(output, input, output_scale,
+                                  input_global_scale)
+    output_scale = output_scale.view(torch.float8_e4m3fn)
+    return output, output_scale
+
+
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,
@@ -851,8 +906,8 @@ def scaled_int8_quant(
     if scale is not None:
         # static-per-tensor quantization.
         assert symmetric == (
-            azp is
-            None), "azp must only be provided for asymmetric quantization."
+            azp
+            is None), "azp must only be provided for asymmetric quantization."
         torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
         return output, scale, azp
 
@@ -954,6 +1009,15 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                                           num_tokens_post_pad)
 
 
+def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
+                             block_size: int, sorted_token_ids: torch.Tensor,
+                             experts_ids: torch.Tensor,
+                             num_tokens_post_pad: torch.Tensor) -> None:
+    torch.ops._moe_C.sgl_moe_align_block_size(topk_ids, num_experts,
+                                              block_size, sorted_token_ids,
+                                              experts_ids, num_tokens_post_pad)
+
+
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indicies: torch.Tensor,
                  gating_output: float) -> None:
@@ -987,8 +1051,8 @@ def reshape_and_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
                                              value_cache, slot_mapping,
@@ -1002,8 +1066,8 @@ def reshape_and_cache_flash(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
                                                    value_cache, slot_mapping,
@@ -1011,10 +1075,28 @@ def reshape_and_cache_flash(
                                                    v_scale)
 
 
+def concat_and_cache_mla(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    scale: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.concat_and_cache_mla(kv_c, k_pe, kv_cache,
+                                                slot_mapping, kv_cache_dtype,
+                                                scale)
+
+
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+
+
+def copy_blocks_mla(kv_caches: List[torch.Tensor],
+                    block_mapping: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.copy_blocks_mla(kv_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
@@ -1027,6 +1109,16 @@ def convert_fp8(output: torch.Tensor,
                 scale: float = 1.0,
                 kv_dtype: str = "fp8") -> None:
     torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
+
+
+def gather_cache(src_cache: torch.Tensor,
+                 dst: torch.Tensor,
+                 block_table: torch.Tensor,
+                 cu_seq_lens: torch.Tensor,
+                 batch_size: int,
+                 seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
+                                        cu_seq_lens, batch_size, seq_starts)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:
@@ -1071,3 +1163,67 @@ def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[int], List[int]]:
 def register_graph_buffers(fa: int, handles: List[List[int]],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
+
+
+def get_flash_mla_metadata(
+    cache_seqlens: torch.Tensor,
+    num_heads_per_head_k: int,
+    num_heads_k: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Arguments:
+        cache_seqlens: (batch_size), dtype torch.int32.
+        num_heads_per_head_k: Equals to seq_len_q * num_heads_q // num_heads_k.
+        num_heads_k: num_heads_k.
+
+    Return:
+        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), dtype torch.int32.
+        num_splits: (batch_size + 1), dtype torch.int32.
+    """
+    return torch.ops._C.get_flash_mla_metadata(cache_seqlens,
+                                               num_heads_per_head_k,
+                                               num_heads_k)
+
+
+def flash_mla_with_kvcache(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    head_dim_v: int,
+    tile_scheduler_metadata: torch.Tensor,
+    num_splits: torch.Tensor,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Arguments:
+        q: (batch_size, seq_len_q, num_heads_q, head_dim).
+        k_cache: (num_blocks, page_block_size, num_heads_k, head_dim).
+        block_table: (batch_size, max_num_blocks_per_seq), torch.int32.
+        cache_seqlens: (batch_size), torch.int32.
+        head_dim_v: Head_dim of v.
+        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), torch.int32, return by get_mla_metadata.
+        num_splits: (batch_size + 1), torch.int32, return by get_mla_metadata.
+        softmax_scale: float. The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim).
+        causal: bool. Whether to apply causal attention mask.
+
+    Return:
+        out: (batch_size, seq_len_q, num_heads_q, head_dim_v).
+        softmax_lse: (batch_size, num_heads_q, seq_len_q), torch.float32.
+    """
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1]**(-0.5)
+    out, softmax_lse = torch.ops._C.flash_mla_fwd_kvcache(
+        q,
+        k_cache,
+        None,
+        head_dim_v,
+        cache_seqlens,
+        block_table,
+        softmax_scale,
+        causal,
+        tile_scheduler_metadata,
+        num_splits,
+    )
+    return out, softmax_lse

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Callable, List, Optional
 
 import torch
@@ -62,7 +64,7 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                        **kwargs):
 
         assert params_dtype == torch.float16, (
-            "float16 is required for marlin24 compressd models. Set dtype=torch.float16"  # noqa: E501
+            "float16 is required for marlin24 compressed models. Set dtype=torch.float16"  # noqa: E501
         )
 
         pack_factor = 32 // self.quant_type.size_bits

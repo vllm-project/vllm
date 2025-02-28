@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List
 
 import openai
@@ -90,7 +92,7 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=775, total_tokens=785)
+        completion_tokens=10, prompt_tokens=774, total_tokens=784)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -183,7 +185,7 @@ async def test_single_chat_session_image_base64encoded(
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=775, total_tokens=785)
+        completion_tokens=10, prompt_tokens=774, total_tokens=784)
 
     message = choice.message
     message = chat_completion.choices[0].message

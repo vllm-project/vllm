@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from unittest.mock import patch
 
 import pytest
@@ -11,11 +13,13 @@ from .registry import HF_EXAMPLE_MODELS
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
 def test_can_initialize(model_arch):
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-    if not model_info.is_available_online:
-        pytest.skip("Model is not available online")
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
 
     # Avoid OOM
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
+        hf_config.update(model_info.hf_overrides)
+
         if hasattr(hf_config, "text_config"):
             text_config: PretrainedConfig = hf_config.text_config
         else:

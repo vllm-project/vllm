@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
@@ -32,7 +34,8 @@ class BaseTokenizerGroup(ABC):
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
-               lora_request: Optional[LoRARequest] = None) -> List[int]:
+               lora_request: Optional[LoRARequest] = None,
+               add_special_tokens: Optional[bool] = None) -> List[int]:
         """Encode a prompt using the tokenizer group."""
         pass
 
@@ -41,7 +44,8 @@ class BaseTokenizerGroup(ABC):
             self,
             prompt: str,
             request_id: Optional[str] = None,
-            lora_request: Optional[LoRARequest] = None) -> List[int]:
+            lora_request: Optional[LoRARequest] = None,
+            add_special_tokens: Optional[bool] = None) -> List[int]:
         """Encode a prompt using the tokenizer group."""
         pass
 

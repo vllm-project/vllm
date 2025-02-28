@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import logging
 import traceback
+from contextlib import suppress
 from itertools import chain
 from typing import TYPE_CHECKING, Optional
 
@@ -10,6 +13,21 @@ from .interface import _Backend  # noqa: F401
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = logging.getLogger(__name__)
+
+
+def vllm_version_matches_substr(substr: str) -> bool:
+    """
+    Check to see if the vLLM version matches a substring.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        vllm_version = version("vllm")
+    except PackageNotFoundError as e:
+        logger.warning(
+            "The vLLM package was not found, so its version could not be "
+            "inspected. This may cause platform detection to fail.")
+        raise e
+    return substr in vllm_version
 
 
 def tpu_platform_plugin() -> Optional[str]:
@@ -31,14 +49,24 @@ def cuda_platform_plugin() -> Optional[str]:
     is_cuda = False
 
     try:
-        import pynvml
+        from vllm.utils import import_pynvml
+        pynvml = import_pynvml()
         pynvml.nvmlInit()
         try:
-            if pynvml.nvmlDeviceGetCount() > 0:
-                is_cuda = True
+            # NOTE: Edge case: vllm cpu build on a GPU machine.
+            # Third-party pynvml can be imported in cpu build,
+            # we need to check if vllm is built with cpu too.
+            # Otherwise, vllm will always activate cuda plugin
+            # on a GPU machine, even if in a cpu build.
+            is_cuda = (pynvml.nvmlDeviceGetCount() > 0
+                       and not vllm_version_matches_substr("cpu"))
         finally:
             pynvml.nvmlShutdown()
-    except Exception:
+    except Exception as e:
+        if "nvml" not in e.__class__.__name__.lower():
+            # If the error is not related to NVML, re-raise it.
+            raise e
+
         # CUDA is supported on Jetson, but NVML may not be.
         import os
 
@@ -99,8 +127,11 @@ def xpu_platform_plugin() -> Optional[str]:
 def cpu_platform_plugin() -> Optional[str]:
     is_cpu = False
     try:
-        from importlib.metadata import version
-        is_cpu = "cpu" in version("vllm")
+        is_cpu = vllm_version_matches_substr("cpu")
+        if not is_cpu:
+            import platform
+            is_cpu = platform.machine().lower().startswith("arm")
+
     except Exception:
         pass
 
@@ -120,11 +151,8 @@ def neuron_platform_plugin() -> Optional[str]:
 
 def openvino_platform_plugin() -> Optional[str]:
     is_openvino = False
-    try:
-        from importlib.metadata import version
-        is_openvino = "openvino" in version("vllm")
-    except Exception:
-        pass
+    with suppress(Exception):
+        is_openvino = vllm_version_matches_substr("openvino")
 
     return "vllm.platforms.openvino.OpenVinoPlatform" if is_openvino else None
 
@@ -179,7 +207,7 @@ def resolve_current_platform_cls_qualname() -> str:
         logger.info("Automatically detected platform %s.",
                     activated_builtin_plugins[0])
     else:
-        platform_cls_qualname = "vllm.interface.UnspecifiedPlatform"
+        platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
         logger.info(
             "No platform detected, vLLM is running on UnspecifiedPlatform")
     return platform_cls_qualname
@@ -213,8 +241,11 @@ def __getattr__(name: str):
             global _init_trace
             _init_trace = "".join(traceback.format_stack())
         return _current_platform
-    else:
+    elif name in globals():
         return globals()[name]
+    else:
+        raise AttributeError(
+            f"No attribute named '{name}' exists in {__name__}.")
 
 
 __all__ = [

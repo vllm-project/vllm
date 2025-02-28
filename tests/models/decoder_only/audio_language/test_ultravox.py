@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Tuple, Type
 
 import numpy as np
@@ -13,7 +15,7 @@ from ....conftest import HfRunner, VllmRunner
 from ....utils import RemoteOpenAIServer
 from ...utils import check_logprobs_close
 
-MODEL_NAME = "fixie-ai/ultravox-v0_3"
+MODEL_NAME = "fixie-ai/ultravox-v0_4"
 
 AudioTuple = Tuple[np.ndarray, int]
 
@@ -185,7 +187,7 @@ def run_multi_audio_test(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("vllm_kwargs", [
@@ -237,8 +239,8 @@ def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
 
 
 @pytest.mark.asyncio
-async def test_online_inference(client, audio_assets):
-    """Exercises online inference with/without chunked prefill enabled."""
+async def test_online_serving(client, audio_assets):
+    """Exercises online serving with/without chunked prefill enabled."""
 
     messages = [{
         "role":

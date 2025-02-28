@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import ast
 from typing import List, Optional, Tuple
 
@@ -6,7 +8,7 @@ import pytest
 
 import vllm
 from vllm import SamplingParams
-from vllm.lora.layers import LinearScalingRotaryEmbeddingWithLora
+from vllm.lora.layers import LinearScalingRotaryEmbeddingWithLoRA
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding)
@@ -149,7 +151,7 @@ def test_rotary_emb_replaced(dist_init):
         if "rotary_emb" in module_name:
             if "base_layer" not in module_name:
                 rotary_emb_count += 1
-                assert isinstance(module, LinearScalingRotaryEmbeddingWithLora)
+                assert isinstance(module, LinearScalingRotaryEmbeddingWithLoRA)
             else:
                 assert isinstance(module, LinearScalingRotaryEmbedding)
     # Llama 2 has 32 layers.

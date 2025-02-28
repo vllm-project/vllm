@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
 from typing import Optional
 
@@ -19,7 +21,7 @@ from ..utils import VLLM_PATH
 EXAMPLES_DIR = VLLM_PATH / "examples"
 
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
-ULTRAVOX_MODEL_ID = "fixie-ai/ultravox-v0_3"
+ULTRAVOX_MODEL_ID = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
@@ -754,6 +756,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
      ("template_chatglm.jinja", "string"),
      ("template_chatglm2.jinja", "string"),
      ("template_chatml.jinja", "string"),
+     ("template_deepseek_vl2.jinja", "string"),
      ("template_falcon_180b.jinja", "string"),
      ("template_falcon.jinja", "string"),
      ("template_inkbot.jinja", "string"),

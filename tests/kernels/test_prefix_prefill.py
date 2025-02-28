@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 import random
 import time
@@ -98,7 +100,7 @@ def test_contexted_kv_attention(
         BS, max_block_per_request)
     b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
     b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
-    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens[:-1],
+    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
                                             dtype=torch.long),
                                dim=0)
     max_input_len = MAX_SEQ_LEN
@@ -138,6 +140,7 @@ def test_contexted_kv_attention(
     # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
     v_cache = v_cache.view(-1, block_size, num_kv_heads,
                            head_size).permute(0, 2, 3, 1).contiguous()
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
@@ -151,8 +154,9 @@ def test_contexted_kv_attention(
                           block_table,
                           b_start_loc,
                           b_seq_len,
-                          b_ctx_len,
                           max_input_len,
+                          k_scale,
+                          v_scale,
                           sliding_window=sliding_window)
     torch.cuda.synchronize()
     start_time = time.time()
@@ -166,8 +170,9 @@ def test_contexted_kv_attention(
                           block_table,
                           b_start_loc,
                           b_seq_len,
-                          b_ctx_len,
                           max_input_len,
+                          k_scale,
+                          v_scale,
                           sliding_window=sliding_window)
     torch.cuda.synchronize()
     end_time = time.time()
@@ -326,7 +331,7 @@ def test_contexted_kv_attention_alibi(
         BS, max_block_per_request)
     b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
     b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
-    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens[:-1],
+    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
                                             dtype=torch.long),
                                dim=0)
     max_input_len = MAX_SEQ_LEN
@@ -366,6 +371,7 @@ def test_contexted_kv_attention_alibi(
     # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
     v_cache = v_cache.view(-1, block_size, num_kv_heads,
                            head_size).permute(0, 2, 3, 1).contiguous()
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
@@ -379,8 +385,9 @@ def test_contexted_kv_attention_alibi(
                           block_table,
                           b_start_loc,
                           b_seq_len,
-                          b_ctx_len,
                           max_input_len,
+                          k_scale,
+                          v_scale,
                           alibi_slopes=alibi_slopes)
     torch.cuda.synchronize()
     start_time = time.time()
@@ -394,8 +401,9 @@ def test_contexted_kv_attention_alibi(
                           block_table,
                           b_start_loc,
                           b_seq_len,
-                          b_ctx_len,
                           max_input_len,
+                          k_scale,
+                          v_scale,
                           alibi_slopes=alibi_slopes)
     torch.cuda.synchronize()
     end_time = time.time()
