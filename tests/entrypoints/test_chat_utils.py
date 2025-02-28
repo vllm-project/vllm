@@ -640,6 +640,207 @@ def test_parse_chat_messages_multiple_images_uncommon_input(
     _assert_mm_data_is_image_input(mm_data, 2)
 
 
+def test_parse_chat_messages_multiple_images_interleave(
+    phi3v_model_config,
+    phi3v_tokenizer,
+    image_url,
+):
+    phi3v_model_config.multimodal_config.interleave_mm_strings = True
+
+    conversation, mm_data = parse_chat_messages(
+        [{
+            "role":
+            "user",
+            "content": [{
+                "type": "text",
+                "text": "I need you to compare this image"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "and this one"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "Do they have differences?"
+            }]
+        }],
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+        "Do they have differences?"
+    }]
+    _assert_mm_data_is_image_input(mm_data, 2)
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_multiple_images_interleave_async(
+    phi3v_model_config,
+    phi3v_tokenizer,
+    image_url,
+):
+    phi3v_model_config.multimodal_config.interleave_mm_strings = True
+
+    conversation, mm_data = parse_chat_messages_futures(
+        [{
+            "role":
+            "user",
+            "content": [{
+                "type": "text",
+                "text": "I need you to compare this image"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "and this one"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "Do they have differences?"
+            }]
+        }],
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+        "Do they have differences?"
+    }]
+    _assert_mm_data_is_image_input(await mm_data, 2)
+
+
+def test_parse_chat_messages_multiple_images_multimple_messages_interleave(
+    phi3v_model_config,
+    phi3v_tokenizer,
+    image_url,
+):
+    phi3v_model_config.multimodal_config.interleave_mm_strings = True
+
+    conversation, mm_data = parse_chat_messages(
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What's on this image?"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Be accurate."
+                },
+            ]
+        }, {
+            "role": "assistant",
+            "content": "Some stuff."
+        }, {
+            "role":
+            "user",
+            "content": [{
+                "type": "text",
+                "text": "What's on this image?"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }]
+        }],
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "What's on this image?\n<|image_1|>\nBe accurate."
+    }, {
+        "role": "assistant",
+        "content": "Some stuff."
+    }, {
+        "role": "user",
+        "content": "What's on this image?\n<|image_2|>"
+    }]
+    _assert_mm_data_is_image_input(mm_data, 2)
+
+
+def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
+    phi3v_model_config,
+    phi3v_tokenizer,
+    image_url,
+):
+    phi3v_model_config.multimodal_config.interleave_mm_strings = True
+
+    with pytest.raises(
+            ValueError,
+            match=r"Found more '<|image_1|>' placeholders in input prompt "
+            "than actual multimodal data items."):
+        parse_chat_messages(
+            [{
+                "role":
+                "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type":
+                        "text",
+                        "text":
+                        "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+                        "Do they have differences?"
+                    },
+                ]
+            }],
+            phi3v_model_config,
+            phi3v_tokenizer,
+            content_format="string",
+        )
+
+
 ### Mllama currently wraps images / texts as interleaved dictionaries
 def test_mllama_single_image(
     mllama_model_config,
