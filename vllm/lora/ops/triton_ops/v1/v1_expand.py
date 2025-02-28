@@ -75,7 +75,7 @@ def _v1_expand_kernel(
     # cur_n=tl.load(output_hs_ptr + slice_id), this situation exists in GQA's
     # qkv linear.
     curr_N = N if SAME_STRIDE else tl.load(output_hs_ptr + slice_id)
-    if pid_n * BLOCK_N > curr_N:
+    if pid_n * BLOCK_N >= curr_N:
         # Early exit CTA.
         return
 
