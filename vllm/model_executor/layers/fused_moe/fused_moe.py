@@ -954,11 +954,11 @@ def get_default_config(
             "num_warps": 4,
             "num_stages": 3,
         }
-    elif dtype in ["int4_w8a16", "int8_w8a16"] and block_shape is not None:
+    elif dtype in ["int4_w4a16", "int8_w8a16"] and block_shape is not None:
         # moe wna16 kernels
         # only set BLOCK_SIZE_M
         # BLOCK_SIZE_N and BLOCK_SIZE_K would be set later
-        bit = 4 if dtype == "int4_w8a16" else 8
+        bit = 4 if dtype == "int4_w4a16" else 8
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(M * topk,
                                                        block_shape[1], E, bit)
         if use_moe_wna16_cuda:
@@ -1003,7 +1003,7 @@ def try_get_optimal_moe_config(
     else:
         # First try to load optimal config from the file
         E, _, N = w2_shape
-        if dtype == "int4_w8a16":
+        if dtype == "int4_w4a16":
             N = N * 2
         block_n = block_shape[0] if block_shape else 0
         block_k = block_shape[1] if block_shape else 0
@@ -1125,7 +1125,7 @@ def get_config_dtype_str(dtype: torch.dtype,
     elif use_int8_w8a16:
         return "int8_w8a16"
     elif use_int4_w4a16:
-        return "int4_w8a16"
+        return "int4_w4a16"
     elif dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
         # use fp16/bfloat16 configs

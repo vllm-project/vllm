@@ -522,6 +522,13 @@ set_gencode_flags_for_srcs(
   CUDA_ARCHS "${CUDA_ARCHS}")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
+  set(VLLM_MOE_WNA16_SRC
+    "csrc/moe/moe_wna16.cu")
+
+  set_gencode_flags_for_srcs(
+    SRCS "${VLLM_MOE_WNA16_SRC}"
+    CUDA_ARCHS "${CUDA_ARCHS}")
+
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
     set(MARLIN_MOE_SRC
