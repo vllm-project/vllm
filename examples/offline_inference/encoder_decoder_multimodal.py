@@ -52,17 +52,14 @@ def run_mllama():
         dtype="half",
     )
 
-    # yapf: disable
     prompts = [
-        # Implicit prompt
-        {
+        {   # Implicit prompt
             "prompt": "<|image|><|begin_of_text|>What is the content of this image?",   # noqa: E501
             "multi_modal_data": {
                 "image": ImageAsset("stop_sign").pil_image,
             },
         },
-        # Explicit prompt
-        {
+        {   # Explicit prompt
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
@@ -72,14 +69,13 @@ def run_mllama():
             "decoder_prompt": "<|image|><|begin_of_text|>Please describe the image.",   # noqa: E501
         },
     ]
-    # yapf: enable
     return llm, prompts
 
 
 def run_whisper():
     # Create a Whisper encoder/decoder model instance
     llm = LLM(
-        model="openai/whisper-large-v3",
+        model="openai/whisper-large-v3-turbo",
         max_model_len=448,
         max_num_seqs=16,
         limit_mm_per_prompt={"audio": 1},
@@ -87,15 +83,13 @@ def run_whisper():
     )
 
     prompts = [
-        # Test implicit prompt
-        {
+        {   # Test implicit prompt
             "prompt": "<|startoftranscript|>",
             "multi_modal_data": {
                 "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
             },
         },
-        # Test explicit encoder/decoder prompt
-        {
+        {   # Test explicit encoder/decoder prompt
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
@@ -139,10 +133,8 @@ def main(args):
     # Print the outputs.
     for output in outputs:
         prompt = output.prompt
-        encoder_prompt = output.encoder_prompt
         generated_text = output.outputs[0].text
-        print(f"Encoder prompt: {encoder_prompt!r}, "
-              f"Decoder prompt: {prompt!r}, "
+        print(f"Decoder prompt: {prompt!r}, "
               f"Generated text: {generated_text!r}")
 
     duration = time.time() - start
