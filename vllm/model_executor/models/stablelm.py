@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2023 Stability AI, EleutherAI, and The HuggingFace Inc. team.
 # All rights reserved.
 #
@@ -18,13 +20,13 @@
 # https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/config.json
 """Inference-only StabeLM (https://github.com/Stability-AI/StableLM)
 model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import StableLmConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -50,8 +52,9 @@ from .utils import (is_pp_missing_parameter,
 class StablelmMLP(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 config: StableLmConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -59,10 +62,13 @@ class StablelmMLP(nn.Module):
         self.gate_up_proj = MergedColumnParallelLinear(
             config.hidden_size, [config.intermediate_size] * 2,
             bias=False,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj")
         self.down_proj = RowParallelLinear(config.intermediate_size,
                                            config.hidden_size,
-                                           bias=False)
+                                           bias=False,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.down_proj")
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -75,9 +81,10 @@ class StablelmMLP(nn.Module):
 class StablelmAttention(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: StableLmConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -115,11 +122,13 @@ class StablelmAttention(nn.Module):
                                           self.total_num_heads,
                                           self.total_num_key_value_heads,
                                           self.qkv_bias,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.qkv_proj")
         self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
                                         self.hidden_size,
                                         bias=False,
-                                        quant_config=quant_config)
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.o_proj")
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.rotary_ndims,
@@ -131,19 +140,18 @@ class StablelmAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_key_value_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -152,13 +160,17 @@ class StablelmDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: StableLmConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
-        self.self_attn = StablelmAttention(config, cache_config, quant_config)
-        self.mlp = StablelmMLP(config, quant_config)
+        self.self_attn = StablelmAttention(config,
+                                           cache_config,
+                                           quant_config,
+                                           prefix=f"{prefix}.self_attn")
+        self.mlp = StablelmMLP(config, quant_config, prefix=f"{prefix}.mlp")
         norm_eps = getattr(config, "norm_eps",
                            getattr(config, "layer_norm_eps", 1e-05))
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=norm_eps)
@@ -169,8 +181,6 @@ class StablelmDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         residual = hidden_states
@@ -178,8 +188,6 @@ class StablelmDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states
 
@@ -204,11 +212,13 @@ class StableLMEpochModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: StablelmDecoderLayer(config, cache_config,
-                                                quant_config),
+            lambda prefix: StablelmDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         norm_eps = getattr(config, "norm_eps",
@@ -218,27 +228,26 @@ class StableLMEpochModel(nn.Module):
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.hidden_size))
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = self.embed_tokens(input_ids)
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
-            )
+        for layer in self.layers[self.start_layer:self.end_layer]:
+            hidden_states, residual = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.norm(hidden_states)
@@ -257,7 +266,8 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
                                         prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=quant_config)
+                                      quant_config=quant_config,
+                                      prefix=f"{prefix}.lm_head")
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -265,16 +275,18 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -294,7 +306,8 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -304,6 +317,7 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -335,3 +349,5 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

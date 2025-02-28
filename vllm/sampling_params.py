@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Sampling parameters for text generation."""
 import copy
 from dataclasses import dataclass
@@ -62,6 +63,25 @@ class GuidedDecodingParams:
             backend=backend,
             whitespace_pattern=whitespace_pattern,
         )
+
+    @property
+    def backend_name(self) -> str:
+        """Return the backend name without any options.
+        
+        For example if the backend is "xgrammar:no-fallback", returns "xgrammar"
+        """
+        return (self.backend or "").split(":")[0]
+
+    def backend_options(self) -> List[str]:
+        """Return the backend options as a list of strings."""
+        if not self.backend or ":" not in self.backend:
+            return []
+        return self.backend.split(":")[1].split(",")
+
+    def no_fallback(self) -> bool:
+        """Returns True if the "no-fallback" option is supplied for the guided
+        decoding backend"""
+        return "no-fallback" in self.backend_options()
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
@@ -242,8 +262,10 @@ class SamplingParams(
         allowed_token_ids: Optional[List[int]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
+            # Convert token_id to integer
+            # Clamp the bias between -100 and 100 per OpenAI API spec
             logit_bias = {
-                int(token): bias
+                int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
 
@@ -293,8 +315,9 @@ class SamplingParams(
                 raise ValueError(
                     f"best_of must be greater than or equal to n, "
                     f"got n={self.n} and best_of={self.best_of}.")
-            self._real_n = self.n
-            self.n = self.best_of
+            if not self._real_n:
+                self._real_n = self.n
+                self.n = self.best_of
 
         if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
@@ -449,15 +472,16 @@ class SamplingParams(
         return self._all_stop_token_ids
 
     def clone(self) -> "SamplingParams":
-        """Deep copy excluding LogitsProcessor objects.
+        """Deep copy, but maybe not the LogitsProcessor objects.
 
-        LogitsProcessor objects are excluded because they may contain an
-        arbitrary, nontrivial amount of data.
+        LogitsProcessor objects may contain an arbitrary, nontrivial amount of
+        data that is expensive to copy. However, if not copied, the processor
+        needs to support parallel decoding for multiple sequences
         See https://github.com/vllm-project/vllm/issues/3087
         """
 
         logit_processor_refs = None if self.logits_processors is None else {
-            id(lp): lp
+            id(lp): lp.clone() if hasattr(lp, 'clone') else lp
             for lp in self.logits_processors
         }
         return copy.deepcopy(self, memo=logit_processor_refs)

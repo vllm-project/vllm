@@ -1,11 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Tuple
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                  flash_attn_with_kvcache)
+from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
+                                  flash_attn_varlen_func,
+                                  flash_attn_with_kvcache,
+                                  is_fa_version_supported)
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 256]
@@ -71,6 +75,7 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
+@pytest.mark.parametrize("use_out", [True, False])
 @pytest.mark.parametrize("kv_lens", [[1328, 18, 463], [1, 54, 293, 70]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -79,8 +84,10 @@ def ref_paged_attn(
 @pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("sliding_window", [None, 256])
+@pytest.mark.parametrize("fa_version", [2, 3])
 @torch.inference_mode()
 def test_flash_attn_with_paged_kv(
+    use_out: bool,
     kv_lens: List[int],
     num_heads: Tuple[int, int],
     head_size: int,
@@ -89,8 +96,13 @@ def test_flash_attn_with_paged_kv(
     soft_cap: Optional[float],
     num_blocks: int,
     sliding_window: Optional[int],
+    fa_version: int,
 ) -> None:
     torch.set_default_device("cuda")
+    if not is_fa_version_supported(fa_version):
+        pytest.skip(f"Flash attention version {fa_version} not supported due "
+                    f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
+
     current_platform.seed_everything(0)
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
@@ -116,17 +128,23 @@ def test_flash_attn_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
+    q = query.unsqueeze(1)
+    out = torch.empty_like(q) if use_out else None
     output = flash_attn_with_kvcache(
-        q=query.unsqueeze(1),
+        q=q,
         k_cache=key_cache,
         v_cache=value_cache,
+        out=out,
         softmax_scale=scale,
         causal=True,
         block_table=block_tables,
         cache_seqlens=kv_lens_tensor,
         softcap=soft_cap if soft_cap is not None else 0,
         window_size=window_size,
-    ).squeeze(1)
+        fa_version=fa_version,
+    )
+    output = output if not use_out else out
+    output = output.squeeze(1)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -141,7 +159,10 @@ def test_flash_attn_with_paged_kv(
         f"{torch.max(torch.abs(output - ref_output))}"
 
 
-@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
+@pytest.mark.parametrize("use_out", [True, False])
+@pytest.mark.parametrize("seq_lens",
+                         [[(1, 1328), (5, 18),
+                           (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
@@ -149,8 +170,10 @@ def test_flash_attn_with_paged_kv(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("fa_version", [2, 3])
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
+    use_out: bool,
     seq_lens: List[Tuple[int, int]],
     num_heads: Tuple[int, int],
     head_size: int,
@@ -159,8 +182,12 @@ def test_varlen_with_paged_kv(
     block_size: int,
     soft_cap: Optional[float],
     num_blocks: int,
+    fa_version: int,
 ) -> None:
     torch.set_default_device("cuda")
+    if not is_fa_version_supported(fa_version):
+        pytest.skip(f"Flash attention version {fa_version} not supported due "
+                    f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
     current_platform.seed_everything(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -187,9 +214,7 @@ def test_varlen_with_paged_kv(
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
-    cu_kv_lens = torch.tensor([0] + kv_lens,
-                              dtype=torch.int32).cumsum(dim=0,
-                                                        dtype=torch.int32)
+    kv_lens = torch.tensor(kv_lens, dtype=torch.int32)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
@@ -197,12 +222,14 @@ def test_varlen_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
+    out = torch.empty_like(query) if use_out else None
     output = flash_attn_varlen_func(
         q=query,
         k=key_cache,
         v=value_cache,
+        out=out,
         cu_seqlens_q=cu_query_lens,
-        cu_seqlens_k=cu_kv_lens,
+        seqused_k=kv_lens,
         max_seqlen_q=max_query_len,
         max_seqlen_k=max_kv_len,
         softmax_scale=scale,
@@ -210,7 +237,9 @@ def test_varlen_with_paged_kv(
         window_size=window_size,
         block_table=block_tables,
         softcap=soft_cap if soft_cap is not None else 0,
+        fa_version=fa_version,
     )
+    output = output if not use_out else out
 
     ref_output = ref_paged_attn(
         query=query,

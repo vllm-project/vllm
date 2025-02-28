@@ -6,6 +6,7 @@
 
 # Do not set -e, as the mixtral 8x22B model tends to crash occasionally
 # and we still want to see other benchmarking results even when mixtral crashes.
+set -x
 set -o pipefail
 
 check_gpus() {
@@ -85,11 +86,7 @@ kill_gpu_processes() {
 
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
-  pkill -f pt_main_thread
-  # this line doesn't work now
-  # ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
-  pkill -f python3
-  pkill -f /usr/bin/python3
+  pgrep python3 | xargs -r kill -9
 
 
   # wait until GPU memory usage smaller than 1GB
@@ -289,7 +286,7 @@ run_serving_tests() {
     # run the server
     echo "Running test case $test_name"
     echo "Server command: $server_command"
-    eval "$server_command" &
+    bash -c "$server_command" &
     server_pid=$!
 
     # wait until the server is alive
@@ -312,17 +309,20 @@ run_serving_tests() {
 
       new_test_name=$test_name"_qps_"$qps
 
+      # pass the tensor parallel size to the client so that it can be displayed
+      # on the benchmark dashboard
       client_command="python3 benchmark_serving.py \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
         --request-rate $qps \
+        --metadata "tensor_parallel_size=$tp" \
         $client_args"
 
       echo "Running test case $test_name with qps $qps"
       echo "Client command: $client_command"
 
-      eval "$client_command"
+      bash -c "$client_command"
 
       # record the benchmarking commands
       jq_output=$(jq -n \
@@ -347,6 +347,11 @@ run_serving_tests() {
 main() {
   check_gpus
   check_hf_token
+
+  # Set to v1 to run v1 benchmark
+  if [[ "${ENGINE_VERSION:-v0}" == "v1" ]]; then
+    export VLLM_USE_V1=1
+  fi
 
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)

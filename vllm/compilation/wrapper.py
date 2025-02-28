@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import sys
 from abc import abstractmethod
@@ -8,8 +10,10 @@ from typing import Callable, List, Optional
 import torch
 
 import vllm.envs as envs
+from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.logger import init_logger
 
-from .levels import CompilationLevel
+logger = init_logger(__name__)
 
 
 class TorchCompileWrapperWithCustomDispatcher:
@@ -25,20 +29,17 @@ class TorchCompileWrapperWithCustomDispatcher:
         `torch.compile` over the forward method.
     """
 
-    def __init__(self, compiled_callable: Optional[Callable] = None):
+    def __init__(self,
+                 compiled_callable: Optional[Callable] = None,
+                 compilation_level: int = 0):
 
+        vllm_config = get_current_vllm_config()
+        self.vllm_config = vllm_config
         if compiled_callable is None:
             # default compilation settings
             # compiling the forward method
 
-            # choose the compile backend
-
-            # if the user has set the backend, use it
-            from vllm.plugins import get_torch_compile_backend
-            backend = get_torch_compile_backend()
-            if backend is None:
-                from vllm.compilation.backends import select_default_backend
-                backend = select_default_backend(envs.VLLM_TORCH_COMPILE_LEVEL)
+            backend = vllm_config.compilation_config.init_backend(vllm_config)
 
             compiled_callable = torch.compile(
                 self.forward,
@@ -54,7 +55,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = \
-            envs.VLLM_TORCH_COMPILE_LEVEL >= CompilationLevel.DYNAMO_ONCE
+            compilation_level >= CompilationLevel.DYNAMO_ONCE
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
@@ -86,6 +87,32 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
 
         self.compiled_codes.append(new_code)
+        local_cache_dir = self.vllm_config.compilation_config.local_cache_dir
+        if isinstance(local_cache_dir, str):
+            decompiled_file = os.path.join(local_cache_dir,
+                                           "transformed_code.py")
+            if not os.path.exists(decompiled_file):
+                try:
+                    # usually the decompilation will succeed for most models,
+                    # as we guarantee a full-graph compilation in Dynamo.
+                    # but there's no 100% guarantee, since decompliation is
+                    # not a reversible process.
+                    import depyf
+                    src = depyf.decompile(new_code)
+                    with open(decompiled_file, "w") as f:
+                        f.write(src)
+
+                    logger.debug("Dynamo transformed code saved to %s",
+                                 decompiled_file)
+                except Exception:
+                    pass
+
+        if self.vllm_config.compilation_config.use_cudagraph and \
+            "update" in new_code.co_names:
+            import depyf
+            src = depyf.decompile(new_code)
+            msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n" + src  # noqa
+            raise RuntimeError(msg)
 
     @contextmanager
     def dispatch_to_code(self, index: int):

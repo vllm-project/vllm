@@ -1,19 +1,23 @@
-import time
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+# SPDX-License-Identifier: Apache-2.0
 
-from vllm.config import LoRAConfig, ModelConfig
+import time
+from typing import Mapping, Optional, Union
+
+from vllm.config import CacheConfig, LoRAConfig, ModelConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalHasher,
+                             MultiModalKwargs, MultiModalRegistry)
+from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 
 
 class Processor:
@@ -21,6 +25,7 @@ class Processor:
     def __init__(
         self,
         model_config: ModelConfig,
+        cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         tokenizer: BaseTokenizerGroup,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -28,54 +33,111 @@ class Processor:
     ):
 
         self.model_config = model_config
+        self.cache_config = cache_config
         self.lora_config = lora_config
         self.tokenizer = tokenizer
 
-        self.generation_config_fields = _load_generation_config_dict(
-            model_config)
+        self.generation_config_fields = model_config.try_get_generation_config(
+        )
         self.input_preprocessor = InputPreprocessor(model_config,
                                                     self.tokenizer,
                                                     mm_registry)
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
-    # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
-    # This ideally should releases the GIL, so we should not block the
-    # asyncio loop while this is running.
+        # Multi-modal (huggingface) input mapper
+        self.mm_input_cache_client = MMInputCacheClient(model_config)
+
+        # Multi-modal hasher (for images)
+        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
+            cache_config.enable_prefix_caching
+
+    def _validate_logprobs(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+    ) -> None:
+        if not isinstance(params, SamplingParams):
+            return
+
+        max_logprobs = self.model_config.max_logprobs
+        # Validate sample logprobs.
+        if params.logprobs and params.logprobs > max_logprobs:
+            raise ValueError(
+                f"Requested sample logprobs of {params.logprobs}, "
+                f"which is greater than max allowed: {max_logprobs}")
+
+        # Validate prompt logprobs.
+        if params.prompt_logprobs and params.prompt_logprobs > max_logprobs:
+            raise ValueError(
+                f"Requested prompt logprobs of {params.prompt_logprobs}, "
+                f"which is greater than max allowed: {max_logprobs}")
+
+        # TODO(andy): enable this in follow up by recomputing.
+        if (params.prompt_logprobs is not None
+                and self.cache_config.enable_prefix_caching):
+            raise ValueError("Prefix caching with prompt logprobs not yet "
+                             "supported on VLLM V1.")
+
+    def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
+        if lora_request is not None and not self.lora_config:
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
+
+    def _validate_allowed_token_ids(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+    ) -> None:
+        if not isinstance(params, SamplingParams):
+            return
+        if params.allowed_token_ids is None:
+            return
+        if not all(0 <= tid < self.model_config.vocab_size
+                   for tid in params.allowed_token_ids):
+            raise ValueError(
+                "allowed_token_ids contains out-of-vocab token id")
+
     def process_inputs(
         self,
         request_id: str,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
-        arrival_time: float,
+        arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
+    ) -> EngineCoreRequest:
 
-        # TODO(woosuk): Support embedding mode.
-        # TODO(woosuk): Check max_logprobs
+        # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
-        if lora_request is not None and not self.lora_config:
-            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
-                             "not enabled!")
+        self._validate_logprobs(params)
+        self._validate_lora(lora_request)
+        self._validate_allowed_token_ids(params)
+
         if arrival_time is None:
             arrival_time = time.time()
         assert priority == 0, "vLLM V1 does not support priority at the moment."
         assert trace_headers is None, "vLLM V1 does not support tracing yet."
 
-        # Process inputs.
+        # Process inputs, which includes:
+        # 1. Tokenize text prompt, with LoRA request if one exists.
+        # 2. For multimodal models with a merged preprocessor, preprocess
+        #   multimodal data and expand prompt token ids accordingly.
+        # 3. Apply prompt adapter to prompt token ids if one exists.
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        processed_inputs = self.input_processor(preprocessed_inputs)
-        self._validate_model_inputs(processed_inputs)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
+
+        # Process prompt and prompt token ids.
+        # Only applicable to multimodal models with legacy input processor.
+        processed_inputs = self.input_processor(preprocessed_inputs)
+
+        self._validate_model_inputs(processed_inputs)
 
         if is_encoder_decoder_inputs(processed_inputs):
             decoder_inputs = SingletonInputsAdapter(
@@ -96,33 +158,94 @@ class Processor:
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
 
-        # Make Request for Detokenizer.
-        detokenizer_request = DetokenizerRequest(
-            request_id,
-            decoder_inputs.prompt,
-            decoder_inputs.prompt_token_ids,
-            sampling_params.skip_special_tokens,
-            sampling_params.spaces_between_special_tokens,
-            sampling_params.output_kind,
-            sampling_params.stop,
-            sampling_params.include_stop_str_in_output,
-        )
+        # Multimodal related.
+        # Compute MM hashes (if enabled)
+        mm_hashes = None
+        if self.use_hash:
+            # Use mm_hashes from processed inputs if the model has merged
+            # input processor.
+            if decoder_inputs.multi_modal_hashes:
+                mm_hashes = decoder_inputs.multi_modal_hashes
+            # Fallback to using MultiModalHasher directly.
+            else:
+                mm_hashes = MultiModalHasher.hash_prompt_mm_data(prompt)
 
-        # Make Request for EngineCore.
-        engine_core_request = EngineCoreRequest(
-            request_id,
-            decoder_inputs.prompt,
-            decoder_inputs.prompt_token_ids,
-            decoder_inputs.multi_modal_data,
-            decoder_inputs.multi_modal_placeholders,
-            decoder_inputs.mm_processor_kwargs,
-            sampling_params,
-            eos_token_id,
-            arrival_time,
-            lora_request,
-        )
+        # For merged preprocessor, mm_data is already mm_inputs
+        precomputed_mm_inputs: Optional[list[MultiModalKwargs]] = None
+        decoder_mm_data = decoder_inputs.multi_modal_data
+        if isinstance(decoder_mm_data, MultiModalKwargs):
+            # The output of merged multi-modal processor (`decoder_mm_data`)
+            # contains the kwargs for all items from all modalities.
+            # This code separates them so that there is one set of kwargs
+            # per item per modality.
+            precomputed_mm_inputs = [
+                MultiModalKwargs.from_items([item])
+                for modality in decoder_mm_data.modalities
+                for item in decoder_mm_data.get_items(modality)
+            ]
 
-        return detokenizer_request, engine_core_request
+        mm_positions = decoder_inputs.multi_modal_placeholders
+
+        # Last-mile processing of multimodal metadata and inputs.
+        if mm_positions:
+
+            # Merge and flatten multimodal placeholders, hashes and inputs
+            # from dictionaries to lists, and sort them by each item's position
+            # in the input sequence.
+            # NOTE: interleaved modalities are not supported.
+            (
+                sorted_modalities,
+                sorted_mm_positions,
+                sorted_mm_hashes,
+            ) = merge_and_sort_multimodal_metadata(
+                mm_positions,
+                mm_hashes,
+            )
+
+            # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
+            # modalities involved AND the model supports merged input processor.
+            if len(sorted_modalities) > 1 and precomputed_mm_inputs:
+
+                modality_order_dict = {
+                    modality: order
+                    for order, modality in enumerate(sorted_modalities)
+                }
+
+                # Sanity check to make sure each multimodal input has only one
+                # modality key.
+                for mm_input in precomputed_mm_inputs:
+                    assert len(mm_input.modalities) == 1
+
+                # Sort MultiModalKwags to match sorted_mm_positions
+                precomputed_mm_inputs = sorted(
+                    precomputed_mm_inputs,
+                    key=lambda mm_input: modality_order_dict[list(
+                        mm_input.modalities)[0]])
+
+            # Apply mm input cache update and legacy input mapper if one exists.
+            sorted_mm_inputs = self.mm_input_cache_client.process_inputs(
+                mm_data=decoder_mm_data,
+                mm_hashes=sorted_mm_hashes,
+                mm_processor_kwargs=decoder_inputs.mm_processor_kwargs,
+                precomputed_mm_inputs=precomputed_mm_inputs,
+            )
+        else:
+            sorted_mm_inputs = None
+            sorted_mm_hashes = None
+            sorted_mm_positions = None
+
+        return EngineCoreRequest(
+            request_id=request_id,
+            prompt=decoder_inputs.prompt,
+            prompt_token_ids=decoder_inputs.prompt_token_ids,
+            mm_inputs=sorted_mm_inputs,
+            mm_hashes=sorted_mm_hashes,
+            mm_placeholders=sorted_mm_positions,
+            sampling_params=sampling_params,
+            eos_token_id=eos_token_id,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+        )
 
     def _validate_model_inputs(self, inputs: ProcessorInputs):
         if is_encoder_decoder_inputs(inputs):
@@ -137,6 +260,11 @@ class Processor:
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
+
+        if len(prompt_ids) >= self.model_config.max_model_len:
+            raise ValueError(
+                f"Prompt length of {len(prompt_ids)} is longer than the "
+                f"maximum model length of {self.model_config.max_model_len}.")
 
         if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len
@@ -153,16 +281,3 @@ class Processor:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
-
-
-def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
-    config = try_get_generation_config(
-        model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=model_config.revision,
-    )
-
-    if config is None:
-        return {}
-
-    return config.to_diff_dict()

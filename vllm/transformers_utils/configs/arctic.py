@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # yapf: disable
 # ruff: noqa: E501
 # coding=utf-8
@@ -19,7 +21,7 @@ ARCTIC_PRETRAINED_CONFIG_ARCHIVE_MAP = {
 
 
 @dataclass
-class ArcticLoraConfig:
+class ArcticLoRAConfig:
     lora_r: int = 64
     lora_alpha: float = 16
     shard_base_weights: bool = False

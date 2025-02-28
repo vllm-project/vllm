@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Sequence
 
 import torch
@@ -24,7 +26,7 @@ def check_embeddings_close(
                                   dim=0)
 
         fail_msg = (f"Test{prompt_idx}:"
-                    f"\n{name_0}:\t{embeddings_0!r}"
-                    f"\n{name_1}:\t{embeddings_1!r}")
+                    f"\n{name_0}:\t{embeddings_0[:16]!r}"
+                    f"\n{name_1}:\t{embeddings_1[:16]!r}")
 
         assert sim >= 1 - tol, fail_msg

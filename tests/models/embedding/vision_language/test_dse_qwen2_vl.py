@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import partial
 from typing import Callable, Dict, List, Type
 
@@ -93,7 +95,7 @@ def _run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     with vllm_runner(model,
-                     task="embedding",
+                     task="embed",
                      dtype=dtype,
                      enforce_eager=True,
                      max_model_len=8192) as vllm_model:

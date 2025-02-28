@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
-from typing import List, Mapping, Optional, Union
+from typing import List, Mapping, Optional, Tuple, Union, cast
 
 from typing_extensions import assert_never
 
@@ -7,10 +9,10 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.processing import MultiModalDataDict, MultiModalInputsV2
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
+                                    MultiModalInputs)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.utils import print_warning_once
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
                    PromptType, SingletonInputs, SingletonPrompt, token_inputs)
@@ -67,22 +69,25 @@ class InputPreprocessor:
         model config is unavailable.
         '''
 
-        if not self.is_encoder_decoder_model():
-            print_warning_once("Using None for decoder start token id because "
-                               "this is not an encoder/decoder model.")
+        if not self.model_config.is_encoder_decoder:
+            logger.warning_once(
+                "Using None for decoder start token id because "
+                "this is not an encoder/decoder model.")
             return None
 
         if (self.model_config is None or self.model_config.hf_config is None):
-            print_warning_once("Using None for decoder start token id because "
-                               "model config is not available.")
+            logger.warning_once(
+                "Using None for decoder start token id because "
+                "model config is not available.")
             return None
 
         dec_start_token_id = getattr(self.model_config.hf_config,
                                      'decoder_start_token_id', None)
         if dec_start_token_id is None:
-            print_warning_once("Falling back on <BOS> for decoder start token "
-                               "id because decoder start token id is not "
-                               "available.")
+            logger.warning_once(
+                "Falling back on <BOS> for decoder start token "
+                "id because decoder start token id is not "
+                "available.")
             dec_start_token_id = self.get_bos_token_id()
 
         return dec_start_token_id
@@ -184,10 +189,22 @@ class InputPreprocessor:
         corresponding token IDs.
         """
         tokenizer = self.get_tokenizer_group()
+        add_special_tokens = None
+        if self.model_config.hf_config.model_type == "whisper":
+            # For Whisper, special tokens should be provided by the user based
+            # on the task and language of their request. Also needed to avoid
+            # appending an EOS token to the prompt which disrupts generation.
+            add_special_tokens = False
+
+        if (self.model_config.encoder_config is not None
+                and self.model_config.encoder_config.get(
+                    "do_lower_case", False)):
+            prompt = prompt.lower()
 
         return tokenizer.encode(request_id=request_id,
                                 prompt=prompt,
-                                lora_request=lora_request)
+                                lora_request=lora_request,
+                                add_special_tokens=add_special_tokens)
 
     async def _tokenize_prompt_async(
         self,
@@ -197,10 +214,17 @@ class InputPreprocessor:
     ) -> List[int]:
         """Async version of :meth:`_tokenize_prompt`."""
         tokenizer = self.get_tokenizer_group()
-
-        return await tokenizer.encode_async(request_id=request_id,
-                                            prompt=prompt,
-                                            lora_request=lora_request)
+        add_special_tokens = None
+        if self.model_config.hf_config.model_type == "whisper":
+            # For Whisper, special tokens should be provided by the user based
+            # on the task and language of their request. Also needed to avoid
+            # appending an EOS token to the prompt which disrupts generation.
+            add_special_tokens = False
+        return await tokenizer.encode_async(
+            request_id=request_id,
+            prompt=prompt,
+            lora_request=lora_request,
+            add_special_tokens=add_special_tokens)
 
     def _can_process_multimodal(self) -> bool:
         model_config = self.model_config
@@ -212,11 +236,15 @@ class InputPreprocessor:
         # updated to use the new multi-modal processor
         can_process_multimodal = self.mm_registry.has_processor(model_config)
         if not can_process_multimodal:
-            logger.info(
-                "Your model uses the legacy input pipeline instead of the new "
-                "multi-modal processor. Please note that the legacy pipeline "
-                "will be removed in a future release. For more details, see: "
-                "https://github.com/vllm-project/vllm/issues/10114")
+            from vllm.model_executor.models.registry import _VLLM_MODELS
+            if not any(arch in _VLLM_MODELS
+                       for arch in model_config.architectures):
+                logger.warning_once(
+                    "Your model uses the legacy input pipeline, which will be "
+                    "removed in an upcoming release. "
+                    "Please upgrade to the new multi-modal processing pipeline "
+                    "(https://docs.vllm.ai/en/latest/design/mm_processing.html)"
+                )
 
         return can_process_multimodal
 
@@ -226,19 +254,23 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],
-    ) -> MultiModalInputsV2:
+    ) -> MultiModalInputs:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
         returning the corresponding token IDs and metadata.
         """
-        tokenizer_group = self.get_tokenizer_group()
-        tokenizer = tokenizer_group.get_lora_tokenizer(lora_request)
+        # At the moment on model (PrithviGeoSpatialMAE) requires to be
+        # initialized without a tokenizer while using also multi-modal
+        # input.
+        if not self.tokenizer:
+            tokenizer = None
+        else:
+            tokenizer_group = self.get_tokenizer_group()
+            tokenizer = tokenizer_group.get_lora_tokenizer(lora_request)
 
         mm_processor = self.mm_registry.create_processor(
             self.model_config, tokenizer)
 
-        if isinstance(prompt, list):
-            prompt = tokenizer.decode(prompt)
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
@@ -250,18 +282,20 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],
-    ) -> MultiModalInputsV2:
+    ) -> MultiModalInputs:
         """Async version of :meth:`_process_multimodal`."""
-        tokenizer_group = self.get_tokenizer_group()
-        tokenizer = await tokenizer_group.get_lora_tokenizer_async(lora_request
-                                                                   )
+        # At the moment on model (PrithviGeoSpatialMAE) requires to be
+        # initialized without a tokenizer while using also multi-modal
+        # input.
+        if not self.tokenizer:
+            tokenizer = None
+        else:
+            tokenizer_group = self.get_tokenizer_group()
+            tokenizer = await tokenizer_group.get_lora_tokenizer_async(
+                lora_request)
 
         mm_processor = self.mm_registry.create_processor(
             self.model_config, tokenizer)
-        if isinstance(prompt, list):
-            logger.warning("Passing `multi_modal_data` in TokensPrompt is"
-                           "deprecated and will be removed in a future update")
-            prompt = tokenizer.decode(prompt)
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
@@ -305,6 +339,7 @@ class InputPreprocessor:
             tokens_content = parsed["content"]
 
             prompt_token_ids = tokens_content["prompt_token_ids"]
+            token_type_ids = tokens_content.get("token_type_ids")
             multi_modal_data = tokens_content.get("multi_modal_data")
             mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
 
@@ -318,6 +353,7 @@ class InputPreprocessor:
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
+                token_type_ids=token_type_ids,
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,
             )
@@ -434,11 +470,18 @@ class InputPreprocessor:
                 or encoder_inputs["type"] == "multimodal"):
             pass
         else:
-            assert_never(encoder_inputs)
+            assert_never(encoder_inputs)  # type: ignore[arg-type]
 
         if decoder_inputs is None:
-            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                None)
+            if self.model_config.hf_config.model_type == "whisper":
+                # For Whisper models, the text prompt should go to the decoder.
+                # If no explicit encoder/decoder inputs, then copy the prompt
+                # from the encoder to the decoder. The encoder tokens are later
+                # overridden by the audio features.
+                dec_token_ids = encoder_inputs["prompt_token_ids"].copy()
+            else:
+                dec_token_ids = self._prepare_decoder_input_ids_for_generation(
+                    None)
             decoder_inputs = token_inputs(dec_token_ids)
         elif (decoder_inputs["type"] == "token"
               or decoder_inputs["type"] == "multimodal"):
@@ -450,12 +493,57 @@ class InputPreprocessor:
                 raise ValueError("Multi-modal decoder inputs of encoder-"
                                  "decoder models are not supported yet")
         else:
-            assert_never(encoder_inputs)
+            assert_never(encoder_inputs)  # type: ignore[arg-type]
 
         return EncoderDecoderInputs(
             encoder=encoder_inputs,
             decoder=decoder_inputs,
         )
+
+    def _separate_enc_dec_inputs_from_mm_processor_outputs(
+        self,
+        inputs: SingletonInputs,
+        decoder_inputs_to_override: Optional[SingletonInputs] = None,
+    ) -> Tuple[SingletonInputs, SingletonInputs]:
+        """
+        For encoder/decoder models only:
+        Separate Encoder/Decoder inputs from a MultiModalEncDecInputs
+        """
+        encoder_inputs: SingletonInputs
+        decoder_inputs: SingletonInputs
+        if inputs["type"] == "multimodal":
+            # Multimodal data inputs
+            assert ("encoder_prompt" in inputs
+                    and "encoder_prompt_token_ids" in inputs)
+            inputs = cast(MultiModalEncDecInputs, inputs)
+            encoder_inputs = token_inputs(
+                prompt=inputs["encoder_prompt"],
+                prompt_token_ids=inputs["encoder_prompt_token_ids"],
+            )
+            if decoder_inputs_to_override is not None:
+                decoder_inputs = MultiModalInputs(
+                    type="multimodal",
+                    prompt=decoder_inputs_to_override.get("prompt", ""),
+                    prompt_token_ids=decoder_inputs_to_override[
+                        "prompt_token_ids"],
+                    mm_kwargs=inputs["mm_kwargs"],
+                    mm_placeholders=inputs["mm_placeholders"],
+                )
+            else:
+                decoder_inputs = MultiModalInputs(
+                    type="multimodal",
+                    prompt=inputs["prompt"],
+                    prompt_token_ids=inputs["prompt_token_ids"],
+                    mm_kwargs=inputs["mm_kwargs"],
+                    mm_placeholders=inputs["mm_placeholders"],
+                )
+        elif inputs["type"] == "token":
+            # Text-only inputs
+            encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
+            decoder_inputs = decoder_inputs_to_override or inputs
+        else:
+            assert_never(inputs)  # type: ignore[arg-type]
+        return encoder_inputs, decoder_inputs
 
     def _process_encoder_decoder_prompt(
         self,
@@ -501,7 +589,6 @@ class InputPreprocessor:
                 prompt["encoder_prompt"],
                 request_id=request_id,
             )
-
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
@@ -509,13 +596,28 @@ class InputPreprocessor:
                     decoder_input,
                     request_id=request_id,
                 )
+            # For multimodal model, override decoder prompt from processor
+            # with explicit decoder prompt.
+            if self.model_config.is_multimodal_model and (
+                    self._can_process_multimodal()):
+                encoder_inputs, decoder_inputs = (
+                    self._separate_enc_dec_inputs_from_mm_processor_outputs(
+                        encoder_inputs, decoder_inputs))
         else:
-            encoder_inputs = self._prompt_to_llm_inputs(
+            inputs = self._prompt_to_llm_inputs(
                 prompt,
                 request_id=request_id,
             )
+            if self.model_config.is_multimodal_model and (
+                    self._can_process_multimodal()):
+                # Encoder-Decoder Multimodal model
+                encoder_inputs, decoder_inputs = (
+                    self._separate_enc_dec_inputs_from_mm_processor_outputs(
+                        inputs))
+            else:
+                encoder_inputs = inputs
 
-            decoder_inputs = None
+                decoder_inputs = None
 
         return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 
@@ -545,13 +647,29 @@ class InputPreprocessor:
 
                 encoder_inputs, decoder_inputs = await asyncio.gather(
                     encoder_task, decoder_task)
+
+            # For multimodal model, override decoder prompt from processor
+            # with explicit decoder prompt.
+            if self.model_config.is_multimodal_model and (
+                    self._can_process_multimodal()):
+                encoder_inputs, decoder_inputs = (
+                    self._separate_enc_dec_inputs_from_mm_processor_outputs(
+                        encoder_inputs, decoder_inputs))
         else:
-            encoder_inputs = await self._prompt_to_llm_inputs_async(
+            inputs = await self._prompt_to_llm_inputs_async(
                 prompt,
                 request_id=request_id,
             )
+            if self.model_config.is_multimodal_model and (
+                    self._can_process_multimodal()):
+                # Encoder-Decoder Multimodal model
+                encoder_inputs, decoder_inputs = (
+                    self._separate_enc_dec_inputs_from_mm_processor_outputs(
+                        inputs))
+            else:
+                encoder_inputs = inputs
 
-            decoder_inputs = None
+                decoder_inputs = None
 
         return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 
@@ -567,7 +685,7 @@ class InputPreprocessor:
                 prompt_adapter_request=prompt_adapter_request,
             )
         else:
-            assert_never(prompt_inputs)
+            assert_never(prompt_inputs)  # type: ignore[arg-type]
 
         return prompt_inputs
 
@@ -632,7 +750,7 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
-        if self.is_encoder_decoder_model():
+        if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return self._process_encoder_decoder_prompt(
@@ -660,7 +778,7 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> ProcessorInputs:
         """Async version of :meth:`preprocess`."""
-        if self.is_encoder_decoder_model():
+        if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return await self._process_encoder_decoder_prompt_async(
@@ -679,6 +797,3 @@ class InputPreprocessor:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-
-    def is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder

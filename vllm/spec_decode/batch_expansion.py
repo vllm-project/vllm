@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from array import array
 from itertools import chain, count
 from typing import Iterator, List, Optional, Tuple
@@ -83,13 +85,13 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         if not non_spec_indices:
             # All sequence groups in batch have spec decoding enabled
-            contracted = self._contract_batch_all_spec(
+            return self._contract_batch_all_spec(
                 target_sampler_output=target_sampler_output,
                 proposals=proposals,
             )
         else:
             # Batch has a mix of spec decode enabled and disabled seq groups
-            contracted = self._contract_batch(
+            return self._contract_batch(
                 execute_model_req.seq_group_metadata_list,
                 target_sampler_output=target_sampler_output,
                 proposals=proposals,
@@ -98,14 +100,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 spec_indices=spec_indices,
                 k=execute_model_req.num_lookahead_slots,
             )
-
-        all_tokens, all_probs, spec_logprobs, all_hidden_states = contracted
-        return SpeculativeScores(
-            probs=all_probs,
-            token_ids=all_tokens,
-            logprobs=spec_logprobs,
-            hidden_states=all_hidden_states,
-        )
 
     def _expand_batch(
         self,
@@ -143,13 +137,57 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
                 num_scoring_tokens)
 
+    def _contract_non_speculative(
+            self, scores: SpeculativeScores,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            non_spec_indices: List[int], non_spec_outputs: SpeculativeScores,
+            has_prompt_log: bool) -> SpeculativeScores:
+        """
+            Augment input `scores` with non-speculative requests outputs. 
+            This includes decode requests with speculation turned off, as well
+            as prefill requests when `enable_chunked_prefill` is set.
+            For the latter, prefills are further separated into terminal and 
+            non-terminal chunks (from which no token is sampled).
+        """
+        if not non_spec_indices:
+            return scores
+
+        if has_prompt_log:
+            # When prompt_logprobs is enabled, prefills yield output token
+            # (and respective prob) in the last entry (prompt|out):
+            # [.|.|.|prefill0_out|.|prefill1_out|decode0_out|..].
+            # With chunked prefill, non-terminal chunks have -1 on each
+            # position: they're still picked, but they're discarded later.
+            seq_meta = seq_group_metadata_list
+            nospec_sizes = torch.tensor([
+                seq_meta[i].token_chunk_size if seq_meta[i].is_prompt else 1
+                for i in non_spec_indices
+            ])
+            nospec_sampled_token_idxs = torch.cumsum(nospec_sizes, 0).add_(-1)
+        else:
+            # In this case only sampled tokens are returned, select all.
+            nospec_sampled_token_idxs = list(
+                range(len(non_spec_outputs.token_ids)))
+
+        scores.token_ids[non_spec_indices, :1] = \
+            non_spec_outputs.token_ids[nospec_sampled_token_idxs].unsqueeze(1)
+        scores.probs[non_spec_indices, :1, :] = \
+            non_spec_outputs.probs[nospec_sampled_token_idxs].unsqueeze(1)
+        scores.logprobs[non_spec_indices, :1, :] = \
+            non_spec_outputs.logprobs[nospec_sampled_token_idxs].unsqueeze(1)
+        if scores.hidden_states is not None:
+            assert non_spec_outputs.hidden_states is not None
+            scores.hidden_states[non_spec_indices, :1, :] = \
+                non_spec_outputs.hidden_states[nospec_sampled_token_idxs].unsqueeze(1)
+        return scores
+
     def _contract_batch(
-        self, contracted_seq_group_metadata_list: List[SequenceGroupMetadata],
-        target_sampler_output: SamplerOutput, proposals: SpeculativeProposals,
-        num_scoring_tokens: int, non_spec_indices: List[int],
-        spec_indices: List[int], k: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-               Optional[torch.Tensor]]:
+            self,
+            contracted_seq_group_metadata_list: List[SequenceGroupMetadata],
+            target_sampler_output: SamplerOutput,
+            proposals: SpeculativeProposals, num_scoring_tokens: int,
+            non_spec_indices: List[int], spec_indices: List[int],
+            k: int) -> SpeculativeScores:
         """Contract the expanded batch back into its original size.
         This maps the scores of speculative tokens back to their original
         sequences.
@@ -195,23 +233,28 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         else:
             all_hidden_states = None
 
-        # Rule out prefills that produce no tokens.
-        non_spec_indices = [
-            idx for idx in non_spec_indices
-            if contracted_seq_group_metadata_list[idx].do_sample
-        ]
-        if len(non_spec_indices):
-            all_tokens[non_spec_indices, :1] = \
-                non_spec_target_token_ids.unsqueeze(1)
-            all_probs[non_spec_indices, :1, :] = \
-                non_spec_target_probs.unsqueeze(1)
-            all_logprobs[non_spec_indices, :1, :] = \
-                non_spec_target_logprobs.unsqueeze(1)
-            if all_hidden_states is not None:
-                assert non_spec_target_hidden_states is not None
-                all_hidden_states[non_spec_indices, :1, :] = \
-                    non_spec_target_hidden_states.unsqueeze(1)
+        has_prompt_log = any((sg.sampling_params.prompt_logprobs
+                              and sg.sampling_params.prompt_logprobs > 0)
+                             for sg in contracted_seq_group_metadata_list)
+        # When prompt logprobs is enabled, lens of returned tensors go from
+        # n_sampled (requests with do_sample=True) to n_prompt+n_prefills.
+        # We adjust stride accordingly to get the generated tokens and
+        # their probs, but pass on prompt_logprobs as is.
+        prompt_logprobs = None
+        if (not self._scorer_worker.model_runner.disable_logprobs\
+            and has_prompt_log):
+            prompt_logprobs = [
+                o.prompt_logprobs for o in target_sampler_output.outputs
+            ]
+        elif not has_prompt_log:
+            # When prompt logprobs are not to be returned,
+            # we can ignore non-terminal chunks (no out token).
+            non_spec_indices = [
+                idx for idx in non_spec_indices
+                if contracted_seq_group_metadata_list[idx].do_sample
+            ]
 
+        # "Contract" speculative.
         if spec_indices:
             all_tokens[spec_indices] = target_token_ids
             all_probs[spec_indices] = target_probs
@@ -219,14 +262,27 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             if all_hidden_states is not None:
                 all_hidden_states[spec_indices] = target_hidden_states
 
-        return all_tokens, all_probs, all_logprobs, all_hidden_states
+        spec_scores = SpeculativeScores(probs=all_probs,
+                                        token_ids=all_tokens,
+                                        logprobs=all_logprobs,
+                                        hidden_states=all_hidden_states,
+                                        prompt_logprobs=prompt_logprobs)
+
+        non_spec_outputs = SpeculativeScores(
+            probs=non_spec_target_probs,
+            token_ids=non_spec_target_token_ids,
+            logprobs=non_spec_target_logprobs,
+            hidden_states=non_spec_target_hidden_states)
+        # Contract remaining nonspec entries based on non_spec_indices, if any.
+        return self._contract_non_speculative(
+            spec_scores, contracted_seq_group_metadata_list, non_spec_indices,
+            non_spec_outputs, has_prompt_log)
 
     def _contract_batch_all_spec(
         self,
         target_sampler_output: SamplerOutput,
         proposals: SpeculativeProposals,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-               Optional[torch.Tensor]]:
+    ) -> SpeculativeScores:
         """Contract the expanded batch back into its original size.
         This maps the scores of speculative tokens back to their original
         sequences.
@@ -250,8 +306,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             target_hidden_states = target_hidden_states.reshape(
                 *target_token_ids.shape, target_hidden_states.shape[-1])
 
-        return (target_token_ids, target_probs, target_logprobs,
-                target_hidden_states)
+        return SpeculativeScores(probs=target_probs,
+                                 token_ids=target_token_ids,
+                                 logprobs=target_logprobs,
+                                 hidden_states=target_hidden_states,
+                                 prompt_logprobs=None)
 
     def _create_scoring_model_input(
         self,
@@ -307,28 +366,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         token_ids_to_score = self._get_token_ids_to_score(
             proposal_token_ids[batch_index])
 
-        # Use simpler sampling parameters apart from for final token
-        # (in particular don't do seeded sampling) since those sampled tokens
-        # aren't used.
-        # We don't replace the sampling_params in the greedy case because
-        # this also controls whether the probs get modified in the sampler
-        # (see use of _modify_greedy_probs_inplace there).
         sampling_params = input_seq_group_metadata.sampling_params
-        non_bonus_sampling_params = DEFAULT_SIMPLE_SAMPLING_PARAMS \
-            if sampling_params.temperature else sampling_params
-
         target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        last_index = len(token_ids_to_score) - 1
         for i, token_ids in enumerate(token_ids_to_score):
-            target_sampling_params = sampling_params if i == last_index \
-                else non_bonus_sampling_params
             target_seq_group_metadata_list.append(
                 self._create_single_target_seq_group_metadata(
                     input_seq_group_metadata,
                     input_seq_id,
                     next(target_seq_ids_iter),
                     token_ids,
-                    sampling_params=target_sampling_params,
+                    sampling_params=sampling_params,
                 ))
 
         return target_seq_group_metadata_list
@@ -353,6 +400,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         seq_data = seq_group_metadata.seq_data[seq_id]
         prompt_token_ids = seq_data.prompt_token_ids_array
         new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
+        mrope_position_delta = seq_data.mrope_position_delta
 
         new_seq_data_dict = {
             target_seq_id:
@@ -368,6 +416,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # the kv cache is filled by a previous batch in the batch expansion.
         for data in new_seq_data_dict.values():
             data.update_num_computed_tokens(data.get_len() - 1)
+            data.mrope_position_delta = mrope_position_delta
 
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,

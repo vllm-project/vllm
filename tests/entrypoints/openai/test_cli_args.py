@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 
 import pytest
 
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
-from vllm.entrypoints.openai.serving_engine import LoRAModulePath
+from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.utils import FlexibleArgumentParser
 
 from ...utils import VLLM_PATH
@@ -24,7 +26,7 @@ def serve_parser():
     return make_arg_parser(parser)
 
 
-### Tests for Lora module parsing
+### Tests for LoRA module parsing
 def test_valid_key_value_format(serve_parser):
     # Test old format: name=path
     args = serve_parser.parse_args([
@@ -114,6 +116,35 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
         "mistral",
     ])
     validate_parsed_serve_args(args)
+
+
+def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
+    """Ensure validation fails if reasoning is enabled with auto tool choice"""
+    args = serve_parser.parse_args(args=[
+        "--enable-auto-tool-choice",
+        "--enable-reasoning",
+    ])
+    with pytest.raises(TypeError):
+        validate_parsed_serve_args(args)
+
+
+def test_enable_reasoning_passes_with_reasoning_parser(serve_parser):
+    """Ensure validation passes if reasoning is enabled 
+    with a reasoning parser"""
+    args = serve_parser.parse_args(args=[
+        "--enable-reasoning",
+        "--reasoning-parser",
+        "deepseek_r1",
+    ])
+    validate_parsed_serve_args(args)
+
+
+def test_enable_reasoning_fails_without_reasoning_parser(serve_parser):
+    """Ensure validation fails if reasoning is enabled 
+    without a reasoning parser"""
+    args = serve_parser.parse_args(args=["--enable-reasoning"])
+    with pytest.raises(TypeError):
+        validate_parsed_serve_args(args)
 
 
 def test_chat_template_validation_for_happy_paths(serve_parser):

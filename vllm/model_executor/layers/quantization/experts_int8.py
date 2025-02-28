@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -15,7 +17,7 @@ class ExpertsInt8Config(QuantizationConfig):
     """Config class for Int8 experts quantization."""
 
     def __init__(self) -> None:
-        pass
+        super().__init__()
 
     @classmethod
     def get_name(cls) -> str:
@@ -52,7 +54,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
         int8_dtype = torch.int8
@@ -64,26 +66,29 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         extra_weight_attrs['weight_loader'] = wrapped_weight_loader
 
         # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    2 * intermediate_size,
-                                                    hidden_size,
-                                                    dtype=int8_dtype),
+        w13_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size,
+            dtype=int8_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                   hidden_size,
-                                                   intermediate_size,
-                                                   dtype=int8_dtype),
+        w2_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            dtype=int8_dtype),
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        w13_scale = torch.nn.Parameter(torch.zeros(num_experts,
-                                                   2 * intermediate_size,
-                                                   dtype=torch.float32),
+        w13_scale = torch.nn.Parameter(torch.zeros(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            dtype=torch.float32),
                                        requires_grad=False)
         layer.register_parameter("w13_scale", w13_scale)
 
@@ -99,11 +104,16 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
-        renormalize: bool = True,
+        renormalize: bool,
         use_grouped_topk: bool = False,
-        num_expert_group: Optional[int] = None,
         topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -115,7 +125,9 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             renormalize=renormalize,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function)
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
 
         return fused_experts(x,
                              layer.w13_weight,
@@ -123,7 +135,10 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                              topk_weights=topk_weights,
                              topk_ids=topk_ids,
                              inplace=True,
+                             activation=activation,
                              use_int8_w8a16=True,
+                             global_num_experts=global_num_experts,
+                             expert_map=expert_map,
                              w1_scale=layer.w13_scale,
                              w2_scale=layer.w2_scale)
 

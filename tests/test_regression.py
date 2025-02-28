@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Containing tests that check for regressions in vLLM's behavior.
 
 It should include tests that are reported by users and making sure they
@@ -17,7 +18,7 @@ def test_duplicated_ignored_sequence_group():
     sampling_params = SamplingParams(temperature=0.01,
                                      top_p=0.1,
                                      max_tokens=256)
-    llm = LLM(model="facebook/opt-125m",
+    llm = LLM(model="distilbert/distilgpt2",
               max_num_batched_tokens=4096,
               tensor_parallel_size=1)
     prompts = ["This is a short prompt", "This is a very long prompt " * 1000]
@@ -30,7 +31,7 @@ def test_max_tokens_none():
     sampling_params = SamplingParams(temperature=0.01,
                                      top_p=0.1,
                                      max_tokens=None)
-    llm = LLM(model="facebook/opt-125m",
+    llm = LLM(model="distilbert/distilgpt2",
               max_num_batched_tokens=4096,
               tensor_parallel_size=1)
     prompts = ["Just say hello!"]
@@ -40,7 +41,7 @@ def test_max_tokens_none():
 
 
 def test_gc():
-    llm = LLM("facebook/opt-125m", enforce_eager=True)
+    llm = LLM(model="distilbert/distilgpt2", enforce_eager=True)
     del llm
 
     gc.collect()

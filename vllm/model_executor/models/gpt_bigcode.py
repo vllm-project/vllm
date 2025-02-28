@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
 # Copyright 2023 The vLLM team.
@@ -17,13 +19,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPTBigCode model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import GPTBigCodeConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -57,6 +59,7 @@ class GPTBigCodeAttention(nn.Module):
         config: GPTBigCodeConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -97,13 +100,12 @@ class GPTBigCodeAttention(nn.Module):
                               scale=self.scale,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.split(
@@ -113,7 +115,7 @@ class GPTBigCodeAttention(nn.Module):
             ],
             dim=-1,
         )
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output
 
@@ -156,6 +158,7 @@ class GPTBigCodeBlock(nn.Module):
         config: GPTBigCodeConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -163,23 +166,20 @@ class GPTBigCodeBlock(nn.Module):
                      hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = GPTBigCodeAttention(config, cache_config, quant_config)
+        self.attn = GPTBigCodeAttention(config,
+                                        cache_config,
+                                        quant_config,
+                                        prefix=f"{prefix}.attn")
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = GPTBigMLP(inner_dim, config, quant_config)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
-        attn_output = self.attn(
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
+        attn_output = self.attn(hidden_states=hidden_states, )
         # residual connection
         hidden_states = attn_output + residual
 
@@ -221,7 +221,8 @@ class GPTBigCodeModel(nn.Module):
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: GPTBigCodeBlock(config, cache_config, quant_config),
+            lambda prefix: GPTBigCodeBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h",
         )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
@@ -229,26 +230,25 @@ class GPTBigCodeModel(nn.Module):
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.n_embd))
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.wte(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            inputs_embeds = self.wte(input_ids)
-            position_embeds = self.wpe(position_ids)
-            hidden_states = inputs_embeds + position_embeds
+            if inputs_embeds is None:
+                inputs_embeds = self.get_input_embeddings(input_ids)
+            hidden_states = inputs_embeds + self.wpe(position_ids)
         else:
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.h[i]
-            hidden_states = layer(hidden_states,
-                                  kv_caches[i - self.start_layer],
-                                  attn_metadata)
+        for layer in self.h[self.start_layer:self.end_layer]:
+            hidden_states = layer(hidden_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -260,13 +260,11 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
     supported_lora_modules = ["c_fc", "c_proj", "wte", "lm_head", "c_attn"]
-
+    # LoRA specific attributes
     embedding_modules = {
         "wte": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -318,16 +316,18 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -347,8 +347,10 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "lm_head.weight" in name and self.config.tie_word_embeddings:
                 continue
@@ -368,3 +370,5 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 weight_loader(param, loaded_weight, 'v')
             else:
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

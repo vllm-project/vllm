@@ -1,6 +1,11 @@
-from dataclasses import dataclass
+# SPDX-License-Identifier: Apache-2.0
+
+import uuid
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Mapping, Optional, Union, overload
+
+from typing_extensions import deprecated
 
 from vllm import PoolingParams
 from vllm.inputs import PromptType
@@ -32,11 +37,10 @@ class RPCProcessRequest:
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     priority: int = 0
 
-    @overload  # DEPRECATED
+    @overload
     def __init__(
         self,
-        *,
-        inputs: PromptType,
+        prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -47,9 +51,11 @@ class RPCProcessRequest:
         ...
 
     @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def __init__(
         self,
-        prompt: PromptType,
+        *,
+        inputs: PromptType,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -117,10 +123,38 @@ class RPCUProfileRequest(Enum):
     STOP_PROFILE = 2
 
 
-RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
-                      RPCUProfileRequest]
+class RPCResetPrefixCacheRequest(Enum):
+    RESET_PREFIX_CACHE = 1
 
-REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
+
+class RPCSleepRequest(Enum):
+    SLEEP_LEVEL_1 = 1
+    SLEEP_LEVEL_2 = 2
+
+
+class RPCWakeUpRequest(Enum):
+    WAKE_UP = 1
+
+
+@dataclass
+class RPCLoadAdapterRequest:
+    lora_request: LoRARequest
+    # Set the default value of request_id to a new UUID
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class RPCAdapterLoadedResponse:
+    request_id: str
+
+
+RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
+                      RPCUProfileRequest, RPCLoadAdapterRequest,
+                      RPCResetPrefixCacheRequest, RPCSleepRequest,
+                      RPCWakeUpRequest]
+
+REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
+                          RPCError]
 
 
 def ENGINE_DEAD_ERROR(

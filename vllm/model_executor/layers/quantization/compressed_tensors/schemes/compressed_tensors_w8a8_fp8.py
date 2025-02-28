@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Callable, List, Optional
 
 import torch
@@ -7,8 +9,8 @@ from torch.nn import Parameter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz,
-    requantize_with_max_scale)
+    apply_fp8_linear, cutlass_fp8_supported, maybe_create_device_identity,
+    normalize_e4m3fn_to_e4m3fnuz, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
@@ -41,10 +43,12 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             )
 
             if current_platform.is_rocm():
+                input_scale = getattr(layer, 'input_scale', None)
+
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=weight,
                     weight_scale=max_w_scale,
-                    input_scale=layer.input_scale)
+                    input_scale=input_scale)
                 if input_scale is not None:
                     layer.input_scale = Parameter(input_scale,
                                                   requires_grad=False)
@@ -57,11 +61,13 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight = layer.weight
 
             if current_platform.is_rocm():
+                input_scale = getattr(layer, 'input_scale', None)
+
                 weight, weight_scale, input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
                         weight=weight,
                         weight_scale=layer.weight_scale,
-                        input_scale=layer.input_scale)
+                        input_scale=input_scale)
                 if input_scale is not None:
                     layer.input_scale = Parameter(input_scale,
                                                   requires_grad=False)
@@ -76,7 +82,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             raise ValueError(f"Unknown quantization strategy {self.strategy}")
 
         # INPUT SCALE
-        if self.is_static_input_scheme:
+        if self.is_static_input_scheme and hasattr(layer, 'input_scale'):
             layer.input_scale = Parameter(layer.input_scale.max(),
                                           requires_grad=False)
         else:
@@ -87,6 +93,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
+        maybe_create_device_identity()
+
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 

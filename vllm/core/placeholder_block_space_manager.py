@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Tuple
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
@@ -8,7 +10,7 @@ from vllm.utils import Device
 class PlaceholderBlockSpaceManager(BlockSpaceManager):
     """A version of BlockSpaceManager for use in environments
     where block management is not required. 
-    For example: embedding models or attention-free models like Mamba.
+    For example: pooling models or attention-free models like Mamba.
 
     This class provides the same interface as BlockSpaceManager, but its
     methods perform no actions or return simple values like True in specific
@@ -89,3 +91,9 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return -1
+
+    def reset_prefix_cache(self) -> bool:
+        return True
+
+    def get_num_cached_tokens(self, seq: Sequence) -> int:
+        return 0

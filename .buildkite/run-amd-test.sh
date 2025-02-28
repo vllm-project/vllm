@@ -85,7 +85,6 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_encoder_decoder_attn.py \
   --ignore=kernels/test_flash_attn.py \
   --ignore=kernels/test_flashinfer.py \
-  --ignore=kernels/test_gguf.py \
   --ignore=kernels/test_int8_quant.py \
   --ignore=kernels/test_machete_gemm.py \
   --ignore=kernels/test_mamba_ssm.py \
@@ -93,7 +92,9 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_moe.py \
   --ignore=kernels/test_prefix_prefill.py \
   --ignore=kernels/test_rand.py \
-  --ignore=kernels/test_sampler.py"
+  --ignore=kernels/test_sampler.py \
+  --ignore=kernels/test_cascade_flash_attn.py \
+  --ignore=kernels/test_mamba_mixer2.py"
 fi
 
 #ignore certain Entrypoints tests
@@ -122,6 +123,8 @@ if [[ $commands == *"--shard-id="* ]]; then
         --rm \
         -e HIP_VISIBLE_DEVICES="${GPU}" \
         -e HF_TOKEN \
+        -e AWS_ACCESS_KEY_ID \
+        -e AWS_SECRET_ACCESS_KEY \
         -v "${HF_CACHE}:${HF_MOUNT}" \
         -e "HF_HOME=${HF_MOUNT}" \
         --name "${container_name}_${GPU}" \
@@ -149,6 +152,8 @@ else
           --rm \
           -e HIP_VISIBLE_DEVICES=0 \
           -e HF_TOKEN \
+          -e AWS_ACCESS_KEY_ID \
+          -e AWS_SECRET_ACCESS_KEY \
           -v "${HF_CACHE}:${HF_MOUNT}" \
           -e "HF_HOME=${HF_MOUNT}" \
           --name "${container_name}" \
