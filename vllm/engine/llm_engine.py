@@ -2084,3 +2084,8 @@ class LLMEngine:
                 sampling_params.logits_processors.extend(logits_processors)
 
         return sampling_params
+
+
+# TODO(v1): Remove this class proxy when V1 goes default.
+if envs.VLLM_USE_V1:
+    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
