@@ -6,7 +6,7 @@
         "types": [],
         "names": []
     },
-    "blacklist": {
+    "blocklist": {
         "types": [],
         "names": ["lm_head"]
     },

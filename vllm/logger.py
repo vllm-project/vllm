@@ -49,6 +49,17 @@ DEFAULT_LOGGING_CONFIG = {
     "disable_existing_loggers": False
 }
 
+import sys
+import pdb
+class ForkedPdb(pdb.Pdb):
+    def interaction(self, *args, **kwargs):
+        _stdin = sys.stdin
+        try:
+            sys.stdin = open('/dev/stdin')
+            pdb.Pdb.interaction(self, *args, **kwargs)
+        finally:
+            sys.stdin = _stdin
+
 
 @lru_cache
 def _print_info_once(logger: Logger, msg: str) -> None:

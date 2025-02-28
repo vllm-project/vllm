@@ -31,7 +31,7 @@ from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import DeviceConfig, VllmConfig
-# from vllm.config import ForkedPdb
+from vllm.logger import ForkedPdb
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import get_world_group
 from vllm.forward_context import set_forward_context
@@ -705,8 +705,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def _remove_duplicate_submodules_(self, model, inc_config):
         blocklist = inc_config.blocklist
-        # "VLLMKVCache" in blocklist and Deepseek v3
-        if not ("VLLMKVCache" in blocklist["types"]):
+        #ForkedPdb().set_trace()
+        # FIXME: (Yi)  "VLLMKVCache" in blocklist and Deepseek v3
+        if not ("VLLMKVCache" not in blocklist["types"]):
             return
         self_attn = model.model.layers[0].self_attn
         for layer in model.model.layers:
@@ -799,7 +800,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         FP8Config, convert, prepare)
                     rank_debug(f"Orig MODEL: \n{self.model}", target_rank=0)
                     rank_debug(f"Orig MODEL: \n{self.model}", target_rank=15)
-
                     quant_method = self.model_config.quantization
                     if quant_method == "inc":
                         config = FP8Config.from_json_file(
