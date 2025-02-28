@@ -1165,9 +1165,6 @@ class EngineArgs:
                     "Detected that your EngineConfig is compatible with "
                     "VLLM V1. Launch with VLLM_USE_V1=0 to disable the V1 "
                     "Engine.")
-                logger.warning(
-                    "VLLM V1 only supports xgrammar for guided decoding. "
-                    "See [LINK TO DOCS] for more details on the implications.")
                 use_v1 = True
 
         if envs.is_set("VLLM_USE_V1"):
