@@ -13,7 +13,7 @@ from vllm.platforms import current_platform
     ("model_id", "expected_runner_type", "expected_task"),
     [
         ("distilbert/distilgpt2", "generate", "generate"),
-        ("intfloat/e5-mistral-7b-instruct", "pooling", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed"),
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),

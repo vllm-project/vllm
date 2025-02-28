@@ -211,7 +211,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),  # noqa: E501
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),  # noqa: E501
-    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-large"),
+    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),
     # [Multimodal]
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
