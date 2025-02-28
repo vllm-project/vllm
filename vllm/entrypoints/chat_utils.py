@@ -888,7 +888,9 @@ def _parse_chat_message_content(
             parsed_msg = _AssistantParser(message)
 
             if "tool_calls" in parsed_msg:
-                result_msg["tool_calls"] = list(parsed_msg["tool_calls"])
+                tool_calls = list(parsed_msg["tool_calls"])
+                if len(tool_calls) > 0:
+                    result_msg["tool_calls"] = tool_calls
         elif role == "tool":
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:
