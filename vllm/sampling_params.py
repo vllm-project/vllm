@@ -116,10 +116,6 @@ class SamplingParams(
 
     Args:
         n: Number of output sequences to return for the given prompt.
-        best_of: Number of output sequences that are generated from the prompt.
-            From these `best_of` sequences, the top `n` sequences are returned.
-            `best_of` must be greater than or equal to `n`. By default,
-            `best_of` is set to `n`.
         presence_penalty: Float that penalizes new tokens based on whether they
             appear in the generated text so far. Values > 0 encourage the model
             to use new tokens, while values < 0 encourage the model to repeat
@@ -187,7 +183,6 @@ class SamplingParams(
     """
 
     n: int = 1
-    best_of: Optional[int] = None
     _real_n: Optional[int] = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
@@ -231,7 +226,6 @@ class SamplingParams(
     @staticmethod
     def from_optional(
         n: Optional[int] = 1,
-        best_of: Optional[int] = None,
         presence_penalty: Optional[float] = 0.0,
         frequency_penalty: Optional[float] = 0.0,
         repetition_penalty: Optional[float] = 1.0,
@@ -270,7 +264,6 @@ class SamplingParams(
 
         return SamplingParams(
             n=1 if n is None else n,
-            best_of=best_of,
             presence_penalty=0.0
             if presence_penalty is None else presence_penalty,
             frequency_penalty=0.0
