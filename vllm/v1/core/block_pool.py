@@ -13,6 +13,17 @@ logger = init_logger(__name__)
 
 
 class BlockPool:
+    """BlockPool that manages KVCacheBlocks.
+    It provides methods to allocate, free and cache the kv cache blocks. The 
+    free_block_queue stores the free blocks in eviction order to enable 
+    allocation, free, and cache eviction. The cached_block_hash_to_block 
+    maps between block hash and cached block to support finding cached blocks 
+    by their block hash.
+
+    Args:
+        num_gpu_blocks: The number of blocks in the pool.
+        enable_caching: Whether to enable prefix caching.
+    """
 
     def __init__(self, num_gpu_blocks: int, enable_caching: bool):
         self.num_gpu_blocks = num_gpu_blocks
