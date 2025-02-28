@@ -33,7 +33,7 @@ parser.add_argument("--nprompts", type=int, default=4, help="The number of promp
 parser.add_argument("--random", action="store_true", help="Randomly sample prompts.")
 # add mode
 parser.add_argument("--mode", type=str, default="q", required=False, help="The mode.")
-parser.add_argument("--fp8_inc", action="store_true", help="Using FP8 KV cache.")
+parser.add_argument("--fp8-kvcahe", "--fp8_kvcache", action="store_true", help="Using FP8 KV cache.")
 args = parser.parse_args()
 
 # os.environ["VLLM_SKIP_WARMUP"] = "true"
@@ -241,7 +241,7 @@ if __name__ == "__main__":
         )
     else:
         quantization = "inc"
-        if args.fp8_inc:
+        if args.fp8_kvcache:
             print(f">>>>>>>>>>>>>> Using FP8 KV cache.")
             llm = LLM(
                 model=model, 
