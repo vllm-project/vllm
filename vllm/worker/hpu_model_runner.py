@@ -713,31 +713,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             delattr(self_attn, "kv_b_proj")
             delattr(self_attn, "o_proj")
 
-    def _inc_preprocess(self, model: torch.nn.Module, inc_config) -> torch.nn.Module:
+    def _inc_preprocess_(self, model: torch.nn.Module, inc_config):
         self._remove_duplicate_submodules_(model, inc_config)
-        # TEST ARGS
-        # dump args into disk as json
-        import time
-        import datetime
-        timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d_%H-%M-%S')
-        filename = f'args_{timestamp}.json'
-        import json
-        # with open(filename, 'w') as f:
-        #     json.dump(vars(args), f)
-        #     print(f"args: {vars(args)}")
-        #     print(f"dump args into {filename}")
-
-        # TEST ENVS
-        # os.environ['TEST_NEW_ENVS'] = 'default'
-        TEST_NEW_ENVS = os.getenv('TEST_NEW_ENVS', 'default')
-        os.environ["TEST_NEW_ENVS"] = TEST_NEW_ENVS
-        print(f"TEST_NEW_ENVS: {TEST_NEW_ENVS}")
-        # dump envs into disk as json
-        # filename with timestamp
-        filename = f'envs_{timestamp}.json'
-        with open(filename, 'w') as f:
-            json.dump(dict(os.environ), f)
-            print(f"dump envs into {filename}")
 
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
@@ -810,7 +787,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         else:
                             raise ValueError(f"Invalid quantization method: {quant_method}")
                         config = FP8Config.from_json_file(config_path)
-                    self._inc_preprocess(self.model, config)
+                    self._inc_preprocess_(self.model, config)
                     if config.measure:
                         self.model = prepare(self.model, config)
                     elif config.quantize:
