@@ -428,7 +428,8 @@ def sample_random_requests(
     )
 
     if dataset_path is not None:
-        # Sample token ids from ShareGPT and repeat/truncate them to satisfy the input_lens
+        # Sample token ids from ShareGPT and 
+        # repeat/truncate them to satisfy the input_lens
 
         # Download sharegpt if necessary
         if not os.path.isfile(dataset_path):
@@ -441,7 +442,8 @@ def sample_random_requests(
         dataset = [data for data in dataset if len(data["conversations"]) >= 2]
         # Only keep the first two turns of each conversation.
         dataset = [
-            (data["conversations"][0]["value"], data["conversations"][1]["value"])
+            (data["conversations"][0]["value"], 
+                data["conversations"][1]["value"])
             for data in dataset
         ]
         # Shuffle the dataset.
@@ -469,7 +471,8 @@ def sample_random_requests(
                 ratio = (input_lens[i] + prompt_len - 1) // prompt_len
                 input_ids = (prompt_token_ids * ratio)[: input_lens[i]]
             prompt = tokenizer.decode(input_ids)
-            input_requests.append((prompt, int(input_lens[i]), int(output_lens[i]), None))
+            input_requests.append((prompt, int(input_lens[i]), 
+                int(output_lens[i]), None))
     else:
         offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
         input_requests = []
