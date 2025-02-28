@@ -3,9 +3,9 @@
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -26,7 +26,7 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
@@ -281,12 +281,12 @@ class DeepseekVL2MultiModalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         image_token_id = hf_processor.image_token_id
