@@ -330,6 +330,16 @@ class Platform:
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        """Returns whether the current platform supports F8 types."""
+        return False
+
+    @classmethod
+    def is_fp8_fnuz(cls) -> bool:
+        """Returns whether the preferred F8 type is fnuz on the current platform."""
+        return False
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED

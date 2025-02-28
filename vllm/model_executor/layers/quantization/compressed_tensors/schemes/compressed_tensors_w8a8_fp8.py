@@ -42,7 +42,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 logical_widths=layer.logical_widths,
             )
 
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, 'input_scale', None)
 
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
@@ -60,7 +60,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight = layer.weight
 
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, 'input_scale', None)
 
                 weight, weight_scale, input_scale = \

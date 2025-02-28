@@ -31,9 +31,10 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
 #endif
 }
 
-static __device__ __forceinline__ FP8_TYPE float_to_fp8(float const x) {
-  float const r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
-  return static_cast<FP8_TYPE>(r);
+template<typename fp8_type>
+static __device__ __forceinline__ void float_to_fp8(fp8_type &ret, float const x) {
+  float const r = fmax(-FP8_E4M3_ADJUSTED_MAX<fp8_type>::val(), fmin(x, FP8_E4M3_ADJUSTED_MAX<fp8_type>::val()));
+  ret = static_cast<fp8_type>(r);
 }
 
 template <typename quant_type_t, bool is_scale_inverted, typename enable = void>
@@ -56,14 +57,32 @@ struct ScaledQuant<
 template <typename quant_type_t, bool is_scale_inverted>
 struct ScaledQuant<
     quant_type_t, is_scale_inverted,
-    typename std::enable_if_t<std::is_same_v<quant_type_t, FP8_TYPE>>> {
+    typename std::enable_if_t<std::is_same_v<quant_type_t, c10::Float8_e4m3fn>>> {
   static __device__ __forceinline__ quant_type_t quant_fn(float const x,
                                                           float const scale) {
+    quant_type_t ret;
     if constexpr (is_scale_inverted) {
-      return float_to_fp8(x * scale);
+      float_to_fp8(ret, x * scale);
     } else {
-      return float_to_fp8(x / scale);
+      float_to_fp8(ret, x / scale);
     }
+    return ret;
+  }
+};
+
+template <typename quant_type_t, bool is_scale_inverted>
+struct ScaledQuant<
+    quant_type_t, is_scale_inverted,
+    typename std::enable_if_t<std::is_same_v<quant_type_t, c10::Float8_e4m3fnuz>>> {
+  static __device__ __forceinline__ quant_type_t quant_fn(float const x,
+                                                          float const scale) {
+    quant_type_t ret;
+    if constexpr (is_scale_inverted) {
+      float_to_fp8(ret, x * scale);
+    } else {
+      float_to_fp8(ret, x / scale);
+    }
+    return ret;
   }
 };
 

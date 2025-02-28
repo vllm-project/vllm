@@ -9,7 +9,7 @@ from vllm.platforms import current_platform
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for rocm.
 ROCM_FP8_MAX = 224.0
-FP8_DTYPE = torch.float8_e4m3fnuz if current_platform.is_rocm() \
+FP8_DTYPE = torch.float8_e4m3fnuz if current_platform.is_fp8_fnuz() \
                 else torch.float8_e4m3fn
 
 
