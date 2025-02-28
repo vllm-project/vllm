@@ -948,6 +948,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply guided decoding bitmasks if present
         grammar_bitmask = scheduler_output.grammar_bitmask
         if grammar_bitmask is not None:
+            grammar_bitmask = torch.from_numpy(grammar_bitmask)
             # We receive the guided decoding bitmask from the scheduler, but the
             # indices of the requests in the batch may not match the indices of
             # the bitmask since the scheduler doesn't know how the gpu runner is

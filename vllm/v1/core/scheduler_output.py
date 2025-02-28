@@ -3,8 +3,10 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
+import numpy as np
+
 if TYPE_CHECKING:
-    import torch
+    import numpy as np
 
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
@@ -118,4 +120,4 @@ class SchedulerOutput:
     # for filling the next token bitmask
     guided_decoding_request_ids: Dict[str, int]
     # the bitmask for the whole batch
-    grammar_bitmask: Optional["torch.Tensor"]
+    grammar_bitmask: Optional[np.ndarray]

@@ -2,7 +2,8 @@
 
 import time
 from collections import deque
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
+                    Tuple, Union)
 
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
@@ -18,6 +19,9 @@ from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = init_logger(__name__)
 
@@ -364,20 +368,21 @@ class Scheduler:
                     any_request, len(self.running)))
 
         # Prepare the guided decoding bitmask for this batch.
-        grammar_bitmask = None
+        grammar_bitmask: Optional[np.ndarray] = None
         if guided_decoding_request_ids:
             # Fill the bitmask using the index of each request equal to its
             # position in the batch. Resize the bitmask down to the size of
             # the batch.
-            grammar_bitmask = self.guided_decoding_manager.grammar_bitmask
-            assert grammar_bitmask is not None
+            bitmask_tensor = self.guided_decoding_manager.grammar_bitmask
+            assert bitmask_tensor is not None
             for req_id, batch_index in guided_decoding_request_ids.items():
                 request = self.requests[req_id]
                 assert request.grammar is not None
                 if not request.grammar.matcher.is_terminated():
-                    request.grammar.fill_bitmask(grammar_bitmask, batch_index)
-            if len(self.running) < grammar_bitmask.shape[0]:
-                grammar_bitmask = grammar_bitmask[:len(self.running)]
+                    request.grammar.fill_bitmask(bitmask_tensor, batch_index)
+            if len(self.running) < bitmask_tensor.shape[0]:
+                bitmask_tensor = bitmask_tensor[:len(self.running)]
+            grammar_bitmask = bitmask_tensor.numpy()
 
         # Construct the scheduler output.
         new_reqs_data = [
