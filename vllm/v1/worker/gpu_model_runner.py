@@ -399,10 +399,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-            start_index = (len(req_state.block_ids) -
-                           len(req_data.new_block_ids))
-            self.input_batch.block_table.append_row(req_index, start_index,
-                                                    req_data.new_block_ids)
+            self.input_batch.block_table.append_row(req_data.new_block_ids,
+                                                    req_index)
             # Add new_token_ids to token_ids_cpu.
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(req_data.new_token_ids)
@@ -1071,12 +1069,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
         scheduler_output: "SchedulerOutput",
-    ) -> Dict[str, LogprobsTensors]:
+    ) -> Dict[str, Optional[LogprobsTensors]]:
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
             return {}
 
-        prompt_logprobs_dict: Dict[str, LogprobsTensors] = {}
+        prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
