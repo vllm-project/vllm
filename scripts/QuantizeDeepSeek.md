@@ -106,5 +106,5 @@ QUANT_CONFIG=inc_quant_config.json python inc_quant_on_one_node.py
 cd vllm/scripts
 # Download the unified calibration results
 huggingface-cli download Yi30/inc-tp8-ep8-full-kvcache-from-tp16-ep16 --local-dir nc_workspace_measure_kvache
-QUANT_CONFIG=inc_quant_with_fp8kv_config.json python inc_quant_on_one_node.py --fp8-kvcache
+QUANT_CONFIG=inc_quant_with_fp8kv_config.json python inc_quant_on_one_node.py --fp8_kvcache
 ```
