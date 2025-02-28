@@ -67,8 +67,7 @@ def apply_w8a8_block_fp8_linear(
                              dtype=input.dtype)
         deep_gemm.gemm_fp8_fp8_bf16_nt((q_input, x_scale),
                                        (weight, weight_scale), output)
-
-    if cutlass_block_fp8_supported and shape_supported_by_cutlass:
+    elif cutlass_block_fp8_supported and shape_supported_by_cutlass:
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
                                                      column_major_scales=True)
