@@ -95,8 +95,8 @@ source worker_node_source.sh
 ```
 
 > [!TIP]
-> Please start Ray in the SAME directory within both Docker containers.
-> Please RESTART Ray if you need to modify the environment variables.
+> - Please start Ray in the SAME directory within both Docker containers.
+> - If you modify the environment variables, please RESTART Ray.
 
 ## Calibration
 
