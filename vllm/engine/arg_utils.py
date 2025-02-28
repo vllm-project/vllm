@@ -1524,10 +1524,6 @@ class EngineArgs:
                 _fallback_info(feature_name=current_platform.device_type)
                 return False
 
-        logger.info(
-            "Detected deployment is compatible with V1. If you encounter"
-            "issues, set VLLM_USE_V1=0 to force the V0 Engine and make a "
-            "bug report on GitHub.")
         return True
 
     def _set_default_args_v0(self, model_config: ModelConfig) -> None:
@@ -1614,15 +1610,15 @@ class EngineArgs:
                 and usage_context in default_max_num_batched_tokens):
             self.max_num_batched_tokens = default_max_num_batched_tokens[
                 usage_context]
-            logger.warning(
+            logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, usage_context.value)
 
         default_max_num_seqs = 1024
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs
-            logger.info("Setting max_num_seqs to %d for %s usage context.",
-                        self.max_num_seqs, usage_context.value)
+            logger.debug("Setting max_num_seqs to %d for %s usage context.",
+                         self.max_num_seqs, usage_context.value)
 
         if self.compilation_config:
             self.compilation_config.set_splitting_ops_for_v1()
