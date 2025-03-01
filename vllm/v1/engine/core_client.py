@@ -433,7 +433,7 @@ class AsyncMPClient(MPClient):
             task.cancel()
 
     async def _start_process_outputs_socket(self):
-        # Perform IO (releases GIL) in background task.
+        # Perform IO in separate task to parallelize as much as possible.
         # Avoid task having direct reference back to the client.
         output_socket = self.output_socket
         decoder = self.decoder
