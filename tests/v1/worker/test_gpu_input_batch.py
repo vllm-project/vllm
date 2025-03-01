@@ -123,7 +123,6 @@ def _construct_expected_sampling_metadata(
                                           dtype=torch.float,
                                           device=device),
         output_token_ids=output_token_ids,
-        spec_token_ids=None,
         min_tokens=min_tokens,
         no_penalties=(all(x == 0 for x in presence_penalties)
                       and all(x == 0 for x in frequency_penalties)
