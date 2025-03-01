@@ -170,7 +170,7 @@ class MultiprocExecutor(Executor):
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
-        if getattr(self, 'shutting_down', False):
+        if not getattr(self, 'shutting_down', False):
             self.shutting_down = True
             for w in self.workers:
                 w.worker_response_mq = None
