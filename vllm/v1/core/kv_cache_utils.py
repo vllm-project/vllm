@@ -3,12 +3,12 @@
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
-                                        KVCacheTensor)
+                                        KVCacheTensor, VirtualLayer)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -436,7 +436,7 @@ def hash_request_tokens(block_size: int,
 
 
 def check_enough_kv_cache_memory(vllm_config: VllmConfig,
-                                 kv_cache_spec: KVCacheSpec,
+                                 kv_cache_spec: Dict[str, KVCacheSpec],
                                  available_memory: int):
     """
     Checks whether `available_memory` is enough for the KV cache to hold at 
@@ -444,7 +444,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
 
     Args:
         vllm_config: The global VllmConfig
-        kv_cache_spec: The kv cache spec of the model
+        kv_cache_spec: The kv cache spec of each attention layer in the model
         available_memory: Memory available for KV cache in bytes.
 
     Raises:
@@ -471,12 +471,42 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
             f"`max_model_len` when initializing the engine.")
 
 
-def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
+def create_virtual_layer(
+        kv_cache_spec: Dict[str, KVCacheSpec],
+        virtual_layer_map: List[List[str]]) -> List[VirtualLayer]:
+    """
+     Create VirtualLayer object for each virtual layer.
+     The layers represented by the same virtual layer should share the same 
+     KVCacheSpec.
+
+     Args:
+         kv_cache_spec:
+             A mapping from each layer name to its corresponding KVCacheSpec.
+         virtual_layer_map:
+             A list of virtual layers, where each element is a list of layer 
+             names that represented by the same virtual layer and should share 
+             the same KVCacheSpec.
+     Returns:
+         A list of VirtualLayer objects, one for each virtual layer.
+     """
+    virtual_layers = []
+    for layer_names in virtual_layer_map:
+        layer_spec = kv_cache_spec[layer_names[0]]
+        assert all(
+            kv_cache_spec[layer_name] == layer_spec
+            for layer_name in layer_names[1:]
+        ), ("All layers represented by one virtual layer must share the same "
+            "KVCacheSpec.")
+        virtual_layers.append(VirtualLayer(layer_names, layer_spec))
+    return virtual_layers
+
+
+def is_kv_cache_type_uniform(kv_cache_spec: Dict[str, KVCacheSpec]) -> bool:
     """
     Whether all layers in the given KVCacheSpec have the same type of KV cache.
 
     Args:
-        kv_cache_spec: The KVCacheSpec of the model
+        kv_cache_spec: The kv cache spec of each attention layer in the model
 
     Returns:
         True if all layers have the same type, False otherwise.
@@ -487,18 +517,16 @@ def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
 
 
 def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
-                                      kv_cache_spec: KVCacheSpec,
-                                      available_memory: int,
-                                      num_layers: int) -> KVCacheConfig:
+                                      kv_cache_spec: Dict[str, KVCacheSpec],
+                                      available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model with one type of KV cache.
     Divide the available memory equally among all layers.
 
     Args:
         vllm_config: The global VllmConfig
-        kv_cache_spec: The kv cache spec of the model
+        kv_cache_spec: The kv cache spec of each attention layer in the model
         available_memory: Memory available for KV cache in bytes.
-        num_layers: The number of layers in the model.
 
     Returns:
         The generated KVCacheConfig
@@ -508,7 +536,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     assert len(page_sizes) == 1
     page_size = page_sizes.pop()
 
-    num_blocks = int(available_memory // page_size // num_layers)
+    num_blocks = int(available_memory // page_size // len(kv_cache_spec))
     num_blocks = max(num_blocks, 0)
 
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
@@ -528,6 +556,8 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
                 max_model_len_str, max_concurrency)
 
     per_layer_size = page_size * num_blocks
+    # All layers can be represented by the same virtual layer.
+    virtual_layer_map = [[layer_name for layer_name in kv_cache_spec]]
 
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -535,41 +565,68 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
             layer_name: KVCacheTensor(size=per_layer_size)
             for layer_name in kv_cache_spec
         },
-        groups=[[layer_name for layer_name in kv_cache_spec]],
-        kv_cache_spec=kv_cache_spec)
+        virtual_layers=create_virtual_layer(kv_cache_spec, virtual_layer_map),
+    )
     return kv_cache_config
 
 
-def get_kv_cache_configs(vllm_config: VllmConfig,
-                         kv_cache_specs: List[KVCacheSpec],
-                         available_memory: int) -> List[KVCacheConfig]:
+def get_kv_cache_config(vllm_config: VllmConfig,
+                        kv_cache_spec: Dict[str, KVCacheSpec],
+                        available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model
     TODO: support hybrid models with more than one type of KV cache.
 
     Args:
         vllm_config: The global VllmConfig
-        kv_cache_specs: The kv cache specs of the model
+        kv_cache_spec: The kv cache specs of the model
         available_memory: Memory available for KV cache in bytes.
 
     Returns:
         The generated KVCacheConfigs
     """
-    # Use the max number of layers to conservatively determine
-    # the number of blocks.
-    num_layers = max(len(kv_cache_spec) for kv_cache_spec in kv_cache_specs)
-    kv_cache_configs = []
-    for kv_cache_spec in kv_cache_specs:
-        check_enough_kv_cache_memory(vllm_config, kv_cache_spec,
-                                     available_memory)
-        if is_kv_cache_type_uniform(kv_cache_spec):
-            # KV cache of all layers are the same, which is true for
-            # most models. Allocate the same amount of memory for
-            # each layer.
-            kv_cache_configs.append(
-                _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
-                                                  available_memory,
-                                                  num_layers))
-        else:
-            raise NotImplementedError
+    check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
+    if is_kv_cache_type_uniform(kv_cache_spec):
+        # KV cache of all layers are the same, which is true for
+        # most models. Allocate the same amount of memory for
+        # each layer.
+        return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
+                                                 available_memory)
+
+    raise NotImplementedError
+
+
+def make_kv_cache_configs_consistent(kv_cache_configs: List[KVCacheConfig]):
+    """
+    Make the KV cache configurations for each worker consistent. 
+    This function verifies that the virtual layers of each worker are the same,
+    and change the num_blocks of each worker to the smallest among all workers.
+    
+    Args:
+        kv_cache_configs (List[KVCacheConfig]):
+            The KV cache configurations for each worker. Will be in-place
+            modified to make them consistent.
+    """
+
+    # Sort the virtual layers by the type_id of the KV cache spec.
+    # This can avoid the inconsistency caused by the order of virtual layers.
+    for kv_cache_config in kv_cache_configs:
+        kv_cache_config.virtual_layers.sort(
+            key=lambda x: x.kv_cache_spec.type_id)
+
+    # Verify that the virtual layers of each rank are the same.
+    for kv_cache_config in kv_cache_configs[1:]:
+        for virtual_layer1, virtual_layer2 in zip(
+                kv_cache_configs[0].virtual_layers,
+                kv_cache_config.virtual_layers):
+            assert virtual_layer1.kv_cache_spec == virtual_layer2.kv_cache_spec
+
+    # Change the num_blocks of each rank to the smallest among all ranks. We
+    # do not need to shrink the tensor size because it is valid to only use the
+    # first `num_blocks` blocks of the tensor.
+    num_blocks = min(kv_cache_config.num_blocks
+                     for kv_cache_config in kv_cache_configs)
+    for kv_cache_config in kv_cache_configs:
+        kv_cache_config.num_blocks = num_blocks
+
     return kv_cache_configs

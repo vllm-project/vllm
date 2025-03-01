@@ -12,7 +12,7 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class KVCacheSpecBase:
+class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
     """
@@ -56,7 +56,7 @@ class KVCacheSpecBase:
 
 
 @dataclass
-class FullAttentionSpec(KVCacheSpecBase):
+class FullAttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
@@ -74,9 +74,6 @@ class FullAttentionSpec(KVCacheSpecBase):
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
 
 
-KVCacheSpec = Dict[str, KVCacheSpecBase]
-
-
 @dataclass
 class KVCacheTensor:
     """
@@ -85,6 +82,18 @@ class KVCacheTensor:
     be extended to support multiple layers sharing the same memory pool.
     """
     size: int  # The size of KV cache Tensor in bytes
+
+
+@dataclass
+class VirtualLayer:
+    """
+    A dataclass for specifying a virtual layer, which represents multiple layers
+    that can share the same block_table.
+    """
+    # The names of layers represented by this virtual layer
+    layer_names: List[str]
+    # The KV cache spec of this virtual layer
+    kv_cache_spec: KVCacheSpec
 
 
 @dataclass
@@ -97,17 +106,20 @@ class KVCacheConfig:
     """layer_name -> how to initialize KV cache for that layer"""
     tensors: Dict[str, KVCacheTensor]
     """
-    A list of kv-cache groups. Each group includes a set of layers with
-    the same kv-cache spec, and the total page_size of layers inside a group
-    is same across all groups (as the KVCacheManager only supports allocating
-    pages of the same size). For example:
-    1. A model only uses full attention: one group with all layers in the model.
-    2. (not implemented yet) A model with the same number of full attention
-    layers and sliding window attention layers: two groups, one for full
-    attention layers and one for sliding window attention layers.
-    3. (not implemented yet) A model with 2 full attention layers and 4 sliding 
-    window attention layers: three groups, (full * 2), (sw * 2), (sw * 2).
+    The virtual_layers of the model.
+    The layers in the models are repeated with some patterns, e.g., a model
+    with 10 full attention layers and 20 sliding window attention layers can be
+    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. And we regard
+    this pattern as virtual layers (3 virtual layers in this case, each
+    representing 10 layers).
+    The KVCacheManager allocates the blocks for each virtual layer, and the
+    model runner applies the block table of the virtual layer to all layers 
+    represented by it.
+    For example:
+    1. A model only uses full attention. There is only one virtual layer, 
+    and the block table is shared by all layers.
+    2. (WIP) A model with 10 full attention layers and 20 sliding window 
+    attention. There are 3 virtual layers (1 * full, 2 * sw), and the block 
+    table of each virtual layer is shared by 10 layers of the same type.
     """
-    groups: List[List[str]]
-    """the KVCacheSpec of the model"""
-    kv_cache_spec: KVCacheSpec
+    virtual_layers: List[VirtualLayer]

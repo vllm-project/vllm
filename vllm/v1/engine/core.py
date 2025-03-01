@@ -20,7 +20,8 @@ from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
-from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
+from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
+                                         make_kv_cache_configs_consistent)
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
@@ -99,14 +100,20 @@ class EngineCore:
         available_gpu_memory = self.model_executor.determine_available_memory()
 
         # Get the kv cache tensor size
-        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
-                                                available_gpu_memory)
-        num_gpu_blocks_set = set(config.num_blocks
-                                 for config in kv_cache_configs)
-        assert len(num_gpu_blocks_set) == 1, (
-            f"num_gpu_blocks need to be the same across workers, "
-            f"but they are different: {num_gpu_blocks_set}")
-        num_gpu_blocks = num_gpu_blocks_set.pop()
+        kv_cache_configs = [
+            get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
+                                available_gpu_memory_one_worker)
+            for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
+            zip(kv_cache_specs, available_gpu_memory)
+        ]
+
+        # Since we use a shared centralized controller, we need the
+        # `kv_cache_config` to be consistent across all workers to make sure
+        # all the memory operators can be applied to all workers.
+        make_kv_cache_configs_consistent(kv_cache_configs)
+
+        # The kv cache configs
+        num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution

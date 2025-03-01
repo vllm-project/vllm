@@ -2,7 +2,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, Optional, Set
+from typing import TYPE_CHECKING, Dict, Optional, Set
 
 import torch
 import torch.distributed
@@ -182,7 +182,7 @@ class Worker(WorkerBase):
 
         return int(available_kv_cache_memory)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> Dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
