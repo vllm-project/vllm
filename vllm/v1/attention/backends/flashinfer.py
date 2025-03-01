@@ -59,14 +59,6 @@ class FlashInferBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        #if self.runner.kv_cache_dtype != self.runner.model_config.dtype:
-        #    # TODO: The cascade wrapper currently does not support setting
-        #    # kv cache dtype to something different from query dtype.
-        #    return False
-        return use_cascade_attention(*args, **kwargs)
-
 
 @dataclass
 class PerLayerParameters:
@@ -363,8 +355,17 @@ class FlashInferMetadataBuilder:
             shared_kv_page_indices=shared_kv_page_indices,
             shared_kv_last_page_len=shared_kv_last_page_len,
         )
+
         self._plan(attn_metadata)
+
         return attn_metadata
+
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        if self.runner.kv_cache_dtype != self.runner.model_config.dtype:
+           # TODO: The cascade wrapper currently does not support setting
+           # kv cache dtype to something different from query dtype.
+           return False
+        return use_cascade_attention(*args, **kwargs)
 
 
 class FlashInferImpl(AttentionImpl):

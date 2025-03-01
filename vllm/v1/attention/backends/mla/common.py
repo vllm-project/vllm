@@ -270,10 +270,6 @@ class MLACommonBackend(AttentionBackend):
     def get_supported_head_sizes() -> List[int]:
         return [576]
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
-
 
 @dataclass
 class MLACommonMetadata:
@@ -524,6 +520,9 @@ class MLACommonMetadataBuilder(Generic[T]):
             context_chunk_seq_tot=context_chunk_seq_tot,
             context_chunk_max_seq_lens=context_chunk_max_seq_lens,
         )
+
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        return False
 
 
 class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
