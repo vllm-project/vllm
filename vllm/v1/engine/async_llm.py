@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import os
 from typing import AsyncGenerator, List, Mapping, Optional, Set, Type, Union
 
@@ -56,10 +57,9 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
         self.stat_loggers: List[StatLoggerBase] = []
         if self.log_stats:
-            self.stat_loggers.extend([
-                LoggingStatLogger(),
-                PrometheusStatLogger(vllm_config),
-            ])
+            if logger.isEnabledFor(logging.INFO):
+                self.stat_loggers.append(LoggingStatLogger())
+            self.stat_loggers.append(PrometheusStatLogger(vllm_config))
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -305,7 +305,7 @@ class AsyncLLM(EngineClient):
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
-                self._log_stats(
+                self._record_stats(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
                 )
@@ -324,7 +324,7 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
 
-    def _log_stats(
+    def _record_stats(
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
@@ -334,9 +334,9 @@ class AsyncLLM(EngineClient):
 
         assert scheduler_stats is not None
         assert iteration_stats is not None
-        for logger in self.stat_loggers:
-            logger.log(scheduler_stats=scheduler_stats,
-                       iteration_stats=iteration_stats)
+        for stat_logger in self.stat_loggers:
+            stat_logger.record(scheduler_stats=scheduler_stats,
+                               iteration_stats=iteration_stats)
 
     def encode(
         self,
@@ -372,7 +372,8 @@ class AsyncLLM(EngineClient):
         scheduler_outputs=None,
         model_output=None,
     ) -> None:
-        logger.debug("Called do_log_stats.")
+        for stat_logger in self.stat_loggers:
+            stat_logger.log()
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
