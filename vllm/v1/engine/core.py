@@ -7,7 +7,6 @@ import threading
 import time
 from concurrent.futures import Future
 from inspect import isclass, signature
-from multiprocessing.connection import Connection
 from typing import Any, List, Optional, Set, Tuple, Type
 
 import msgspec
@@ -241,7 +240,6 @@ class EngineCoreProc(EngineCore):
         self,
         input_path: str,
         output_path: str,
-        ready_pipe: Connection,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
         log_stats: bool,
@@ -263,17 +261,10 @@ class EngineCoreProc(EngineCore):
                          args=(output_path, ),
                          daemon=True).start()
 
-        dp_size = vllm_config.parallel_config.data_parallel_size
-        self.dp_group = None if dp_size <= 1 else (
-            vllm_config.parallel_config.stateless_init_dp_group())
-
         self.global_unfinished_reqs = False
 
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
-
-        # Send Readiness signal to EngineClient.
-        ready_pipe.send({"status": "READY"})
 
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, **kwargs):
@@ -297,33 +288,25 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        engine_core_proc_cls: Type[EngineCoreProc]
         parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
         if parallel_config.data_parallel_size > 1:
             # Set data parallel rank for this engine process.
             parallel_config.data_parallel_rank = dp_rank
-
-            # Add process-specific prefix to stdout and stderr
-            process_name = get_mp_context().current_process().name
-            pid = os.getpid()
-            _add_prefix(sys.stdout, process_name, pid)
-            _add_prefix(sys.stderr, process_name, pid)
-
-            from vllm.platforms import current_platform
-            if current_platform.is_cuda_alike():
-                from vllm.platforms.cuda import device_id_to_physical_device_id
-                tp_size = parallel_config.tensor_parallel_size
-                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-                    str(device_id_to_physical_device_id(i))
-                    for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
+            engine_core_proc_cls = DPEngineCoreProc
+        else:
+            engine_core_proc_cls = EngineCoreProc
 
         parent_process = psutil.Process().parent()
         engine_core = None
         try:
-            engine_core = EngineCoreProc(*args, **kwargs)
-            if parallel_config.data_parallel_size > 1:
-                engine_core.run_dp_busy_loop()
-            else:
-                engine_core.run_busy_loop()
+            engine_core = engine_core_proc_cls(*args, **kwargs)
+
+            # Send Readiness signal to EngineClient.
+            if (ready_pipe := kwargs.get("ready_pipe")) is not None:
+                ready_pipe.send({"status": "READY"})
+
+            engine_core.run_busy_loop()
 
         except SystemExit:
             logger.debug("EngineCore interrupted.")
@@ -337,9 +320,15 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
 
-    def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
-        return ParallelConfig.has_unfinished_dp(self.dp_group,
-                                                local_unfinished)
+    def run_busy_loop(self):
+        """Core busy loop of the EngineCore."""
+
+        # Loop until process is sent a SIGINT or SIGTERM
+        while True:
+            # 1) Poll the input queue until there is work to do.
+            self._process_input_queue()
+            # 2) Step the engine core and return the outputs.
+            self._process_engine_step()
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -364,47 +353,6 @@ class EngineCoreProc(EngineCore):
         assert outputs is not None
         # Put EngineCoreOutputs into the output queue.
         self.output_queue.put_nowait(outputs)
-
-    def run_busy_loop(self):
-        """Core busy loop of the EngineCore."""
-
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
-            # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
-            # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
-
-    def run_dp_busy_loop(self):
-        """Core busy loop of the EngineCore for data parallel case."""
-
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
-            # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
-
-            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
-            if local_unfinished_reqs:
-                # 2) Step the engine core.
-                self._process_engine_step()
-
-                # Check if we have now finished all requests.
-                local_unfinished_reqs = (
-                    self.scheduler.has_unfinished_requests())
-            else:
-                assert self.global_unfinished_reqs
-                # There must be unfinished requests in DP peers, run a
-                # dummy forward pass.
-                self.execute_dummy_batch()
-
-            # All-reduce operation to determine global unfinished reqs.
-            self.global_unfinished_reqs = self._has_global_unfinished_reqs(
-                local_unfinished_reqs)
-
-            if not self.global_unfinished_reqs:
-                # Notify client that we are pausing the loop.
-                self.output_queue.put_nowait(
-                    EngineCoreOutputs(global_finished=True))
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -479,3 +427,82 @@ class EngineCoreProc(EngineCore):
                 outputs = self.output_queue.get()
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)
+
+
+class DPEngineCoreProc(EngineCoreProc):
+    """ZMQ-wrapper for running EngineCore in background process
+    in a data parallel context."""
+
+    def __init__(
+        self,
+        input_path: str,
+        output_path: str,
+        vllm_config: VllmConfig,
+        executor_class: Type[Executor],
+        log_stats: bool,
+    ):
+        super().__init__(input_path, output_path, vllm_config, executor_class,
+                         log_stats)
+
+        # Add process-specific prefix to stdout and stderr
+        process_name = get_mp_context().current_process().name
+        pid = os.getpid()
+        _add_prefix(sys.stdout, process_name, pid)
+        _add_prefix(sys.stderr, process_name, pid)
+
+        from vllm.platforms import current_platform
+        if current_platform.is_cuda_alike():
+            from vllm.platforms.cuda import device_id_to_physical_device_id
+            tp_size = vllm_config.parallel_config.tensor_parallel_size
+            dp_rank = vllm_config.parallel_config.data_parallel_rank
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                str(device_id_to_physical_device_id(i))
+                for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
+
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        self.dp_group = None if dp_size <= 1 else (
+            vllm_config.parallel_config.stateless_init_dp_group())
+
+        self.counter = 0
+
+    def run_busy_loop(self):
+        """Core busy loop of the EngineCore for data parallel case."""
+
+        # Loop until process is sent a SIGINT or SIGTERM
+        while True:
+            # 1) Poll the input queue until there is work to do.
+            self._process_input_queue()
+
+            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+            if local_unfinished_reqs:
+                # 2) Step the engine core.
+                self._process_engine_step()
+
+                # Check if we have now finished all requests.
+                local_unfinished_reqs = (
+                    self.scheduler.has_unfinished_requests())
+            else:
+                assert self.global_unfinished_reqs
+                # There must be unfinished requests in DP peers, run a
+                # dummy forward pass.
+                self.execute_dummy_batch()
+
+            # 3) All-reduce operation to determine global unfinished reqs.
+            self.global_unfinished_reqs = self._has_global_unfinished_reqs(
+                local_unfinished_reqs)
+
+            if not self.global_unfinished_reqs:
+                # Notify client that we are pausing the loop.
+                self.output_queue.put_nowait(
+                    EngineCoreOutputs(global_finished=True))
+
+    def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
+
+        # TODO: Possible optimization
+        # self.counter += 1
+        # if self.counter != 20:
+        #     return True
+        # self.counter = 0
+
+        return ParallelConfig.has_unfinished_dp(self.dp_group,
+                                                local_unfinished)

@@ -10,7 +10,8 @@ from abc import ABC, abstractmethod
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from threading import Thread
-from typing import Any, Dict, List, Optional, Set, Type, Union
+from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Type,
+                    Union)
 
 import zmq
 import zmq.asyncio
@@ -59,7 +60,10 @@ class EngineCoreClient(ABC):
                 "is not currently supported.")
 
         if multiprocess_mode and asyncio_mode:
-            return AsyncMPClient(vllm_config, executor_class, log_stats)
+            if vllm_config.parallel_config.data_parallel_size > 1:
+                return DPAsyncMPClient(vllm_config, executor_class, log_stats)
+            else:
+                return AsyncMPClient(vllm_config, executor_class, log_stats)
 
         if multiprocess_mode and not asyncio_mode:
             return SyncMPClient(vllm_config, executor_class, log_stats)
@@ -330,10 +334,8 @@ class MPClient(EngineCoreClient):
 
         self.output_socket = resources.output_socket
         self.core_engines = resources.core_engines
+        self.core_engine = self.core_engines[0]
         self.utility_results: Dict[int, AnyFuture] = {}
-
-        self.num_engines_running = 0
-        self.reqs_in_flight: Dict[str, CoreEngine] = {}
 
     def shutdown(self):
         self._finalizer()
@@ -363,7 +365,10 @@ class SyncMPClient(MPClient):
 
         self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
 
-        self.input_socket = self.core_engines[0].input_socket
+        assert len(self.core_engines) == 1, (
+            "SyncMPClient does not support data parallel")
+
+        self.input_socket = self.core_engine.input_socket
 
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
@@ -459,12 +464,11 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        # Control message used for triggering dp idle mode loop.
-        self.start_dp_msg = (EngineCoreRequestType.START_DP.value,
-                             self.encoder.encode(None))
-
         self.outputs_queue: Optional[asyncio.Queue[EngineCoreOutputs]] = None
         self.queue_task: Optional[asyncio.Task] = None
+
+        self.output_processor: Optional[Callable[
+            [AsyncMPClient, EngineCoreOutputs], Awaitable[None]]] = None
 
     async def _start_output_queue_task(self):
         # Perform IO in separate task to parallelize as much as possible.
@@ -473,9 +477,9 @@ class AsyncMPClient(MPClient):
         output_socket = self.output_socket
         decoder = self.decoder
         utility_results = self.utility_results
-        reqs_in_flight = self.reqs_in_flight
         outputs_queue = self.outputs_queue
-        _self_ref = weakref.ref(self)
+        output_processor = self.output_processor
+        _self_ref = weakref.ref(self) if output_processor else None
 
         async def process_outputs_socket():
             while True:
@@ -486,39 +490,17 @@ class AsyncMPClient(MPClient):
                                             utility_results)
                     continue
 
-                if reqs_in_flight:
-                    # This only applies in DP case.
-                    for req_id in outputs.finished_requests:
-                        if engine := reqs_in_flight.pop(req_id, None):
-                            engine.num_reqs_in_flight -= 1
+                if output_processor is not None:
+                    assert _self_ref is not None
+                    _self = _self_ref()
+                    if not _self:
+                        return
+                    await output_processor(_self, outputs)
 
-                if outputs.global_finished and (_self := _self_ref()):
-                    # This only applies in DP case.
-                    await AsyncMPClient._handle_all_engines_finished(_self)
-                    if not outputs.outputs:
-                        continue
-
-                outputs_queue.put_nowait(outputs)
+                if outputs.outputs or outputs.scheduler_stats:
+                    outputs_queue.put_nowait(outputs)
 
         self.queue_task = asyncio.create_task(process_outputs_socket())
-
-    @staticmethod
-    async def _handle_all_engines_finished(self: "AsyncMPClient"):
-        assert self.num_engines_running >= 1
-        self.num_engines_running -= 1
-        if self.num_engines_running == 0 and self.reqs_in_flight:
-            # If there are requests in flight here, they must have
-            # been sent after the engines paused. We must make
-            # sure to start the other engines:
-            self.num_engines_running = len(self.core_engines)
-            coros = [
-                engine.input_socket.send_multipart(
-                    self.start_dp_msg, copy=False)
-                for engine in self.core_engines
-                if not engine.num_reqs_in_flight
-            ]
-            if coros:
-                await asyncio.gather(*coros)
 
     async def get_output_async(self) -> EngineCoreOutputs:
         if self.outputs_queue is None:
@@ -526,41 +508,96 @@ class AsyncMPClient(MPClient):
             assert self.outputs_queue is not None
         return await self.outputs_queue.get()
 
-    async def _send_input(self, core_engine: CoreEngine,
+    async def _send_input(self,
                           request_type: EngineCoreRequestType,
-                          request: Any) -> None:
+                          request: Any,
+                          core_engine: Optional[CoreEngine] = None) -> None:
         msg = (request_type.value, self.encoder.encode(request))
-        await core_engine.input_socket.send_multipart(msg, copy=False)
+        engine = self.core_engine if core_engine is None else core_engine
+        await engine.input_socket.send_multipart(msg, copy=False)
 
         if self.outputs_queue is None:
             await self._start_output_queue_task()
 
-    def get_core_engine_for_request(self) -> CoreEngine:
-        return min(self.core_engines, key=lambda e: e.num_reqs_in_flight)
+    async def call_utility_async(self, method: str, *args) -> Any:
+        return self._call_utility_async(method, *args, engine=self.core_engine)
 
-    async def _call_utility_async(self, method: str, *args) -> Any:
-        if len(self.core_engines) == 1:
-            return await self._call_engine_utility_async(
-                self.core_engines[0], method, *args)
-
-        # Only the result from the first engine is returned.
-        return (await asyncio.gather(*[
-            self._call_engine_utility_async(engine, method, *args)
-            for engine in self.core_engines
-        ]))[0]
-
-    async def _call_engine_utility_async(
+    async def _call_utility_async(
         self,
-        engine: CoreEngine,
         method: str,
         *args,
+        engine: CoreEngine,
     ) -> Any:
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
-        await self._send_input(engine, EngineCoreRequestType.UTILITY,
-                               (call_id, method, args))
+        await self._send_input(EngineCoreRequestType.UTILITY,
+                               (call_id, method, args), engine)
         return await future
+
+    async def add_request_async(self, request: EngineCoreRequest) -> None:
+        # NOTE: text prompt is not needed in the core engine as it has been
+        # tokenized.
+        request.prompt = None
+        await self._send_input(EngineCoreRequestType.ADD, request)
+
+    async def abort_requests_async(self, request_ids: List[str]) -> None:
+        if request_ids:
+            await self._send_input(EngineCoreRequestType.ABORT, request_ids)
+
+    async def profile_async(self, is_start: bool = True) -> None:
+        await self.call_utility_async("profile", is_start)
+
+    async def reset_prefix_cache_async(self) -> None:
+        await self.call_utility_async("reset_prefix_cache")
+
+    async def sleep_async(self, level: int = 1) -> None:
+        await self.call_utility_async("sleep", level)
+
+    async def wake_up_async(self) -> None:
+        await self.call_utility_async("wake_up")
+
+    async def execute_dummy_batch_async(self) -> None:
+        await self.call_utility_async("execute_dummy_batch")
+
+    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        return await self.call_utility_async("add_lora", lora_request)
+
+    async def remove_lora_async(self, lora_id: int) -> bool:
+        return await self.call_utility_async("remove_lora", lora_id)
+
+    async def list_loras_async(self) -> Set[int]:
+        return await self.call_utility_async("list_loras")
+
+    async def pin_lora_async(self, lora_id: int) -> bool:
+        return await self.call_utility_async("pin_lora", lora_id)
+
+
+class DPAsyncMPClient(AsyncMPClient):
+    """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
+    EngineCore."""
+
+    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor],
+                 log_stats: bool):
+        super().__init__(vllm_config, executor_class, log_stats)
+
+        assert len(self.core_engines) > 1
+
+        # Control message used for triggering dp idle mode loop.
+        self.start_dp_msg = (EngineCoreRequestType.START_DP.value,
+                             self.encoder.encode(None))
+
+        self.num_engines_running = 0
+        self.reqs_in_flight: Dict[str, CoreEngine] = {}
+
+        self.output_processor = DPAsyncMPClient.process_engine_outputs  # type: ignore[assignment]
+
+    async def call_utility_async(self, method: str, *args) -> Any:
+        # Only the result from the first engine is returned.
+        return (await asyncio.gather(*[
+            self._call_utility_async(method, *args, engine=engine)
+            for engine in self.core_engines
+        ]))[0]
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         # NOTE: text prompt is not needed in the core engine as it has been
@@ -572,12 +609,6 @@ class AsyncMPClient(MPClient):
 
         msg = (EngineCoreRequestType.ADD.value, self.encoder.encode(request))
 
-        if len(self.core_engines) == 1:
-            engine = self.core_engines[0]
-            await engine.input_socket.send_multipart(msg, copy=False)
-            return
-
-        # Data-parallel case.
         chosen_engine = self.get_core_engine_for_request()
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1
@@ -593,13 +624,36 @@ class AsyncMPClient(MPClient):
                     copy=False) for engine in self.core_engines
             ])
 
+    def get_core_engine_for_request(self) -> CoreEngine:
+        return min(self.core_engines, key=lambda e: e.num_reqs_in_flight)
+
+    @staticmethod
+    async def process_engine_outputs(self: "DPAsyncMPClient",
+                                     outputs: EngineCoreOutputs):
+        if self.reqs_in_flight:
+            for req_id in outputs.finished_requests:
+                if engine := self.reqs_in_flight.pop(req_id, None):
+                    engine.num_reqs_in_flight -= 1
+
+        if outputs.global_finished:
+            assert self.num_engines_running >= 1
+            self.num_engines_running -= 1
+            if self.num_engines_running == 0 and self.reqs_in_flight:
+                # If there are requests in flight here, they must have
+                # been sent after the engines paused. We must make
+                # sure to start the other engines:
+                self.num_engines_running = len(self.core_engines)
+                coros = [
+                    engine.input_socket.send_multipart(self.start_dp_msg,
+                                                       copy=False)
+                    for engine in self.core_engines
+                    if not engine.num_reqs_in_flight
+                ]
+                if coros:
+                    await asyncio.gather(*coros)
+
     async def abort_requests_async(self, request_ids: List[str]) -> None:
         if not request_ids:
-            return
-
-        if len(self.core_engines) == 1:
-            # Non-DP case.
-            await self._abort_requests(request_ids, self.core_engines[0])
             return
 
         if len(request_ids) == 1:
@@ -617,32 +671,5 @@ class AsyncMPClient(MPClient):
 
     async def _abort_requests(self, request_ids: List[str],
                               engine: CoreEngine) -> None:
-        await self._send_input(engine, EngineCoreRequestType.ABORT,
-                               request_ids)
-
-    async def profile_async(self, is_start: bool = True) -> None:
-        await self._call_utility_async("profile", is_start)
-
-    async def reset_prefix_cache_async(self) -> None:
-        await self._call_utility_async("reset_prefix_cache")
-
-    async def sleep_async(self, level: int = 1) -> None:
-        await self._call_utility_async("sleep", level)
-
-    async def wake_up_async(self) -> None:
-        await self._call_utility_async("wake_up")
-
-    async def execute_dummy_batch_async(self) -> None:
-        await self._call_utility_async("execute_dummy_batch")
-
-    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
-        return await self._call_utility_async("add_lora", lora_request)
-
-    async def remove_lora_async(self, lora_id: int) -> bool:
-        return await self._call_utility_async("remove_lora", lora_id)
-
-    async def list_loras_async(self) -> Set[int]:
-        return await self._call_utility_async("list_loras")
-
-    async def pin_lora_async(self, lora_id: int) -> bool:
-        return await self._call_utility_async("pin_lora", lora_id)
+        await self._send_input(EngineCoreRequestType.ABORT, request_ids,
+                               engine)
