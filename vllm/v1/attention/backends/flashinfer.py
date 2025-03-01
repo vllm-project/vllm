@@ -304,6 +304,7 @@ class FlashInferMetadataBuilder:
         use_cascade = common_prefix_len > 0
         if use_cascade:
             # Grab the blocks of the shared prefix from the first request.
+            assert common_prefix_len % page_size == 0
             num_common_kv_blocks = common_prefix_len // page_size
             shared_qo_indptr = torch.tensor([0, num_actual_tokens],
                                             dtype=torch.int32,
@@ -312,7 +313,7 @@ class FlashInferMetadataBuilder:
                                                  dtype=torch.int32,
                                                  device=device)
             shared_kv_page_indices = block_table[0, :num_common_kv_blocks]
-            shared_kv_last_page_len = torch.tensor([0],
+            shared_kv_last_page_len = torch.tensor([page_size],
                                                    dtype=torch.int32,
                                                    device=device)
             # Remove the blocks of the shared prefix from all requests.
