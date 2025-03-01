@@ -47,10 +47,6 @@ class FlashInferBackend(AttentionBackend):
         return FlashInferMetadata
 
     @staticmethod
-    def get_state_cls() -> FlashInferState:
-        return FlashInferState
-
-    @staticmethod
     def get_builder_cls() -> FlashInferMetadataBuilder:
         return FlashInferMetadataBuilder
 
@@ -138,83 +134,6 @@ def infer_global_hyperparameters(
     return global_params
 
 
-class FlashInferState:
-
-    def __init__(self, runner):
-        self.runner = runner
-        self._workspace_buffer = None
-        self._prefill_wrapper = None  # Wrapper for prefill/append
-        self._cascade_wrapper = None  # Wrapper for cascade attention
-
-        # Global hyperparameters shared by all attention layers
-        self.global_hyperparameters: Optional[PerLayerParameters] = None
-
-        self.vllm_config = get_current_vllm_config()
-
-    def _get_workspace_buffer(self):
-        if self._workspace_buffer is None:
-            self._workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=torch.uint8,
-                device=self.runner.device)
-        return self._workspace_buffer
-
-    def _get_prefill_wrapper(self):
-        if self._prefill_wrapper is None:
-            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), "NHD")
-        return self._prefill_wrapper
-
-    def _get_cascade_wrapper(self):
-        if self._cascade_wrapper is None:
-            self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(), "NHD")
-        return self._cascade_wrapper
-
-    def begin_forward(self, attn_metadata: FlashInferMetadata):
-        if self.global_hyperparameters is None:
-            self.global_hyperparameters = infer_global_hyperparameters(
-                    get_per_layer_parameters(self.vllm_config))
-        if attn_metadata.use_cascade:
-            attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
-            attn_metadata.cascade_wrapper.plan(
-                [attn_metadata.shared_qo_indptr, attn_metadata.qo_indptr],
-                [attn_metadata.shared_kv_page_indptr,
-                 attn_metadata.paged_kv_indptr],
-                [attn_metadata.shared_kv_page_indices,
-                 attn_metadata.paged_kv_indices],
-                [attn_metadata.shared_kv_last_page_len,
-                 attn_metadata.paged_kv_last_page_len],
-                attn_metadata.num_qo_heads,
-                attn_metadata.num_kv_heads,
-                attn_metadata.head_dim,
-                attn_metadata.page_size,
-                causal=True,
-                sm_scale=self.global_hyperparameters.sm_scale,
-                window_left=self.global_hyperparameters.window_left,
-                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
-                q_data_type=attn_metadata.q_data_type,
-            )
-        else:
-            attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
-            attn_metadata.prefill_wrapper.plan(
-                attn_metadata.qo_indptr,
-                attn_metadata.paged_kv_indptr,
-                attn_metadata.paged_kv_indices,
-                attn_metadata.paged_kv_last_page_len,
-                attn_metadata.num_qo_heads,
-                attn_metadata.num_kv_heads,
-                attn_metadata.head_dim,
-                attn_metadata.page_size,
-                causal=True,
-                sm_scale=self.global_hyperparameters.sm_scale,
-                window_left=self.global_hyperparameters.window_left,
-                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
-                q_data_type=attn_metadata.q_data_type,
-                kv_data_type=attn_metadata.data_type,
-            )
-
-
 @dataclass
 class FlashInferMetadata:
 
@@ -282,12 +201,81 @@ class FlashInferMetadataBuilder:
 
     def __init__(self, runner: GPUModelRunner):
         self.runner = runner
-        self.state = runner.attn_state
-        assert isinstance(self.state, FlashInferState)
+        self._workspace_buffer = None
+        self._prefill_wrapper = None  # Wrapper for prefill/append
+        self._cascade_wrapper = None  # Wrapper for cascade attention
+
+        # Global hyperparameters shared by all attention layers
+        self.global_hyperparameters: Optional[PerLayerParameters] = None
+
+        self.vllm_config = get_current_vllm_config()
 
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput):
         pass
+
+    def _get_workspace_buffer(self):
+        if self._workspace_buffer is None:
+            self._workspace_buffer = torch.empty(
+                FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=self.runner.device)
+        return self._workspace_buffer
+
+    def _get_prefill_wrapper(self):
+        if self._prefill_wrapper is None:
+            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(), "NHD")
+        return self._prefill_wrapper
+
+    def _get_cascade_wrapper(self):
+        if self._cascade_wrapper is None:
+            self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
+                2, self._get_workspace_buffer(), "NHD")
+        return self._cascade_wrapper
+
+    def _plan(self, attn_metadata: FlashInferMetadata):
+        if self.global_hyperparameters is None:
+            self.global_hyperparameters = infer_global_hyperparameters(
+                    get_per_layer_parameters(self.vllm_config))
+        if attn_metadata.use_cascade:
+            attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
+            attn_metadata.cascade_wrapper.plan(
+                [attn_metadata.shared_qo_indptr, attn_metadata.qo_indptr],
+                [attn_metadata.shared_kv_page_indptr,
+                 attn_metadata.paged_kv_indptr],
+                [attn_metadata.shared_kv_page_indices,
+                 attn_metadata.paged_kv_indices],
+                [attn_metadata.shared_kv_last_page_len,
+                 attn_metadata.paged_kv_last_page_len],
+                attn_metadata.num_qo_heads,
+                attn_metadata.num_kv_heads,
+                attn_metadata.head_dim,
+                attn_metadata.page_size,
+                causal=True,
+                sm_scale=self.global_hyperparameters.sm_scale,
+                window_left=self.global_hyperparameters.window_left,
+                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
+                q_data_type=attn_metadata.q_data_type,
+            )
+        else:
+            attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
+            attn_metadata.prefill_wrapper.plan(
+                attn_metadata.qo_indptr,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                attn_metadata.paged_kv_last_page_len,
+                attn_metadata.num_qo_heads,
+                attn_metadata.num_kv_heads,
+                attn_metadata.head_dim,
+                attn_metadata.page_size,
+                causal=True,
+                sm_scale=self.global_hyperparameters.sm_scale,
+                window_left=self.global_hyperparameters.window_left,
+                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
+                q_data_type=attn_metadata.q_data_type,
+                kv_data_type=attn_metadata.data_type,
+            )
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int):
@@ -358,7 +346,7 @@ class FlashInferMetadataBuilder:
             shared_kv_page_indices=shared_kv_page_indices,
             shared_kv_last_page_len=shared_kv_last_page_len,
         )
-        self.state.begin_forward(attn_metadata)
+        self._plan(attn_metadata)
         return attn_metadata
 
 

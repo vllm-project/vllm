@@ -111,13 +111,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             raise NotImplementedError(
                 "Non-Attention backend is not supported by V1 GPUModelRunner.")
 
-        try:
-            attn_state_cls = self.attn_backend.get_state_cls()
-        except NotImplementedError:
-            self.attn_state = None
-        else:
-            self.attn_state = attn_state_cls(weakref.proxy(self))
-
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
 
