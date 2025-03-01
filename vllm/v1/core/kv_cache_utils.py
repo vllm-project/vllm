@@ -128,6 +128,19 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
 
+    def __repr__(self) -> str:
+        # Use block_id instead of KVCacheBlock object to avoid calling __repr__
+        # on KVCacheBlock object recursively.
+        prev_block_id = self.prev_free_block.block_id \
+            if self.prev_free_block else None
+        next_block_id = self.next_free_block.block_id \
+            if self.next_free_block else None
+        return (f"KVCacheBlock(block_id={self.block_id}, "
+                f"ref_cnt={self.ref_cnt}, "
+                f"_block_hash={self._block_hash}, "
+                f"prev_free_block={prev_block_id}, "
+                f"next_free_block={next_block_id})")
+
 
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
