@@ -36,7 +36,42 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-def test_async_llm_startup_error(monkeypatch, model, tensor_parallel_size):
+def test_async_llm_forward_pass_error(monkeypatch, model,
+                                      tensor_parallel_size):
+    """Test failure during first forward pass"""
+
+    if cuda_device_count_stateless() < tensor_parallel_size:
+        pytest.skip(reason="Not enough CUDA devices")
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        # Monkeypatch an error in the model.
+        m.setattr(LlamaForCausalLM, "load_weights", evil_load_weights)
+
+        engine_args = AsyncEngineArgs(
+            model=model,
+            enforce_eager=True,
+            tensor_parallel_size=tensor_parallel_size)
+
+        # Confirm we get an exception.
+        with pytest.raises(Exception,
+                           match="EngineCore initialization failed"):
+            _ = AsyncLLM.from_engine_args(engine_args)
+
+        # Confirm all the processes are cleaned up.
+        wait_for_gpu_memory_to_clear(
+            devices=list(range(tensor_parallel_size)),
+            threshold_bytes=2 * GiB_bytes,
+            timeout_s=60,
+        )
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
+def test_async_llm_weight_loading_failure(monkeypatch, model,
+                                          tensor_parallel_size):
+    """Test failure during first forward pass"""
 
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
@@ -67,7 +102,9 @@ def test_async_llm_startup_error(monkeypatch, model, tensor_parallel_size):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-def test_llm_forward_pass_failure(monkeypatch, model, tensor_parallel_size):
+@pytest.mark.parametrize("enable_multiprocessing", [True, False])
+def test_llm_forward_pass_failure(monkeypatch, model, tensor_parallel_size,
+                                  enable_multiprocessing):
     """Test failure during first forward pass (after IPC setup)."""
 
     if cuda_device_count_stateless() < tensor_parallel_size:
@@ -75,50 +112,29 @@ def test_llm_forward_pass_failure(monkeypatch, model, tensor_parallel_size):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+        value = "1" if enable_multiprocessing else "0"
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", value)
 
         # Simulate error during forward pass
         m.setattr(LlamaForCausalLM, "forward", evil_forward)
 
-        with pytest.raises(Exception,
-                           match="EngineCore initialization failed"):
-            _ = LLM(model=model,
-                    enforce_eager=True,
-                    tensor_parallel_size=tensor_parallel_size)
-
-        wait_for_gpu_memory_to_clear(
-            devices=list(range(tensor_parallel_size)),
-            threshold_bytes=2 * GiB_bytes,
-            timeout_s=60,
-        )
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-def test_llm_forward_pass_failure_inproc(monkeypatch, model,
-                                         tensor_parallel_size):
-    """Test failure during first forward pass (after IPC setup)."""
-
-    if cuda_device_count_stateless() < tensor_parallel_size:
-        pytest.skip(reason="Not enough CUDA devices")
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-
-        # Simulate error during forward pass
-        m.setattr(LlamaForCausalLM, "forward", evil_forward)
-
-        # Inproc raises the original error.
-        with pytest.raises(RuntimeError):
-            llm = LLM(model=model,
-                      enforce_eager=True,
-                      tensor_parallel_size=tensor_parallel_size)
-            del llm
-
-        import torch
-        torch.cuda.empty_cache()
-        gc.collect()
+        if enable_multiprocessing:
+            with pytest.raises(Exception,
+                               match="EngineCore initialization failed"):
+                _ = LLM(model=model,
+                        enforce_eager=True,
+                        tensor_parallel_size=tensor_parallel_size)
+        else:
+            # Inproc raises the original error.
+            # GPU memory is only cleared when the gc is run.
+            with pytest.raises(RuntimeError):
+                llm = LLM(model=model,
+                          enforce_eager=True,
+                          tensor_parallel_size=tensor_parallel_size)
+                del llm
+                import torch
+                torch.cuda.empty_cache()
+                gc.collect()
 
         wait_for_gpu_memory_to_clear(
             devices=list(range(tensor_parallel_size)),
@@ -129,7 +145,9 @@ def test_llm_forward_pass_failure_inproc(monkeypatch, model,
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-def test_llm_weight_loading_failure(monkeypatch, model, tensor_parallel_size):
+@pytest.mark.parametrize("enable_multiprocessing", [True, False])
+def test_llm_weight_loading_failure(monkeypatch, model, tensor_parallel_size,
+                                    enable_multiprocessing):
     """Test failure during weight loading (before IPC setup)."""
 
     if cuda_device_count_stateless() < tensor_parallel_size:
@@ -137,52 +155,32 @@ def test_llm_weight_loading_failure(monkeypatch, model, tensor_parallel_size):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+        value = "1" if enable_multiprocessing else "0"
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", value)
 
         # Simulate error during weight loading
         m.setattr(LlamaForCausalLM, "load_weights", evil_load_weights)
 
-        with pytest.raises(Exception,
-                           match="EngineCore initialization failed"):
-            _ = LLM(model=model,
-                    enforce_eager=True,
-                    tensor_parallel_size=tensor_parallel_size)
+        if enable_multiprocessing:
+            with pytest.raises(Exception,
+                               match="EngineCore initialization failed"):
+                _ = LLM(model=model,
+                        enforce_eager=True,
+                        tensor_parallel_size=tensor_parallel_size)
+        else:
+            # Inproc raises the original error.
+            # GPU memory is only cleared when the gc is run.
+            with pytest.raises(RuntimeError):
+                llm = LLM(model=model,
+                          enforce_eager=True,
+                          tensor_parallel_size=tensor_parallel_size)
+                del llm
+                import torch
+                torch.cuda.empty_cache()
+                gc.collect()
 
         wait_for_gpu_memory_to_clear(
             devices=list(range(tensor_parallel_size)),
             threshold_bytes=2 * GiB_bytes,
-            timeout_s=60,
-        )
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-def test_llm_weight_loading_failure_inproc(monkeypatch, model,
-                                           tensor_parallel_size):
-    """Test failure during weight loading (before IPC setup)."""
-
-    if cuda_device_count_stateless() < tensor_parallel_size:
-        pytest.skip(reason="Not enough CUDA devices")
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-
-        # Simulate error during weight loading
-        m.setattr(LlamaForCausalLM, "load_weights", evil_load_weights)
-
-        with pytest.raises(RuntimeError):
-            llm = LLM(model=model,
-                      enforce_eager=True,
-                      tensor_parallel_size=tensor_parallel_size)
-            del llm
-
-        import torch
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        wait_for_gpu_memory_to_clear(
-            devices=list(range(tensor_parallel_size)),
-            threshold_bytes=5 * GiB_bytes,
             timeout_s=60,
         )
