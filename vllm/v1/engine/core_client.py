@@ -345,12 +345,11 @@ class SyncMPClient(MPClient):
         Thread(target=process_outputs_socket, daemon=True).start()
 
     def get_output(self) -> EngineCoreOutputs:
-        try:
-            (frame, ) = self.output_socket.recv_multipart(copy=False)
-            self._raise_if_engine_core_dead(frame.buffer)
-            return self.outputs_queue.get()
-        except Exception as e:
-            raise self._format_exception(e) from None
+        outputs = self.outputs_queue.get()
+        if isinstance(outputs, Exception):
+            raise self._format_exception(outputs) from None
+
+        return outputs
 
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: Any) -> None:
@@ -464,7 +463,7 @@ class AsyncMPClient(MPClient):
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
 
-        return self.decoder.decode(outputs)
+        return outputs
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
