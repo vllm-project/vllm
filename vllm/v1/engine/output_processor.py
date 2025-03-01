@@ -56,7 +56,7 @@ class RequestState:
         cls,
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[asyncio.Queue[Union[RequestOutput, Exception]]],
         log_stats: bool,
     ) -> "RequestState":
         return cls(

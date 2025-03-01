@@ -227,8 +227,7 @@ class AsyncLLM(EngineClient):
                 while not q.empty():
                     next_out = q.get_nowait()
                     if isinstance(next_out, Exception):
-                        print(f"{repr(next_out)=}")
-                        raise out
+                        raise next_out
                     if sampling_params.output_kind == RequestOutputKind.DELTA:
                         out.add(next_out)
                     else:
