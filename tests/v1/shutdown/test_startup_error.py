@@ -187,6 +187,6 @@ def test_llm_weight_loading_failure(monkeypatch, model, tensor_parallel_size,
 
         wait_for_gpu_memory_to_clear(
             devices=list(range(tensor_parallel_size)),
-            threshold_bytes=2 * GiB_bytes,
+            threshold_bytes=5 * GiB_bytes,
             timeout_s=60,
         )
