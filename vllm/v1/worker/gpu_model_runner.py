@@ -399,10 +399,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-            start_index = (len(req_state.block_ids) -
-                           len(req_data.new_block_ids))
-            self.input_batch.block_table.append_row(req_index, start_index,
-                                                    req_data.new_block_ids)
+            self.input_batch.block_table.append_row(req_data.new_block_ids,
+                                                    req_index)
             # Add new_token_ids to token_ids_cpu.
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(req_data.new_token_ids)
@@ -1071,12 +1069,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
         scheduler_output: "SchedulerOutput",
-    ) -> Dict[str, LogprobsTensors]:
+    ) -> Dict[str, Optional[LogprobsTensors]]:
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
             return {}
 
-        prompt_logprobs_dict: Dict[str, LogprobsTensors] = {}
+        prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
@@ -1187,8 +1185,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
             # it supports multiple.
-            max_tokens_by_modality_dict = MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
-                self.model_config)
+            max_tokens_by_modality_dict = (
+                MULTIMODAL_REGISTRY.
+                get_max_tokens_per_item_by_nonzero_modality(self.model_config))
             dummy_data_modality, max_tokens_per_mm_item = max(
                 max_tokens_by_modality_dict.items(), key=lambda item: item[1])
 
@@ -1275,15 +1274,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # maximum num_tokens.
         num_reqs = self.scheduler_config.max_num_seqs
         num_tokens = self.max_num_tokens
-        min_tokens_per_req: int = num_tokens // num_reqs
+        min_tokens_per_req = num_tokens // num_reqs
 
-        num_scheduled_tokens_list: List[int] = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
 
-        num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
-                                                    dtype=np.int32)
+        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
+                                        dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
 
         with self.maybe_profile_with_lora(self.lora_config,
