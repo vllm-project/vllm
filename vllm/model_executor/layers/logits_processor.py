@@ -53,6 +53,7 @@ class LogitsProcessor(nn.Module):
         # Whether to use gather or all-gather to gather the logits.
         parallel_config = get_current_vllm_config().parallel_config
         self.use_all_gather = current_platform.is_tpu() \
+            or current_platform.is_neuron() \
             or envs.VLLM_USE_V1 \
             or parallel_config.distributed_executor_backend == "external_launcher" # noqa
 
@@ -108,9 +109,9 @@ class LogitsProcessor(nn.Module):
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = lm_head.linear_method.apply(lm_head,
-                                             hidden_states,
-                                             bias=embedding_bias)
+        logits = lm_head.quant_method.apply(lm_head,
+                                            hidden_states,
+                                            bias=embedding_bias)
 
         # Gather logits for TP
         logits = self._gather_logits(logits)

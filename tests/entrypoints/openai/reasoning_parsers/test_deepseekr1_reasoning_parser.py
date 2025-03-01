@@ -24,10 +24,10 @@ COMPLETE_REASONING = {
     "reasoning_content": "This is a reasoning section",
     "content": None,
 }
-NO_REASONING = {
+NO_CONTENT = {
     "output": "This is content",
-    "reasoning_content": None,
-    "content": "This is content",
+    "reasoning_content": "This is content",
+    "content": None,
 }
 NO_REASONING_STREAMING = {
     "output": "This is a reasoning section",
@@ -98,8 +98,8 @@ TEST_CASES = [
     ),
     pytest.param(
         False,
-        NO_REASONING,
-        id="no_reasoning_token",
+        NO_CONTENT,
+        id="no_content_token",
     ),
     pytest.param(
         True,

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import abstractmethod
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Final, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, TypedDict, TypeVar, Union)
+from typing import (Final, List, Literal, Optional, Protocol, Set, Tuple,
+                    TypedDict, TypeVar, Union)
 
 import torch
 import torch.nn as nn
@@ -15,7 +16,6 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
 from vllm.model_executor.layers.activation import get_act_fn
@@ -32,7 +32,7 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -119,7 +119,7 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
         return get_vision_encoder_info(self.get_hf_config())
 
     @abstractmethod
-    def get_hf_processor(self) -> LlavaLikeProcessor:
+    def get_hf_processor(self, **kwargs: object) -> LlavaLikeProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -208,8 +208,8 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(LlavaProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
 
 
 class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
@@ -223,12 +223,12 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         raise NotImplementedError
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
@@ -272,8 +272,8 @@ class LlavaMultiModalProcessor(
 
 class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(PixtralProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
 
 class PixtralHFMultiModalProcessor(
@@ -294,7 +294,7 @@ class PixtralHFMultiModalProcessor(
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
             # Before/after https://github.com/huggingface/transformers/pull/35122
-            if Version(TRANSFORMERS_VERSION) <= Version("4.48.2"):
+            if Version(TRANSFORMERS_VERSION) <= Version("4.48.3"):
                 images = mm_data["images"]
                 assert isinstance(images, list)
 
@@ -329,12 +329,12 @@ class PixtralHFMultiModalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         hf_config = self.info.get_hf_config()
         tokenizer = self.info.get_tokenizer()
@@ -428,7 +428,7 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
 
 
 def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
-    """Given an signed vision feature layer, get the number of hidden layers
+    """Given a signed vision feature layer, get the number of hidden layers
     needed to leverage it.
 
     Args:
@@ -438,7 +438,7 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     """
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
-    return feature_layer_index + 1
+    return feature_layer_index
 
 
 def init_vision_tower_for_llava(
@@ -658,8 +658,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -712,8 +710,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
@@ -742,23 +738,24 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
 class MantisProcessingInfo(LlavaProcessingInfo):
 
-    def get_hf_processor(self):
+    def get_hf_processor(self, **kwargs: object):
         hf_config = self.get_hf_config()
         vision_info = self.get_vision_encoder_info()
+
+        kwargs.setdefault("patch_size", vision_info.get_patch_size())
 
         if Version(TRANSFORMERS_VERSION) < Version("4.48"):
             # BUG: num_additional_image_tokens = 0 but treated as 1,
             # so we set vision_feature_select_strategy to None to offset this
-            vision_feature_select_strategy = None
+            kwargs.setdefault("vision_feature_select_strategy", None)
         else:
             # FIXED: https://github.com/huggingface/transformers/pull/33424/files#diff-6a37acc21efcadaae622b079b2712a131131448ff64262bd219aa346aeec38faL150
-            vision_feature_select_strategy = hf_config.vision_feature_select_strategy  # noqa: E501
+            kwargs.setdefault(
+                "vision_feature_select_strategy",
+                hf_config.vision_feature_select_strategy,
+            )
 
-        return self.ctx.get_hf_processor(
-            LlavaProcessor,
-            patch_size=vision_info.get_patch_size(),
-            vision_feature_select_strategy=vision_feature_select_strategy,
-        )
+        return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
 
 
 class MantisMultiModalProcessor(LlavaMultiModalProcessor):
@@ -793,7 +790,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
                 "</Image>)",  # 3 tokens
             ])
 
-        mantis_mm_repls = self._bind_and_group_repls([
+        mantis_mm_repls = self._bind_and_group_updates([
             PromptReplacement(
                 modality="image",
                 target=[image_token_id] * num_image_tokens,
@@ -801,25 +798,24 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             )
         ])
 
-        prompt_ids, prompt, _ = self._apply_prompt_replacements(
+        prompt_ids, prompt, _ = self._apply_prompt_updates(
             result["prompt_token_ids"],
             mantis_mm_repls,
             mm_item_counts,
         )
 
-        unbound_orig_repls = self._get_prompt_replacements(
+        unbound_orig_repls = self._get_prompt_updates(
             mm_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        orig_repls = self._bind_and_group_repls(unbound_orig_repls)
+        orig_repls = self._bind_and_group_updates(unbound_orig_repls)
 
         mm_placeholders = self._find_mm_placeholders(
             orig_repls,
             prompt_ids,
             mm_item_counts,
         )
-
         self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         mm_placeholder_ranges = {

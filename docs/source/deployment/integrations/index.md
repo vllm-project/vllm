@@ -6,6 +6,7 @@
 kserve
 kubeai
 llamastack
+llmaz
 production-stack
 aibrix
 :::

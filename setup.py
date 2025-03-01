@@ -13,7 +13,7 @@ from typing import Dict, List
 
 import torch
 from packaging.version import Version, parse
-from setuptools import Extension, find_packages, setup
+from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
@@ -54,7 +54,7 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
 
-MAIN_CUDA_VERSION = "12.1"
+MAIN_CUDA_VERSION = "12.4"
 
 
 def is_sccache_available() -> bool:
@@ -268,14 +268,33 @@ class cmake_build_ext(build_ext):
 
 class repackage_wheel(build_ext):
     """Extracts libraries and other files from an existing wheel."""
-    default_wheel = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+
+    def get_base_commit_in_main_branch(self) -> str:
+        import subprocess
+
+        try:
+            current_branch = subprocess.check_output(
+                ["git", "branch", "--show-current"]).decode("utf-8").strip()
+
+            base_commit = subprocess.check_output(
+                ["git", "merge-base", "main",
+                 current_branch]).decode("utf-8").strip()
+            return base_commit
+        except Exception as err:
+            logger.warning(
+                "Failed to get the base commit in the main branch. "
+                "Using the nightly wheel. The libraries in this "
+                "wheel may not be compatible with your dev branch: %s", err)
+            return "nightly"
 
     def run(self) -> None:
-        wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION",
-                                   self.default_wheel)
-
         assert _is_cuda(
         ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+
+        wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
+        if wheel_location is None:
+            base_commit = self.get_base_commit_in_main_branch()
+            wheel_location = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
 
         import zipfile
 
@@ -309,6 +328,7 @@ class repackage_wheel(build_ext):
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
+                "vllm/_flashmla_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/vllm_flash_attn/flash_attn_interface.py",
@@ -480,9 +500,7 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    version = get_version(
-        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
-    )
+    version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
@@ -530,16 +548,6 @@ def get_vllm_version() -> str:
     return version
 
 
-def read_readme() -> str:
-    """Read the README file if present."""
-    p = get_path("README.md")
-    if os.path.isfile(p):
-        with open(get_path("README.md"), encoding="utf-8") as f:
-            return f.read()
-    else:
-        return ""
-
-
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
 
@@ -563,9 +571,8 @@ def get_requirements() -> List[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if ("vllm-flash-attn" in req
-                    and not (cuda_major == "12" and cuda_minor == "1")):
-                # vllm-flash-attn is built only for CUDA 12.1.
+            if ("vllm-flash-attn" in req and cuda_major != "12"):
+                # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
             modified_requirements.append(req)
@@ -605,6 +612,11 @@ if _is_cuda():
         # FA3 requires CUDA 12.0 or later
         ext_modules.append(
             CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
+        # Optional since this doesn't get built (produce an .so file) when
+        # not targeting a hopper system
+        ext_modules.append(
+            CMakeExtension(name="vllm._flashmla_C", optional=True))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
@@ -630,36 +642,10 @@ else:
     }
 
 setup(
-    name="vllm",
+    # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
-    author="vLLM Team",
-    license="Apache 2.0",
-    description=("A high-throughput and memory-efficient inference and "
-                 "serving engine for LLMs"),
-    long_description=read_readme(),
-    long_description_content_type="text/markdown",
-    url="https://github.com/vllm-project/vllm",
-    project_urls={
-        "Homepage": "https://github.com/vllm-project/vllm",
-        "Documentation": "https://vllm.readthedocs.io/en/latest/",
-    },
-    classifiers=[
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "License :: OSI Approved :: Apache Software License",
-        "Intended Audience :: Developers",
-        "Intended Audience :: Information Technology",
-        "Intended Audience :: Science/Research",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-        "Topic :: Scientific/Engineering :: Information Analysis",
-    ],
-    packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
-                                    "tests*")),
-    python_requires=">=3.9",
-    install_requires=get_requirements(),
     ext_modules=ext_modules,
+    install_requires=get_requirements(),
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
@@ -668,9 +654,4 @@ setup(
     },
     cmdclass=cmdclass,
     package_data=package_data,
-    entry_points={
-        "console_scripts": [
-            "vllm=vllm.scripts:main",
-        ],
-    },
 )
