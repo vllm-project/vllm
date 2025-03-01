@@ -13,7 +13,6 @@ Alternatively, you can also deploy Kubernetes using [helm chart](https://docs.vl
 Note that These projects are sorted chronologically.
 
 * [vLLM production-stack](https://github.com/vllm-project/production-stack): Originated from UChicago, vLLM production stack is a project that contains latest research and community effort, while still delivering production-level stability and performance. Checkout the [documentation page](https://docs.vllm.ai/en/latest/deployment/integrations/production-stack.html) for more details and examples.
-* [Aibrix](https://github.com/vllm-project/aibrix): Originated from Bytedance, Aibrix is a production-level stack that is Kubernetes-friendly and contains rich features (e.g. Lora management).
 
 --------
 
