@@ -167,6 +167,12 @@ def test_llm_weight_loading_failure(monkeypatch, model, tensor_parallel_size,
                 _ = LLM(model=model,
                         enforce_eager=True,
                         tensor_parallel_size=tensor_parallel_size)
+        elif not enable_multiprocessing and tensor_parallel_size > 1:
+            with pytest.raises(Exception,
+                               match="WorkerProc initialization failed"):
+                _ = LLM(model=model,
+                        enforce_eager=True,
+                        tensor_parallel_size=tensor_parallel_size)
         else:
             # Inproc raises the original error.
             # GPU memory is only cleared when the gc is run.
