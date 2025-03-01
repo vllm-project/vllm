@@ -2,7 +2,6 @@
 """Test that we handle an Error in model forward and shutdown."""
 
 import asyncio
-import gc
 
 import pytest
 
@@ -92,17 +91,13 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
 
 
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-@pytest.mark.parametrize("enable_multiprocessing", [True])
-def test_llm_model_error(monkeypatch, tensor_parallel_size,
-                         enable_multiprocessing):
+def test_llm_model_error(monkeypatch, tensor_parallel_size):
 
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        value = "1" if enable_multiprocessing else "0"
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", value)
 
         # Monkeypatch an error in the model.
         m.setattr(LlamaForCausalLM, "forward", evil_forward)
@@ -111,24 +106,12 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size,
                   enforce_eager=True,
                   tensor_parallel_size=tensor_parallel_size)
 
-        if enable_multiprocessing:
-            with pytest.raises(EngineDeadError):
-                llm.generate("Hello my name is Robert and I")
-        else:
-            # For Inproc client case, there is no "EngineCoreProc",
-            # so we will raise the original exception.
-            with pytest.raises(Exception, match="Simulated illegal memory"):
-                llm.generate("Hello my name is Robert and I")
-
-            # Since inproc, we need to gc ourselves.
-            del llm
-            import torch
-            torch.cuda.empty_cache()
-            gc.collect()
+        with pytest.raises(EngineDeadError):
+            llm.generate("Hello my name is Robert and I")
 
     # Confirm all the processes are cleaned up.
     wait_for_gpu_memory_to_clear(
         devices=list(range(tensor_parallel_size)),
-        threshold_bytes=5 * GiB_bytes,
+        threshold_bytes=2 * GiB_bytes,
         timeout_s=60,
     )

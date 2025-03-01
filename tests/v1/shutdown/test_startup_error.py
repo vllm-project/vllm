@@ -108,7 +108,6 @@ def test_llm_forward_pass_failure(monkeypatch, model, tensor_parallel_size):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
 
         # Simulate error during forward pass
         m.setattr(LlamaForCausalLM, "forward", evil_forward)
@@ -136,7 +135,6 @@ def test_llm_weight_loading_failure(monkeypatch, model, tensor_parallel_size):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
 
         # Simulate error during weight loading
         m.setattr(LlamaForCausalLM, "load_weights", evil_load_weights)
