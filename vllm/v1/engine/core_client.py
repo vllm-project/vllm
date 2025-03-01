@@ -432,7 +432,7 @@ class AsyncMPClient(MPClient):
         if task := getattr(self, "process_outputs_socket_task", None):
             task.cancel()
 
-    async def _start_process_outputs_socket(self):
+    async def _start_output_queue_task(self):
         # Perform IO in separate task to parallelize as much as possible.
         # Avoid task having direct reference back to the client.
         output_socket = self.output_socket
@@ -454,12 +454,11 @@ class AsyncMPClient(MPClient):
             except Exception as e:
                 outputs_queue.put_nowait(e)
 
-        self.process_outputs_socket_task = asyncio.create_task(
-            process_outputs_socket())
+        self.queue_task = asyncio.create_task(process_outputs_socket())
 
     async def get_output_async(self) -> EngineCoreOutputs:
-        if self.process_outputs_socket_task is None:
-            await self._start_process_outputs_socket()
+        if self.queue_task is None:
+            await self._start_output_queue_task()
 
         # Exceptions in process_outputs_socket are forwarded
         # so we can raise them in the run_output_handler() task.
