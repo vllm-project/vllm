@@ -1162,8 +1162,10 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                              w2_scale: Optional[torch.Tensor] = None,
                              block_shape: Optional[List[int]] = None,
                              expert_mask: Optional[torch.Tensor] = None):
-
     if envs.VLLM_ROCM_USE_AITER_BSCALED_MOE and use_fp8_w8a8:
+        assert w1_scale is not None
+        assert w2_scale is not None
+
         local_E = E = w1.shape[0]
         if expert_mask is not None:
             E = expert_mask.numel()
@@ -1171,6 +1173,10 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
         topk = topk_ids.shape[1]
         model_dim = w1.shape[-1]
         dtype = hidden_states.dtype
+        # The default block sizes are 128 in AITER.
+        if block_shape is None:
+            block_shape = [128, 128]
+
         scale_blk_k = block_shape[1]
 
         (
@@ -1206,7 +1212,7 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
         )
         return out_asm
 
-    if use_fp8_w8a8:
+    elif use_fp8_w8a8:
         return rocm_aiter_asm_fmoe.asm_moe(hidden_states=hidden_states,
                                            w1=w1,
                                            w2=w2,

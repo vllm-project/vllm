@@ -593,6 +593,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
+
+            if USE_ROCM_AITER_FMOE:
+                w13_scales = layer.w13_weight_scale.data.unsqueeze(
+                    -1).unsqueeze(-1).expand(
+                        (-1, layer.w13_weight.shape[1], -1))
+                w2_scales = layer.w2_weight_scale.data.unsqueeze(-1).unsqueeze(
+                    -1).expand((-1, layer.w2_weight.shape[1], -1))
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+                layer.w13_weight_scale = torch.nn.Parameter(
+                    w13_scales.contiguous(), requires_grad=False)
+                layer.w13_weight = torch.nn.Parameter(
+                    rocm_aiter_shuffle_weight(layer.w13_weight),
+                    requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(rocm_aiter_shuffle_weight(
+                    layer.w2_weight),
+                                                     requires_grad=False)
             return
 
         # If checkpoint is fp8, we need to handle that the

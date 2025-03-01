@@ -529,9 +529,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # use aiter block scaled moe op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_BSCALED_MOE":
-    lambda: (os.getenv("LLM_ROCM_USE_AITER", "False").lower() in
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_BSCALED_MOE",
-                                         "True").lower() in ("true", "1")),
+                                         "true").lower() in ("true", "1")),
 
     # use aiter linear op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_LINEAR":
