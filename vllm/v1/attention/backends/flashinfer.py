@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
 from flashinfer import (BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
-
-FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -22,6 +20,8 @@ if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
 logger = init_logger(__name__)
 
@@ -39,15 +39,15 @@ class FlashInferBackend(AttentionBackend):
         return "FLASHINFER"
 
     @staticmethod
-    def get_impl_cls() -> FlashInferImpl:
+    def get_impl_cls() -> Type[FlashInferImpl]:
         return FlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> AttentionMetadata:
+    def get_metadata_cls() -> Type[FlashInferMetadata]:
         return FlashInferMetadata
 
     @staticmethod
-    def get_builder_cls() -> FlashInferMetadataBuilder:
+    def get_builder_cls() -> Type[FlashInferMetadataBuilder]:
         return FlashInferMetadataBuilder
 
     @staticmethod
@@ -242,17 +242,23 @@ class FlashInferMetadataBuilder:
     def _plan(self, attn_metadata: FlashInferMetadata):
         if self.global_hyperparameters is None:
             self.global_hyperparameters = infer_global_hyperparameters(
-                    get_per_layer_parameters(self.vllm_config))
+                get_per_layer_parameters(self.vllm_config))
         if attn_metadata.use_cascade:
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
                 [attn_metadata.shared_qo_indptr, attn_metadata.qo_indptr],
-                [attn_metadata.shared_kv_page_indptr,
-                 attn_metadata.paged_kv_indptr],
-                [attn_metadata.shared_kv_page_indices,
-                 attn_metadata.paged_kv_indices],
-                [attn_metadata.shared_kv_last_page_len,
-                 attn_metadata.paged_kv_last_page_len],
+                [
+                    attn_metadata.shared_kv_page_indptr,
+                    attn_metadata.paged_kv_indptr
+                ],
+                [
+                    attn_metadata.shared_kv_page_indices,
+                    attn_metadata.paged_kv_indices
+                ],
+                [
+                    attn_metadata.shared_kv_last_page_len,
+                    attn_metadata.paged_kv_last_page_len
+                ],
                 attn_metadata.num_qo_heads,
                 attn_metadata.num_kv_heads,
                 attn_metadata.head_dim,
@@ -306,7 +312,8 @@ class FlashInferMetadataBuilder:
                                                  dtype=torch.int32,
                                                  device=device)
             shared_kv_page_indices = block_table[0, :num_common_kv_blocks]
-            shared_kv_last_page_len = torch.tensor([0], dtype=torch.int32,
+            shared_kv_last_page_len = torch.tensor([0],
+                                                   dtype=torch.int32,
                                                    device=device)
             # Remove the blocks of the shared prefix from all requests.
             block_table = block_table[:, num_common_kv_blocks:]
@@ -318,15 +325,18 @@ class FlashInferMetadataBuilder:
 
         block_table_bounds = (seq_lens + page_size - 1) // page_size
 
-        mask = (torch.arange(block_table.size(1), dtype=block_table.dtype,
+        mask = (torch.arange(block_table.size(1),
+                             dtype=block_table.dtype,
                              device=block_table.device).unsqueeze(0)
                 < block_table_bounds.unsqueeze(1))
         paged_kv_indices = block_table[mask]
 
         paged_kv_indptr = torch.cat([
-            torch.zeros(1, dtype=block_table_bounds.dtype,
+            torch.zeros(1,
+                        dtype=block_table_bounds.dtype,
                         device=block_table_bounds.device),
-            block_table_bounds.cumsum(dim=0, dtype=torch.int32)])
+            block_table_bounds.cumsum(dim=0, dtype=torch.int32)
+        ])
 
         paged_kv_last_page_len = seq_lens % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
@@ -466,7 +476,7 @@ class FlashInferImpl(AttentionImpl):
             assert attn_metadata.prefill_wrapper._causal
             assert attn_metadata.prefill_wrapper._window_left == window_left
             assert attn_metadata.prefill_wrapper._logits_soft_cap == (
-               self.logits_soft_cap or 0.0)
+                self.logits_soft_cap or 0.0)
             assert attn_metadata.prefill_wrapper._sm_scale == self.scale
             output = attn_metadata.prefill_wrapper.run(
                 query,
