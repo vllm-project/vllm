@@ -39,7 +39,10 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs)
@@ -311,10 +314,38 @@ class HpuModelAdapter:
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
         enforce_eager = vllm_config.model_config.enforce_eager
+
         if not htorch.utils.internal.is_lazy() and not enforce_eager:
-            self.model = torch.compile(self.model,
-                                       backend='hpu_backend',
-                                       dynamic=False)
+            if os.getenv('VLLM_REGIONAL_COMPILATION',
+                         'true').lower() == 'true':
+                self.regional_compilation_layers_list = [
+                    RMSNorm, VocabParallelEmbedding
+                ]
+                self._regional_compilation(self.model)
+            else:
+                self.model = torch.compile(self.model,
+                                           backend='hpu_backend',
+                                           dynamic=False)
+
+    def _regional_compilation(self,
+                              module,
+                              parent_module=None,
+                              module_name=None):
+        if isinstance(module, torch.nn.ModuleList):
+            for children_name, children_module in module.named_children():
+                self._compile_region(module, children_name, children_module)
+        elif any(
+                isinstance(module, layer)
+                for layer in self.regional_compilation_layers_list):
+            self._compile_region(parent_module, module_name, module)
+        else:
+            for children_name, children_module in module.named_children():
+                self._regional_compilation(children_module, module,
+                                           children_name)
+
+    def _compile_region(self, model, name, module):
+        module = torch.compile(module, backend='hpu_backend', dynamic=False)
+        setattr(model, name, module)
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
@@ -384,11 +415,12 @@ class HpuModelAdapter:
         if 'virtual_engine' in kwargs:
             virtual_engine = kwargs.pop('virtual_engine')
         input_ids = kwargs['input_ids']
-        kwargs['attn_metadata'] = self._update_metadata(
-            kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
-            input_ids.device, self.dtype)
+        attn_metadata = self._update_metadata(kwargs.pop('attn_metadata'),
+                                              input_ids.size(0),
+                                              input_ids.size(1),
+                                              input_ids.device, self.dtype)
         LoraMask.setLoraMask(kwargs.pop('lora_mask'))
-        with set_forward_context(kwargs['attn_metadata'], self.vllm_config,
+        with set_forward_context(attn_metadata, self.vllm_config,
                                  virtual_engine):
             hidden_states = self.model(*args, **kwargs)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -1346,15 +1378,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         max_seq_len = self.bucketing_global_state.prompt_seq_bucket_cfg[-1]
         max_batch_size = min(self.max_num_batched_tokens // max_seq_len,
                              self.scheduler_config.max_num_seqs)
-        self.warmup_scenario(max_batch_size, max_seq_len, True, kv_caches,
-                             False, True)
+        self.warmup_scenario(max_batch_size, max_seq_len, True, False, True)
         return
 
     def warmup_scenario(self,
                         batch_size,
                         seq_len,
                         is_prompt,
-                        kv_caches,
                         is_pt_profiler_run=False,
                         is_lora_profile_run=False) -> None:
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
@@ -1418,7 +1448,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             profiler.start()
         for _ in range(times):
             inputs = self.prepare_model_input(seqs)
-            self.execute_model(inputs, kv_caches, warmup_mode=True)
+            self.execute_model(inputs, None, warmup_mode=True)
             torch.hpu.synchronize()
             if profiler:
                 profiler.step()
@@ -1470,17 +1500,16 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                f"free_mem:{free_mem}")
         logger.info(msg)
 
-    def warmup_all_buckets(self, buckets, is_prompt, kv_caches):
+    def warmup_all_buckets(self, buckets, is_prompt):
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
             self.log_warmup('Prompt' if is_prompt else 'Decode', i,
                             len(buckets), batch_size, seq_len)
-            self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+            self.warmup_scenario(batch_size, seq_len, is_prompt)
 
     def warmup_graphs(self,
                       strategy,
                       buckets,
                       is_prompt,
-                      kv_caches,
                       available_mem,
                       starting_mem=0,
                       total_batch_seq=0.001):
@@ -1512,7 +1541,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.graphed_buckets.add(graphed_bucket)
             self.log_warmup(phase, idx, num_candidates, batch_size, seq_len)
             with HabanaMemoryProfiler() as mem_prof:
-                self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+                self.warmup_scenario(batch_size, seq_len, is_prompt)
             used_mem = align_workers(mem_prof.consumed_device_memory,
                                      torch.distributed.ReduceOp.MAX)
             available_mem -= used_mem
@@ -1542,8 +1571,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             graphs = graph == 't'
             if graphs:
                 self.graphed_buckets.add((int(bs), int(seq_len), is_prompt))
-            self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches,
-                                 True)
+            self.warmup_scenario(int(bs), int(seq_len), is_prompt, True)
             raise AssertionError("Finished profiling")
         if self.skip_warmup:
             logger.info("Skipping warmup...")
@@ -1578,9 +1606,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     list(sorted(self.bucketing_global_state.decode_buckets)))
 
         if not htorch.utils.internal.is_lazy() and not self.enforce_eager:
-            cache_size_limit = len(
-                self.bucketing_global_state.prompt_buckets) + len(
-                    self.bucketing_global_state.decode_buckets) + 1
+            cache_size_limit = 1 + 3 * (
+                len(self.bucketing_global_state.prompt_buckets) +
+                len(self.bucketing_global_state.decode_buckets))
             torch._dynamo.config.cache_size_limit = max(
                 cache_size_limit, torch._dynamo.config.cache_size_limit)
             # Multiply by 8 to follow the original default ratio between
@@ -1608,9 +1636,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         with compile_only_mode_context(
         ) if can_use_compile_only_mode else contextlib.nullcontext():
             self.warmup_all_buckets(self.bucketing_global_state.prompt_buckets,
-                                    True, kv_caches)
+                                    True)
             self.warmup_all_buckets(self.bucketing_global_state.decode_buckets,
-                                    False, kv_caches)
+                                    False)
 
             if not self.enforce_eager and htorch.utils.internal.is_lazy():
                 assert self.mem_margin is not None, \
@@ -1641,11 +1669,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
                     self.warmup_graphs(
                     prompt_strategy, self.bucketing_global_state.prompt_buckets,
-                    True, kv_caches, prompt_available_memory)
+                    True, prompt_available_memory)
                 mem_post_decode, decode_batch_seq, decode_captured_all = \
                     self.warmup_graphs(
                     decode_strategy, self.bucketing_global_state.decode_buckets,
-                    False, kv_caches, decode_available_memory)
+                    False, decode_available_memory)
 
                 # Not all prompt buckets were captured, but all decode buckets
                 # were captured and we have some free graph-allocated space
@@ -1656,7 +1684,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         self.warmup_graphs(
                             prompt_strategy,
                             self.bucketing_global_state.prompt_buckets, True,
-                            kv_caches,
                             graph_free_mem - mem_post_prompt - mem_post_decode,
                             mem_post_prompt, prompt_batch_seq))
 
@@ -1669,7 +1696,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     mem_post_decode, _, _ = self.warmup_graphs(
                         decode_strategy,
                         self.bucketing_global_state.decode_buckets, False,
-                        kv_caches,
                         graph_free_mem - mem_post_prompt - mem_post_decode,
                         mem_post_decode, decode_batch_seq)
 
@@ -1982,7 +2008,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         execute_model_kwargs = {
             "input_ids": input_tokens,
             "positions": input_positions,
-            "kv_caches": kv_caches,
             "attn_metadata": self.trim_attn_metadata(attn_metadata),
             "intermediate_tensors": intermediate_tensors,
             "lora_mask": lora_mask,

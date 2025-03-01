@@ -93,6 +93,7 @@ class EngineArgs:
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
+    hf_config_path: Optional[str] = None
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
@@ -263,6 +264,12 @@ class EngineArgs:
             help='Name or path of the huggingface tokenizer to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
+            "--hf-config-path",
+            type=nullable_str,
+            default=EngineArgs.hf_config_path,
+            help='Name or path of the huggingface config to use. '
+            'If unspecified, model name or path will be used.')
+        parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
             help='Skip initialization of tokenizer and detokenizer.')
@@ -382,9 +389,10 @@ class EngineArgs:
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
             ' parameter.\n'
-            'Backend-sepcific options can be supplied in a comma-separated '
+            'Backend-specific options can be supplied in a comma-separated '
             'list following a colon after the backend name. Valid backends and '
             'all available options are: [xgrammar:no-fallback, '
+            'xgrammar:disable-any-whitespace, '
             'outlines:no-fallback, lm-format-enforcer:no-fallback]')
         parser.add_argument(
             '--logits-processor-pattern',
@@ -1062,8 +1070,20 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
+        # gguf file needs a specific model loader and doesn't use hf_repo
+        if check_gguf_file(self.model):
+            self.quantization = self.load_format = "gguf"
+
+        # NOTE: This is to allow model loading from S3 in CI
+        if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
+                and self.model in MODELS_ON_S3
+                and self.load_format == LoadFormat.AUTO):  # noqa: E501
+            self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
+            self.load_format = LoadFormat.RUNAI_STREAMER
+
         return ModelConfig(
             model=self.model,
+            hf_config_path=self.hf_config_path,
             task=self.task,
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
@@ -1101,26 +1121,6 @@ class EngineArgs:
         )
 
     def create_load_config(self) -> LoadConfig:
-        return LoadConfig(
-            load_format=self.load_format,
-            download_dir=self.download_dir,
-            model_loader_extra_config=self.model_loader_extra_config,
-            ignore_patterns=self.ignore_patterns,
-        )
-
-    def create_engine_config(self,
-                             usage_context: Optional[UsageContext] = None
-                             ) -> VllmConfig:
-        from vllm.platforms import current_platform
-        current_platform.pre_register_and_update()
-
-        if envs.VLLM_USE_V1:
-            self._override_v1_engine_args(usage_context)
-
-        # gguf file needs a specific model loader and doesn't use hf_repo
-        if check_gguf_file(self.model):
-            self.quantization = self.load_format = "gguf"
-
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
         if (self.quantization == "bitsandbytes" or
@@ -1137,19 +1137,23 @@ class EngineArgs:
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
 
-        assert self.cpu_offload_gb >= 0, (
-            "CPU offload space must be non-negative"
-            f", but got {self.cpu_offload_gb}")
+        return LoadConfig(
+            load_format=self.load_format,
+            download_dir=self.download_dir,
+            model_loader_extra_config=self.model_loader_extra_config,
+            ignore_patterns=self.ignore_patterns,
+        )
+
+    def create_engine_config(self,
+                             usage_context: Optional[UsageContext] = None
+                             ) -> VllmConfig:
+        from vllm.platforms import current_platform
+        current_platform.pre_register_and_update()
+
+        if envs.VLLM_USE_V1:
+            self._override_v1_engine_args(usage_context)
 
         device_config = DeviceConfig(device=self.device)
-
-        # NOTE: This is to allow model loading from S3 in CI
-        if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
-                and self.model in MODELS_ON_S3
-                and self.load_format == LoadFormat.AUTO):  # noqa: E501
-            self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
-            self.load_format = LoadFormat.RUNAI_STREAMER
-
         model_config = self.create_model_config()
 
         if (model_config.is_multimodal_model and not envs.VLLM_USE_V1
@@ -1280,16 +1284,6 @@ class EngineArgs:
         num_lookahead_slots = num_lookahead_slots \
             if speculative_config is None \
             else speculative_config.num_lookahead_slots
-
-        if not self.use_v2_block_manager:
-            logger.warning(
-                "[DEPRECATED] Block manager v1 has been removed, "
-                "and setting --use-v2-block-manager to True or False has "
-                "no effect on vLLM behavior. Please remove "
-                "--use-v2-block-manager in your engine argument. "
-                "If your use case is not supported by "
-                "SelfAttnBlockSpaceManager (i.e. block manager v2),"
-                " please file an issue with detailed information.")
 
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,

@@ -9,8 +9,7 @@ py-cpuinfo
 transformers >= 4.48.2  # Required for Bamba model and Transformers backend.
 tokenizers >= 0.19.1  # Required for Llama 3.
 protobuf # Required by LlamaTokenizer.
-fastapi[standard] >= 0.107.0, < 0.113.0; python_version < '3.9'
-fastapi[standard]  >= 0.107.0, != 0.113.*, != 0.114.0; python_version >= '3.9'
+fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
 aiohttp
 openai >= 1.52.0 # Ensure modern openai package (ensure types module present and max_completion_tokens field support)
 pydantic >= 2.9
@@ -18,7 +17,7 @@ prometheus_client >= 0.18.0
 pillow  # Required for image processing
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
-lm-format-enforcer >= 0.10.9, < 0.11
+lm-format-enforcer >= 0.10.11, < 0.11
 outlines == 0.1.11
 lark == 1.2.2
 xgrammar == 0.1.11; platform_machine == "x86_64"
@@ -38,3 +37,4 @@ compressed-tensors == 0.9.2 # required for compressed-tensors
 depyf==0.18.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
 watchfiles # required for http server to monitor the updates of TLS files
+python-json-logger # Used by logging as per examples/other/logging_configuration.md

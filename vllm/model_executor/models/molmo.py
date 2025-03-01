@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union, cast)
+from typing import List, Optional, Set, Tuple, TypedDict, Union, cast
 
 import numpy as np
 import torch
@@ -16,7 +16,7 @@ from transformers import (BatchFeature, PretrainedConfig, ProcessorMixin,
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.attention.layer import MultiHeadAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -46,8 +46,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        BaseProcessingInfo, PromptIndexTargets,
+                                        PromptInsertion, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import JSONTree, json_map_leaves
@@ -460,15 +460,13 @@ class MolmoAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.q_norm is not None and self.k_norm is not None:
             q, k = self._apply_qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -580,8 +578,6 @@ class MolmoDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Self Attention
@@ -594,8 +590,6 @@ class MolmoDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         hidden_states, residual = self.post_attention_layernorm(
@@ -610,8 +604,6 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Self Attention
@@ -619,8 +611,6 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -841,8 +831,6 @@ class MolmoModel(nn.Module, SupportsQuant):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -858,13 +846,10 @@ class MolmoModel(nn.Module, SupportsQuant):
             residual = intermediate_tensors["residual"]
 
         # Apply blocks one-by-one.
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
@@ -1205,6 +1190,8 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         return MolmoProcessorWrapper(processor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        # TODO: Investigate different `embed_is_patch` between cache/no-cache
+        # in multi-image case
         return {"image": 1}
 
     def get_mm_max_tokens_per_item(
@@ -1343,24 +1330,17 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             img_patch_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
 
         image_token_length_w = processor.image_token_length_w
         image_token_length_h = processor.image_token_length_h
         pooling_size = processor.pooling_size
-
-        user_str = "User:"
-        if processor.always_start_with_space:
-            user_str = " " + user_str
-
-        user_tokens = tokenizer.encode(user_str, add_special_tokens=False)
 
         img_patch_id = processor.image_patch_id
         img_col_id = processor.im_col_id
@@ -1371,7 +1351,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         extra_joint = ([img_start_id] + extra_row * image_token_length_h +
                        [img_end_id])
 
-        def get_replacement_molmo(item_idx: int):
+        def get_insertion_molmo(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
@@ -1386,17 +1366,13 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
                      ((nrows + 1) // pooling_size) + [img_end_id])
 
             image_tokens = extra_joint + joint
-
-            return PromptReplacementDetails(
-                full=image_tokens + user_tokens,
-                features=image_tokens,
-            )
+            return image_tokens
 
         return [
-            PromptReplacement(
+            PromptInsertion(
                 modality="image",
-                target=user_str,
-                replacement=get_replacement_molmo,
+                target=PromptIndexTargets.prefix("<|endoftext|>"),
+                insertion=get_insertion_molmo,
             )
         ]
 
@@ -1643,8 +1619,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         self,
         input_ids: torch.LongTensor,
         positions: torch.LongTensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -1663,8 +1637,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
         hidden_states = self.model(input_ids,
                                    positions,
-                                   kv_caches,
-                                   attn_metadata,
                                    intermediate_tensors,
                                    inputs_embeds=inputs_embeds)
 

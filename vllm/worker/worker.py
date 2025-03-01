@@ -288,10 +288,11 @@ class Worker(LocalOrDistributedWorkerBase):
 
         This also warms up the model, which may record CUDA graphs.
         """
-        raise_if_cache_size_invalid(num_gpu_blocks,
-                                    self.cache_config.block_size,
-                                    self.cache_config.is_attention_free,
-                                    self.model_config.max_model_len)
+        raise_if_cache_size_invalid(
+            num_gpu_blocks, self.cache_config.block_size,
+            self.cache_config.is_attention_free,
+            self.model_config.max_model_len,
+            self.parallel_config.pipeline_parallel_size)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -525,21 +526,21 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the"
+                "You can use float16 instead by explicitly setting the "
                 "`dtype` flag in CLI, for example: --dtype=half.")
 
 
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
-                                max_model_len) -> None:
+                                max_model_len, pipeline_parallel_size) -> None:
     if is_attention_free and num_gpu_blocks != 0:
         raise ValueError("No memory should be allocated for the cache blocks "
-                         f"for an attention-free model, but {num_gpu_blocks}"
+                         f"for an attention-free model, but {num_gpu_blocks} "
                          "blocks are allocated.")
     if not is_attention_free and num_gpu_blocks <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
                          "initializing the engine.")
-    max_seq_len = block_size * num_gpu_blocks
+    max_seq_len = block_size * (num_gpu_blocks // pipeline_parallel_size)
     if not is_attention_free and max_model_len > max_seq_len:
         raise ValueError(
             f"The model's max seq len ({max_model_len}) "
