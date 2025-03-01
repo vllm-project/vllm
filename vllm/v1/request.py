@@ -5,7 +5,7 @@ import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union, cast
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -181,6 +181,7 @@ class Request:
     def _check_grammar_completion(self) -> bool:
         if isinstance(self._grammar, Future):
             try:
+                # We will check whether the future is ready within 100 us
                 self._grammar = self._grammar.result(timeout=0.0001)
                 self.status = RequestStatus.WAITING
             except TimeoutError:
@@ -193,8 +194,8 @@ class Request:
 
     @property
     def grammar(self) -> Optional[Grammar]:
-        self._check_grammar_completion()
-        return self._grammar if isinstance(self._grammar, Grammar) else None
+        completed = self._check_grammar_completion()
+        return cast(Optional[Grammar], self._grammar) if completed else None
 
     @grammar.setter
     def grammar(self, grammar: Union[Grammar, Future[Grammar]]) -> None:
@@ -203,7 +204,7 @@ class Request:
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
-    WAITING = 0
+    WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
