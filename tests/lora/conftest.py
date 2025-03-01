@@ -242,7 +242,7 @@ def baichuan_regex_lora_files():
 
 @pytest.fixture(scope="session")
 def ilama_lora_files():
-    return "jeeejeee/ilama-text2sql-spider"
+    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
 
 
 @pytest.fixture(scope="session")
