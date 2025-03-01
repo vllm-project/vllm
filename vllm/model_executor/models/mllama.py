@@ -54,7 +54,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalEncDecInputs,
+                                    MultiModalFieldConfig, MultiModalKwargs)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataDict, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
@@ -168,6 +169,27 @@ class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
 
 class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
                                 ):
+
+    def apply(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalEncDecInputs:
+        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
+
+        # Check that the number of image tokens in the decoder prompt matches
+        # the number of images provided in mm_data
+        num_image_tokens = mm_inputs['prompt_token_ids'].count(
+            self.info.get_hf_config().image_token_index)
+        image_data = mm_data.get("image", [])
+        num_images = 1 if isinstance(image_data, Image) else len(image_data)
+        if num_image_tokens != num_images:
+            raise ValueError(
+                f"The number of image tokens ({num_image_tokens}) must be"
+                f" the same as the number of images ({num_images})")
+
+        return mm_inputs
 
     def _call_hf_processor(
         self,

@@ -18,6 +18,7 @@ If you frequently encounter preemptions from the vLLM engine, consider the follo
 - Increase `gpu_memory_utilization`. The vLLM pre-allocates GPU cache by using gpu_memory_utilization% of memory. By increasing this utilization, you can provide more KV cache space.
 - Decrease `max_num_seqs` or `max_num_batched_tokens`. This can reduce the number of concurrent requests in a batch, thereby requiring less KV cache space.
 - Increase `tensor_parallel_size`. This approach shards model weights, so each GPU has more memory available for KV cache.
+- Increase `pipeline_parallel_size`. This approach distributes model layers across GPUs, reducing the memory needed for model weights on each GPU, which indirectly leaves more memory available for KV cache.
 
 You can also monitor the number of preemption requests through Prometheus metrics exposed by the vLLM. Additionally, you can log the cumulative number of preemption requests by setting disable_log_stats=False.
 
