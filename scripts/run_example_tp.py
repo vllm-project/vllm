@@ -7,24 +7,26 @@ from transformers import (PreTrainedTokenizerBase, AutoTokenizer)
 import random
 import datasets
 import time
+import argparse
+
 # get file location
 file_path = os.path.abspath(__file__)
 dataset_path = os.path.join(os.path.dirname(file_path), "../benchmarks")
 
-model_path = "/data/models/DeepSeek-R1/"
-# model_path = "deepseek-ai/DeepSeek-V2-Lite"
+model_path = "/data/models/DeepSeek-R1-static/"
 
 # Parse the command-line arguments.
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default=model_path, help="The model path.")
 parser.add_argument("--tokenizer", type=str, default=model_path, help="The model path.")
 parser.add_argument("--tp_size", type=int, default=8, help="The number of threads.")
-parser.add_argument("--ep_size", type=int, default=1, help="The number of threads.")
+parser.add_argument("--ep_size", type=int, default=8, help="The number of threads.")
 parser.add_argument("--dataset", type=str, default=None, help="The dataset.")
 parser.add_argument("--isl", type=int, default=1024, help="input sequence length.")
 parser.add_argument("--osl", type=int, default=1024, help="output sequence length.")
 parser.add_argument("--nprompts", type=int, default=4, help="The number of prompts.")
 parser.add_argument("--random", action="store_true", help="Randomly sample prompts.")
+parser.add_argument("--fp8_kv_cache", action="store_true", help="Use fp8 for kv cache.")
 args = parser.parse_args()
 
 os.environ["VLLM_SKIP_WARMUP"] = "true"
@@ -34,6 +36,7 @@ os.environ["VLLM_MOE_N_SLICE"] = "1" if args.ep_size > 1 else "4"
 os.environ["VLLM_EP_SIZE"] = f"{args.ep_size}"
 os.environ["VLLM_MLA_DISABLE_REQUANTIZATION"] = "1"
 os.environ["PT_HPU_WEIGHT_SHARING"] = "0"
+#os.environ['VLLM_DMOE_DYNAMIC_SCALE']='1' # only works for 1.20 + dmoe patch
 
 def sample_sonnet_requests(
     dataset_path: str,
@@ -160,7 +163,7 @@ if __name__ == "__main__":
     else:
         prompts = [
             "Hello, my name is",
-            "The president of the United States is",
+            "0.999 compares to 0.9 is ",
             "The capital of France is",
             "The future of AI is",
         ]
@@ -172,6 +175,9 @@ if __name__ == "__main__":
     # Create a sampling params object.
     sampling_params = SamplingParams(temperature=0, max_tokens=args.osl, ignore_eos=True)
     model = args.model
+    param = {}
+    if args.fp8_kv_cache:
+        param["kv_cache_dtype"] = "fp8_inc"
     if args.tp_size == 1:
         llm = LLM(
             model=model, 
@@ -180,6 +186,7 @@ if __name__ == "__main__":
             dtype="bfloat16",
             max_model_len=16384,
             gpu_memory_utilization=0.8,
+            **param
         )
     else:
         llm = LLM(
@@ -191,6 +198,7 @@ if __name__ == "__main__":
             max_model_len=16384,
             dtype="bfloat16",
             gpu_memory_utilization=0.8,
+            **param
         )
 
     # Generate texts from the prompts. The output is a list of RequestOutput objects
