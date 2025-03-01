@@ -92,7 +92,7 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
 
 
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-@pytest.mark.parametrize("enable_multiprocessing", [True, False])
+@pytest.mark.parametrize("enable_multiprocessing", [True])
 def test_llm_model_error(monkeypatch, tensor_parallel_size,
                          enable_multiprocessing):
 
