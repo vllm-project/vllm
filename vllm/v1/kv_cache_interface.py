@@ -75,6 +75,27 @@ class FullAttentionSpec(KVCacheSpec):
 
 
 @dataclass
+class SlidingWindowSpec(KVCacheSpec):
+    num_kv_heads: int
+    head_size: int
+    dtype: torch.dtype
+    sliding_window: int
+
+    @property
+    def type_id(self) -> str:
+        return f"sliding_window_{self.sliding_window}_{self.block_size}_{self.page_size_bytes}"  # noqa
+
+    @property
+    def page_size_bytes(self) -> int:
+        return  2 * self.block_size * self.num_kv_heads * self.head_size \
+                * get_dtype_size(self.dtype)
+
+    def bytes_for_tokens(self, num_tokens: int) -> int:
+        num_tokens = min(num_tokens, self.sliding_window)
+        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
+
+
+@dataclass
 class KVCacheTensor:
     """
     A dataclass for specifying how the workers should initialize the KV cache

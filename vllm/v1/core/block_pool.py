@@ -49,6 +49,8 @@ class BlockPool:
         self.cached_block_hash_to_block: Dict[BlockHashType, Dict[
             int, KVCacheBlock]] = defaultdict(dict)
 
+        self._null_block = KVCacheBlock(-1)
+
     def get_cached_block(self,
                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:
         """Get a cached block by the block hash, or None if cache miss.
@@ -224,6 +226,8 @@ class BlockPool:
                 priority.
         """
         for block in ordered_blocks:
+            if block == self._null_block:
+                continue
             block.decr_ref()
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
@@ -269,3 +273,6 @@ class BlockPool:
             The KV cache usage (between 0.0 and 1.0).
         """
         return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
+
+    def get_null_block(self) -> KVCacheBlock:
+        return self._null_block

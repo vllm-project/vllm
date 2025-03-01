@@ -95,7 +95,8 @@ class PrefixCachingMetrics:
 @dataclass
 class KVCacheBlock:
     """KV-cache block metadata."""
-    # Block ID, ranging from 0 to num_gpu_blocks - 1.
+    # Block ID, ranging from 0 to num_gpu_blocks - 1, and a special null_block
+    # with block_id = -1.
     block_id: int
     # Reference count.
     ref_cnt: int = 0
@@ -630,3 +631,12 @@ def make_kv_cache_configs_consistent(kv_cache_configs: List[KVCacheConfig]):
         kv_cache_config.num_blocks = num_blocks
 
     return kv_cache_configs
+
+
+@dataclass
+class PrefixLengthRange:
+    """
+    A closed interval [start, end] representing a range of valid prefix lengths.
+    """
+    start: int
+    end: int

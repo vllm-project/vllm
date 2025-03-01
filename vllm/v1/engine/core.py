@@ -27,6 +27,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -57,8 +58,9 @@ class EngineCore:
         self.model_executor = executor_class(vllm_config)
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks = self._initialize_kv_caches(
-            vllm_config)
+        num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+            self._initialize_kv_caches(vllm_config)
+
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
@@ -69,6 +71,7 @@ class EngineCore:
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
             speculative_config=vllm_config.speculative_config,
+            kv_cache_config=kv_cache_config,
             log_stats=self.log_stats,
         )
 
@@ -88,8 +91,8 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
-    def _initialize_kv_caches(self,
-                              vllm_config: VllmConfig) -> Tuple[int, int]:
+    def _initialize_kv_caches(
+            self, vllm_config: VllmConfig) -> Tuple[int, int, KVCacheConfig]:
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -112,18 +115,20 @@ class EngineCore:
         # all the memory operators can be applied to all workers.
         make_kv_cache_configs_consistent(kv_cache_configs)
 
-        # All workers have the same kv_cache_config except layer names, so use
-        # an arbitrary one to get the number of blocks.
-        num_gpu_blocks = kv_cache_configs[0].num_blocks
-        num_cpu_blocks = 0
-
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
+
+        # All workers have the same kv_cache_config except layer names, so we
+        # can use an arbitrary one to initialize the scheduler.
+        scheduler_kv_cache_config = kv_cache_configs[0]
+        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+        num_cpu_blocks = 0
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
-        return num_gpu_blocks, num_cpu_blocks
+        return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""

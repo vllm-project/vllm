@@ -14,6 +14,7 @@ from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreOutput, EngineCoreOutputs)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -30,12 +31,14 @@ class Scheduler:
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         speculative_config: Optional[SpeculativeConfig],
+        kv_cache_config: KVCacheConfig,
         log_stats: bool,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.speculative_config = speculative_config
+        self.kv_cache_config = kv_cache_config
         self.log_stats = log_stats
 
         # Scheduling constraints.
@@ -44,15 +47,11 @@ class Scheduler:
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
 
-        num_gpu_blocks = cache_config.num_gpu_blocks
-        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=num_gpu_blocks,
+            kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching,
+            enable_caching=cache_config.enable_prefix_caching,
             log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 
@@ -258,9 +257,20 @@ class Scheduler:
                     # is always a multiple of the block size. This limitation
                     # can potentially be removed in the future to slightly
                     # improve the performance.
-                    num_computed_tokens -= self.block_size
-                    num_new_tokens = self.block_size
-                    computed_blocks.pop()
+                    virtual_layers = self.kv_cache_config.virtual_layers
+                    if len(virtual_layers) > 1 or \
+                        not isinstance(virtual_layers[0].kv_cache_spec,
+                                    FullAttentionSpec):
+                        # It is difficult to handle the last block problem
+                        # for hybrid models. Ignore all computed tokens as
+                        # a temporary solution.
+                        num_computed_tokens = 0
+                        num_new_tokens = request.num_tokens
+                        computed_blocks = []
+                    else:
+                        num_computed_tokens -= self.block_size
+                        num_new_tokens = self.block_size
+                        computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
@@ -354,6 +364,7 @@ class Scheduler:
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
         ]
+        print("block_ids", req_to_new_block_ids)
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
