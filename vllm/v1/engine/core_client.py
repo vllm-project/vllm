@@ -320,22 +320,32 @@ class MPClient(EngineCoreClient):
         resources.output_socket = make_zmq_socket(self.ctx, output_path,
                                                   zmq.constants.PULL)
 
-        dp_size = vllm_config.parallel_config.data_parallel_size
+        new_core_engine = lambda index: CoreEngine(
+            vllm_config, executor_class, log_stats, self.ctx, output_path,
+            index)
 
         # Start engine core process(es).
-        for i in range(dp_size):
-            resources.core_engines.append(
-                CoreEngine(vllm_config, executor_class, log_stats, self.ctx,
-                           output_path, i))
+        self._init_core_engines(vllm_config, new_core_engine,
+                                resources.core_engines)
 
         # Wait for engine core process(es) to start.
         for engine in resources.core_engines:
             engine.proc_handle.wait_for_startup()
 
         self.output_socket = resources.output_socket
-        self.core_engines = resources.core_engines
-        self.core_engine = self.core_engines[0]
         self.utility_results: Dict[int, AnyFuture] = {}
+
+    def _init_core_engines(
+        self,
+        vllm_config: VllmConfig,
+        new_core_engine: Callable[[int], CoreEngine],
+        core_engines: List[CoreEngine],
+    ) -> None:
+
+        # Default case - single core engine.
+        core_engine = new_core_engine(0)
+        core_engines.append(core_engine)
+        self.core_engine = core_engine
 
     def shutdown(self):
         self._finalizer()
@@ -364,9 +374,6 @@ class SyncMPClient(MPClient):
         )
 
         self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
-
-        assert len(self.core_engines) == 1, (
-            "SyncMPClient does not support data parallel")
 
         self.input_socket = self.core_engine.input_socket
 
@@ -408,7 +415,6 @@ class SyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future: Future[Any] = Future()
         self.utility_results[call_id] = future
-
         self._send_input(EngineCoreRequestType.UTILITY,
                          (call_id, method, args))
 
@@ -591,6 +597,20 @@ class DPAsyncMPClient(AsyncMPClient):
         self.reqs_in_flight: Dict[str, CoreEngine] = {}
 
         self.output_processor = DPAsyncMPClient.process_engine_outputs  # type: ignore[assignment]
+
+    def _init_core_engines(
+        self,
+        vllm_config: VllmConfig,
+        new_core_engine: Callable[[int], CoreEngine],
+        core_engines: List[CoreEngine],
+    ) -> None:
+
+        # Launch a core engine for each data parallel rank.
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        for i in range(dp_size):
+            core_engines.append(new_core_engine(i))
+
+        self.core_engines = core_engines
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
