@@ -10,7 +10,7 @@ from flashinfer import (BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionType)
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
