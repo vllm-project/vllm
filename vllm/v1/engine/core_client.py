@@ -426,9 +426,8 @@ class AsyncMPClient(MPClient):
 
     def shutdown(self):
         super().shutdown()
-        if process_outputs_socket_task := getattr(
-                self, "process_outputs_socket_task", None):
-            process_outputs_socket_task.cancel()
+        if task := getattr(self, "process_outputs_socket_task", None):
+            task.cancel()
 
     async def _start_process_outputs_socket(self):
         # Perform IO (releases GIL) in background task.
