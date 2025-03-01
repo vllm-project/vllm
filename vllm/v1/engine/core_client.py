@@ -284,7 +284,7 @@ class MPClient(EngineCoreClient):
     def shutdown(self):
         self._finalizer()
 
-    def _check_engine_core_dead(self, buffer: Any):
+    def _raise_if_engine_core_dead(self, buffer: Any):
         if buffer == EngineCoreProc.ENGINE_CORE_DEAD:
             self.is_engine_dead = True
             raise EngineDeadError()
@@ -347,7 +347,7 @@ class SyncMPClient(MPClient):
     def get_output(self) -> EngineCoreOutputs:
         try:
             (frame, ) = self.output_socket.recv_multipart(copy=False)
-            self._check_engine_core_dead(frame.buffer)
+            self._raise_if_engine_core_dead(frame.buffer)
             return self.outputs_queue.get()
         except Exception as e:
             raise self._format_exception(e) from None
@@ -422,29 +422,27 @@ class AsyncMPClient(MPClient):
         )
         self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs,
                                                 Exception]] = asyncio.Queue()
-        self.queue_task: Optional[asyncio.Task] = None
+        self.process_outputs_socket_task: Optional[asyncio.Task] = None
 
     def shutdown(self):
         super().shutdown()
-        if queue_task := getattr(self, "queue_task", None):
-            queue_task.cancel()
+        if process_outputs_socket_task := getattr(
+                self, "process_outputs_socket_task", None):
+            process_outputs_socket_task.cancel()
 
-    async def _start_output_queue_task(self):
-        # Perform IO in separate task to parallelize as much as possible.
+    async def _start_process_outputs_socket(self):
+        # Perform IO (releases GIL) in background task.
         # Avoid task having direct reference back to the client.
-        self.outputs_queue = asyncio.Queue()
         output_socket = self.output_socket
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
 
         async def process_outputs_socket():
-            # Run ZMQ IO (which releases the GIL) in a background task
-            # to overlap with this task (run_output_handler).
             try:
                 while True:
                     (frame, ) = await output_socket.recv_multipart(copy=False)
-                    self._check_engine_core_dead(frame.buffer)
+                    self._raise_if_engine_core_dead(frame.buffer)
                     outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
@@ -454,15 +452,15 @@ class AsyncMPClient(MPClient):
             except Exception as e:
                 outputs_queue.put_nowait(e)
 
-        self.queue_task = asyncio.create_task(process_outputs_socket())
+        self.process_outputs_socket_task = asyncio.create_task(
+            process_outputs_socket())
 
     async def get_output_async(self) -> EngineCoreOutputs:
-        if self.outputs_queue is None:
-            await self._start_output_queue_task()
-            assert self.outputs_queue is not None
-        # If an exception arises in process_outputs_socket task,
-        # it is forwarded to the outputs_queue so we can raise it
-        # from this (run_output_handler) task to shut down the server.
+        if self.process_outputs_socket_task is None:
+            await self._start_process_outputs_socket()
+
+        # Exceptions in process_outputs_socket are forwarded
+        # so we can raise them in the run_output_handler() task.
         outputs = await self.outputs_queue.get()
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
@@ -476,9 +474,6 @@ class AsyncMPClient(MPClient):
             await self.input_socket.send_multipart(msg, copy=False)
         except Exception as e:
             raise self._format_exception(e) from None
-
-        if self.outputs_queue is None:
-            await self._start_output_queue_task()
 
     async def _call_utility_async(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64

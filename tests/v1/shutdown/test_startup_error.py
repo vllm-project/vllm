@@ -18,7 +18,7 @@ def evil_forward(self, *args, **kwargs):
     if get_tensor_model_parallel_rank() == 0:
         raise RuntimeError("Simulated Error during forward pass!")
 
-    return self.model(*args, **kwargs, intermediate_tensors=None)
+    return self.model(*args, **kwargs)
 
 
 def evil_load_weights(self, *args, **kwargs):

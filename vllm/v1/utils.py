@@ -125,8 +125,7 @@ class BackgroundProcHandle:
         """Wait until the background process is ready."""
 
         e = Exception(f"{self.process_name} initialization failed due to "
-                      "an exception in a background process. See stack trace "
-                      "for root cause.")
+                      "an Exception. See stack trace for root cause.")
 
         try:
             if self.reader.recv()["status"] != "READY":

@@ -27,7 +27,7 @@ def evil_forward(self, *args, **kwargs):
         raise Exception("Simulated illegal memory access on Rank 0!")
     self.num_calls += 1
 
-    return self.model(*args, **kwargs, intermediate_tensors=None)
+    return self.model(*args, **kwargs)
 
 
 @pytest.mark.asyncio
