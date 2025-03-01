@@ -275,20 +275,14 @@ class MPClient(EngineCoreClient):
                 "executor_class": executor_class,
                 "log_stats": log_stats,
             })
-        resources.proc_handle.wait_for_startup(self.shutdown)
+        resources.proc_handle.wait_for_startup()
 
         self.output_socket = resources.output_socket
         self.input_socket = resources.input_socket
         self.utility_results: Dict[int, AnyFuture] = {}
 
     def shutdown(self):
-        """Clean up background resources."""
-
-        if ctx := getattr(self, "ctx", None):
-            ctx.destroy(linger=0)
-
-        if proc_handle := getattr(self, "proc_handle", None):
-            proc_handle.shutdown()
+        self._finalizer()
 
     def _validate_alive(self, buffer: Any):
         if buffer == EngineCoreProc.ENGINE_CORE_DEAD:

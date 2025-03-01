@@ -121,7 +121,7 @@ class BackgroundProcHandle:
     def shutdown(self):
         self._finalizer()
 
-    def wait_for_startup(self, shutdown_callback: Callable):
+    def wait_for_startup(self):
         """Wait until the background process is ready."""
 
         e = Exception(f"{self.process_name} initialization failed due to "
@@ -133,10 +133,8 @@ class BackgroundProcHandle:
                 raise e
         except EOFError:
             e.__suppress_context__ = True
-            shutdown_callback()
             raise e from None
         except Exception:
-            shutdown_callback()
             raise e from None
         finally:
             self.reader.close()
