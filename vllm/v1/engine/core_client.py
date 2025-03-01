@@ -318,7 +318,8 @@ class SyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
+        self.outputs_queue: queue.Queue[Union[EngineCoreOutputs,
+                                              Exception]] = queue.Queue()
 
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
@@ -331,7 +332,8 @@ class SyncMPClient(MPClient):
             try:
                 while True:
                     (frame, ) = output_socket.recv_multipart(copy=False)
-                    outputs = decoder.decode(frame.buffer)
+                    self._raise_if_engine_core_dead(frame.buffer)
+                    outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
@@ -340,6 +342,8 @@ class SyncMPClient(MPClient):
             except zmq.error.ContextTerminated:
                 # Expected when the class is GC'd / during process termination.
                 pass
+            except Exception as e:
+                outputs_queue.put_nowait(e)
 
         # Process outputs from engine in separate thread.
         Thread(target=process_outputs_socket, daemon=True).start()
