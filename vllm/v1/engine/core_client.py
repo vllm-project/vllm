@@ -428,12 +428,12 @@ class AsyncMPClient(MPClient):
         )
         self.outputs_queue: asyncio.Queue[Union[EngineCoreOutputs,
                                                 Exception]] = asyncio.Queue()
-        self.process_outputs_socket_task: Optional[asyncio.Task] = None
+        self.queue_task: Optional[asyncio.Task] = None
 
     def shutdown(self):
         super().shutdown()
-        if task := getattr(self, "process_outputs_socket_task", None):
-            task.cancel()
+        if queue_task := getattr(self, "queue_task", None):
+            queue_task.cancel()
 
     async def _start_output_queue_task(self):
         # Perform IO in separate task to parallelize as much as possible.
