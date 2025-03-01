@@ -34,6 +34,14 @@ POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
 
+class MultiprocWorkerError(Exception):
+    """Raised when the Worker sends an exception over RPC. Unrecoverable."""
+
+    def __init__(self, *args, **kwargs):
+        MESSAGE = "WorkerProc encountered an issue. See stack trace above for the root cause."  # noqa: E501
+        super().__init__(MESSAGE, *args, **kwargs)
+
+
 class MultiprocExecutor(Executor):
 
     def _init_executor(self) -> None:
@@ -118,7 +126,7 @@ class MultiprocExecutor(Executor):
 
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     if isinstance(result, Exception):
-                        raise result
+                        raise MultiprocWorkerError from result
                     else:
                         raise RuntimeError("Worker failed")
 
@@ -253,7 +261,8 @@ class WorkerProc:
             })
 
         except Exception as e:
-            logger.exception("WorkerProc got error at startup:", exc_info=e)
+            logger.exception("WorkerProc got Exception at startup:",
+                             exc_info=e)
             ready_pipe.send({"status": "FAILED"})
 
         finally:
@@ -389,9 +398,9 @@ class WorkerProc:
                     func = partial(cloudpickle.loads(method), self.worker)
                 output = func(*args, **kwargs)
             except Exception as e:
+                logger.exception("WorkerProc got an Exception:", exc_info=e)
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
-                logger.exception("WorkerProc got an Exception:", exc_info=e)
                 continue
 
             self.worker_response_mq.enqueue(
