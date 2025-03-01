@@ -186,6 +186,11 @@ class FlashInferMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
+    @property
+    def query_start_loc(self):
+        # The GPUModelRunner expects to be able to access this property.
+        return self.qo_indptr
+
     def __post_init__(self):
         # Refer to
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157

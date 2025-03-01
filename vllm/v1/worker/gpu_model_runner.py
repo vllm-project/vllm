@@ -26,7 +26,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -581,13 +580,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            if isinstance(attn_metadata, FlashInferMetadata):
-                # FIXME: abstract this away so it's not flashinfer-specific.
-                # This code should not rely on knowing the internals of the
-                # attention metadata.
-                logits_indices = attn_metadata.qo_indptr[1:] - 1
-            else:
-                logits_indices = attn_metadata.query_start_loc[1:] - 1
+            logits_indices = attn_metadata.query_start_loc[1:] - 1
 
         # Hot-Swap lora model
         if self.lora_config:
