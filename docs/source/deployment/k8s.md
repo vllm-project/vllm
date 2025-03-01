@@ -10,7 +10,7 @@ NOTE: please make sure that there is a running Kubernetes cluster with available
 
 Alternatively, you can also deploy Kubernetes using [helm chart](https://docs.vllm.ai/en/latest/deployment/frameworks/helm.html). There are also open-source vLLM community projects available to make your deployment even smoother.
 
-* [vLLM production-stack](https://github.com/vllm-project/production-stack): Originated from UChicago, vLLM production stack is a project that contains latest research and community effort, while still delivering production-level stability and performance. Checkout the [documentation page](https://docs.vllm.ai/en/latest/deployment/integrations/production-stack.html) for more details and examples.
+* [vLLM production-stack](https://github.com/vllm-project/production-stack): Born out of a Berkeley-UChicago collaboration, vLLM production stack is a project that contains latest research and community effort, while still delivering production-level stability and performance. Checkout the [documentation page](https://docs.vllm.ai/en/latest/deployment/integrations/production-stack.html) for more details and examples.
 
 --------
 
