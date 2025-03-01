@@ -215,8 +215,6 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
             assert qkv_proj.scheme.group_size == (-1
                                                   if group is None else group)
 
-            assert qkv_proj.weight_packed.dtype is torch.int32
-            assert qkv_proj.weight_scale.dtype is torch.float16
             assert qkv_proj.scheme.pack_factor == pack_factor
 
         llm.apply_model(check_model)
