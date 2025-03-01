@@ -4,8 +4,6 @@
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
-NOTE: please make sure that there is a running Kubernetes cluster with available GPU resources. If you are new to Kubernetes, here is a [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) that helps you prepare the Kubernetes environment.
-
 --------
 
 Alternatively, you can also deploy Kubernetes using [helm chart](https://docs.vllm.ai/en/latest/deployment/frameworks/helm.html). There are also open-source projects available to make your deployment even smoother.
