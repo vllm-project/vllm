@@ -111,6 +111,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             raise NotImplementedError(
                 "Non-Attention backend is not supported by V1 GPUModelRunner.")
 
+        try:
+            attn_state_cls = self.attn_backend.get_state_cls()
+        except NotImplementedError:
+            self.attn_state = None
+        else:
+            self.attn_state = attn_state_cls(weakref.proxy(self))
+
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
 
@@ -254,10 +261,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
-
-        # Instantiate the backend class.
-        # FIXME: clean up after deciding if the backend should be instantiable.
-        self.attn_backend = self.attn_backend(self)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -573,9 +576,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_num_scheduled_tokens,
             common_prefix_len=common_prefix_len,
         )
-        if isinstance(attn_metadata, FlashInferMetadata):
-            # FIXME: abstract this away so it's not flashinfer-specific
-            self.attn_backend.begin_forward(attn_metadata)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0

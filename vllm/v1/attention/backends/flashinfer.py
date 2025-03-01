@@ -17,7 +17,7 @@ except ImportError:
 import numpy as np
 import torch
 
-from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -32,9 +32,119 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class FlashInferBackend:
+class FlashInferBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
+
+    @staticmethod
+    def get_supported_head_sizes() -> List[int]:
+        return [64, 128, 256]
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHINFER_VLLM_V1"
+
+    @staticmethod
+    def get_impl_cls() -> Type["FlashInferImpl"]:
+        return FlashInferImpl
+
+    @staticmethod
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return FlashInferMetadata
+
+    @staticmethod
+    def get_state_cls() -> Type["FlashInferState"]:
+        return FlashInferState
+
+    @staticmethod
+    def get_builder_cls() -> Type["FlashInferMetadataBuilder"]:
+        return FlashInferMetadataBuilder
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def use_cascade_attention(*args, **kwargs) -> bool:
+        #if self.runner.kv_cache_dtype != self.runner.model_config.dtype:
+        #    # TODO: The cascade wrapper currently does not support setting
+        #    # kv cache dtype to something different from query dtype.
+        #    return False
+        return use_cascade_attention(*args, **kwargs)
+
+
+@dataclass
+class PerLayerParameters:
+    """
+    Currently, FlashInfer backend only support models in which all layers share
+    the same values for the following hyperparameters.
+    """
+
+    window_left: int
+    logits_soft_cap: Optional[float]
+    sm_scale: float
+
+
+def get_per_layer_parameters(
+        vllm_config: VllmConfig) -> Dict[str, PerLayerParameters]:
+    """
+    Scan all attention layers and determine some hyperparameters
+    to use during `plan`.
+    """
+
+    layers = vllm_config.compilation_config.static_forward_context
+    per_layer_params: Dict[str, PerLayerParameters] = {}
+
+    for key, layer in layers.items():
+        assert isinstance(layer, Attention)
+
+        impl = layer.impl
+        assert isinstance(impl, FlashInferImpl)
+
+        # Infer hyperparameters from the attention layer
+        window_size = impl.sliding_window
+        window_left = window_size[0] if window_size is not None else -1
+        logits_soft_cap = impl.logits_soft_cap
+        sm_scale = impl.scale
+
+        per_layer_params[key] = PerLayerParameters(window_left,
+                                                   logits_soft_cap, sm_scale)
+
+    return per_layer_params
+
+
+def infer_global_hyperparameters(
+        per_layer_params: Dict[str, PerLayerParameters]) -> PerLayerParameters:
+    """
+    Currently, FlashInfer backend only support models in which all layers share
+    the same values for the following hyperparameters:
+    - `window_left`
+    - `logits_soft_cap`
+    - `sm_scale`
+
+    So this function asserts that all layers share the same values for these
+    hyperparameters and returns the global values.
+    """
+
+    assert len(per_layer_params) > 0, "No attention layers found in the model."
+
+    param_sets = list(per_layer_params.values())
+    global_params = param_sets[0]
+    for params in param_sets:
+        assert params == global_params, (
+            "FlashInfer backend currently only supports models in which all "
+            "layers share the same values for the following hyperparameters: "
+            "`window_left`, `logits_soft_cap`, `sm_scale`.")
+
+    return global_params
+
+
+class FlashInferState:
 
     def __init__(self, runner):
         self.runner = runner
@@ -110,109 +220,6 @@ class FlashInferBackend:
                 kv_data_type=attn_metadata.data_type,
             )
 
-    @staticmethod
-    def get_supported_head_sizes() -> List[int]:
-        return [64, 128, 256]
-
-    @staticmethod
-    def get_name() -> str:
-        return "FLASHINFER_VLLM_V1"
-
-    @staticmethod
-    def get_impl_cls() -> Type["FlashInferImpl"]:
-        return FlashInferImpl
-
-    @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return FlashInferMetadata
-
-    @staticmethod
-    def get_builder_cls() -> Type["FlashInferMetadataBuilder"]:
-        return FlashInferMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
-
-    #@staticmethod
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        if self.runner.kv_cache_dtype != self.runner.model_config.dtype:
-            # TODO: The cascade wrapper currently does not support setting
-            # kv cache dtype to something different from query dtype.
-            return False
-        return use_cascade_attention(*args, **kwargs)
-
-
-@dataclass
-class PerLayerParameters:
-    """
-    Currently, FlashInfer backend only support models in which all layers share
-    the same values for the following hyperparameters.
-    """
-
-    window_left: int
-    logits_soft_cap: Optional[float]
-    sm_scale: float
-
-
-def get_per_layer_parameters(
-        vllm_config: VllmConfig) -> Dict[str, PerLayerParameters]:
-    """
-    Scan all attention layers and determine some hyperparameters
-    to use during `plan`.
-    """
-
-    layers = vllm_config.compilation_config.static_forward_context
-    per_layer_params: Dict[str, PerLayerParameters] = {}
-
-    for key, layer in layers.items():
-        assert isinstance(layer, Attention)
-
-        impl = layer.impl
-        assert isinstance(impl, FlashInferImpl)
-
-        # Infer hyperparameters from the attention layer
-        window_size = impl.sliding_window
-        window_left = window_size[0] if window_size is not None else -1
-        logits_soft_cap = impl.logits_soft_cap
-        sm_scale = impl.scale
-
-        per_layer_params[key] = PerLayerParameters(window_left,
-                                                   logits_soft_cap, sm_scale)
-
-    return per_layer_params
-
-
-def infer_global_hyperparameters(
-        per_layer_params: Dict[str, PerLayerParameters]) -> PerLayerParameters:
-    """
-    Currently, FlashInfer backend only support models in which all layers share
-    the same values for the following hyperparameters:
-    - `window_left`
-    - `logits_soft_cap`
-    - `sm_scale`
-
-    So this function asserts that all layers share the same values for these
-    hyperparameters and returns the global values.
-    """
-
-    assert len(per_layer_params) > 0, "No attention layers found in the model."
-
-    param_sets = list(per_layer_params.values())
-    global_params = param_sets[0]
-    for params in param_sets:
-        assert params == global_params, (
-            "FlashInfer backend currently only supports models in which all "
-            "layers share the same values for the following hyperparameters: "
-            "`window_left`, `logits_soft_cap`, `sm_scale`.")
-
-    return global_params
-
 
 @dataclass
 class FlashInferMetadata:
@@ -281,6 +288,8 @@ class FlashInferMetadataBuilder:
 
     def __init__(self, runner: "GPUModelRunner"):
         self.runner = runner
+        self.state = runner.attn_state
+        assert isinstance(self.state, FlashInferState)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput"):
@@ -355,6 +364,7 @@ class FlashInferMetadataBuilder:
             shared_kv_page_indices=shared_kv_page_indices,
             shared_kv_last_page_len=shared_kv_last_page_len,
         )
+        self.state.begin_forward(attn_metadata)
         return attn_metadata
 
 
@@ -410,7 +420,7 @@ class FlashInferImpl(AttentionImpl):
 
     def forward(
         self,
-        layer: AttentionLayer,
+        layer: torch.nn.Module,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,

@@ -25,12 +25,9 @@ if current_platform.is_cuda():
 logger = init_logger(__name__)
 
 
-class FlashAttentionBackend:
+class FlashAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
-
-    def __init__(self, runner):
-        self.runner = runner
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
