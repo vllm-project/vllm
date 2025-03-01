@@ -1,8 +1,8 @@
 (deployment-production-stack)=
 
-## Production stack
+# Production stack
 
-Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using the [vLLM production stack](https://github.com/vllm-project/production-stack) and native Kubernetes. The [vLLM production stack](https://github.com/vllm-project/production-stack) is an officially released, production-optimized codebase under the [vLLM project](https://github.com/vllm-project), designed for LLM deployment with:
+Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using the [vLLM production stack](https://github.com/vllm-project/production-stack). The [vLLM production stack](https://github.com/vllm-project/production-stack) is an officially released, production-optimized codebase under the [vLLM project](https://github.com/vllm-project), designed for LLM deployment with:
 
 * **Upstream vLLM compatibility** – It wraps around upstream vLLM without modifying its code.
 * **Ease of use** – Simplified deployment via Helm charts and observability through Grafana dashboards.
