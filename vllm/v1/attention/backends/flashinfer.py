@@ -301,6 +301,8 @@ class FlashInferMetadataBuilder:
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
             self.runner.device, non_blocking=True).long()
 
+        block_table_bounds = (seq_lens + page_size - 1) // page_size
+
         use_cascade = common_prefix_len > 0
         if use_cascade:
             # Grab the blocks of the shared prefix from the first request.
@@ -318,13 +320,12 @@ class FlashInferMetadataBuilder:
                                                    device=device)
             # Remove the blocks of the shared prefix from all requests.
             block_table = block_table[:, num_common_kv_blocks:]
+            block_table_bounds -= num_common_kv_blocks
         else:
             shared_qo_indptr = None
             shared_kv_page_indptr = None
             shared_kv_page_indices = None
             shared_kv_last_page_len = None
-
-        block_table_bounds = (seq_lens + page_size - 1) // page_size
 
         mask = (torch.arange(block_table.size(1),
                              dtype=block_table.dtype,
