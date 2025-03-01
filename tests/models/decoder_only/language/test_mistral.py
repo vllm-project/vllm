@@ -12,6 +12,7 @@ import pytest
 
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (  # noqa
     MistralToolParser)
+from vllm.platforms import current_platform
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 from ...utils import check_logprobs_close
@@ -174,15 +175,14 @@ SAMPLE_JSON_SCHEMA = {
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+def test_models(hf_runner, vllm_runner, example_prompts, model: str,
+                dtype: str, max_tokens: int, num_logprobs: int,
+                use_rocm_aiter: bool, monkeypatch) -> None:
+    if use_rocm_aiter:
+        monkeypatch.setenv("VLLM_ROCM_AITER_USE_AITER", "1")
+
     # TODO(sang): Sliding window should be tested separately.
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
