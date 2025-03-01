@@ -579,7 +579,7 @@ def get_kv_cache_config(vllm_config: VllmConfig,
 
     Args:
         vllm_config: The global VllmConfig
-        kv_cache_spec: The kv cache specs of the model
+        kv_cache_spec: The kv cache spec of each attention layer in the model
         available_memory: Memory available for KV cache in bytes.
 
     Returns:
@@ -598,14 +598,14 @@ def get_kv_cache_config(vllm_config: VllmConfig,
 
 def make_kv_cache_configs_consistent(kv_cache_configs: List[KVCacheConfig]):
     """
-    Make the KV cache configurations for each worker consistent. 
+    Make the KV cache configurations for each worker consistent, so that all 
+    workers can be controlled by the same KVCacheManager.
     This function verifies that the virtual layers of each worker are the same,
-    and change the num_blocks of each worker to the smallest among all workers.
+    and changes the num_blocks of each worker to the smallest among all workers.
     
     Args:
-        kv_cache_configs (List[KVCacheConfig]):
-            The KV cache configurations for each worker. Will be in-place
-            modified to make them consistent.
+        kv_cache_configs: The KV cache configurations for each worker. Will be
+            in-place modified to make them consistent.
     """
 
     # Sort the virtual layers by the type_id of the KV cache spec.

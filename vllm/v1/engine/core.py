@@ -112,7 +112,8 @@ class EngineCore:
         # all the memory operators can be applied to all workers.
         make_kv_cache_configs_consistent(kv_cache_configs)
 
-        # The kv cache configs
+        # All workers have the same kv_cache_config except layer names, so use
+        # an arbitrary one to get the number of blocks.
         num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
 
