@@ -34,14 +34,6 @@ POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
 
-class MultiprocWorkerError(Exception):
-    """Raised when the Worker sends an exception over RPC. Unrecoverable."""
-
-    def __init__(self, *args, **kwargs):
-        MESSAGE = "WorkerProc encountered an issue. See stack trace above for the root cause."  # noqa: E501
-        super().__init__(MESSAGE, *args, **kwargs)
-
-
 class MultiprocExecutor(Executor):
 
     def _init_executor(self) -> None:
@@ -127,7 +119,7 @@ class MultiprocExecutor(Executor):
 
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     if isinstance(result, Exception):
-                        raise MultiprocWorkerError from result
+                        raise result
                     else:
                         raise RuntimeError("Worker failed")
 

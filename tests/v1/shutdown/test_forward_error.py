@@ -2,6 +2,7 @@
 """Test that we handle an Error in model forward and shutdown."""
 
 import asyncio
+import gc
 
 import pytest
 
@@ -90,18 +91,15 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
         async_llm.shutdown()
 
 
-@pytest.mark.parametrize("enable_multiprocessing", [True, False])
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-def test_llm_model_error(monkeypatch, tensor_parallel_size,
-                         enable_multiprocessing):
+def test_llm_model_error(monkeypatch, tensor_parallel_size):
 
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING",
-                 "1" if enable_multiprocessing else "0")
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
 
         # Monkeypatch an error in the model.
         m.setattr(LlamaForCausalLM, "forward", evil_forward)
@@ -117,5 +115,42 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size,
     wait_for_gpu_memory_to_clear(
         devices=list(range(tensor_parallel_size)),
         threshold_bytes=2 * GiB_bytes,
+        timeout_s=60,
+    )
+
+
+@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
+def test_llm_model_error_inproc(monkeypatch, tensor_parallel_size):
+
+    if cuda_device_count_stateless() < tensor_parallel_size:
+        pytest.skip(reason="Not enough CUDA devices")
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+        # Monkeypatch an error in the model.
+        m.setattr(LlamaForCausalLM, "forward", evil_forward)
+
+        llm = LLM(model="meta-llama/Llama-3.2-1B",
+                  enforce_eager=True,
+                  tensor_parallel_size=tensor_parallel_size)
+
+        # For Inproc client case, there is no "EngineCoreProc",
+        # so we will raise the original exception.
+        with pytest.raises(Exception, match="Simulated illegal memory"):
+            llm.generate("Hello my name is Robert and I")
+
+        # For Inproc, shutdown happens at program exit when the
+        # gc runs.
+        del llm
+        import torch
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    # Confirm all the processes are cleaned up.
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(tensor_parallel_size)),
+        threshold_bytes=5 * GiB_bytes,  # 5GB
         timeout_s=60,
     )

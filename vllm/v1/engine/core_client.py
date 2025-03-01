@@ -155,10 +155,7 @@ class InprocClient(EngineCoreClient):
         self.engine_core = EngineCore(*args, **kwargs)
 
     def get_output(self) -> EngineCoreOutputs:
-        try:
-            return self.engine_core.step()
-        except Exception as e:
-            raise EngineDeadError from e
+        return self.engine_core.step()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         self.engine_core.add_request(request)
