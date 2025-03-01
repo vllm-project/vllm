@@ -78,7 +78,7 @@ def test_ilama_lora(ilama_lora_files):
 
 
 @pytest.mark.skip_v1
-@multi_gpu_test(num_gpus=2)
+@multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_ilama_lora_tp4(ilama_lora_files):
     llm = vllm.LLM(MODEL_PATH,
@@ -100,7 +100,7 @@ def test_ilama_lora_tp4(ilama_lora_files):
 
 
 @pytest.mark.skip_v1
-@multi_gpu_test(num_gpus=2)
+@multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
     llm = vllm.LLM(MODEL_PATH,
