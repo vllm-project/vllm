@@ -225,6 +225,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/quantization/gguf/gguf_kernel.cu"
+    "csrc/quantization/autoquant/int4_fp16_gemm_kernels.cu"
+    "csrc/quantization/autoquant/format.cu"
+    "csrc/quantization/autoquant/gemm_s4_f16.cu"
     "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu")

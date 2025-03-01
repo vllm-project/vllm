@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.neuron_quant import (
     NeuronQuantConfig)
 from vllm.model_executor.layers.quantization.qqq import QQQConfig
 from vllm.model_executor.layers.quantization.tpu_int8 import Int8TpuConfig
+from vllm.model_executor.layers.quantization.auto_quant import AutoQuantConfig
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
@@ -51,6 +52,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "experts_int8": ExpertsInt8Config,
     "neuron_quant": NeuronQuantConfig,
     "ipex": IPEXConfig,
+    "autoquant": AutoQuantConfig,
 }
 
 
