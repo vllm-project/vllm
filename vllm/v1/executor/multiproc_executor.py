@@ -78,12 +78,16 @@ class MultiprocExecutor(Executor):
         # Workers must be created before wait_for_ready to avoid
         # deadlock, since worker.init_device() does a device sync.
         for unready_worker in unready_workers:
-            # NOTE(rob): WorkerProc wraps startup in a try ... catch
-            # so if there are any issues in loading in a WorkerProcess
-            # (e.g. OOM), an Exception will be caught and initialize
-            # shutdown of all workers.
-            worker = WorkerProc.wait_for_ready(unready_worker)
-            self.workers.append(worker)
+            try:
+                # WorkerProc.wait_for_ready waits on the ready_pipe.
+                # If any errors encountered, shutdown all the workers.
+                # This makes sure we cleanup the WorkerProcs when using
+                # the InprocClient.
+                worker = WorkerProc.wait_for_ready(unready_worker)
+                self.workers.append(worker)
+            except Exception:
+                shutdown(unready_workers)
+                raise
 
         # Ensure message queues are ready. Will deadlock if re-ordered
         # Must be kept consistent with the WorkerProc
@@ -173,9 +177,11 @@ class WorkerProcHandle:
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(workers: List[WorkerProcHandle]):
+def shutdown(workers: Union[List[WorkerProcHandle],
+                            List[UnreadyWorkerProcHandle]]):
     for w in workers:
-        w.worker_response_mq = None
+        if hasattr(w, "worker_response_mq"):
+            w.worker_response_mq = None
 
     def wait_for_termination(procs, timeout):
         if not time:
