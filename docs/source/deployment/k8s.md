@@ -6,6 +6,13 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 
 NOTE: please make sure that there is a running Kubernetes cluster with available GPU resources. If you are new to Kubernetes, here is a [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) that helps you prepare the Kubernetes environment.
 
+Alternatively, you can also deploy Kubernetes using [helm chart](https://docs.vllm.ai/en/latest/deployment/frameworks/helm.html). There are also open-source vLLM community projects available to make your deployment even smoother.
+
+Note that These projects are sorted chronologically.
+
+* [vLLM production-stack](https://github.com/vllm-project/production-stack): Originated from UChicago, vLLM production stack is a project that contains latest research and community effort, while still delivering production-level stability and performance. Checkout the [documentation page](https://docs.vllm.ai/en/latest/deployment/integrations/production-stack.html) for more details and examples.
+* [Aibrix](https://github.com/vllm-project/aibrix): Originated from Bytedance, Aibrix is a production-level stack that is Kubernetes-friendly and contains rich features (e.g. Lora management).
+
 ## Pre-requisite
 
 Ensure that you have a running Kubernetes environment with GPU (you can follow [this tutorial](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) to install a Kubernetes environment on a bare-medal GPU machine).
@@ -241,13 +248,3 @@ Ensure that you have a running Kubernetes environment with GPU (you can follow [
       ```
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
-
-## Deployment using open-source vLLM community projects
-
-Alternatively, you can also deploy Kubernetes using vLLM community projects.
-
-Note that These projects are sorted chronologically.
-
-## Conclusion
-
-Deploying vLLM with Kubernetes allows for efficient scaling and management of ML models leveraging GPU resources. By following the steps outlined above, you should be able to set up and test a vLLM deployment within your Kubernetes cluster. If you encounter any issues or have suggestions, please feel free to contribute to the documentation.
