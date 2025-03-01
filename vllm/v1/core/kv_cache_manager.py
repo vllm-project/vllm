@@ -65,7 +65,7 @@ class KVCacheManager:
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
         # data for reempted ones.
-        self.num_cached_block: Dict[str, int] = defaultdict(int)
+        self.num_cached_block: Dict[str, int] = {}
         self.prefix_cache_stats = PrefixCacheStats()
 
     @property
@@ -224,9 +224,10 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
-        # FIXME: `num_cached_blocks` is not correct when the prefix cache
-        # of a new request is hit.
-        num_cached_blocks = self.num_cached_block[request.request_id]
+        # Use `new_computed_blocks` for a new request, and `num_cached_block`
+        # for a running request.
+        num_cached_blocks = self.num_cached_block.get(request.request_id,
+                                                      len(new_computed_blocks))
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
