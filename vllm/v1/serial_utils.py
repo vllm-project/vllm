@@ -46,7 +46,8 @@ class MsgpackEncoder:
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
 
-        return msgpack.Ext(CUSTOM_TYPE_PICKLE, pickle.dumps(obj))
+        return msgpack.Ext(CUSTOM_TYPE_PICKLE,
+                           pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
 
     def _encode_ndarray(self, obj: np.ndarray) -> Any:
         assert self.aux_buffers is not None
