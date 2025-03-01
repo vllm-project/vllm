@@ -20,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import get_exception_traceback, get_mp_context, zmq_socket_ctx
+from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -267,7 +267,7 @@ class EngineCoreProc(EngineCore):
                         self.step_with_batch_queue)
 
     @staticmethod
-    def run_engine_core(*args, dp_rank: int = 0, **kwargs):
+    def run_engine_core(*args, dp_rank: int = 0, ready_pipe, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
         # Signal handler used for graceful termination.
@@ -288,23 +288,20 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        engine_core_proc_cls: Type[EngineCoreProc]
-        parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
-        if parallel_config.data_parallel_size > 1:
-            # Set data parallel rank for this engine process.
-            parallel_config.data_parallel_rank = dp_rank
-            engine_core_proc_cls = DPEngineCoreProc
-        else:
-            engine_core_proc_cls = EngineCoreProc
-
         parent_process = psutil.Process().parent()
-        engine_core = None
+        engine_core: Optional[EngineCoreProc] = None
         try:
-            engine_core = engine_core_proc_cls(*args, **kwargs)
+            parallel_config: ParallelConfig = kwargs[
+                "vllm_config"].parallel_config
+            if parallel_config.data_parallel_size > 1:
+                # Set data parallel rank for this engine process.
+                parallel_config.data_parallel_rank = dp_rank
+                engine_core = DPEngineCoreProc(*args, **kwargs)
+            else:
+                engine_core = EngineCoreProc(*args, **kwargs)
 
             # Send Readiness signal to EngineClient.
-            if (ready_pipe := kwargs.get("ready_pipe")) is not None:
-                ready_pipe.send({"status": "READY"})
+            ready_pipe.send({"status": "READY"})
 
             engine_core.run_busy_loop()
 
@@ -441,14 +438,16 @@ class DPEngineCoreProc(EngineCoreProc):
         executor_class: Type[Executor],
         log_stats: bool,
     ):
-        super().__init__(input_path, output_path, vllm_config, executor_class,
-                         log_stats)
-
-        # Add process-specific prefix to stdout and stderr
-        process_name = get_mp_context().current_process().name
+        # Add process-specific prefix to stdout and stderr before
+        # we initialize the engine.
+        from multiprocessing import current_process
+        process_name = current_process().name
         pid = os.getpid()
         _add_prefix(sys.stdout, process_name, pid)
         _add_prefix(sys.stderr, process_name, pid)
+
+        super().__init__(input_path, output_path, vllm_config, executor_class,
+                         log_stats)
 
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
