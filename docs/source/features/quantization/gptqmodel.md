@@ -2,10 +2,10 @@
 
 # GPTQModel
 
-To create a new [2, 3, 4, 8]-bit GPTQ quantized model, you can leverage [GPTQModel](https://github.com/ModelCloud/GPTQModel) from ModelCloud.AI.
+To create a new 4-bit or 8-bit GPTQ quantized model, you can leverage [GPTQModel](https://github.com/ModelCloud/GPTQModel) from ModelCloud.AI.
 
-Quantizing reduces the model's precision from BF16 (16-bits) to 2-to-8-bits range which can significantly reduce the 
-model memory footprint while at-the-same-time increasing inference performance.
+Quantization reduces the model's precision from BF16/FP16 (16-bits) to 4-bits or 8-bits which significantly reduce the 
+total model memory footprint while at-the-same-time increasing inference performance.
 
 Compatible GPTQModel quantized models can leverage the `Marlin` and `Machete` vLLM custom kernels to maximize batching 
 transactions-per-second `tps` and token-latency performance for both Ampere (A100+) and Hopper (H100+) Nvidia GPUs. 
@@ -53,7 +53,7 @@ model.save(quant_path)
 To run an GPTQModel quantized model with vLLM, you can use [DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2](https://huggingface.co/ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2) with the following command:
 
 ```console
-python examples/offline_inference/llm_engine_example.py --model DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2 --quantization gptq
+python examples/offline_inference/llm_engine_example.py --model DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2
 ```
 
 GPTQModel quantized models are also supported directly through the LLM entrypoint:
@@ -72,7 +72,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.6, top_p=0.9)
 
 # Create an LLM.
-llm = LLM(model="DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2", quantization="gptq")
+llm = LLM(model="DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2")
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
