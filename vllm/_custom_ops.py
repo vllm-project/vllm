@@ -404,6 +404,22 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                 memory_format=torch.contiguous_format)
 
 
+if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
+
+    @register_fake("_C::allspark_w8a16_gemm")
+    def _allspark_w8a16_gemm_fake(a: torch.Tensor, b_qweight: torch.Tensor,
+                                  b_scales: torch.Tensor,
+                                  b_qzeros: Optional[torch.Tensor],
+                                  n: torch.SymInt, group_size: torch.SymInt,
+                                  sm_count: torch.SymInt,
+                                  sm_version: torch.SymInt,
+                                  CUBLAS_M_THRESHOLD: torch.SymInt,
+                                  has_zp: bool,
+                                  n32k16_reorder: bool) -> torch.Tensor:
+        m = a.size(0)
+        return torch.empty((m, n), device=a.device, dtype=a.dtype)
+
+
 if hasattr(torch.ops._C, "ggml_dequantize"):
 
     @register_fake("_C::ggml_dequantize")
@@ -879,6 +895,67 @@ def scaled_fp8_quant(
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
+
+
+# gptq allspark
+def allspark_repack_weight(
+        qweight: torch.Tensor,
+        scale: torch.Tensor,
+        zero_point: Optional[torch.Tensor] = None,
+        has_zp: bool = False
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Rearrange qweight, scale, and zero_point(if asymmetric) to n32k16 format 
+    for Ampere W8A16 Fused Gemm kernel
+
+    Args:
+        qweight: uint8 weight tensor, original k x n format.
+        scale: fp16/bf16 weight scale tensor, 1 x n format.
+        zero_point: fp16/bf16 weight zero_point tensor, 1 x n format.
+            Must be provided for asymmetric quantization.
+        has_zp: if use symmetric quantization, has_zp = False.
+            if use asymmetric quantization, has_zp = True.  
+    
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : 
+            rearranged weight, scale, and optionally zero_point.
+    """
+    K = qweight.shape[0]
+    N = qweight.shape[1]
+    N_32align = (N + 32 - 1) // 32 * 32
+
+    qweight_reorder = torch.empty((N_32align, K),
+                                  device=qweight.device,
+                                  dtype=qweight.dtype)
+    scale_reorder = torch.empty((1, N_32align),
+                                device=scale.device,
+                                dtype=scale.dtype)
+    zero_point_reorder = None
+    if has_zp:
+        assert zero_point is not None, (
+            "zero_point must be provided for asymmetric quantization.")
+        zero_point_reorder = torch.empty((1, N_32align),
+                                         device=zero_point.device,
+                                         dtype=zero_point.dtype)
+
+    torch.ops._C.rearrange_kn_weight_as_n32k16_order(
+        qweight, scale, zero_point, has_zp, qweight_reorder, scale_reorder,
+        zero_point_reorder, K, N, N_32align)
+
+    return qweight_reorder, scale_reorder, zero_point_reorder
+
+
+def allspark_w8a16_gemm(a: torch.Tensor, b_qweight: torch.Tensor,
+                        b_scales: torch.Tensor,
+                        b_qzeros: Optional[torch.Tensor], n: int,
+                        group_size: int, sm_count: int, sm_version: int,
+                        CUBLAS_M_THRESHOLD: int, has_zp: bool,
+                        n32k16_reorder: bool) -> torch.Tensor:
+
+    return torch.ops._C.allspark_w8a16_gemm(a, b_qweight, b_scales, b_qzeros,
+                                            n, group_size, sm_count,
+                                            sm_version, CUBLAS_M_THRESHOLD,
+                                            has_zp, n32k16_reorder)
 
 
 # int8
