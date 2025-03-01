@@ -71,6 +71,7 @@ class DisabledTqdm(tqdm):
 def get_lock(model_name_or_path: Union[str, Path],
              cache_dir: Optional[str] = None):
     lock_dir = cache_dir or temp_dir
+    model_name_or_path = str(model_name_or_path)
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
     model_name = model_name_or_path.replace("/", "-")
     hash_name = hashlib.sha256(model_name.encode()).hexdigest()
