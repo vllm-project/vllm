@@ -17,8 +17,9 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptInsertion,
-                                        PromptReplacement, PromptUpdateDetails)
+                                        BaseProcessingInfo, PromptIndexTargets,
+                                        PromptInsertion, PromptReplacement,
+                                        PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -153,30 +154,19 @@ class PaliGemmaMultiModalProcessor(
         assert isinstance(bos_token_id, int)
 
         # Paligemma 1 and 2 have different tokenizer.add_bos_token
-        # Replace <bos> with <bos> + <image>*n + <bos> for Paligemma 1
+        # Insert <image>*n + <bos> after <bos> for Paligemma 1
         # Insert <image>*n + <bos> for Paligemma 2
-        if tokenizer.add_bos_token:
-            return [
-                PromptReplacement(
-                    modality="image",
-                    target=[bos_token_id],
-                    replacement=PromptUpdateDetails(
-                        full=[bos_token_id] + image_tokens + [bos_token_id],
-                        features=image_tokens,
-                    ),
-                )
-            ]
-        else:
-            return [
-                PromptInsertion(
-                    modality="image",
-                    target=[],
-                    insertion=PromptUpdateDetails(
-                        full=image_tokens + [bos_token_id],
-                        features=image_tokens,
-                    ),
-                )
-            ]
+        return [
+            PromptInsertion(
+                modality="image",
+                target=PromptIndexTargets.prefix(
+                    [bos_token_id] if tokenizer.add_bos_token else []),
+                insertion=PromptUpdateDetails(
+                    full=image_tokens + [bos_token_id],
+                    features=image_tokens,
+                ),
+            )
+        ]
 
     def apply(
         self,
