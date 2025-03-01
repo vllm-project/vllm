@@ -47,7 +47,8 @@ class MultiprocExecutor(Executor):
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
-        self._finalizer = weakref.finalize(self, self.shutdown)
+        self.workers: List[WorkerProcHandle] = []
+        self._finalizer = weakref.finalize(self, shutdown, self.workers)
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -84,11 +85,11 @@ class MultiprocExecutor(Executor):
 
         # Workers must be created before wait_for_ready to avoid
         # deadlock, since worker.init_device() does a device sync.
-        self.workers: List[WorkerProcHandle] = []
         for unready_worker in unready_workers:
-            # NOTE: the WorkerProc wraps startup in a try ... catch
+            # NOTE(rob): WorkerProc wraps startup in a try ... catch
             # so if there are any issues in loading in a WorkerProcess
-            # (e.g. OOM), an Exception will be caught here.
+            # (e.g. OOM), an Exception will be caught and initialize
+            # shutdown of all workers.
             worker = WorkerProc.wait_for_ready(unready_worker)
             self.workers.append(worker)
 
@@ -134,45 +135,17 @@ class MultiprocExecutor(Executor):
 
             return responses
         except TimeoutError as e:
+            self.shutdown()
             raise TimeoutError(f"RPC call to {method} timed out.") from e
         except Exception as e:
-            # Re-raise any other exceptions
+            self.shutdown()
             raise e
-
-    def _ensure_worker_termination(self):
-        """Ensure that all worker processes are terminated. Assumes workers have
-        received termination requests. Waits for processing, then sends
-        termination and kill signals if needed."""
-
-        def wait_for_termination(procs, timeout):
-            if not time:
-                # If we are in late stage shutdown, the interpreter may replace
-                # `time` with `None`.
-                return all(not proc.is_alive() for proc in procs)
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                if all(not proc.is_alive() for proc in procs):
-                    return True
-                time.sleep(0.1)
-            return False
-
-        # Send SIGTERM if still running
-        active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
-        for p in active_procs:
-            p.terminate()
-        if not wait_for_termination(active_procs, 4):
-            # Send SIGKILL if still running
-            active_procs = [p for p in active_procs if p.is_alive()]
-            for p in active_procs:
-                p.kill()
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if not getattr(self, 'shutting_down', False):
             self.shutting_down = True
-            for w in self.workers:
-                w.worker_response_mq = None
-            self._ensure_worker_termination()
+            self._finalizer()
 
         self.rpc_broadcast_mq = None
 
@@ -204,6 +177,35 @@ class WorkerProcHandle:
             rank=unready_handle.rank,
             worker_response_mq=worker_response_mq,
         )
+
+
+# Note(rob): shutdown function cannot be a bound method,
+# else the gc cannot collect the object.
+def shutdown(workers: List[WorkerProcHandle]):
+    for w in workers:
+        w.worker_response_mq = None
+
+    def wait_for_termination(procs, timeout):
+        if not time:
+            # If we are in late stage shutdown, the interpreter may replace
+            # `time` with `None`.
+            return all(not proc.is_alive() for proc in procs)
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if all(not proc.is_alive() for proc in procs):
+                return True
+            time.sleep(0.1)
+        return False
+
+    # Send SIGTERM if still running
+    active_procs = [w.proc for w in workers if w.proc.is_alive()]
+    for p in active_procs:
+        p.terminate()
+    if not wait_for_termination(active_procs, 4):
+        # Send SIGKILL if still running
+        active_procs = [p for p in active_procs if p.is_alive()]
+        for p in active_procs:
+            p.kill()
 
 
 class WorkerProc:
