@@ -161,17 +161,6 @@ class CudaPlatformBase(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
-        if use_v1:
-            if cls.has_device_capability(80):
-                logger.info("Using Flash Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "flash_attn.FlashAttentionBackend")
-            elif cls.has_device_capability(75):
-                logger.info(
-                    "Cannot use Flash Attention backend for Turing GPUs.")
-                logger.info("Using Triton backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "triton_attn.TritonAttentionBackend")
         if use_mla:
             # TODO(lucas): refactor to  be more concise
             #  we should probably consider factoring out V1 here
@@ -205,9 +194,16 @@ class CudaPlatformBase(Platform):
                 logger.info("Using Triton MLA backend.")
                 return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if use_v1:
-            logger.info("Using Flash Attention backend on V1 engine.")
-            return ("vllm.v1.attention.backends.flash_attn."
-                    "FlashAttentionBackend")
+            if cls.has_device_capability(80):
+                logger.info("Using Flash Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "flash_attn.FlashAttentionBackend")
+            elif cls.has_device_capability(75):
+                logger.info(
+                    "Cannot use Flash Attention backend for Turing GPUs.")
+                logger.info("Using Triton backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "triton_attn.TritonAttentionBackend")
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
