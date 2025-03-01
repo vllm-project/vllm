@@ -1,20 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashInfer."""
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from __future__ import annotations
 
-try:
-    from flashinfer import (BatchPrefillWithPagedKVCacheWrapper,
-                            MultiLevelCascadeAttentionWrapper)
-    FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
-except ImportError:
-    # Avoid turning these types into variables during type checking
-    if not TYPE_CHECKING:
-        BatchPrefillWithPagedKVCacheWrapper = None
-        MultiLevelCascadeAttentionWrapper = None
-    FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import torch
+from flashinfer import (BatchPrefillWithPagedKVCacheWrapper,
+                        MultiLevelCascadeAttentionWrapper)
+
+FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -41,22 +36,22 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHINFER_VLLM_V1"
+        return "FLASHINFER"
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashInferImpl"]:
+    def get_impl_cls() -> FlashInferImpl:
         return FlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> AttentionMetadata:
         return FlashInferMetadata
 
     @staticmethod
-    def get_state_cls() -> Type["FlashInferState"]:
+    def get_state_cls() -> FlashInferState:
         return FlashInferState
 
     @staticmethod
-    def get_builder_cls() -> Type["FlashInferMetadataBuilder"]:
+    def get_builder_cls() -> FlashInferMetadataBuilder:
         return FlashInferMetadataBuilder
 
     @staticmethod
@@ -176,7 +171,7 @@ class FlashInferState:
                 2, self._get_workspace_buffer(), "NHD")
         return self._cascade_wrapper
 
-    def begin_forward(self, attn_metadata: "FlashInferMetadata"):
+    def begin_forward(self, attn_metadata: FlashInferMetadata):
         if self.global_hyperparameters is None:
             self.global_hyperparameters = infer_global_hyperparameters(
                     get_per_layer_parameters(self.vllm_config))
@@ -285,13 +280,13 @@ class FlashInferMetadata:
 
 class FlashInferMetadataBuilder:
 
-    def __init__(self, runner: "GPUModelRunner"):
+    def __init__(self, runner: GPUModelRunner):
         self.runner = runner
         self.state = runner.attn_state
         assert isinstance(self.state, FlashInferState)
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput"):
+    def reorder_batch(self, input_batch: InputBatch,
+                      scheduler_output: SchedulerOutput):
         pass
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
