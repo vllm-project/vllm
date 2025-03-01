@@ -287,13 +287,10 @@ class MPClient(EngineCoreClient):
     def _raise_if_engine_core_dead(self, buffer: Any):
         if buffer == EngineCoreProc.ENGINE_CORE_DEAD:
             self.is_engine_dead = True
-            raise EngineDeadError()
+            raise EngineDeadError
 
     def _format_exception(self, e: Exception) -> Exception:
-        """If errored, use EngineDeadError so root cause is clear."""
-
-        return (EngineDeadError(
-            suppress_context=True) if self.is_engine_dead else e)
+        return EngineDeadError() if self.is_engine_dead else e
 
 
 def _process_utility_output(output: UtilityOutput,
@@ -452,6 +449,7 @@ class AsyncMPClient(MPClient):
                     else:
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
+
                 outputs_queue.put_nowait(e)
 
         self.queue_task = asyncio.create_task(process_outputs_socket())

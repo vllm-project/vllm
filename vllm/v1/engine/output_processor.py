@@ -121,7 +121,7 @@ class OutputProcessor:
     def add_request(
         self,
         request: EngineCoreRequest,
-        queue: Optional[asyncio.Queue[RequestOutput]] = None,
+        queue: Optional[asyncio.Queue[Union[RequestOutput, Exception]]] = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:

@@ -140,7 +140,7 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
 
         if self.errored:
-            raise EngineDeadError()
+            raise EngineDeadError
 
         # 1) Create a new output queue for the request.
         if self.output_processor.is_request_active(request_id):
@@ -227,6 +227,7 @@ class AsyncLLM(EngineClient):
                 while not q.empty():
                     next_out = q.get_nowait()
                     if isinstance(next_out, Exception):
+                        print(f"{repr(next_out)=}")
                         raise out
                     if sampling_params.output_kind == RequestOutputKind.DELTA:
                         out.add(next_out)
@@ -258,7 +259,8 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
-            raise EngineGenerateError() from e
+            logger.exception("GOT EXCEPTION:", exc_info=e)
+            raise EngineGenerateError from e
 
     def generate(
         self,
@@ -331,6 +333,8 @@ class AsyncLLM(EngineClient):
         except Exception as e:
             logger.error("AsyncLLM output_handler got an Exception:",
                          exc_info=e)
+            # NOTE(rob): since we check isinstance(e, Exception), need to
+            # propagate an instance of EngineDeadError rather than type.
             self.output_processor.propagate_error(EngineDeadError())
 
     async def abort(self, request_id: str) -> None:
