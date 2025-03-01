@@ -318,7 +318,7 @@ class EngineCoreProc(EngineCore):
             # 1) Poll the input queue until there is work to do.
             while not self.scheduler.has_unfinished_requests():
                 logger.debug("EngineCore busy loop waiting.")
-                req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
+                req = self.input_queue.get()
                 self._handle_client_request(*req)
 
             # 2) Handle any new client requests.
