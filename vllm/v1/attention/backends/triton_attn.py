@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Attention layer with PagedAttention on rocm"""
+"""Attention layer with PagedAttention and Triton prefix prefill."""
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
@@ -9,7 +9,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flash_attn import (
+    FlashAttentionMetadata, FlashAttentionMetadataBuilder)
 
 logger = init_logger(__name__)
 
@@ -48,6 +49,10 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
+
+    @staticmethod
+    def get_builder_cls() -> Type["FlashAttentionMetadataBuilder"]:
+        return FlashAttentionMetadataBuilder
 
 
 class TritonAttentionImpl(AttentionImpl):
