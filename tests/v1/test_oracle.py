@@ -22,7 +22,7 @@ def test_unsupported_models(monkeypatch, model):
             _ = args.create_engine_config()
 
 
-def test_engine_configs(monkeypatch):
+def test_unsupported_configs(monkeypatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
