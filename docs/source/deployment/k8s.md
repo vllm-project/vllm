@@ -4,7 +4,7 @@
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
-Alternatively, you can deploy vLLM using other open source projects. Checkout the [integrations page](https://docs.vllm.ai/en/latest/deployment/integrations) for more details and examples.
+Alternatively, you can deploy vLLM using other open source projects. Checkout the [integrations page](https://docs.vllm.ai/en/latest/deployment/integrations) and [frameworks page](https://docs.vllm.ai/en/latest/deployment/frameworks/index.html) for more details and examples.
 
 ## Pre-requisite
 
