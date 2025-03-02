@@ -7,8 +7,9 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
-                                        KVCacheTensor, VirtualLayer)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec, KVCacheTensor,
+                                        SlidingWindowSpec, VirtualLayer)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -584,6 +585,32 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     return kv_cache_config
 
 
+def make_uniform_kv_cache_type(kv_cache_spec: Dict[str, KVCacheSpec]):
+    """
+    As hybrid models with more than one type of KV cache are not supported yet,
+    this function tries it best to make the KV cache type uniform. It will
+    convert all SlidingWindowSpec to FullAttentionSpec if both types are 
+    present.
+
+    Args:
+        kv_cache_spec: The kv cache spec of each attention layer in the model
+    """
+
+    has_full_attention = any(
+        isinstance(spec, FullAttentionSpec) for spec in kv_cache_spec.values())
+    has_sliding_window = any(
+        isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
+    if has_full_attention and has_sliding_window:
+        for layer_name, spec in kv_cache_spec.items():
+            if isinstance(spec, SlidingWindowSpec):
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=spec.block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                )
+
+
 def get_kv_cache_config(vllm_config: VllmConfig,
                         kv_cache_spec: Dict[str, KVCacheSpec],
                         available_memory: int) -> KVCacheConfig:
@@ -600,6 +627,7 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
+    make_uniform_kv_cache_type(kv_cache_spec)
     if is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
