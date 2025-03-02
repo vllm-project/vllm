@@ -3255,6 +3255,7 @@ class VllmConfig:
         vllm_factors: List[Any] = []
         from vllm import __version__
         vllm_factors.append(__version__)
+        vllm_factors.append(self.use_v1)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
