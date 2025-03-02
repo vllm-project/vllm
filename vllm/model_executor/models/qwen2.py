@@ -181,14 +181,20 @@ class Qwen2Attention(nn.Module):
         # Only GPU 6 and 7 is for dummies
         # print("QHEADS", q.size(0), self.num_heads, self.head_dim, get_tensor_model_parallel_rank())
         if get_tensor_model_parallel_rank() in (6, 7):
-            # print(f"DUMMY OUTPUT {get_tensor_model_parallel_rank()}", q)
+            # print(f"DUMMY GPU {get_tensor_model_parallel_rank()}", v)
+
             q = q.view(q.size(0), self.num_heads, self.head_dim)
+            k = k.view(k.size(0), self.num_kv_heads, self.head_dim)
+            v = v.view(v.size(0), self.num_kv_heads, self.head_dim)
 
             # Zero out the dummy heads
             q[:, :, :] = 0
-            # q[:, -self.dummy_heads:, :] = -1000
+            k[:, :, :] = 0
+            v[:, :, :] = 0
 
             q = q.view(q.size(0), -1)
+            k = k.view(k.size(0), -1)
+            v = v.view(v.size(0), -1)
         else:
             pass
             # print(f"REAL OUTPUT {get_tensor_model_parallel_rank()}", q)
