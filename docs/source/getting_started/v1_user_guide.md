@@ -24,8 +24,7 @@ Upgrade to vLLM’s Core Architecture](https://blog.vllm.ai/2025/01/27/v1-alpha-
 
 ### Logprobs
 
-vLLM V1 introduces support for returning logprobs and prompt logprobs.
-However, there are some important semantic
+vLLM V1 supports logprobs and prompt logprobs. However, there are some important semantic
 differences compared to V0:
 
 **Prompt Logprobs Without Prefix Caching**
@@ -55,13 +54,11 @@ As part of the major architectural rework in vLLM V1, several legacy features ha
 
 **Deprecated sampling features**
 
-- **best_of**: The sampling parameter best_of—which in V0 enabled
-  generating multiple candidate outputs per request and then selecting the best
-  one—has been deprecated in V1.
+- **best_of**: See details in this [PR #13361](https://github.com/vllm-project/vllm/issues/13361)
 - **Per-Request Logits Processors**: In V0, users could pass custom
   processing functions to adjust logits on a per-request basis. In vLLM V1 this
-  mechanism is deprecated. Instead, the design is moving toward supporting global
-  logits processors—a feature the team is actively working on for future releases.
+  is deprecated. Instead, the design is moving toward supporting global logits
+  processors—a feature the team is actively working on for future releases.
 
 **Deprecated KV Cache features**
 
