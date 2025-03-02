@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     # so that users who only use non-mistral models
     # will not be bothered by the dependency.
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
+    from mistral_common.tokens.instruct.request import FIMRequest
     from mistral_common.tokens.tokenizers.mistral import (
         MistralTokenizer as PublicMistralTokenizer)
 
@@ -364,6 +365,10 @@ class MistralTokenizer(TokenizerBase):
                                          eos=add_special_tokens)
         else:
             return self.tokenizer.encode(text, bos=True, eos=False)
+
+    def encode_with_suffix(self, prefix: str, suffix: str) -> List[int]:
+        fim = FIMRequest(prompt=prefix, suffix=suffix)
+        return self.mistral.encode_fim(fim).tokens
 
     def apply_chat_template(self,
                             messages: List["ChatCompletionMessageParam"],
