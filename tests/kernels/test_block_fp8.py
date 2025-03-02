@@ -412,9 +412,11 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
                                  block_shape):
     """Fused moe with block-wise quantization using DeepGemm torch."""
     num_groups = w1.shape[0]
-    M = a.numel() // a.shape[-1] # * num_groups)
-    M_sum = M # * num_groups
-    K = w1.shape[-1]
+    M = a.shape[0]
+    M_sum = M * topk
+    N = w1.shape[1] // 2
+    K = w1.shape[2]
+
     a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
     inter_out = torch.empty((M_sum, K),
                             dtype=torch.bfloat16,
@@ -437,10 +439,15 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
     #assert w1_s.shape == (num_groups, (2 * N + 127) // 128, (K + 127) // 128)
     #print(f"FIRST GEMM {a_q.shape}")
 
-    m_indices = torch.arange(0, num_groups, dtype=torch.int)
-    m_indices = m_indices.unsqueeze(-1).expand(
-        num_groups, max((topk * M) // num_groups, 1)).contiguous().view(-1)
-    #m_indices = torch.IntTensor([1, 0]).to(dtype=torch.int32, device=a.device)
+    # use topk_ids??
+    if True:
+        m_indices = torch.arange(0, num_groups, dtype=torch.int)
+        m_indices = m_indices.unsqueeze(-1).expand(
+            num_groups, max(M_sum // num_groups, 1)).contiguous().view(-1)
+        #m_indices = torch.IntTensor([1, 0]).to(dtype=torch.int32, device=a.device)
+    else:
+        pass
+
     p("m_indices", m_indices)
     print(m_indices)
 
@@ -560,7 +567,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     p("w2_s", w2_s)
 
     with set_current_vllm_config(vllm_config):
-        if True:
+        if False:
             out = fused_moe(
                 a,
                 w1,
