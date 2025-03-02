@@ -90,7 +90,7 @@ vLLM V1 does not yet include a `PoolingModelRunner` to support embedding/pooling
   models (e.g, `XLMRobertaModel`).
 
 **Mamba Models**  
-Models using selective state-space mechanisms (instead of standard transformer attention) 
+Models using selective state-space mechanisms (instead of standard transformer attention)
 are not yet supported (e.g., `MambaForCausalLM`, `JambaForCausalLM`).
 
 **Encoder-Decoder Models**  
