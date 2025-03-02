@@ -748,11 +748,11 @@ def _create_fake_bias_for_k_proj(
     weights: Iterable[Tuple[str, torch.Tensor]]
 ) -> Iterable[Tuple[str, torch.Tensor]]:
     """
-    Create full zeros bias for k_proj weight in self-attention layers.
+    Create full zeros bias for k_proj weight in self-attn and x-attn layers.
     So that the bias for k_proj in qkv_proj can be initialized with zeros.
     """
     for name, weight in weights:
-        if name.endswith(".self_attn.k_proj.weight"):
+        if name.endswith(".k_proj.weight"):
             bias = torch.zeros(weight.size(0))
             bias_name = name.replace("weight", "bias")
             yield from [(name, weight), (bias_name, bias)]

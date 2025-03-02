@@ -178,7 +178,8 @@ class CudaPlatformBase(Platform):
                         block_size)
                 else:
                     if use_v1:
-                        logger.info("Using FlashMLA backend on V1 engine.")
+                        logger.info_once(
+                            "Using FlashMLA backend on V1 engine.")
                         return ("vllm.v1.attention.backends.mla."
                                 "flashmla.FlashMLABackend")
                     else:
@@ -187,14 +188,14 @@ class CudaPlatformBase(Platform):
                                 "flashmla.FlashMLABackend")
 
             if use_v1:
-                logger.info("Using Triton MLA backend on V1 engine.")
+                logger.info_once("Using Triton MLA backend on V1 engine.")
                 return ("vllm.v1.attention.backends.mla."
                         "triton_mla.TritonMLABackend")
             else:
                 logger.info("Using Triton MLA backend.")
                 return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if use_v1:
-            logger.info("Using Flash Attention backend on V1 engine.")
+            logger.info_once("Using Flash Attention backend on V1 engine.")
             return ("vllm.v1.attention.backends.flash_attn."
                     "FlashAttentionBackend")
         if selected_backend == _Backend.FLASHINFER:
