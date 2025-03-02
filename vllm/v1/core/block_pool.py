@@ -49,6 +49,12 @@ class BlockPool:
         self.cached_block_hash_to_block: Dict[BlockHashType, Dict[
             int, KVCacheBlock]] = defaultdict(dict)
 
+        # To represent a placeholder block with block_id=-1. Do not need to
+        # allocate a real block for this in most cases. If the attention
+        # implementation requires a real block for this, it should call
+        # `init_real_null_block` to allocate a real block for this placeholder
+        # block. `init_real_null_block` should be called before allocating any
+        # other blocks.
         self._null_block = KVCacheBlock(-1)
 
     def get_cached_block(self,
@@ -275,4 +281,25 @@ class BlockPool:
         return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
 
     def get_null_block(self) -> KVCacheBlock:
+        """Get the null block.
+
+        Returns:
+            The null block.
+        """
         return self._null_block
+
+    def init_real_null_block(self):
+        """
+        Initialize the null_block with a real block. This function should be
+        called before any other blocks are allocated.
+        """
+        if self._null_block.block_id == -1:
+            logger.debug("Initializing the real null block")
+            assert self.free_block_queue.num_free_blocks ==  \
+                self.num_gpu_blocks, (
+                "The real null block should be initialized before any other "
+                "blocks are allocated")
+            self._null_block = self.free_block_queue.popleft()
+            assert self._null_block.block_id == 0
+        else:
+            assert self._null_block.block_id == 0

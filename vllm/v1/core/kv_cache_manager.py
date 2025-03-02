@@ -136,9 +136,6 @@ class KVCacheManager:
         self.prefix_cache_stats.queries += len(block_hashes)
         self.prefix_cache_stats.hits += len(computed_blocks)
 
-        print("computed_blocks", request.request_id, request.num_tokens,
-              num_computed_tokens, computed_blocks)
-
         return computed_blocks, num_computed_tokens
 
     def allocate_slots(
@@ -335,8 +332,10 @@ class KVCacheManager:
         assert request.status == RequestStatus.RUNNING
         blocks = self.req_to_blocks[request.request_id]
         num_common_blocks = 0
+        null_block_id = self.block_pool.get_null_block().block_id
         for block in blocks:
-            if block.ref_cnt == num_running_requests:
+            if block.ref_cnt == num_running_requests \
+                    and block.block_id != null_block_id:
                 num_common_blocks += 1
             else:
                 break

@@ -128,7 +128,8 @@ class SlidingWindowManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: SlidingWindowSpec,
                  block_pool: BlockPool):
         super().__init__(kv_cache_spec, block_pool)
-        self.sliding_window = kv_cache_spec.sliding_window
+        self.sliding_window = kv_cache_spec.sliding_window + 16 * 6
+        self.block_pool.init_real_null_block()
         self._null_block = block_pool.get_null_block()
 
     def get_possible_cached_prefix(
