@@ -126,8 +126,12 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
         tokenizer = _adapt_tokenizer(tokenizer)
         return RegexGuide.from_regex(regex_string, tokenizer)
 
-    def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase,
-                 reasoner: Optional[Reasoner]):
+    def __init__(
+        self,
+        regex_string: str,
+        tokenizer: PreTrainedTokenizerBase,
+        reasoner: Optional[Reasoner],
+    ):
         """Compile the FSM that drives the regex-structured generation.
 
         Parameters
