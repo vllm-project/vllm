@@ -4,17 +4,15 @@
 Previous blog post [vLLM V1: A Major Upgrade to vLLM's Core Architecture](https://blog.vllm.ai/2025/01/27/v1-alpha-release.html)
 
 
-## Semantic changes and deprecated features
-
+## Semantic Changes and Deprecated Features
 ### Logprobs
-- vLLM V1 now supports both sample logprobs and prompt logprobs, as introduced in this [PR](https://github.com/vllm-project/vllm/pull/9880).
-- **Current Limitations**:
+- vLLM V1 now supports both sample logprobs and prompt logprobs. Currently, the [implementation](https://github.com/vllm-project/vllm/pull/9880) has the following **limitations and semantic changes**:
   - V1 prompt logprobs do not support prefix caching.
   - V1 logprobs are computed before logits post-processing, so penalty
   adjustments and temperature scaling are not applied.
 - The team is actively working on implementing logprobs that include post-sampling adjustments.
 
-### The following features has been deprecated in V1:
+### Deprecated Features:
 
 #### Current deprecated sampling features
 The team is working on supporting these features globally in the server.
@@ -66,7 +64,7 @@ support them eventually.
 **Encoder-Decoder Models**  
 - vLLM V1 is currently optimized for decoder-only transformers. Models requiring
   cross-attention between separate encoder and decoder (e.g.,
-  `facebook/bart-large-cnn`) are unsupported.
+  `facebook/bart-large-cnn`) are not yet supported.
 
 For a complete list of supported models, see
 [our documentation](https://docs.vllm.ai/en/latest/models/supported_models.html).
