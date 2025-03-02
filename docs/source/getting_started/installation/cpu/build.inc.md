@@ -6,7 +6,14 @@ sudo apt-get install -y gcc-12 g++-12 libnuma-dev
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 ```
 
-Second, install Python packages for vLLM CPU backend building:
+Second, clone vLLM project:
+
+```console
+git clone https://github.com/vllm-project/vllm.git vllm_source
+cd vllm_source
+```
+
+Third, install Python packages for vLLM CPU backend building:
 
 ```console
 pip install --upgrade pip
