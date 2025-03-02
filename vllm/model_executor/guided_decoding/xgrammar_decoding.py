@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any, List
 import torch
 from transformers import PreTrainedTokenizerFast
 
+from vllm.logger import init_logger
+
 try:
     import xgrammar as xgr
     from xgrammar.base import _core as xgr_core
@@ -19,7 +21,6 @@ except ImportError:
     xgr_installed = False
     pass
 
-from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
                                                        grammar_is_likely_lark)
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
     from vllm.config import ModelConfig
+    from vllm.model_executor.guided_decoding.reasoner import Reasoner
     from vllm.sampling_params import GuidedDecodingParams
 
 logger = init_logger(__name__)
@@ -38,12 +40,13 @@ def get_local_xgrammar_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
+        reasoner: Reasoner | None,
         max_threads: int = 8):
     config = GrammarConfig.from_guided_params(guided_params=guided_params,
                                               model_config=model_config,
                                               tokenizer=tokenizer,
                                               max_threads=max_threads)
-    return XGrammarLogitsProcessor(config)
+    return XGrammarLogitsProcessor(config, reasoner)
 
 
 @dataclass(frozen=True)
@@ -293,6 +296,7 @@ class GrammarConfig:
 class XGrammarLogitsProcessor:
     """Wrapper class to support pickle protocol"""
     config: GrammarConfig
+    reasoner: Reasoner | None = None
 
     ctx: xgr.CompiledGrammar | None = None
     token_bitmask: torch.Tensor = None  # type: ignore[assignment]
@@ -301,10 +305,11 @@ class XGrammarLogitsProcessor:
     prefilled: bool = field(default=False)
 
     def __getstate__(self) -> dict[str, Any]:
-        return {'config': self.config}
+        return {'config': self.config, 'reasoner': self.reasoner}
 
     def __setstate__(self, state: dict[str, Any]):
         self.config = state['config']
+        self.reasoner = state['reasoner']
 
         self.ctx = None
         self.matchers = []
@@ -331,6 +336,14 @@ class XGrammarLogitsProcessor:
 
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
+
+        # Skip the structured logits processing if reasoning is not finished.
+        # reasoner is not None only when `--enable-reasoning` is set.
+        if self.reasoner is not None and \
+        not self.reasoner.is_reasoning_end(
+                input_ids):
+            return scores
+
         if self.ctx is None:
             self._ensure_ctx()
 

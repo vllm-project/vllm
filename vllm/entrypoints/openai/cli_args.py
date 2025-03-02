@@ -13,7 +13,6 @@ from typing import List, Optional, Sequence, Union, get_args
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
-from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
@@ -215,23 +214,6 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Enable auto tool choice for supported models. Use "
         "``--tool-call-parser`` to specify which parser to use.")
-    parser.add_argument(
-        "--enable-reasoning",
-        action="store_true",
-        default=False,
-        help="Whether to enable reasoning_content for the model. "
-        "If enabled, the model will be able to generate reasoning content.")
-
-    valid_reasoning_parsers = ReasoningParserManager.reasoning_parsers.keys()
-    parser.add_argument(
-        "--reasoning-parser",
-        type=str,
-        metavar="{" + ",".join(valid_reasoning_parsers) + "}",
-        default=None,
-        help=
-        "Select the reasoning parser depending on the model that you're using."
-        " This is used to parse the reasoning content into OpenAI API "
-        "format. Required for ``--enable-reasoning``.")
 
     valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
