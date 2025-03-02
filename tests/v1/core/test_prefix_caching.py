@@ -3,6 +3,7 @@
 from typing import List
 
 import pytest
+import torch
 
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
@@ -11,6 +12,8 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_block_tokens)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        VirtualLayer)
 
 
 def make_request(request_id,
@@ -36,12 +39,21 @@ def make_request(request_id,
     )
 
 
+def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        tensors={},
+        virtual_layers=[
+            VirtualLayer(['layer'],
+                         FullAttentionSpec(block_size, 1, 1, torch.float32))
+        ],
+    )
+
+
 def test_prefill():
     manager = KVCacheManager(
-        block_size=16,
-        num_gpu_blocks=10,
+        make_kv_cache_config(16, 10),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=16,
     )
@@ -147,10 +159,8 @@ def test_prefill():
 
 def test_decode():
     manager = KVCacheManager(
-        block_size=16,
-        num_gpu_blocks=10,
+        make_kv_cache_config(16, 10),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=16,
     )
@@ -200,10 +210,8 @@ def test_decode():
 
 def test_evict():
     manager = KVCacheManager(
-        block_size=16,
-        num_gpu_blocks=10,
+        make_kv_cache_config(16, 10),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=16,
     )
@@ -253,10 +261,8 @@ def test_hash_block_correct_reuse():
     """
     block_size = 16
     manager = KVCacheManager(
-        block_size=block_size,
-        num_gpu_blocks=1,
+        make_kv_cache_config(16, 1),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=0,
     )
@@ -292,10 +298,8 @@ def test_computed_blocks_not_evicted():
     """
     block_size = 16
     manager = KVCacheManager(
-        block_size=block_size,
-        num_gpu_blocks=2,
+        make_kv_cache_config(block_size, 2),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=0,
     )
@@ -343,10 +347,8 @@ def test_basic_prefix_caching_disabled():
     """
     block_size = 4
     manager = KVCacheManager(
-        block_size=block_size,
-        num_gpu_blocks=4,
+        make_kv_cache_config(block_size, 4),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=False,
         num_preallocate_tokens=0,
     )
@@ -386,10 +388,8 @@ def test_preallocate_blocks(num_preallocate_tokens: int, block_size: int):
     This tests that the preallocated blocks are correctly added.
     """
     manager = KVCacheManager(
-        block_size=block_size,
-        num_gpu_blocks=10,
+        make_kv_cache_config(block_size, 10),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=num_preallocate_tokens,
     )
@@ -467,10 +467,8 @@ def test_mm_prefix_caching():
     This tests that the multi-modal prefix caching is correct.
     """
     manager = KVCacheManager(
-        block_size=16,
-        num_gpu_blocks=10,
+        make_kv_cache_config(16, 10),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=16,
     )
@@ -548,10 +546,8 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     """
     block_size = 16
     manager = KVCacheManager(
-        block_size=block_size,
-        num_gpu_blocks=10,
+        make_kv_cache_config(block_size, 10),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=0,
     )
@@ -604,10 +600,8 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
 
 def test_reset_prefix_cache():
     manager = KVCacheManager(
-        block_size=16,
-        num_gpu_blocks=10,
+        make_kv_cache_config(16, 10),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=0,
     )
