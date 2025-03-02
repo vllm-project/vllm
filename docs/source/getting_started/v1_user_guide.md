@@ -54,7 +54,8 @@ As part of the major architectural rework in vLLM V1, several legacy features ha
 
 **Deprecated sampling features**
 
-- **best_of**: See details in this [PR #13361](https://github.com/vllm-project/vllm/issues/13361)
+- **best_of**: See details here [PR #13361](https://github.com/vllm-project/vllm/issues/13361),
+[PR #13997](https://github.com/vllm-project/vllm/issues/13997).
 - **Per-Request Logits Processors**: In V0, users could pass custom
   processing functions to adjust logits on a per-request basis. In vLLM V1 this
   is deprecated. Instead, the design is moving toward supporting global logits
