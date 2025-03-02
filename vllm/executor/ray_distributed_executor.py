@@ -52,17 +52,17 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     # These env vars are used at installation time, therefore are NOT copied
     # from the driver to the workers
-    INSTALL_TIME_ENV_VARS = set([
+    INSTALL_TIME_ENV_VARS = {
         "VLLM_TARGET_DEVICES", "MAX_JOBS", "NVCC_THREADS",
         "VLLM_USE_PRECOMPILED", "CMAKE_BUILD_TYPE", "VERBOSE",
         "VLLM_CONFIG_ROOT"
-    ])
+    }
 
     # These env vars are worker-specific, therefore are NOT copied
     # from the driver to the workers
-    WORKER_SPECIFIC_ENV_VARS = set([
+    WORKER_SPECIFIC_ENV_VARS = {
         "VLLM_HOST_IP", "VLLM_HOST_PORT", "LOCAL_RANK", "CUDA_VISIBLE_DEVICES"
-    ])
+    }
 
     uses_ray: bool = True
 
