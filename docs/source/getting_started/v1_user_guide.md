@@ -24,17 +24,16 @@ Upgrade to vLLM’s Core Architecture](https://blog.vllm.ai/2025/01/27/v1-alpha-
 
 ### Logprobs
 
-vLLM V1 introduces support for returning log probabilities (logprobs) for both
-sampled tokens and the prompt.
+vLLM V1 introduces support for returning logprobs and prompt logprobs.
 However, there are some important semantic
 differences compared to V0:
 
 **Prompt Logprobs Without Prefix Caching**
 
-In vLLM V1, if you request prompt logprobs (using the `prompt_logprobs=true` flag),
-prefix caching is not available. This means that if you want logprobs for the prompt,
-you must disable prefix caching (e.g. by starting the server with `--no-enable-prefix-caching`).
-The team is working to support prompt logprobs with caching.
+In vLLM V1, if you request prompt logprobs,
+prefix caching is not available. This means that if you want prompt logprobs,
+you must disable prefix caching (e.g. with `--no-enable-prefix-caching`).
+The team is working to support prompt logprobs with prefix caching.
 
 **Pre-Post-Processing Calculation**
 
