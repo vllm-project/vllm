@@ -12,6 +12,7 @@ import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
@@ -414,9 +415,7 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
     num_groups = w1.shape[0]
     M = a.shape[0]
     M_sum = M * topk
-    N = w1.shape[1] // 2
-    K = w1.shape[2]
-
+    K = w1.shape[2] # w2.shape[1]
     a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
     inter_out = torch.empty((M_sum, K),
                             dtype=torch.bfloat16,
@@ -430,28 +429,31 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
     print(f"BLOCK_M {block_m}")
     p("A", a)
 
+    row_size = max(M_sum // num_groups, 1)
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = (
+        moe_align_block_size(topk_ids, row_size, num_groups, None)
+    )
+    m_indices = expert_ids
+    assert m_indices.numel() == M_sum
+    print(f"num_tokens_post_padded = {num_tokens_post_padded}")
+    p("expert ids", expert_ids)
+
     _, block_k = block_shape[0], block_shape[1]
     a_q, a_s = per_token_group_quant_fp8(a, block_m)
-
-    p("A_q", a_q)
-    p("A_s", a_s)
 
     #assert w1_s.shape == (num_groups, (2 * N + 127) // 128, (K + 127) // 128)
     #print(f"FIRST GEMM {a_q.shape}")
 
-    # use topk_ids??
-    if True:
-        m_indices = torch.arange(0, num_groups, dtype=torch.int)
-        m_indices = m_indices.unsqueeze(-1).expand(
-            num_groups, max(M_sum // num_groups, 1)).contiguous().view(-1)
-        #m_indices = torch.IntTensor([1, 0]).to(dtype=torch.int32, device=a.device)
-    else:
-        pass
+    # m_indices maps to expert_ids
+    #m_indices = torch.arange(0, num_groups, dtype=torch.int)
+    #m_indices = m_indices.unsqueeze(-1).expand(
+    #    num_groups, row_size).contiguous().view(-1)
 
     p("m_indices", m_indices)
     print(m_indices)
 
-    print("topk", topk_ids)
+    print("topk_ids", topk_ids)
     print(topk_ids)
     print("topk_weight", topk_weight)
     print(topk_weight)
@@ -483,8 +485,8 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
         deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(
             (act_out_q, act_out_s), (w2, w2_s), out, topk_ids, M)
 
-    return (out.view(M_sum, -1, w2.shape[1]) *
-            topk_weight.view(M_sum, -1, 1).to(out.dtype)).sum(dim=1)
+    return (out.view(M, -1, w2.shape[1]) *
+            topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
 
 
 @pytest.mark.parametrize(
@@ -516,7 +518,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     w2_bf16 = ((torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 *
                fp8_max).clamp(min=fp8_min, max=fp8_max)
 
-    score = torch.randn((M, E), dtype=dtype)
+    #score = torch.randn((M, E), dtype=dtype)
+    score = torch.zeros((M, E), dtype=dtype)
 
     num_groups = E
     block_n, block_k = block_size[0], block_size[1]
@@ -600,8 +603,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                 block_shape=block_size,
             )
 
-    #print(f"{out.sum()=}")
-    #print(f"{ref_out.sum()=}")
+    print(f"{out.sum()=}")
+    print(f"{ref_out.sum()=}")
 
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
