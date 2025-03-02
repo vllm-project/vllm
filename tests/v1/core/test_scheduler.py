@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 from typing import List, Optional
 
+import torch
+
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        VirtualLayer)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -36,12 +40,20 @@ def create_scheduler(
         swap_space=0,
         cache_dtype="auto",
     )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10000,  # A large number of blocks to hold all requests
+        tensors={},
+        virtual_layers=[
+            VirtualLayer(['layer'], FullAttentionSpec(16, 1, 1, torch.float32))
+        ],
+    )
     cache_config.num_gpu_blocks = 10000
     return Scheduler(scheduler_config,
                      model_config,
                      cache_config,
-                     speculative_config=None,
                      lora_config=None,
+                     speculative_config=None,
+                     kv_cache_config=kv_cache_config,
                      log_stats=True)
 
 
