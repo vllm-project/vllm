@@ -221,6 +221,7 @@ autodoc_mock_imports = [
     "gguf",
     "lark",
     "decord",
+    "loguru",
 ]
 
 for mock_target in autodoc_mock_imports:
