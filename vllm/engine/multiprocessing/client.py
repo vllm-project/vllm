@@ -611,7 +611,8 @@ class MQLLMEngineClient(EngineClient):
                     default_guided_backend=(self.decoding_config.guided_decoding_backend
                         if self.decoding_config
                         else DecodingConfig.guided_decoding_backend),
-                    model_config=self.model_config
+                    model_config=self.model_config,
+                    reasoning_backend=self.decoding_config.reasoning_backend,
                 )
 
         # 1) Create output queue for this requests.
