@@ -233,19 +233,18 @@ def load_nvlm_d(question: str, image_urls: List[str]):
         chat_template=None,
     )
 
+
 def load_ovis(question: str, image_urls: List[str]) -> ModelRequestData:
     model = "AIDC-AI/Ovis1.6-Gemma2-9B"
-    
-    llm = LLM(
-        model=model,
-        max_model_len=8192,
-        dtype="bfloat16",
-        trust_remote_code=True
-    )
+
+    llm = LLM(model=model,
+              max_model_len=8192,
+              dtype="bfloat16",
+              trust_remote_code=True)
     prompt = f"<image>\n{question}"
-    
-    stop_token_ids = [1,107]  
-    
+
+    stop_token_ids = [1, 107]
+
     return ModelRequestData(
         llm=llm,
         prompt=prompt,
@@ -253,6 +252,7 @@ def load_ovis(question: str, image_urls: List[str]) -> ModelRequestData:
         image_data=[fetch_image(url) for url in image_urls],
         chat_template=None,
     )
+
 
 def load_pixtral_hf(question: str, image_urls: List[str]) -> ModelRequestData:
     model_name = "mistral-community/pixtral-12b"
