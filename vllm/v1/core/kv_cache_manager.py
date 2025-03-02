@@ -352,10 +352,13 @@ class KVCacheManager:
     def _free_useless_blocks(self, req_blocks: List[KVCacheBlock],
                              num_computed_tokens: int) -> None:
         """
-        Frees memory blocks that are not needed. E.g., sliding window 
-        layer with window size 2 and block size 1, we have req_blocks as 
-        [[1, 2, 3]], this function will free block 1 and change the req_blocks
-        to [[-1, 2, 3]] (-1 refers to null block)
+        Frees memory blocks that are not needed. E.g., the blocks that are 
+        outside of the sliding window. The removed blocks will be replaced with
+        null blocks in req_blocks.
+        NOTE: Due to the append-only implementation of block_table in model 
+        runner, we don't mark these blocks as removed in model runner. Model 
+        runner is correct as it doesn't access the removed blocks.
+
         Args:
             req_blocks: The KV cache blocks of one request.
             num_computed_tokens: The number of computed tokens.

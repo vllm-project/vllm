@@ -49,12 +49,14 @@ class BlockPool:
         self.cached_block_hash_to_block: Dict[BlockHashType, Dict[
             int, KVCacheBlock]] = defaultdict(dict)
 
-        # To represent a placeholder block with block_id=-1. Do not need to
-        # allocate a real block for this in most cases. If the attention
-        # implementation requires a real block for this, it should call
-        # `init_real_null_block` to allocate a real block for this placeholder
-        # block. `init_real_null_block` should be called before allocating any
-        # other blocks.
+        # To represent a placeholder block with block_id=-1. No need to allocate
+        # a real block in most cases.
+        # If the attention implementation requires a real block for this,
+        # it should call `init_real_null_block` to allocate a real block for
+        # the _null_block. `init_real_null_block` should be called before
+        # allocating any other blocks.
+        # The ref_cnt of null_block is not correctly maintained. It should never
+        # be freed.
         self._null_block = KVCacheBlock(-1)
 
     def get_cached_block(self,
@@ -232,10 +234,11 @@ class BlockPool:
                 priority.
         """
         for block in ordered_blocks:
-            if block == self._null_block:
-                continue
             block.decr_ref()
             if block.ref_cnt == 0:
+                # null_block should not be added to the free list.
+                if block == self._null_block:
+                    continue
                 self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:

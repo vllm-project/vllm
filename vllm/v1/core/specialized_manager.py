@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from itertools import chain
 from typing import Dict, List, Tuple, Type
 
-from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          PrefixLengthRange)
@@ -16,8 +15,6 @@ class SpecializedManager(ABC):
     An abstract base class for specialized managers that handle the kv
     cache management logic of different attention layers.
     """
-    block_size: int
-    max_num_blocks_per_req: int
 
     def __init__(
         self,
@@ -28,10 +25,7 @@ class SpecializedManager(ABC):
         Initializes the SpecializedManager.
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
-            block_pool_operations: Operations to interact with the block pool. 
-            TODO update
-        Returns:
-            None
+            block_pool: The block pool.
         """
 
         self.block_size = kv_cache_spec.block_size
@@ -46,30 +40,17 @@ class SpecializedManager(ABC):
         Get the possible cached prefixes of a request based on its block hashes.
         If no cached prefixes are found, returns a tuple with a prefix length 
         range of [0, 0] and an empty list of blocks.
+
         Args:
             block_hashes: The block hashes of the request.
         Returns:
             A tuple containing:
                 - A list of all possible cached prefix lengths.
-                - The computed blocks that are cached.
+                - A list of cached blocks for each block hash. Use the null 
+                block for blocks that are not cached. Can skip the last blocks
+                that are not cached.
         """
 
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_num_new_blocks(self, num_computed_tokens: int,
-                           num_append_tokens: int,
-                           num_allocated_blocks: int) -> int:
-        """
-        Calculate the number of new blocks needed by this manager.
-        Args:
-            num_computed_tokens: The number of tokens that have been computed.
-            num_append_tokens: The number of tokens that need to be appended.
-            num_allocated_blocks: The number of blocks that have already been 
-            allocated.
-        Returns:
-            int: The number of new blocks needed.
-        """
         raise NotImplementedError
 
     @abstractmethod
@@ -87,7 +68,7 @@ class SpecializedManager(ABC):
             block_table: The block table to be updated.
             num_computed_tokens: The number of tokens that have been computed.
         Returns:
-            List[KVCacheBlock]: The removed blocks.
+            The removed blocks in eviction order.
         """
         raise NotImplementedError
 
@@ -110,20 +91,12 @@ class FullAttentionManager(SpecializedManager):
                                   len(computed_blocks) * self.block_size)
                 ], computed_blocks
 
-    def get_num_new_blocks(self, num_computed_tokens: int,
-                           num_append_tokens: int,
-                           num_allocated_blocks: int) -> int:
-        num_required_blocks = cdiv(num_computed_tokens + num_append_tokens,
-                                   self.block_size)
-        num_new_blocks = num_required_blocks - num_allocated_blocks
-        return num_new_blocks
-
     def remove_useless_blocks(self, block_table: List[KVCacheBlock],
                               num_computed_tokens: int) -> List[KVCacheBlock]:
         return []
 
 
-class SlidingWindowManager(FullAttentionManager):
+class SlidingWindowManager(SpecializedManager):
 
     def __init__(self, kv_cache_spec: SlidingWindowSpec,
                  block_pool: BlockPool):
