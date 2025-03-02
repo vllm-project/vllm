@@ -6,7 +6,6 @@ from typing import List, Optional, Tuple
 
 import pytest
 
-from tests.v1.engine.utils import PLP_APC_UNSUPPORTED_MSG
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -14,6 +13,7 @@ from vllm.inputs import PromptType
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineGenerateError
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -88,10 +88,11 @@ async def test_async_llm_refuses_prompt_logprobs_with_apc(
     apc_engine_args = AsyncEngineArgs(model="facebook/opt-125m",
                                       enable_prefix_caching=True,
                                       gpu_memory_utilization=0.8,
+                                      enforce_eager=True,
                                       disable_log_requests=True)
     engine = AsyncLLM.from_engine_args(apc_engine_args)
     try:
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(EngineGenerateError):
             # Issue a request with prompt logprobs enabled, which should fail
             await asyncio.create_task(
                 generate(engine,
@@ -100,8 +101,6 @@ async def test_async_llm_refuses_prompt_logprobs_with_apc(
                          output_kind,
                          10,
                          prompt_logprobs=5))
-        # Validate exception string is correct
-        assert str(excinfo.value) == PLP_APC_UNSUPPORTED_MSG
     finally:
         # Shut down engine
         engine.shutdown()
