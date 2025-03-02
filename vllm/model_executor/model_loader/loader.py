@@ -10,6 +10,7 @@ import inspect
 import itertools
 import math
 import os
+import time
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -216,6 +217,9 @@ class DefaultModelLoader(BaseModelLoader):
         allow_patterns_overrides: Optional[list[str]] = None
         """If defined, weights will load exclusively using these patterns."""
 
+    counter_before_loading_weights: float = 0.0
+    counter_after_loading_weights: float = 0.0
+
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         if load_config.model_loader_extra_config:
@@ -368,6 +372,8 @@ class DefaultModelLoader(BaseModelLoader):
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
 
+        if self.counter_before_loading_weights == 0.0:
+            self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
         return ((source.prefix + name, tensor)
                 for (name, tensor) in weights_iterator)
@@ -412,6 +418,11 @@ class DefaultModelLoader(BaseModelLoader):
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))
+            self.counter_after_loading_weights = time.perf_counter()
+            logger.info(
+                "Loading weights took %.2f seconds",
+                self.counter_after_loading_weights -
+                self.counter_before_loading_weights)
             # We only enable strict check for non-quantized models
             # that have loaded weights tracking currently.
             if model_config.quantization is None and loaded_weights is not None:
