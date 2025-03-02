@@ -150,16 +150,22 @@ def get_tokenizer(
         # pylint: disable=C.
         from modelscope.hub.snapshot_download import snapshot_download
 
+        # avoid circuit import
+        from vllm.model_executor.model_loader.weight_utils import get_lock
+
         # Only set the tokenizer here, model will be downloaded on the workers.
         if not os.path.exists(tokenizer_name):
-            tokenizer_path = snapshot_download(
-                model_id=tokenizer_name,
-                cache_dir=download_dir,
-                revision=revision,
-                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                # Ignore weights - we only need the tokenizer.
-                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
-            tokenizer_name = tokenizer_path
+            # Use file lock to prevent multiple processes from
+            # downloading the same file at the same time.
+            with get_lock(tokenizer_name, download_dir):
+                tokenizer_path = snapshot_download(
+                    model_id=tokenizer_name,
+                    cache_dir=download_dir,
+                    revision=revision,
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                    # Ignore weights - we only need the tokenizer.
+                    ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
+                tokenizer_name = tokenizer_path
 
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
