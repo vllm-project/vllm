@@ -74,12 +74,14 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
-    VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_BSCALED_MOE: bool = True
     VLLM_ROCM_USE_AITER_NORM: bool = True
+    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = True
+    VLLM_ROCM_USE_CUSTOM_PAGED_ATTN: bool = True
+    VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -535,16 +537,25 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # use aiter linear op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_LINEAR":
-    lambda: (os.getenv("LLM_ROCM_USE_AITER", "False").lower() in
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True"
                                          ).lower() in ("true", "1")),
 
     # use aiter rms norm op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_NORM":
     lambda:
-    (os.getenv("VLLM_USE_AITER", "False").lower() in
+    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
      ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_NORM", "True").lower() in
      ("true", "1")),
+    "VLLM_ROCM_USE_AITER_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN",
+                                         "True").lower() in ("true", "1")),
+
+    # use rocm custom paged attention.
+    "VLLM_ROCM_USE_CUSTOM_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_ROCM_USE_CUSTOM_PAGED_ATTN", "False").lower() in
+             ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
