@@ -279,6 +279,7 @@ every 5 seconds with some key metrics:
   seconds
 - The number of new tokens generated per second over the past 5
   seconds
+- The prefix cache hit rate over the most recent 1 queries
 
 ### Metrics Publishing - Prometheus
 
