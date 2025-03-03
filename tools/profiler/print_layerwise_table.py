@@ -2,13 +2,12 @@
 
 import argparse
 import json
-from typing import Dict
 
 from vllm.profiler.layerwise_profile import ModelStatsEntry, SummaryStatsEntry
 from vllm.profiler.utils import TablePrinter, indent_string
 
 
-def flatten_entries(entry_cls, profile_dict: Dict):
+def flatten_entries(entry_cls, profile_dict: dict):
     entries_and_depth = []
 
     def get_entries(node, curr_depth=0):
