@@ -174,6 +174,7 @@ class DeepseekV3MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         hidden_states = hidden_states.reshape(batch_size, seq_len, hidden_dim)
+        show_mem_info(logger, f"{self._prefix}: shared_output shape {shared_output.shape}, router_logits shape {router_logits.shape}, hidden_states shape {hidden_states.shape}")
         show_mem_info(logger, f"{self._prefix}: before experts")
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
