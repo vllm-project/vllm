@@ -258,10 +258,15 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_lora_a_embeddings.shape[1],
                 -1,
             )
-        self.punica_wrapper.add_lora_embedding(full_output,
-                                               full_lora_a_embeddings,
-                                               self.lora_b_stacked,
-                                               add_input=True)
+
+        lora_output = self.punica_wrapper.add_lora_embedding(
+            full_output,
+            full_lora_a_embeddings,
+            self.lora_b_stacked,
+            add_input=True)
+        if not current_platform.can_update_inplace():
+            full_output = lora_output
+
         return full_output.view_as(full_output_org)
 
     @classmethod
@@ -395,10 +400,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
-                                            self.lora_b_stacked,
-                                            self.lora_bias_stacked, 1.0,
-                                            self.output_slices)
+        lora_output = self.punica_wrapper.add_lora_linear(
+            output, x, self.lora_a_stacked, self.lora_b_stacked,
+            self.lora_bias_stacked, 1.0, self.output_slices)
+        if not current_platform.can_update_inplace():
+            output = lora_output
+
         return output
 
     @classmethod
@@ -1113,9 +1120,12 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                lora_logits.shape[1]] = lora_logits
 
         # LogitsProcessorWithLoRA always using bgmv
-        self.punica_wrapper.add_lora_logits(logits, hidden_states,
-                                            self.lora_a_stacked,
-                                            self.lora_b_stacked, 1.0)
+        lora_output = self.punica_wrapper.add_lora_logits(
+            logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked,
+            1.0)
+
+        if not current_platform.can_update_inplace():
+            logits = lora_output
 
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.base_layer.vocab_size]

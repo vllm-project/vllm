@@ -331,6 +331,11 @@ class Platform:
         return float("-inf"), float("inf")
 
     @classmethod
+    def can_update_inplace(cls) -> bool:
+        """Checks if the platform allows inplace memory updates"""
+        return True
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         """
         Get device specific communicator class for distributed communication.

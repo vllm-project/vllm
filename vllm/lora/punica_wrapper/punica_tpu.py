@@ -34,7 +34,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         #No LoRA request, so return directly
         if self.no_lora:
             return
-        sgmv_shrink(
+        return sgmv_shrink(
             x,
             w_t_all,
             y,
@@ -51,7 +51,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     ):
         if self.no_lora:
             return
-        bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
+        return bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
     def _expand_prefill(
         self,
@@ -63,7 +63,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         #No LoRA request, so return directly
         if self.no_lora:
             return
-        sgmv_expand(
+        return sgmv_expand(
             x,
             w_t_all,
             y,
@@ -80,7 +80,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     ):
         if self.no_lora:
             return
-        bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
+        return bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
 
     def _expand_slice_prefill(
         self,
@@ -90,11 +90,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y_offset: int,
         y_slice_size: int,
         add_inputs: bool,
-    ):
+    ) -> torch.Tensor:
         #No LoRA request, so return directly
         if self.no_lora:
             return
-        sgmv_expand_slice(
+        return sgmv_expand_slice(
             x,
             w_t_all,
             y,
@@ -112,15 +112,15 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y_offset: int,
         y_slice_size: int,
         add_inputs: bool,
-    ):
+    ) -> torch.Tensor:
         if self.no_lora:
             return
-        bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
-                          y_slice_size, add_inputs)
+        return bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices,
+                                 y_offset, y_slice_size, add_inputs)
 
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
                    x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
-                   scale: float, **kwargs):
+                   scale: float, **kwargs) -> Optional[torch.Tensor]:
         """
         Performs GEMM  for multiple slices of lora_a.
         When `is_prefill is` true, it indicates that it is currently the
@@ -144,6 +144,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         shrink_fun: Callable = (self._shrink_prefill
                                 if self.is_prefill else self._shrink_decode)
 
+        new_y = []
         # TODO fuse these kernels
         for slice_idx in range(len(lora_a_stacked)):
             y_s = y[slice_idx]
@@ -152,8 +153,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y_org = y_s
             y_s = y_s.view(-1, y_s.shape[-1])
 
-            shrink_fun(y_s, x, lora_s, scale)
+            y_s = shrink_fun(y_s, x, lora_s, scale)
             y_s = y_s.view_as(y_org)
+            new_y.append(y_s)
+        return tuple(new_y)
 
     def add_expand(self,
                    y: torch.Tensor,
@@ -163,7 +166,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                    output_slices: Tuple[int, ...],
                    offset_start: int = 0,
                    add_inputs=True,
-                   **kwargs) -> None:
+                   **kwargs) -> torch.Tensor:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
       
@@ -191,10 +194,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         offset_left = 0
         if lora_bias_stacked is not None:
-            self._apply_bias(self.token_lora_indices, y, output_slices,
-                             lora_bias_stacked)
+            y = self._apply_bias(self.token_lora_indices, y, output_slices,
+                                 lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
-            expand_slice_fun(
+            y = expand_slice_fun(
                 y,
                 x[slice_idx],
                 lora_b_stacked[slice_idx],
@@ -203,14 +206,14 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 add_inputs=add_inputs,
             )
             offset_left += output_slices[slice_idx]
-        y = y.view_as(y_org)
+        return y.view_as(y_org)
 
     def add_lora_embedding(self,
                            y: torch.Tensor,
                            x: torch.Tensor,
                            lora_b_stacked: torch.Tensor,
                            add_inputs: bool = True,
-                           **kwargs) -> None:
+                           **kwargs) -> torch.Tensor:
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
 
@@ -227,7 +230,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         # Embedding layer only needs the expand op
         expand_fun: Callable = (self._expand_prefill
                                 if self.is_prefill else self._expand_decode)
-        expand_fun(y, x, lora_b_stacked, add_inputs)
+        return expand_fun(y, x, lora_b_stacked, add_inputs)
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -239,7 +242,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                         output_slices: Tuple[int, ...],
                         *,
                         buffer: Optional[Tuple[torch.Tensor, ...]] = None,
-                        **kwargs) -> None:
+                        **kwargs) -> torch.Tensor:
         """
         Applicable to linear-related lora. 
 
@@ -279,14 +282,14 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 dtype=torch.float32,
                 device=x.device,
             )
-        self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
-        self.add_expand(y,
-                        buffer,
-                        lora_b_stacked,
-                        None,
-                        output_slices,
-                        add_inputs=True,
-                        **kwargs)
+        buffer = self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
+        return self.add_expand(y,
+                               buffer,
+                               lora_b_stacked,
+                               None,
+                               output_slices,
+                               add_inputs=True,
+                               **kwargs)
 
     def add_lora_logits(self,
                         y: torch.Tensor,
@@ -296,7 +299,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                         scale,
                         *,
                         buffer: Optional[torch.Tensor] = None,
-                        **kwargs) -> None:
+                        **kwargs) -> torch.Tensor:
         """
         Applies lora  specifically for LogitsProcessorWithLoRA.
         
@@ -323,10 +326,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                                  dtype=torch.float32,
                                  device=x.device)
         # LogitsProcessorWithLoRA always using bgmv.
-        bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
-        bgmv_expand(buffer,
-                    lora_b_stacked,
-                    y,
-                    self.sampler_indices,
-                    add_inputs=True)
-        y = y.view_as(y_org)
+        buffer = bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices,
+                             scale)
+        y = bgmv_expand(buffer,
+                        lora_b_stacked,
+                        y,
+                        self.sampler_indices,
+                        add_inputs=True)
+        return y.view_as(y_org)

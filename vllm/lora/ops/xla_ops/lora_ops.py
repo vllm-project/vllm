@@ -16,8 +16,8 @@ def sgmv_expand(inputs: torch.Tensor,
     exploded_indices = torch.repeat_interleave(lora_indices_tensor,
                                                inputs.size(0))
 
-    bgmv_expand(inputs, lora_b_weights, output_tensor, exploded_indices,
-                add_inputs)
+    return bgmv_expand(inputs, lora_b_weights, output_tensor, exploded_indices,
+                       add_inputs)
 
 
 def bgmv_expand(inputs: torch.Tensor,
@@ -46,9 +46,9 @@ def bgmv_expand(inputs: torch.Tensor,
         dim=1)
 
     if add_inputs:
-        output_tensor += outputs[:limit, :]
+        return output_tensor + outputs[:limit, :]
     else:
-        output_tensor = outputs[:limit, :]
+        return outputs[:limit, :]
 
 
 def sgmv_shrink(
@@ -66,8 +66,8 @@ def sgmv_shrink(
     exploded_indices = torch.repeat_interleave(lora_indices_tensor,
                                                inputs.size(0))
 
-    bgmv_shrink(inputs, lora_a_weights, output_tensor, exploded_indices,
-                scaling)
+    return bgmv_shrink(inputs, lora_a_weights, output_tensor, exploded_indices,
+                       scaling)
 
 
 def bgmv_shrink(inputs: torch.Tensor,
@@ -75,6 +75,7 @@ def bgmv_shrink(inputs: torch.Tensor,
                 output_tensor: torch.Tensor,
                 lora_indices_tensor: torch.Tensor,
                 scaling: float = 1.0):
+
     selected_loras = lora_b_weights[lora_indices_tensor].to(
         dtype=output_tensor.dtype)
     if len(selected_loras.shape) == 4:
@@ -85,7 +86,7 @@ def bgmv_shrink(inputs: torch.Tensor,
     outputs = (selected_loras @ inputs.reshape(
         (batch_size, input_size, 1))).reshape((batch_size, output_size))
 
-    output_tensor = scaling * outputs
+    return scaling * outputs
 
 
 def sgmv_expand_slice(inputs: torch.Tensor,
@@ -103,8 +104,9 @@ def sgmv_expand_slice(inputs: torch.Tensor,
     exploded_indices = torch.repeat_interleave(lora_indices_tensor,
                                                inputs.size(0))
 
-    bgmv_expand_slice(inputs, lora_b_weights, output_tensor, exploded_indices,
-                      slice_offset, slice_size, add_inputs)
+    return bgmv_expand_slice(inputs, lora_b_weights, output_tensor,
+                             exploded_indices, slice_offset, slice_size,
+                             add_inputs)
 
 
 def bgmv_expand_slice(inputs: torch.Tensor,
@@ -114,6 +116,7 @@ def bgmv_expand_slice(inputs: torch.Tensor,
                       slice_offset: int,
                       slice_size: int,
                       add_inputs: bool = True):
+
     selected_loras = lora_b_weights[lora_indices_tensor].to(
         dtype=output_tensor.dtype)
 
@@ -137,6 +140,6 @@ def bgmv_expand_slice(inputs: torch.Tensor,
                         dim=1)
 
     if add_inputs:
-        output_tensor += outputs
+        return output_tensor + outputs
     else:
-        output_tensor = outputs
+        return outputs

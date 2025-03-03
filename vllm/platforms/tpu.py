@@ -71,6 +71,10 @@ class TpuPlatform(Platform):
         return torch.finfo(dtype).min, torch.finfo(dtype).max
 
     @classmethod
+    def can_update_inplace(cls):
+        return False
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
