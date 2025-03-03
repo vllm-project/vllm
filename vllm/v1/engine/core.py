@@ -446,9 +446,6 @@ class DPEngineCoreProc(EngineCoreProc):
         _add_prefix(sys.stdout, process_name, pid)
         _add_prefix(sys.stderr, process_name, pid)
 
-        super().__init__(input_path, output_path, vllm_config, executor_class,
-                         log_stats)
-
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
             from vllm.platforms.cuda import device_id_to_physical_device_id
@@ -461,6 +458,9 @@ class DPEngineCoreProc(EngineCoreProc):
         dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_group = None if dp_size <= 1 else (
             vllm_config.parallel_config.stateless_init_dp_group())
+
+        super().__init__(input_path, output_path, vllm_config, executor_class,
+                         log_stats)
 
         self.counter = 0
 
