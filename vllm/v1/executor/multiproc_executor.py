@@ -269,11 +269,13 @@ class WorkerProc:
         proc = context.Process(target=WorkerProc.worker_main,
                                kwargs=process_kwargs,
                                daemon=True)
-        proc.start()
 
-        # Wait for startup
-        worker_response_mq_handle = WorkerProc.wait_for_startup(
-            proc, ready_path)
+        with zmq_socket_ctx(ready_path, zmq.constants.PULL) as ready_socket:
+            proc.start()
+
+            # Wait for startup
+            worker_response_mq_handle = WorkerProc.wait_for_startup(
+                proc, ready_socket)
 
         worker_response_mq = MessageQueue.create_from_handle(
             worker_response_mq_handle, 0)
@@ -336,23 +338,22 @@ class WorkerProc:
     @staticmethod
     def wait_for_startup(
         proc: BaseProcess,
-        ready_path: str,
+        ready_socket: zmq.Socket,
     ) -> Optional[Handle]:
         """Wait until the Worker is ready."""
-        with zmq_socket_ctx(ready_path, zmq.constants.PULL) as socket:
 
-            # Wait for Worker to send READY.
-            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                logger.debug("Waiting for WorkerProc to startup.")
+        # Wait for Worker to send READY.
+        while ready_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+            logger.debug("Waiting for WorkerProc to startup.")
 
-                if not proc.is_alive():
-                    raise RuntimeError("WorkerProc failed to start.")
+            if not proc.is_alive():
+                raise RuntimeError("WorkerProc failed to start.")
 
-            message = socket.recv_string()
-            assert message == WorkerProc.READY_STR
-            handle_frame = socket.recv(copy=False)
-            handle = pickle.loads(handle_frame.buffer)
-            return handle
+        message = ready_socket.recv_string()
+        assert message == WorkerProc.READY_STR
+        handle_frame = ready_socket.recv(copy=False)
+        handle = pickle.loads(handle_frame.buffer)
+        return handle
 
     class ResponseStatus(Enum):
         SUCCESS = auto()
