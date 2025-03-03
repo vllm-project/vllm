@@ -274,19 +274,11 @@ class DeepGEMMFp8LinearMethod(LinearMethodBase):
 
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        # TODO(rob): refactor block quant into separate class.
 
         qweight, weight_scale = self.per_block_cast_to_fp8(layer.weight)
-        # If using marlin (w8a16), kernel uses channelwise weights,
-        # so extend the weight scales to be channelwise.
-        # weight_scale = weight_scale[0][:1]
-        # Update the layer with the new values.
         layer.weight = Parameter(qweight.t(), requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         layer.input_scale = None
-
-        # If checkpoint is fp8, handle that there are N scales for N
-        # shards in a fused module
 
 
     def apply(self,
@@ -317,256 +309,12 @@ class DeepGEMMFp8MoEMethod(FusedMoEMethodBase):
     """
 
     def __init__(self, quant_config: DeepGEMMFp8Config):
-        self.quant_config = quant_config
-        self.block_quant = self.quant_config.weight_block_size is not None
+        raise NotImplementedError
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-
-        if self.quant_config.is_checkpoint_fp8_serialized:
-            params_dtype = torch.float8_e4m3fn
-        if self.block_quant:
-            assert self.quant_config.weight_block_size is not None
-            tp_size = get_tensor_model_parallel_world_size()
-            block_n, block_k = (
-                self.quant_config.weight_block_size[0],
-                self.quant_config.weight_block_size[1],
-            )
-            # NOTE: To ensure proper alignment of the block-wise quantization
-            # scales, the output_size of the weights for both the gate and up
-            # layers must be divisible by block_n.
-            # Required by column parallel or enabling merged weights
-            if intermediate_size_per_partition % block_n != 0:
-                raise ValueError(
-                    f"The output_size of gate's and up's weight = "
-                    f"{intermediate_size_per_partition} is not divisible by "
-                    f"weight quantization block_n = {block_n}.")
-            if (tp_size > 1
-                    and intermediate_size_per_partition % block_k != 0):
-                # Required by row parallel
-                raise ValueError(
-                    f"The input_size of down's weight = "
-                    f"{intermediate_size_per_partition} is not divisible by "
-                    f"weight quantization block_k = {block_k}.")
-
-        # WEIGHTS
-        w13_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size,
-            dtype=params_dtype),
-                                        requires_grad=False)
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
-
-        w2_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition,
-            dtype=params_dtype),
-                                       requires_grad=False)
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        # WEIGHT_SCALES
-        if not self.block_quant:
-            # Allocate 2 scales for w1 and w3 respectively.
-            # They will be combined to a single scale after weight loading.
-            w13_weight_scale = torch.nn.Parameter(torch.ones(
-                num_experts, 2, dtype=torch.float32),
-                                                  requires_grad=False)
-            w2_weight_scale = torch.nn.Parameter(torch.ones(
-                num_experts, dtype=torch.float32),
-                                                 requires_grad=False)
-            layer.register_parameter("w13_weight_scale", w13_weight_scale)
-            layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        else:
-            w13_weight_scale = torch.nn.Parameter(
-                torch.ones(
-                    num_experts,
-                    2 * ((intermediate_size_per_partition + block_n - 1) //
-                         block_n),
-                    (hidden_size + block_k - 1) // block_k,
-                    dtype=torch.float32,
-                ),
-                requires_grad=False,
-            )
-            w2_weight_scale = torch.nn.Parameter(
-                torch.ones(
-                    num_experts,
-                    (hidden_size + block_n - 1) // block_n,
-                    (intermediate_size_per_partition + block_k - 1) // block_k,
-                    dtype=torch.float32,
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w13_weight_scale_inv", w13_weight_scale)
-            layer.register_parameter("w2_weight_scale_inv", w2_weight_scale)
-            assert self.quant_config.activation_scheme == "dynamic"
-
-        # Add the quantization method used (per tensor/grouped/channel)
-        # to ensure the weight scales are loaded in properly
-        extra_weight_attrs.update(
-            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.
-             value} if self.block_quant else
-            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
-        # If loading fp8 checkpoint, pass the weight loaders.
-        # If loading an fp16 checkpoint, do not (we will quantize in
-        #   process_weights_after_loading()
-        if self.quant_config.is_checkpoint_fp8_serialized:
-            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-
-        # INPUT_SCALES
-        if self.quant_config.activation_scheme == "static":
-            if not self.quant_config.is_checkpoint_fp8_serialized:
-                raise ValueError(
-                    "Found static activation scheme for checkpoint that "
-                    "was not serialized fp8.")
-
-            w13_input_scale = torch.nn.Parameter(torch.ones(
-                num_experts, dtype=torch.float32),
-                                                 requires_grad=False)
-            layer.register_parameter("w13_input_scale", w13_input_scale)
-            set_weight_attrs(w13_input_scale, extra_weight_attrs)
-
-            w2_input_scale = torch.nn.Parameter(torch.ones(
-                num_experts, dtype=torch.float32),
-                                                requires_grad=False)
-            layer.register_parameter("w2_input_scale", w2_input_scale)
-            set_weight_attrs(w2_input_scale, extra_weight_attrs)
-
-        else:
-            layer.w13_input_scale = None
-            layer.w2_input_scale = None
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        # TODO (rob): refactor block quant into separate class.
-        if self.block_quant:
-            assert self.quant_config.activation_scheme == "dynamic"
-            if current_platform.is_rocm():
-                w13_weight, w13_weight_scale_inv, w13_input_scale = \
-                    normalize_e4m3fn_to_e4m3fnuz(
-                        layer.w13_weight, layer.w13_weight_scale_inv,
-                        layer.w13_input_scale)
-                w2_weight, w2_weight_scale_inv, w2_input_scale = \
-                    normalize_e4m3fn_to_e4m3fnuz(
-                        layer.w2_weight, layer.w2_weight_scale_inv,
-                        layer.w2_input_scale)
-            else:
-                w13_weight = layer.w13_weight.data
-                w13_weight_scale_inv = layer.w13_weight_scale_inv.data
-                w2_weight = layer.w2_weight
-                w2_weight_scale_inv = layer.w2_weight_scale_inv
-
-            # torch.compile() cannot use Parameter subclasses.
-            layer.w13_weight = Parameter(w13_weight, requires_grad=False)
-            layer.w13_weight_scale_inv = Parameter(w13_weight_scale_inv,
-                                                   requires_grad=False)
-            layer.w2_weight = Parameter(w2_weight, requires_grad=False)
-            layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
-                                                  requires_grad=False)
-            return
-
-        # If checkpoint is fp16, quantize in place.
-        if not self.quant_config.is_checkpoint_fp8_serialized:
-            # If rocm, use float8_e4m3fnuz as dtype
-            fp8_dtype = torch.float8_e4m3fnuz \
-                        if current_platform.is_rocm() else torch.float8_e4m3fn
-            w13_weight = torch.empty_like(layer.w13_weight.data,
-                                          dtype=fp8_dtype)
-            w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)
-
-            # Re-initialize w13_scale because we directly quantize
-            # merged w13 weights and generate a single scaling factor.
-            layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
-                layer.num_experts,
-                dtype=torch.float32,
-                device=w13_weight.device),
-                                                        requires_grad=False)
-            for expert in range(layer.num_experts):
-                w13_weight[expert, :, :], layer.w13_weight_scale[
-                    expert] = ops.scaled_fp8_quant(
-                        layer.w13_weight.data[expert, :, :])
-                w2_weight[expert, :, :], layer.w2_weight_scale[
-                    expert] = ops.scaled_fp8_quant(
-                        layer.w2_weight.data[expert, :, :])
-            layer.w13_weight = torch.nn.Parameter(w13_weight,
-                                                  requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(w2_weight,
-                                                 requires_grad=False)
-            return
-
-        # If checkpoint is fp8, we need to handle that the
-        # MoE kernels require single activation scale and single weight
-        # scale for w13 per expert.
-        else:
-            # Fp8 moe kernels require a single activation scale.
-            # We take the max of all the scales in case they differ.
-            if self.quant_config.activation_scheme == "static":
-                if (layer.w13_input_scale is None
-                        or layer.w2_input_scale is None):
-                    raise ValueError(
-                        "QuantConfig has static quantization, but found "
-                        "activation scales are None.")
-                if (not all_close_1d(layer.w13_input_scale)
-                        or not all_close_1d(layer.w2_input_scale)):
-                    logger.warning_once(
-                        "Found input_scales that are not equal for "
-                        "fp8 MoE layer. Using the maximum across experts "
-                        "for each layer.")
-                layer.w13_input_scale = torch.nn.Parameter(
-                    layer.w13_input_scale.max(), requires_grad=False)
-                layer.w2_input_scale = torch.nn.Parameter(
-                    layer.w2_input_scale.max(), requires_grad=False)
-            # If rocm, normalize the weights and scales to e4m3fnuz
-            if current_platform.is_rocm():
-                # Normalize the weights and scales
-                w13_weight, w13_weight_scale, w13_input_scale = \
-                    normalize_e4m3fn_to_e4m3fnuz(
-                        layer.w13_weight, layer.w13_weight_scale,
-                        layer.w13_input_scale)
-                w2_weight, w2_weight_scale, w2_input_scale = \
-                    normalize_e4m3fn_to_e4m3fnuz(
-                        layer.w2_weight, layer.w2_weight_scale,
-                        layer.w2_input_scale)
-                # Reset the parameter
-                layer.w13_weight = torch.nn.Parameter(w13_weight,
-                                                      requires_grad=False)
-                layer.w13_weight_scale = torch.nn.Parameter(
-                    w13_weight_scale, requires_grad=False)
-                if w13_input_scale is not None:
-                    layer.w13_input_scale = torch.nn.Parameter(
-                        w13_input_scale, requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(w2_weight,
-                                                     requires_grad=False)
-                layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale,
-                                                           requires_grad=False)
-                if w2_input_scale is not None:
-                    layer.w2_input_scale = torch.nn.Parameter(
-                        w2_input_scale, requires_grad=False)
-
-            # Fp8 moe kernel needs single weight scale for w13 per expert.
-            # We take the max then dequant and requant each expert.
-            assert layer.w13_weight_scale is not None
-            shard_size = layer.intermediate_size_per_partition
-            max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.num_experts):
-                start = 0
-                for shard_id in range(2):
-                    dq_weight = per_tensor_dequantize(
-                        layer.w13_weight[expert_id][start:start +
-                                                    shard_size, :],
-                        layer.w13_weight_scale[expert_id][shard_id])
-                    layer.w13_weight[expert_id][
-                        start:start + shard_size, :], _ = ops.scaled_fp8_quant(
-                            dq_weight, max_w13_scales[expert_id])
-                    start += shard_size
-
-            layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
-                                                        requires_grad=False)
-            return
+        raise NotImplementedError
 
     def apply(
         self,
@@ -591,4 +339,4 @@ class DeepGEMMFp8KVCacheMethod(BaseKVCacheMethod):
     """
 
     def __init__(self, quant_config: DeepGEMMFp8Config):
-        super().__init__(quant_config)
+        raise NotImplementedError
