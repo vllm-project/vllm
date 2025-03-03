@@ -66,8 +66,8 @@ def from_layer(layer: nn.Module,
                                       lora_config=lora_config,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
-            # Handle HFCompatibleLinear
-            if hasattr(layer, "hf_wrapper"):
+            if hasattr(layer, "__wrapper_class__"
+                       ) and layer.__wrapper_class__ == "HFCompatibleLinear":
 
                 class HFCompatibleLoRA(lora_cls):
                     __class__ = lora_cls
