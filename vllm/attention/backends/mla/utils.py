@@ -16,6 +16,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.logger import rank_debug
+from vllm.logger import ForkedPdb
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -36,7 +37,7 @@ class MLACommonMetadata(AttentionMetadata):
     input_positions: torch.Tensor
 
 
-class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
+class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
     """
     Common class for implementing repeated parts
 
@@ -155,6 +156,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         kv_b_proj: ColumnParallelLinear,
         o_proj: RowParallelLinear,
     ) -> None:
+        torch.nn.Module.__init__(self)
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -174,6 +176,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.o_proj = o_proj
 
     def _v_up_proj_and_o_proj(self, x):
+        # ForkedPdb().set_trace()
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
             if is_fp8(self.W_UV_O):
                 output_parallel = apply_fp8_linear_generic(
@@ -388,7 +391,12 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 self.W_UV_O_scales = W_UV_O_scales.T.contiguous()
             else:
                 self.W_UV_O = W_UV_O.to(act_dtype)
-            rank_debug(f"self.W_UV_O: {self.W_UV_O.shape},act_dtype {act_dtype}")
+            rank_debug(f"self.W_UV_O: {self.W_UV_O.shape},act_dtype {act_dtype}, device: {self.W_UV_O.device}")
+            self.W_UV_O = torch.nn.Parameter(self.W_UV_O, requires_grad=False)
+            self.W_Q_UK = torch.nn.Parameter(self.W_Q_UK, requires_grad=False)
+            self.W_UK = torch.nn.Parameter(self.W_UK, requires_grad=False)
+            # self.W_QR
+            self.W_QR = torch.nn.Parameter(self.W_QR, requires_grad=False)
             self.tp_size = get_tensor_model_parallel_world_size()
         else:
             if is_fp8(weight_dtype):
