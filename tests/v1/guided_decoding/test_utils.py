@@ -1,18 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
+
 from vllm.v1.guided_decoding.utils import (
     has_xgrammar_unsupported_json_features)
 
 
-def test_has_xgrammar_unsupported_json_features():
-    schemas_with_unsupported_features: list[dict] = [{
+@pytest.fixture
+def unsupported_string_schemas():
+    return [{
         "type": "string",
         "pattern": "^[a-zA-Z]+$"
     }, {
-        "type":
-        "string",
+        "type": "string",
         "enum": ["active", "inactive", "pending"]
     }, {
+        "type": "string",
+        "minLength": 1
+    }, {
+        "type": "string",
+        "maxLength": 100
+    }, {
+        "type": "string",
+        "format": "email"
+    }]
+
+
+@pytest.fixture
+def unsupported_integer_schemas():
+    return [{
         "type": "integer",
         "minimum": 0
     }, {
@@ -27,7 +43,12 @@ def test_has_xgrammar_unsupported_json_features():
     }, {
         "type": "integer",
         "multipleOf": 120
-    }, {
+    }]
+
+
+@pytest.fixture
+def unsupported_number_schemas():
+    return [{
         "type": "number",
         "minimum": 0
     }, {
@@ -42,7 +63,12 @@ def test_has_xgrammar_unsupported_json_features():
     }, {
         "type": "number",
         "multipleOf": 120
-    }, {
+    }]
+
+
+@pytest.fixture
+def unsupported_array_schemas():
+    return [{
         "type": "array",
         "uniqueItems": True
     }, {
@@ -62,16 +88,12 @@ def test_has_xgrammar_unsupported_json_features():
     }, {
         "type": "array",
         "maxItems": 10
-    }, {
-        "type": "string",
-        "minLength": 1
-    }, {
-        "type": "string",
-        "maxLength": 100
-    }, {
-        "type": "string",
-        "format": "email"
-    }, {
+    }]
+
+
+@pytest.fixture
+def unsupported_object_schemas():
+    return [{
         "type": "object",
         "minProperties": 1
     }, {
@@ -91,10 +113,10 @@ def test_has_xgrammar_unsupported_json_features():
         }
     }]
 
-    for schema in schemas_with_unsupported_features:
-        assert has_xgrammar_unsupported_json_features(schema)
 
-    schema_without_unsupported_features: dict = {
+@pytest.fixture
+def supported_schema():
+    return {
         "type": "object",
         "properties": {
             "name": {
@@ -126,5 +148,19 @@ def test_has_xgrammar_unsupported_json_features():
         }
     }
 
+
+@pytest.mark.parametrize("schema_type", [
+    "unsupported_string_schemas", "unsupported_integer_schemas",
+    "unsupported_number_schemas", "unsupported_array_schemas",
+    "unsupported_object_schemas"
+])
+def test_unsupported_json_features_by_type(schema_type, request):
+    schemas = request.getfixturevalue(schema_type)
+    for schema in schemas:
+        assert has_xgrammar_unsupported_json_features(
+            schema), f"Schema should be unsupported: {schema}"
+
+
+def test_supported_json_features(supported_schema):
     assert not has_xgrammar_unsupported_json_features(
-        schema_without_unsupported_features)
+        supported_schema), "Schema should be supported"
