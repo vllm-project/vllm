@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from typing import Generator, List, Tuple
+from collections.abc import Generator
 
 import pytest
 import torch
@@ -83,7 +83,7 @@ def _repeat_logprob_config(
                              tuples
     
     Returns:
-      List of
+      list of
       (optional num sample logprob,optional num prompt logprob)
       tuples which is either identical to
       `logprob_prompt_logprob_list`, or else repeats
@@ -103,10 +103,10 @@ def _repeat_logprob_config(
 
 def _run_and_validate(
     vllm_model: VllmRunner,
-    test_prompts: List[str],
+    test_prompts: list[str],
     vllm_sampling_params: SamplingParams,
-    hf_logprobs: List[List[torch.Tensor]],
-    hf_outputs: List[Tuple[List[int], str]],
+    hf_logprobs: list[list[torch.Tensor]],
+    hf_outputs: list[tuple[list[int], str]],
     logprob_prompt_logprob_list: BatchLogprobsSpecType,
     temperature: float,
     max_tokens: int,
@@ -161,7 +161,7 @@ def _run_and_validate(
                                for r in range(1, num_top_logprobs + 1))
 
             output_text = vllm_result.outputs[0].text
-            output_string_from_most_likely_tokens_lst: List[str] = []
+            output_string_from_most_likely_tokens_lst: list[str] = []
             for top_logprobs in vllm_result.outputs[0].logprobs:
                 top_logprob = next(iter(top_logprobs.values()))
                 output_string_from_most_likely_tokens_lst.append(

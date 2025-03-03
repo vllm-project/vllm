@@ -109,7 +109,7 @@ def _configure_vllm_root_logger() -> None:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
-            raise ValueError("Invalid logging config. Expected Dict, got %s.",
+            raise ValueError("Invalid logging config. Expected dict, got %s.",
                              type(custom_config).__name__)
         logging_config = custom_config
 

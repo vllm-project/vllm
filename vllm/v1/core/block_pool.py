@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional
+from collections.abc import Iterable
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
@@ -29,7 +29,7 @@ class BlockPool:
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         # All kv-cache blocks.
-        self.blocks: List[KVCacheBlock] = [
+        self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
@@ -46,11 +46,11 @@ class BlockPool:
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
-        self.cached_block_hash_to_block: Dict[BlockHashType, Dict[
+        self.cached_block_hash_to_block: dict[BlockHashType, dict[
             int, KVCacheBlock]] = defaultdict(dict)
 
     def get_cached_block(self,
-                         block_hash: BlockHashType) -> Optional[KVCacheBlock]:
+                         block_hash: BlockHashType) -> KVCacheBlock | None:
         """Get a cached block by the block hash, or None if cache miss.
         If there are duplicated blocks, we return the first block in the cache.
 
@@ -69,8 +69,8 @@ class BlockPool:
     def cache_full_blocks(
         self,
         request: Request,
-        blocks: List[KVCacheBlock],
-        block_hashes: List[BlockHashType],
+        blocks: list[KVCacheBlock],
+        block_hashes: list[BlockHashType],
         num_cached_blocks: int,
         num_full_blocks: int,
         block_size: int,
@@ -147,7 +147,7 @@ class BlockPool:
             prev_block_hash_value = block_hash.hash_value
 
     def get_new_blocks(self, num_blocks: int,
-                       do_apc: bool) -> List[KVCacheBlock]:
+                       do_apc: bool) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
@@ -163,7 +163,7 @@ class BlockPool:
             raise ValueError(
                 f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: List[KVCacheBlock] = []
+        ret: list[KVCacheBlock] = []
         idx = 0
         while idx < num_blocks:
             # First allocate blocks.
@@ -202,7 +202,7 @@ class BlockPool:
             return True
         return False
 
-    def touch(self, blocks: List[KVCacheBlock]) -> None:
+    def touch(self, blocks: list[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
