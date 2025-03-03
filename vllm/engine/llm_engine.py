@@ -1733,7 +1733,9 @@ class LLMEngine:
                     seq_group = group.seq_group
 
                     for seq in seq_group.seqs:
-                        num_generation_tokens_iter += len(seq.data.get_delta_and_reset().new_output_token_ids)
+                        num_generation_tokens_iter += len(
+                            seq.data.get_delta_and_reset(
+                            ).new_output_token_ids)
 
                 group_was_prefill = idx < scheduler_outputs.num_prefill_groups
                 seq_group = scheduled_seq_group.seq_group
