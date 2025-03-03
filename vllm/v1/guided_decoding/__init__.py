@@ -128,15 +128,14 @@ class GuidedDecodingManager:
                 for req in self.requests if req.request_id not in request_ids
             }
 
-    def populate_cache(self, request: Request):
+    def populate_cache(self, request: Request) -> None:
         if not request.use_guided_decoding:
-            return False
+            return
         grammar = self.request_key_to_grammar.get(request.guided_decoding_key)
         if grammar:
             request.grammar = copy.copy(grammar)
-            return False
+            return
         request.grammar = self.cache(request)
-        return True
 
     def cache(self, request: Request):
         return self.executor.submit(self._executor_loop, request)
