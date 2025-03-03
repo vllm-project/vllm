@@ -63,11 +63,17 @@ class Grammar:
                                       hash=False,
                                       init=False)
 
-    def accept_token(self, token: int) -> bool:
+    def accept_tokens(self, request_id: str, tokens: List[int]) -> bool:
         # NOTE: accept_token will determines whether we accept this token
         # and will also update the machine state
-        self.num_processed_tokens += 1
-        return self.matcher.accept_token(token)
+        for token in tokens:
+            self.num_processed_tokens += 1
+            if not self.matcher.accept_token(token):
+                logger.error(
+                    "Failed to advance FSM for request %s "
+                    "for tokens %s. Please file an issue.", request_id, token)
+                return False
+        return True
 
     # this should be ran in parallel with model decoding
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> bool:

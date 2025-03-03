@@ -583,27 +583,6 @@ class Scheduler:
             new_logprobs = None
             new_token_ids: list[int] = []
 
-            # Handle guided decoding FSM advancement if applicable
-            # NOTE: For all requests that uses guided decoding, the grammar
-            # should be ready at this point.
-            # PERF: This is currently expensive given that FSM is being
-            # advanced here.
-            if request.use_guided_decoding:
-                grammar = request.grammar
-                assert grammar is not None
-                if len(generated_token_ids) > 1:
-                    logger.error(
-                        "Structured output does not currently support "
-                        "more than one token at a time. Only the first "
-                        "token will be used.")
-                # accept_token advances the FSM
-                accepted = grammar.accept_token(generated_token_ids[0])
-                if not accepted:
-                    logger.error(
-                        "Failed to advance FSM for request %s "
-                        "for tokens %s. Please file an issue.", req_id,
-                        generated_token_ids[0])
-
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
                     request.append_output_token_ids(output_token_id)
@@ -622,6 +601,11 @@ class Scheduler:
                     # NOTE: once we support N tokens per step (spec decode),
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
+
+            if new_token_ids and request.use_guided_decoding:
+                assert request.grammar is not None
+                request.grammar.accept_tokens(request.request_id,
+                                              new_token_ids)
 
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or prompt_logprobs_tensors is not None:
