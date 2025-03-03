@@ -34,7 +34,7 @@ set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100;gfx1101")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101")
 
 #
 # Supported/expected torch versions for CUDA/ROCm.
@@ -175,6 +175,25 @@ file(MAKE_DIRECTORY ${FETCHCONTENT_BASE_DIR}) # Ensure the directory exists
 message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 #
+# Set rocm version dev int.
+#
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  #
+  # Overriding the default -O set up by cmake, adding ggdb3 for the most verbose devug info
+  #
+  set(CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG "${CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG} -O0 -ggdb3")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb3")
+
+
+  #
+  # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
+  # a lot of warnings that always mask real issues. Suppressing until this is properly addressed.
+  #
+  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
+endif()
+
+#
 # Define other extension targets
 #
 
@@ -229,7 +248,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
   # Please keep this in sync with FetchContent_Declare line below.
-  set(CUTLASS_REVISION "v3.7.0" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "v3.8.0" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -247,7 +266,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         # Please keep this in sync with CUTLASS_REVISION line above.
-        GIT_TAG v3.7.0
+        GIT_TAG v3.8.0
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
@@ -267,6 +286,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
+    "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/cutlass_extensions/common.cpp")
 
@@ -297,11 +317,27 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
+  # Only build AllSpark kernels if we are building for at least some compatible archs.
+  cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
+  if (ALLSPARK_ARCHS)
+    set(ALLSPARK_SRCS
+       "csrc/quantization/gptq_allspark/allspark_repack.cu"
+       "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${ALLSPARK_SRCS}"
+      CUDA_ARCHS "${ALLSPARK_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${ALLSPARK_SRCS}")
+    message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
+  else()
+    message(STATUS "Not building AllSpark kernels as no compatible archs found"
+                   " in CUDA target architectures")
+  endif()
+
   # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
   # CUDA 12.0 or later (and only work on Hopper, 9.0a for now).
   cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-    set(SRCS 
+    set(SRCS
        "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_fp8.cu"
        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_int8.cu"
@@ -381,8 +417,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # FP4 Archs and flags
   cuda_archs_loose_intersection(FP4_ARCHS "10.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND FP4_ARCHS)
-    set(SRCS 
+    set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
+      "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
     )
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
@@ -554,77 +591,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     WITH_SOABI)
 endif()
 
-# vllm-flash-attn currently only supported on CUDA
-if (NOT VLLM_GPU_LANG STREQUAL "CUDA")
-  return()
+# For CUDA we also build and ship some external projects.
+if (VLLM_GPU_LANG STREQUAL "CUDA")
+    include(cmake/external_projects/flashmla.cmake)
+    include(cmake/external_projects/vllm_flash_attn.cmake)
 endif ()
-
-# vLLM flash attention requires VLLM_GPU_ARCHES to contain the set of target
-# arches in the CMake syntax (75-real, 89-virtual, etc), since we clear the
-# arches in the CUDA case (and instead set the gencodes on a per file basis)
-# we need to manually set VLLM_GPU_ARCHES here.
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  foreach(_ARCH ${CUDA_ARCHS})
-    string(REPLACE "." "" _ARCH "${_ARCH}")
-    list(APPEND VLLM_GPU_ARCHES "${_ARCH}-real")
-  endforeach()
-endif()
-
-#
-# Build vLLM flash attention from source
-#
-# IMPORTANT: This has to be the last thing we do, because vllm-flash-attn uses the same macros/functions as vLLM.
-# Because functions all belong to the global scope, vllm-flash-attn's functions overwrite vLLMs.
-# They should be identical but if they aren't, this is a massive footgun.
-#
-# The vllm-flash-attn install rules are nested under vllm to make sure the library gets installed in the correct place.
-# To only install vllm-flash-attn, use --component _vllm_fa2_C (for FA2) or --component _vllm_fa3_C (for FA3).
-# If no component is specified, vllm-flash-attn is still installed.
-
-# If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
-# This is to enable local development of vllm-flash-attn within vLLM.
-# It can be set as an environment variable or passed as a cmake argument.
-# The environment variable takes precedence.
-if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
-  set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
-endif()
-
-if(VLLM_FLASH_ATTN_SRC_DIR)
-  FetchContent_Declare(
-          vllm-flash-attn SOURCE_DIR 
-          ${VLLM_FLASH_ATTN_SRC_DIR}
-          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
-  )
-else()
-  FetchContent_Declare(
-          vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 720c94869cf2e0ff5a706e9c7f1dce0939686ade
-          GIT_PROGRESS TRUE
-          # Don't share the vllm-flash-attn build between build types
-          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
-  )
-endif()
-
-
-# Fetch the vllm-flash-attn library
-FetchContent_MakeAvailable(vllm-flash-attn)
-message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
-
-# Copy over the vllm-flash-attn python files (duplicated for fa2 and fa3, in
-# case only one is built, in the case both are built redundant work is done)
-install(
-  DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-  DESTINATION vllm_flash_attn
-  COMPONENT _vllm_fa2_C
-  FILES_MATCHING PATTERN "*.py"
-)
-
-install(
-  DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-  DESTINATION vllm_flash_attn
-  COMPONENT _vllm_fa3_C
-  FILES_MATCHING PATTERN "*.py"
-)
-
-# Nothing after vllm-flash-attn, see comment about macros above

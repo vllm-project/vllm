@@ -22,9 +22,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
+from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Set, Tuple, TypedDict, Union)
+from typing import (Any, Callable, Dict, List, Literal, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 from torch import nn
@@ -33,7 +34,6 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.whisper.modeling_whisper import (
     ACT2FN, WHISPER_ATTENTION_CLASSES, WhisperConfig, WhisperEncoder)
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import MultiModalFieldConfig
@@ -48,7 +48,7 @@ from .minicpmv import (MiniCPMV2_6, MiniCPMVDummyInputsBuilder,
                        MiniCPMVMultiModalDataParser,
                        MiniCPMVMultiModalProcessor, MiniCPMVProcessingInfo,
                        _minicpmv_field_config)
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
 
@@ -357,10 +357,10 @@ class MiniCPMOMultiModalProcessor(
                 inputs["audio"]["audio_lens"][index])
         return super().get_prompt_texts_by_modality(inputs, modality, index)
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
             self, mm_items: MultiModalDataItems,
             hf_processor_mm_kwargs: Mapping[str, Any],
-            out_mm_kwargs: MultiModalKwargs) -> List[PromptReplacement]:
+            out_mm_kwargs: MultiModalKwargs) -> Sequence[PromptReplacement]:
         placeholder = {
             "image": self.info.image_pattern,
             "video": self.info.video_pattern,
@@ -470,13 +470,8 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
                                               training=self.training)
         hidden_states = residual + hidden_states
 
-        if hidden_states.dtype == torch.float16 and (
-                torch.isinf(hidden_states).any()
-                or torch.isnan(hidden_states).any()):
-            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states,
-                                        min=-clamp_value,
-                                        max=clamp_value)
+        if hidden_states.dtype == torch.float16:
+            hidden_states = cast_overflow_tensors(hidden_states)
 
         outputs = (hidden_states, )
 
@@ -792,8 +787,6 @@ class MiniCPMO(MiniCPMV2_6):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
@@ -818,8 +811,6 @@ class MiniCPMO(MiniCPMV2_6):
         output = self.llm.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=vlm_embeddings,
         )

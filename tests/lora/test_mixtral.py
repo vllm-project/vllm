@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
-
 import pytest
 import torch
 
@@ -13,7 +11,7 @@ MODEL_PATH = "mistralai/Mixtral-8x7B-Instruct-v0.1"
 
 
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int,
-              prompts: List[str]) -> List[str]:
+              prompts: list[str]) -> list[str]:
 
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=256)
     outputs = llm.generate(
@@ -22,7 +20,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
         if lora_id else None)
     # Print the outputs.
-    generated_texts: List[str] = []
+    generated_texts: list[str] = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text.strip()

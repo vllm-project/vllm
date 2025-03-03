@@ -8,6 +8,7 @@ import os
 import tempfile
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import filelock
@@ -27,8 +28,6 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
 
-logger = init_logger(__name__)
-
 try:
     from runai_model_streamer import SafetensorsStreamer
 except (ImportError, OSError):
@@ -38,6 +37,8 @@ except (ImportError, OSError):
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
         "SafetensorsStreamer")
+
+logger = init_logger(__name__)
 
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
@@ -67,8 +68,10 @@ class DisabledTqdm(tqdm):
         super().__init__(*args, **kwargs, disable=True)
 
 
-def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
+def get_lock(model_name_or_path: Union[str, Path],
+             cache_dir: Optional[str] = None):
     lock_dir = cache_dir or temp_dir
+    model_name_or_path = str(model_name_or_path)
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
     model_name = model_name_or_path.replace("/", "-")
     hash_name = hashlib.sha256(model_name.encode()).hexdigest()
@@ -496,7 +499,6 @@ def gguf_quant_weights_iterator(
             weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
-
             if weight_type.name != "F32":
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)

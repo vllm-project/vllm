@@ -118,11 +118,11 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-
-    packed_modules_mapping: ClassVar[Dict[str, List[str]]]
-    supported_lora_modules: ClassVar[List[str]]
-    embedding_modules: ClassVar[Dict[str, str]]
-    embedding_padding_modules: ClassVar[List[str]]
+    # The `embedding_module` and `embedding_padding_modules`
+    # are empty by default.
+    embedding_modules: ClassVar[Dict[str, str]] = {}
+    embedding_padding_modules: ClassVar[List[str]] = []
+    packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -132,7 +132,6 @@ class _SupportsLoRAType(Protocol):
     supports_lora: Literal[True]
 
     packed_modules_mapping: Dict[str, List[str]]
-    supported_lora_modules: List[str]
     embedding_modules: Dict[str, str]
     embedding_padding_modules: List[str]
 
@@ -155,7 +154,6 @@ def supports_lora(
     if not result:
         lora_attrs = (
             "packed_modules_mapping",
-            "supported_lora_modules",
             "embedding_modules",
             "embedding_padding_modules",
         )
@@ -500,3 +498,29 @@ def supports_transcription(
         return isinstance(model, SupportsTranscription)
 
     return isinstance(model, SupportsTranscription)
+
+
+@runtime_checkable
+class SupportsV0Only(Protocol):
+    """Models with this interface are not compatible with V1 vLLM."""
+
+    supports_v0_only: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_v0_only(model: Type[object]) -> TypeIs[Type[SupportsV0Only]]:
+    ...
+
+
+@overload
+def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]:
+    ...
+
+
+def supports_v0_only(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
+    if isinstance(model, type):
+        return isinstance(model, SupportsV0Only)
+
+    return isinstance(model, SupportsV0Only)

@@ -22,7 +22,7 @@ from torch import nn
 from transformers import AutoModel, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
@@ -38,7 +38,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsQuant
+from .interfaces import SupportsLoRA, SupportsQuant
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -54,7 +54,6 @@ def vllm_flash_attention_forward(
         # Transformers kwargs
         scaling: Optional[float] = None,
         # vLLM kwargs
-        attn_metadata: Optional[AttentionMetadata] = None,
         attention_instances: Optional[list[Attention]] = None,
         **kwargs):
     self_attn = attention_instances[module.layer_idx]
@@ -63,12 +62,7 @@ def vllm_flash_attention_forward(
     hidden = query.shape[-2]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    return self_attn.forward(
-        query,
-        key,
-        value,
-        kv_cache=None,  # argument not used
-        attn_metadata=attn_metadata), None
+    return self_attn.forward(query, key, value), None
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
@@ -107,6 +101,10 @@ def replace_linear_class(
         """
         Wrapper class that removes `output_bias` from returned output.
         """
+        # NOTE: The LoRA layer needs to use `parent_cls`.
+        @property
+        def parent_cls(self) -> type:
+            return vllm_linear_cls
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return super().forward(input)[0]
@@ -119,7 +117,7 @@ def replace_linear_class(
     )
 
 
-class TransformersModel(nn.Module, SupportsQuant):
+class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
@@ -216,8 +214,6 @@ class TransformersModel(nn.Module, SupportsQuant):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: list[torch.Tensor],  # argument not used
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -225,7 +221,6 @@ class TransformersModel(nn.Module, SupportsQuant):
             input_ids[None, ...],
             use_cache=False,
             position_ids=positions[None, ...],
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             attention_instances=self.attention_instances,
             return_dict=False)[0][0, ...]  # we remove batch dimension for now
