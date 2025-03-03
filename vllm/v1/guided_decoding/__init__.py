@@ -35,7 +35,7 @@ class GuidedDecodingOptions(enum.Enum):
 GuidedDecodingKey = tuple[GuidedDecodingOptions, str]
 
 
-@dataclass(slots=True, unsafe_hash=True)  # type: ignore[call-overload]
+@dataclass
 class Grammar:
     # NOTE: This would be a generic-enough class for
     # supporting different backends, in the future.
