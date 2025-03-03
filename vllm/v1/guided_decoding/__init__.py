@@ -71,11 +71,6 @@ class Grammar:
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> bool:
         return self.matcher.fill_next_token_bitmask(bitmask, idx)
 
-    def rollback(self, num_tokens: int):
-        if self.num_processed_tokens > 0:
-            self.num_processed_tokens -= num_tokens
-            self.matcher.rollback(num_tokens)
-
     def reset(self):
         self.num_processed_tokens = 0
         self.matcher.reset()
