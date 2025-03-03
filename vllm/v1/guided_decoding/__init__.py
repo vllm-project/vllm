@@ -68,7 +68,6 @@ class Grammar:
                 return False
         return True
 
-    # this should be ran in parallel with model decoding
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> bool:
         return self.matcher.fill_next_token_bitmask(bitmask, idx)
 
