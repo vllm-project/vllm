@@ -162,19 +162,19 @@ class Request:
                 json_str = json.dumps(params.json)
             else:
                 json_str = params.json
-            return (GuidedDecodingOptions.json, json_str)
+            return (GuidedDecodingOptions.JSON, json_str)
         elif params.json_object:
-            return (GuidedDecodingOptions.json_object, "")
+            return (GuidedDecodingOptions.JSON_OBJECT, "")
         elif params.regex is not None:
-            return (GuidedDecodingOptions.regex, params.regex)
+            return (GuidedDecodingOptions.REGEX, params.regex)
         elif params.choice is not None:
             if not isinstance(params.choice, str):
                 json_str = json.dumps(params.choice)
             else:
                 json_str = params.choice
-            return (GuidedDecodingOptions.choice, json_str)
+            return (GuidedDecodingOptions.CHOICE, json_str)
         elif params.grammar is not None:
-            return (GuidedDecodingOptions.grammar, params.grammar)
+            return (GuidedDecodingOptions.GRAMMAR, params.grammar)
         else:
             raise ValueError("No valid guided decoding parameter found")
 

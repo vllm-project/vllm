@@ -25,11 +25,11 @@ logger = init_logger(__name__)
 
 
 class GuidedDecodingOptions(enum.Enum):
-    json = enum.auto()
-    json_object = enum.auto()
-    regex = enum.auto()
-    grammar = enum.auto()
-    choice = enum.auto()
+    JSON = enum.auto()
+    JSON_OBJECT = enum.auto()
+    REGEX = enum.auto()
+    GRAMMAR = enum.auto()
+    CHOICE = enum.auto()
 
 
 GuidedDecodingKey = Tuple[GuidedDecodingOptions, str]
@@ -177,14 +177,14 @@ class GuidedDecodingManager:
         # TODO: we still need to handle xgrammar compilation failures
         request_type, grammar_spec = key
 
-        if request_type == GuidedDecodingOptions.json:
+        if request_type == GuidedDecodingOptions.JSON:
             # TODO -- allow any_whitespace to be configurable
             # pending merge of https://github.com/vllm-project/vllm/pull/12744
             ctx = self.compiler.compile_json_schema(grammar_spec,
                                                     any_whitespace=False)
-        elif request_type == GuidedDecodingOptions.json_object:
+        elif request_type == GuidedDecodingOptions.JSON_OBJECT:
             ctx = self.compiler.compile_builtin_json_grammar()
-        elif request_type == GuidedDecodingOptions.grammar:
+        elif request_type == GuidedDecodingOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         else:
             logger.error("Validation should have already occurred. "
