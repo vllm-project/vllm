@@ -68,9 +68,8 @@ def from_layer(layer: nn.Module,
                                       model_config=model_config):
             if hasattr(layer, "__wrapper_class__"
                        ) and layer.__wrapper_class__ == "HFCompatibleLinear":
-                HFCompatibleLoRABase = lora_cls  # type: type[BaseLayerWithLoRA]
 
-                class HFCompatibleLoRA(HFCompatibleLoRABase):
+                class HFCompatibleLoRA(lora_cls):  # type: ignore
                     __class__ = lora_cls
                     __wrapper_class__ = "HFCompatibleLoRA"
 
