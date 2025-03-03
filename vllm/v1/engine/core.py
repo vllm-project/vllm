@@ -144,11 +144,12 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def step(self) -> Optional[EngineCoreOutputs]:
+    def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
         if not self.scheduler.has_unfinished_requests():
-            return None
+            return EngineCoreOutputs(
+                outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
@@ -197,8 +198,10 @@ class EngineCore:
                 engine_core_outputs = self.scheduler.update_from_output(
                     scheduler_output, model_output)
             except queue.Empty:
-                # The queue is empty (timeout at .get)
-                return None
+                # If the queue is empty (timeout at .get), return
+                # an empty EngineCoreOutputs for logging.
+                engine_core_outputs = EngineCoreOutputs(
+                    outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         return engine_core_outputs
 
@@ -346,10 +349,9 @@ class EngineCoreProc(EngineCore):
 
         # Step the engine core.
         outputs = self.step_fn()
-        # We'll definitely have outputs if there are unfinished reqs.
-        assert outputs is not None
         # Put EngineCoreOutputs into the output queue.
-        self.output_queue.put_nowait(outputs)
+        if outputs:
+            self.output_queue.put_nowait(outputs)
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
