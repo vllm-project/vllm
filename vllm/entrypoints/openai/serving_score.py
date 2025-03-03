@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import time
-from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional, Union
+from collections.abc import AsyncGenerator, Mapping
+from typing import Any, Optional, Union
 
 from fastapi import Request
 
@@ -48,8 +49,8 @@ class ServingScores(OpenAIServing):
     async def _embedding_score(
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        texts_1: List[str],
-        texts_2: List[str],
+        texts_1: list[str],
+        texts_2: list[str],
         request: Union[RerankRequest, ScoreRequest],
         request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -57,11 +58,11 @@ class ServingScores(OpenAIServing):
         prompt_adapter_request: Optional[Union[PromptAdapterRequest,
                                                None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> List[PoolingRequestOutput]:
+    ) -> list[PoolingRequestOutput]:
 
         input_texts = texts_1 + texts_2
 
-        engine_prompts: List[TokensPrompt] = []
+        engine_prompts: list[TokensPrompt] = []
         tokenize_async = make_async(tokenizer.__call__,
                                     executor=self._tokenizer_executor)
 
@@ -82,7 +83,7 @@ class ServingScores(OpenAIServing):
                     prompt_token_ids=text_token_prompt["prompt_token_ids"]))
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         pooling_params = request.to_pooling_params()
 
         for i, engine_prompt in enumerate(engine_prompts):
@@ -108,16 +109,16 @@ class ServingScores(OpenAIServing):
         result_generator = merge_async_iterators(*generators)
 
         # Non-streaming response
-        final_res_batch: List[PoolingRequestOutput] = []
+        final_res_batch: list[PoolingRequestOutput] = []
 
-        embeddings: List[Optional[PoolingRequestOutput]] =\
+        embeddings: list[Optional[PoolingRequestOutput]] =\
               [None] * len(engine_prompts)
 
         async for i, res in result_generator:
             embeddings[i] = res
 
-        emb_texts_1: List[PoolingRequestOutput] = []
-        emb_texts_2: List[PoolingRequestOutput] = []
+        emb_texts_1: list[PoolingRequestOutput] = []
+        emb_texts_2: list[PoolingRequestOutput] = []
 
         for i in range(0, len(texts_1)):
             assert (emb := embeddings[i]) is not None
@@ -139,8 +140,8 @@ class ServingScores(OpenAIServing):
     async def _cross_encoding_score(
         self,
         tokenizer: Union[AnyTokenizer],
-        texts_1: List[str],
-        texts_2: List[str],
+        texts_1: list[str],
+        texts_2: list[str],
         request: Union[RerankRequest, ScoreRequest],
         request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -148,10 +149,10 @@ class ServingScores(OpenAIServing):
         prompt_adapter_request: Optional[Union[PromptAdapterRequest,
                                                None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> List[PoolingRequestOutput]:
+    ) -> list[PoolingRequestOutput]:
 
-        request_prompts: List[str] = []
-        engine_prompts: List[TokensPrompt] = []
+        request_prompts: list[str] = []
+        engine_prompts: list[TokensPrompt] = []
 
         if len(texts_1) == 1:
             texts_1 = texts_1 * len(texts_2)
@@ -185,7 +186,7 @@ class ServingScores(OpenAIServing):
             engine_prompts.append(engine_prompt)
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         pooling_params = request.to_pooling_params()
 
@@ -212,7 +213,7 @@ class ServingScores(OpenAIServing):
         result_generator = merge_async_iterators(*generators)
 
         # Non-streaming response
-        final_res_batch: List[
+        final_res_batch: list[
             Optional[PoolingRequestOutput]] = [None] * len(engine_prompts)
 
         async for i, res in result_generator:
@@ -228,9 +229,9 @@ class ServingScores(OpenAIServing):
         request_id: str,
         raw_request: Optional[Request] = None,
         truncate_prompt_tokens: Optional[int] = None,
-    ) -> List[PoolingRequestOutput]:
+    ) -> list[PoolingRequestOutput]:
 
-        tokenization_kwargs: Dict[str, Any] = {}
+        tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             tokenization_kwargs["truncation"] = True
             tokenization_kwargs["max_length"] = truncate_prompt_tokens
@@ -372,12 +373,12 @@ class ServingScores(OpenAIServing):
 
     def request_output_to_score_response(
         self,
-        final_res_batch: List[PoolingRequestOutput],
+        final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         created_time: int,
         model_name: str,
     ) -> ScoreResponse:
-        items: List[ScoreResponseData] = []
+        items: list[ScoreResponseData] = []
         num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):
@@ -406,13 +407,13 @@ class ServingScores(OpenAIServing):
         )
 
     def request_output_to_rerank_response(
-            self, final_res_batch: List[PoolingRequestOutput], request_id: str,
-            model_name: str, documents: List[str],
+            self, final_res_batch: list[PoolingRequestOutput], request_id: str,
+            model_name: str, documents: list[str],
             top_n: int) -> RerankResponse:
         """
         Convert the output of do_rank to a RerankResponse
         """
-        results: List[RerankResult] = []
+        results: list[RerankResult] = []
         num_prompt_tokens = 0
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)

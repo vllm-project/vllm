@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from typing import Dict, List, Optional
+from typing import Optional
 
 import openai
 import pytest
@@ -54,7 +54,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
         assert isinstance(tool_call.function.arguments, str)
 
         parsed_arguments = json.loads(tool_call.function.arguments)
-        assert isinstance(parsed_arguments, Dict)
+        assert isinstance(parsed_arguments, dict)
         assert isinstance(parsed_arguments.get("city"), str)
         assert isinstance(parsed_arguments.get("state"), str)
 
@@ -73,8 +73,8 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
     role_name: Optional[str] = None
     finish_reason_count: int = 0
 
-    tool_call_names: List[str] = []
-    tool_call_args: List[str] = []
+    tool_call_names: list[str] = []
+    tool_call_args: list[str] = []
     tool_call_idx: int = -1
     tool_call_id_count: int = 0
 
@@ -180,7 +180,7 @@ async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
         logprobs=False,
         stream=True)
 
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     role_sent: bool = False
 

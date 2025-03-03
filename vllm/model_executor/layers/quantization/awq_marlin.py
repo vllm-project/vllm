@@ -136,7 +136,7 @@ class AWQMarlinConfig(QuantizationConfig):
                     self.full_config).get_quant_method(layer, prefix)
             return AWQMarlinLinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            if layer.num_experts > 32:
+            if layer.local_num_experts > 32:
                 # For MoEs with many experts the moe_wna16 kernel is faster
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
@@ -469,7 +469,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
+        assert activation == "silu", "Only SiLU activation is supported."
         if expert_map is not None:
             raise NotImplementedError(
                 "Expert Parallelism is not supported for "

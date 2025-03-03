@@ -62,20 +62,7 @@ Transformers fallback has supported most of available quantization in vLLM (exce
 
 ##### LoRA
 
-LoRA hasn't supported on transformers fallback yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
-
-Usually `transformers` model load weights via the `load_adapters` API, that depends on PEFT. We need to work a bit to either use this api (for now this would result in some weights not being marked as loaded) or replace modules accordingly.
-
-Hints as to how this would look like:
-
-```python
-class TransformersModel(nn.Module, SupportsLoRA):
-  def __init__(*):
-    ...
-    self.model.load_adapter(vllm_config.load_config.model_loader_extra_config["qlora_adapter_name_or_path"])
-```
-
-Blocker is that you need to specify supported lora layers, when we would ideally want to load whatever is inside the checkpoint!
+Transformers fallback has supported LoRA. The usage way is identical to how LoRA works with models supported by vLLM. If you encounter any issues, please open an issue.
 
 ##### Remote code
 
@@ -284,6 +271,11 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `GritLM`
   * GritLM
   * `parasail-ai/GritLM-7B-vllm`.
+  * ✅︎
+  * ✅︎
+- * `Grok1ModelForCausalLM`
+  * Grok1
+  * `hpcai-tech/grok-1`.
   * ✅︎
   * ✅︎
 - * `InternLMForCausalLM`
@@ -710,6 +702,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Florence2ForConditionalGeneration`
+  * Florence-2
+  * T + I
+  * `microsoft/Florence-2-base`, `microsoft/Florence-2-large` etc.
+  *
+  *
+  *
 - * `FuyuForCausalLM`
   * Fuyu
   * T + I

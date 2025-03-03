@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Optional, Union
 
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
@@ -11,14 +11,15 @@ from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
-from vllm.v1.metrics.stats import IterationStats, RequestStateStats
+from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
+                                   RequestStateStats)
 
 
 @dataclass
 class OutputProcessorOutput:
 
-    request_outputs: List[RequestOutput]
-    reqs_to_abort: List[str]
+    request_outputs: list[RequestOutput]
+    reqs_to_abort: list[str]
 
 
 class RequestState:
@@ -26,9 +27,10 @@ class RequestState:
     def __init__(
         self,
         request_id: str,
+        lora_name: Optional[str],
         output_kind: RequestOutputKind,
         prompt: Optional[str],
-        prompt_token_ids: List[int],
+        prompt_token_ids: list[int],
         logprobs_processor: LogprobsProcessor,
         detokenizer: IncrementalDetokenizer,
         arrival_time: float,
@@ -36,6 +38,7 @@ class RequestState:
         log_stats: bool,
     ):
         self.request_id = request_id
+        self.lora_name = lora_name
         self.output_kind = output_kind
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
@@ -58,6 +61,8 @@ class RequestState:
     ) -> "RequestState":
         return cls(
             request_id=request.request_id,
+            lora_name=(request.lora_request.name
+                       if request.lora_request is not None else None),
             output_kind=request.sampling_params.output_kind,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
@@ -85,7 +90,8 @@ class OutputProcessor:
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
-        self.request_states: Dict[str, RequestState] = {}
+        self.request_states: dict[str, RequestState] = {}
+        self.lora_states = LoRARequestStates()
 
     def is_request_active(self, request_id: str) -> bool:
         return request_id in self.request_states
@@ -98,10 +104,12 @@ class OutputProcessor:
 
     def abort_requests(
         self,
-        request_ids: List[str],
+        request_ids: list[str],
     ) -> None:
         for request_id in request_ids:
-            self.request_states.pop(request_id, None)
+            req_state = self.request_states.pop(request_id, None)
+            if req_state is not None:
+                self.lora_states.abort_request(req_state)
 
     def add_request(
         self,
@@ -112,15 +120,17 @@ class OutputProcessor:
         if request_id in self.request_states:
             raise ValueError(f"Request id {request_id} already running.")
 
-        self.request_states[request_id] = RequestState.from_new_request(
+        req_state = RequestState.from_new_request(
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
             queue=queue,
             log_stats=self.log_stats)
+        self.request_states[request_id] = req_state
+        self.lora_states.add_request(req_state)
 
     def process_outputs(
         self,
-        engine_core_outputs: List[EngineCoreOutput],
+        engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: Optional[float] = None,
         iteration_stats: Optional[IterationStats] = None,
     ) -> OutputProcessorOutput:
@@ -148,8 +158,8 @@ class OutputProcessor:
         **********************************************************
         """
 
-        request_outputs: List[RequestOutput] = []
-        reqs_to_abort: List[str] = []
+        request_outputs: list[RequestOutput] = []
+        reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
@@ -214,6 +224,8 @@ class OutputProcessor:
                                                      finish_reason,
                                                      iteration_stats)
 
+        self.lora_states.update_iteration_stats(iteration_stats)
+
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
@@ -226,13 +238,15 @@ class OutputProcessor:
         if iteration_stats is None:
             return
 
+        lora_stats = self.lora_states.get_stats(req_state)
+
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
         iteration_stats.update_from_output(engine_core_output,
                                            engine_core_timestamp,
                                            req_state.is_prefilling,
                                            req_state.prompt_len,
-                                           req_state.stats)
+                                           req_state.stats, lora_stats)
 
     def _update_stats_from_finished(self, req_state: RequestState,
                                     request_output: RequestOutput,
@@ -246,11 +260,12 @@ class OutputProcessor:
         iteration_stats.update_from_finished_request(finish_reason,
                                                      request_output,
                                                      req_state.stats)
+        self.lora_states.finish_request(req_state)
 
     @staticmethod
     def _make_request_output(
         request_state: RequestState,
-        new_token_ids: List[int],
+        new_token_ids: list[int],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
     ) -> Optional[RequestOutput]:

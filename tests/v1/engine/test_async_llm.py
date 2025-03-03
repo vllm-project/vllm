@@ -2,7 +2,7 @@
 
 import asyncio
 from contextlib import ExitStack
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import pytest
 
@@ -47,7 +47,7 @@ async def generate(engine: AsyncLLM,
                    prompt: PromptType,
                    output_kind: RequestOutputKind,
                    max_tokens: int,
-                   prompt_logprobs: Optional[int] = None) -> Tuple[int, str]:
+                   prompt_logprobs: Optional[int] = None) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
 
@@ -114,7 +114,7 @@ async def test_async_llm_refuses_prompt_logprobs_with_apc(
                           (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
 async def test_load(monkeypatch, output_kind: RequestOutputKind,
-                    engine_args_and_prompt: Tuple[AsyncEngineArgs,
+                    engine_args_and_prompt: tuple[AsyncEngineArgs,
                                                   PromptType]):
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
     # so that in the future when we switch, we don't have to change all the
@@ -160,7 +160,7 @@ async def test_load(monkeypatch, output_kind: RequestOutputKind,
                           (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
 async def test_abort(monkeypatch, output_kind: RequestOutputKind,
-                     engine_args_and_prompt: Tuple[AsyncEngineArgs,
+                     engine_args_and_prompt: tuple[AsyncEngineArgs,
                                                    PromptType]):
 
     with monkeypatch.context() as m, ExitStack() as after:
@@ -177,7 +177,7 @@ async def test_abort(monkeypatch, output_kind: RequestOutputKind,
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
         # Create concurrent requests.
-        tasks: List[asyncio.Task] = []
+        tasks: list[asyncio.Task] = []
         for request_id in request_ids:
             tasks.append(
                 asyncio.create_task(

@@ -7,7 +7,7 @@ import time
 from concurrent.futures import Future
 from inspect import isclass, signature
 from multiprocessing.connection import Connection
-from typing import Any, List, Optional, Tuple, Type
+from typing import Any, Optional
 
 import msgspec
 import psutil
@@ -42,7 +42,7 @@ class EngineCore:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
     ):
         assert vllm_config.model_config.runner_type != "pooling"
@@ -80,7 +80,7 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[queue.Queue[Tuple[Future[ModelRunnerOutput],
+        self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
@@ -88,7 +88,7 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
     def _initialize_kv_caches(self,
-                              vllm_config: VllmConfig) -> Tuple[int, int]:
+                              vllm_config: VllmConfig) -> tuple[int, int]:
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -134,7 +134,7 @@ class EngineCore:
 
         self.scheduler.add_request(req)
 
-    def abort_requests(self, request_ids: List[str]):
+    def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
 
         # TODO: The scheduler doesn't really need to know the
@@ -222,8 +222,17 @@ class EngineCore:
     def execute_dummy_batch(self):
         self.model_executor.collective_rpc("execute_dummy_batch")
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self.model_executor.add_lora(lora_request)
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_executor.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_executor.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self.model_executor.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_executor.pin_lora(lora_id)
 
 
 class EngineCoreProc(EngineCore):
@@ -235,7 +244,7 @@ class EngineCoreProc(EngineCore):
         output_path: str,
         ready_pipe: Connection,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
     ):
         super().__init__(vllm_config, executor_class, log_stats)
@@ -245,7 +254,7 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue: queue.Queue[Tuple[EngineCoreRequestType,
+        self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
                                             Any]] = queue.Queue()
         self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,

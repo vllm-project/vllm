@@ -3,9 +3,9 @@
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Any, Iterable, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import Any, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.utils.checkpoint
@@ -29,7 +29,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
@@ -146,7 +147,8 @@ class UltravoxMultiModalProcessor(
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not mm_data or not mm_data.get("audios", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self.info.get_tokenizer().encode(
+                prompt, add_special_tokens=False)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -185,16 +187,6 @@ class UltravoxMultiModalProcessor(
         )
         return BatchFeature(combined_outputs)
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
-        # HF processor omits bos_token_id by setting add_special_tokens=False
-        tokenizer = self.info.get_tokenizer()
-        assert prompt_tokens[0] == tokenizer.bos_token_id
-
-        return prompt_tokens[1:]
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -206,12 +198,12 @@ class UltravoxMultiModalProcessor(
             audio_embeds=MultiModalFieldConfig.batched("audio"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()

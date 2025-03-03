@@ -2,7 +2,8 @@
 
 import asyncio
 import os
-from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
+from collections.abc import AsyncGenerator, Mapping
+from typing import Optional, Union
 
 import numpy as np
 
@@ -39,7 +40,7 @@ class AsyncLLM(EngineClient):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -54,7 +55,7 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: List[StatLoggerBase] = []
+        self.stat_loggers: list[StatLoggerBase] = []
         if self.log_stats:
             self.stat_loggers.extend([
                 LoggingStatLogger(),
@@ -392,9 +393,21 @@ class AsyncLLM(EngineClient):
     async def wake_up(self) -> None:
         await self.engine_core.wake_up_async()
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
-        await self.engine_core.add_lora_async(lora_request)
+        return await self.engine_core.add_lora_async(lora_request)
+
+    async def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter."""
+        return await self.engine_core.remove_lora_async(lora_id)
+
+    async def list_loras(self) -> set[int]:
+        """List all registered adapters."""
+        return await self.engine_core.list_loras_async()
+
+    async def pin_lora(self, lora_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return await self.engine_core.pin_lora_async(lora_id)
 
     @property
     def is_running(self) -> bool:
