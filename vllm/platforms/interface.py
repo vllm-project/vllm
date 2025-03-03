@@ -336,7 +336,8 @@ class Platform:
     def set_device(cls, device: torch.device) -> None:
         """
         Usage of this function is discouraged in favor of device. In most cases 
-        it’s better to use `vllm.current_platform.device_control_env_var` environmental variable.
+        it’s better to use `vllm.current_platform.device_control_env_var` 
+        environmental variable.
         """
         raise NotImplementedError
 
