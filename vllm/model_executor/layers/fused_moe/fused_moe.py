@@ -1357,7 +1357,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
-        print(f"FUSED_MOE {intermediate_cache1.shape} {intermediate_cache1}")
+        #print(f"FUSED_MOE {intermediate_cache1.shape} {intermediate_cache1}")
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
