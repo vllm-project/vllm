@@ -536,6 +536,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
+        self._prefix = prefix
         if model_config.use_mla:
             attn_cls = DeepseekV3MLAAttention
         else:
@@ -594,20 +595,20 @@ class DeepseekV3DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
         # logger.info(f"hidden_states shape : {hidden_states.shape}")
-        # show_mem_info(logger, "DeepseekV3DecoderLayer: before self_attn")
+        show_mem_info(logger, f"{self._prefix}: before self_attn")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        # show_mem_info(logger, "DeepseekV3DecoderLayer: after self_attn")
+        show_mem_info(logger, f"{self._prefix}: after self_attn")
         htorch.core.mark_step()
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        # show_mem_info(logger, "DeepseekV3DecoderLayer: after mlp")
+        show_mem_info(logger, f"{self._prefix}: after mlp")
         return hidden_states, residual
 
 
