@@ -3,6 +3,7 @@
 import math
 from dataclasses import dataclass
 from functools import cached_property, partial
+from itertools import chain
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
                     Union, cast)
 
@@ -1592,7 +1593,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
         image_features = self._process_image_input(image_input)
 
-        return [
+        nested_embeds = [
             self._get_mm_embeds(*args) for args in zip(
                 image_features,
                 image_input["feat_is_patch"],
@@ -1600,6 +1601,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
                 image_input["embed_is_patch"],
             )
         ]
+        return list(chain(*nested_embeds))
 
     def get_input_embeddings(
         self,
