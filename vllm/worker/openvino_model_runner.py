@@ -346,10 +346,6 @@ class OpenVINOModelRunner(ModelRunnerBase):
             input_tokens,
             "positions":
             input_positions,
-            "kv_caches":
-            kv_caches,
-            "attn_metadata":
-            attn_metadata,
             **MultiModalKwargs.as_kwargs(multi_modal_kwargs or {},
                                          device=self.device),
         }

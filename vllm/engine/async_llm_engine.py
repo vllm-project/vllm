@@ -509,6 +509,7 @@ class _AsyncLLMEngine(LLMEngine):
                 tokenizer=await self.get_tokenizer_async(lora_request),
                 default_guided_backend=self.decoding_config.
                 guided_decoding_backend,
+                reasoning_backend=self.decoding_config.reasoning_backend,
                 model_config=self.model_config)
 
         self._add_processed_request(
@@ -530,7 +531,7 @@ class _AsyncLLMEngine(LLMEngine):
 
 async def build_guided_decoding_logits_processor_async(
         sampling_params: SamplingParams, tokenizer: AnyTokenizer,
-        default_guided_backend: str,
+        default_guided_backend: str, reasoning_backend: Optional[str],
         model_config: ModelConfig) -> SamplingParams:
     """Constructs logits processors based on the guided_decoding,
     logits_bias, and allowed_token_ids fields in sampling_params. Deletes
@@ -545,14 +546,18 @@ async def build_guided_decoding_logits_processor_async(
     sampling_params = copy.copy(sampling_params)
     guided_decoding = sampling_params.guided_decoding
 
-    logger.debug("Building guided decoding logits processor. "
-                 "Params: %s", guided_decoding)
+    logger.info(
+        "Building guided decoding logits processor. "
+        "guided_decoding: %s%s", guided_decoding,
+        f", reasoning_backend: {reasoning_backend}"
+        if reasoning_backend is not None else "")
 
     guided_decoding.backend = guided_decoding.backend or default_guided_backend
 
     processor = await get_guided_decoding_logits_processor(
         guided_params=guided_decoding,
         tokenizer=tokenizer,
+        reasoning_backend=reasoning_backend,
         model_config=model_config)
 
     if processor:
@@ -1186,6 +1191,12 @@ class AsyncLLMEngine(EngineClient):
 
     async def reset_prefix_cache(self) -> None:
         self.engine.reset_prefix_cache()
+
+    async def sleep(self, level: int = 1) -> None:
+        self.engine.sleep(level)
+
+    async def wake_up(self) -> None:
+        self.engine.wake_up()
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine.add_lora(lora_request)
