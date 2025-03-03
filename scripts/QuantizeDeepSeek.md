@@ -63,6 +63,8 @@ For more details, please refer to the <https://github.com/yangulei/vllm-fork/blo
 git clone https://github.com/intel/neural-compressor.git inc
 cd inc
 git checkout dev/ds_r1
+pip install -r requirements.txt
+pip install -r requirements_pt.txt
 python setup.py pt develop
 ```
 
