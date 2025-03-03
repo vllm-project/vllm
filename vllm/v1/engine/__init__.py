@@ -134,7 +134,7 @@ class EngineCoreOutputs(
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None
-    finished_requests: List[str] = []
+    finished_requests: list[str] = []
     # In DP case, used to signal that the engine is paused.
     global_finished: bool = False
 

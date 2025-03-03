@@ -7,10 +7,11 @@ import signal
 import uuid
 import weakref
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from threading import Thread
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import zmq
 import zmq.asyncio
@@ -206,7 +207,7 @@ class CoreEngine:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
         ctx: Union[zmq.Context, zmq.asyncio.Context],
         output_path: str,
@@ -248,7 +249,7 @@ class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
     circular reference back to the client object."""
 
-    core_engines: List[CoreEngine] = field(default_factory=list)
+    core_engines: list[CoreEngine] = field(default_factory=list)
     ctx: Union[zmq.Context, zmq.asyncio.Context] = None
     output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
     input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
@@ -333,13 +334,13 @@ class MPClient(EngineCoreClient):
 
         self.output_socket = resources.output_socket
         self.input_socket = resources.input_socket
-        self.utility_results: Dict[int, AnyFuture] = {}
+        self.utility_results: dict[int, AnyFuture] = {}
 
     def _init_core_engines(
         self,
         vllm_config: VllmConfig,
         new_core_engine: Callable[[int], CoreEngine],
-        core_engines: List[CoreEngine],
+        core_engines: list[CoreEngine],
     ) -> None:
 
         # Default case - single core engine.
@@ -411,7 +412,7 @@ class SyncMPClient(MPClient):
         msg = (request_type.value, self.encoder.encode(request))
         self.input_socket.send_multipart(msg, copy=False)
 
-    def _call_utility(self, method: str, *args) -> Any:
+    def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
         future: Future[Any] = Future()
         self.utility_results[call_id] = future
@@ -431,31 +432,31 @@ class SyncMPClient(MPClient):
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     def profile(self, is_start: bool = True) -> None:
-        self._call_utility("profile", is_start)
+        self.call_utility("profile", is_start)
 
     def reset_prefix_cache(self) -> None:
-        self._call_utility("reset_prefix_cache")
+        self.call_utility("reset_prefix_cache")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self._call_utility("add_lora", lora_request)
+        return self.call_utility("add_lora", lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self._call_utility("remove_lora", lora_id)
+        return self.call_utility("remove_lora", lora_id)
 
     def list_loras(self) -> set[int]:
-        return self._call_utility("list_loras")
+        return self.call_utility("list_loras")
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self._call_utility("pin_lora", lora_id)
+        return self.call_utility("pin_lora", lora_id)
 
     def sleep(self, level: int = 1) -> None:
-        self._call_utility("sleep", level)
+        self.call_utility("sleep", level)
 
     def wake_up(self) -> None:
-        self._call_utility("wake_up")
+        self.call_utility("wake_up")
 
     def execute_dummy_batch(self) -> None:
-        self._call_utility("execute_dummy_batch")
+        self.call_utility("execute_dummy_batch")
 
 
 class AsyncMPClient(MPClient):
@@ -547,7 +548,7 @@ class AsyncMPClient(MPClient):
         request.prompt = None
         await self._send_input(EngineCoreRequestType.ADD, request)
 
-    async def abort_requests_async(self, request_ids: List[str]) -> None:
+    async def abort_requests_async(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
@@ -572,8 +573,8 @@ class AsyncMPClient(MPClient):
     async def remove_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("remove_lora", lora_id)
 
-    async def list_loras_async(self) -> Set[int]:
-        return await self._call_utility_async("list_loras")
+    async def list_loras_async(self) -> set[int]:
+        return await self.call_utility_async("list_loras")
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("pin_lora", lora_id)
@@ -583,7 +584,7 @@ class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
     EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor],
+    def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
                  log_stats: bool):
         super().__init__(vllm_config, executor_class, log_stats)
 
@@ -594,7 +595,7 @@ class DPAsyncMPClient(AsyncMPClient):
                              self.encoder.encode(None))
 
         self.num_engines_running = 0
-        self.reqs_in_flight: Dict[str, CoreEngine] = {}
+        self.reqs_in_flight: dict[str, CoreEngine] = {}
 
         self.output_processor = DPAsyncMPClient.process_engine_outputs  # type: ignore[assignment]
 
@@ -602,7 +603,7 @@ class DPAsyncMPClient(AsyncMPClient):
         self,
         vllm_config: VllmConfig,
         new_core_engine: Callable[[int], CoreEngine],
-        core_engines: List[CoreEngine],
+        core_engines: list[CoreEngine],
     ) -> None:
 
         # Launch a core engine for each data parallel rank.
@@ -672,7 +673,7 @@ class DPAsyncMPClient(AsyncMPClient):
                 if coros:
                     await asyncio.gather(*coros)
 
-    async def abort_requests_async(self, request_ids: List[str]) -> None:
+    async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids:
             return
 
@@ -682,14 +683,14 @@ class DPAsyncMPClient(AsyncMPClient):
                 await self._abort_requests(request_ids, engine)
             return
 
-        by_engine: Dict[CoreEngine, List[str]] = {}
+        by_engine: dict[CoreEngine, list[str]] = {}
         for req_id in request_ids:
             if engine := self.reqs_in_flight.get(req_id):
                 by_engine.setdefault(engine, []).append(req_id)
         for engine, req_ids in by_engine.items():
             await self._abort_requests(req_ids, engine)
 
-    async def _abort_requests(self, request_ids: List[str],
+    async def _abort_requests(self, request_ids: list[str],
                               engine: CoreEngine) -> None:
         await self._send_input(EngineCoreRequestType.ABORT, request_ids,
                                engine)
