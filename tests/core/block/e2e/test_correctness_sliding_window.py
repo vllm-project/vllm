@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from typing import List
 
 import pytest
 
 from tests.kernels.utils import override_backend_env_variable
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 
 from .conftest import get_text_from_llm_generator
 
@@ -42,6 +42,11 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
 
     Additionally, we compare the results of the v1 and v2 managers.
     """
+    if backend == "FLASHINFER" and current_platform.is_rocm():
+        pytest.skip("Flashinfer does not support ROCm/HIP.")
+    if backend == "XFORMERS" and current_platform.is_rocm():
+        pytest.skip("Xformers does not support ROCm/HIP.")
+
     override_backend_env_variable(monkeypatch, backend)
 
     sampling_params = SamplingParams(
@@ -101,6 +106,10 @@ def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed,
     The results with and without chunked prefill are not the same due to
     numerical instabilities.
     """
+    if backend == "FLASHINFER" and current_platform.is_rocm():
+        pytest.skip("Flashinfer does not support ROCm/HIP.")
+    if backend == "XFORMERS" and current_platform.is_rocm():
+        pytest.skip("Xformers does not support ROCm/HIP.")
     override_backend_env_variable(monkeypatch, backend)
 
     sampling_params = SamplingParams(
@@ -127,9 +136,9 @@ def prep_prompts(batch_size: int):
     The prompt is just under 10k tokens; sliding window is 4k
     so the answer is outside sliding window, but should still be correct.
     """
-    prompts: List[str] = []
-    answer: List[int] = []
-    indices: List[int] = []
+    prompts: list[str] = []
+    answer: list[int] = []
+    indices: list[int] = []
     random.seed(1)
     for _ in range(batch_size):
         idx = random.randint(30, 90)
@@ -148,7 +157,7 @@ def prep_prompts(batch_size: int):
     return prompts, answer, indices
 
 
-def check_answers(indices: List[int], answer: List[int], outputs: List[str]):
+def check_answers(indices: list[int], answer: list[int], outputs: list[str]):
     answer2 = [int(text[0:2].strip()) for text in outputs]
     print(list(zip(indices, zip(answer, answer2))))
     numok = 0
@@ -160,7 +169,7 @@ def check_answers(indices: List[int], answer: List[int], outputs: List[str]):
     assert frac_ok > 0.7
 
 
-def check_window(prompts: List[str]):
+def check_window(prompts: list[str]):
 
     def inner(llm: LLM):
         sliding_window = llm.llm_engine.model_config.get_sliding_window()

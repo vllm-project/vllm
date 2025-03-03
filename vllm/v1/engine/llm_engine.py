@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Mapping, Optional, Set, Type, Union
+from collections.abc import Mapping
+from typing import Optional, Union
 
 from typing_extensions import TypeVar
 
@@ -36,10 +37,10 @@ class LLMEngine:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
@@ -99,7 +100,7 @@ class LLMEngine:
         cls,
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         enable_multiprocessing: bool = False,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
@@ -141,7 +142,7 @@ class LLMEngine:
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
-    def abort_request(self, request_ids: List[str]) -> None:
+    def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
         self.engine_core.abort_requests(request_ids)
@@ -201,7 +202,7 @@ class LLMEngine:
         # 3) Add the request to EngineCore.
         self.engine_core.add_request(request)
 
-    def step(self) -> List[RequestOutput]:
+    def step(self) -> list[RequestOutput]:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
@@ -243,7 +244,7 @@ class LLMEngine:
 
     def get_tokenizer_group(
         self,
-        group_type: Type[_G] = BaseTokenizerGroup,
+        group_type: type[_G] = BaseTokenizerGroup,
     ) -> _G:
         tokenizer_group = self.tokenizer
 
@@ -265,7 +266,7 @@ class LLMEngine:
         """Remove an already loaded LoRA adapter."""
         return self.engine_core.remove_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         """List all registered adapters."""
         return self.engine_core.list_loras()
 
