@@ -357,7 +357,7 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
         x_flat = x.flatten()
         quant = torch.index_select(qweight, dim=0, index=x_flat)
         dequant = ops.ggml_dequantize(quant, qweight_type, hidden_size,
-                                      x_flat.shape[0])
+                                      x_flat.shape[0]).to(torch.bfloat16)
         return dequant.view(*x.shape, hidden_size)
 
 
