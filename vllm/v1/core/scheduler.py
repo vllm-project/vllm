@@ -7,8 +7,6 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
-import numpy as np
-
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.logger import init_logger
@@ -366,23 +364,8 @@ class Scheduler:
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
-        # Prepare the guided decoding bitmask for this batch.
-        grammar_bitmask: Optional[np.ndarray] = None
-        if guided_decoding_request_ids:
-            # Fill the bitmask using the index of each request equal to its
-            # position in the batch. Resize the bitmask down to the size of
-            # the batch.
-            bitmask_tensor = self.guided_decoding_manager.grammar_bitmask
-            assert bitmask_tensor is not None
-            for req_id, batch_index in guided_decoding_request_ids.items():
-                request = self.requests[req_id]
-                assert request.grammar is not None
-                if not request.grammar.matcher.is_terminated():
-                    request.grammar.fill_bitmask(bitmask_tensor, batch_index)
-            if len(self.running) < bitmask_tensor.shape[0]:
-                bitmask_tensor = bitmask_tensor[:len(self.running)]
-            grammar_bitmask = bitmask_tensor.numpy()
-
+        grammar_bitmask = self.guided_decoding_manager.grammar_bitmask(
+            self.requests, guided_decoding_request_ids, len(self.running))
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,

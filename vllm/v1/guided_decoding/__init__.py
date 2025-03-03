@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Set, Tuple
 
+import numpy as np
 import torch
 import xgrammar as xgr
 
@@ -118,7 +119,7 @@ class GuidedDecodingManager:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.requests: Set[Request] = set()
         self._requests_lock = threading.Lock()
-        self.grammar_bitmask = xgr.allocate_token_bitmask(
+        self._grammar_bitmask = xgr.allocate_token_bitmask(
             self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
 
     def __getitem__(self, key: GuidedDecodingKey) -> Optional[Grammar]:
@@ -206,3 +207,27 @@ class GuidedDecodingManager:
                 if grammar is not None:
                     req.grammar = copy.copy(grammar)
                     continue
+
+    def grammar_bitmask(self, requests: dict[str, Request],
+                        guided_decoding_request_ids: dict[str, int],
+                        batch_len: int) -> Optional[np.ndarray]:
+        # Prepare the guided decoding bitmask for this batch.
+        if not guided_decoding_request_ids:
+            return None
+
+        # Fill the bitmask using the index of each request equal to its
+        # position in the batch. Resize the bitmask down to the size of
+        # the batch.
+        bitmask_tensor = self._grammar_bitmask
+        for req_id, batch_index in guided_decoding_request_ids.items():
+            request = requests[req_id]
+            assert request.grammar is not None
+            if not request.grammar.matcher.is_terminated():
+                request.grammar.fill_bitmask(bitmask_tensor, batch_index)
+        if batch_len < self._grammar_bitmask.shape[0]:
+            bitmask_tensor = self._grammar_bitmask[:batch_len]
+
+        # After finishing with the xgrammar operations, we convert to
+        # np.ndarray, because that is much more efficient for serialization
+        # and deserialization when sending this to the GPU workers.
+        return bitmask_tensor.numpy()
