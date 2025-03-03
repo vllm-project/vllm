@@ -2,7 +2,7 @@
 
 import time
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Optional
 
 import numpy as np
 import prometheus_client
@@ -21,30 +21,29 @@ _LOCAL_LOGGING_INTERVAL_SEC = 5.0
 class StatLoggerBase(ABC):
 
     @abstractmethod
-    def log(self, scheduler_stats: SchedulerStats,
-            iteration_stats: IterationStats):
+    def record(self, scheduler_stats: SchedulerStats,
+               iteration_stats: IterationStats):
         ...
+
+    def log(self):  # noqa
+        pass
 
 
 class LoggingStatLogger(StatLoggerBase):
 
     def __init__(self):
         self._reset(time.monotonic())
+        self.last_scheduler_stats = SchedulerStats()
 
     def _reset(self, now):
         self.last_log_time = now
 
         # Tracked stats over current local logging interval.
-        self.num_prompt_tokens: List[int] = []
-        self.num_generation_tokens: List[int] = []
+        self.num_prompt_tokens: list[int] = []
+        self.num_generation_tokens: list[int] = []
 
         # Prefix cache metrics. TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
-
-    def _local_interval_elapsed(self, now: float) -> bool:
-        # Log every _LOCAL_LOGGING_INTERVAL_SEC.
-        elapsed_time = now - self.last_log_time
-        return elapsed_time > _LOCAL_LOGGING_INTERVAL_SEC
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
@@ -52,27 +51,29 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens.append(
             iteration_stats.num_generation_tokens)
 
-    def _get_throughput(self, tracked_stats: List[int], now: float) -> float:
+    def _get_throughput(self, tracked_stats: list[int], now: float) -> float:
         # Compute summary metrics for tracked stats
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
-    def log(self, scheduler_stats: SchedulerStats,
-            iteration_stats: IterationStats):
+    def record(self, scheduler_stats: SchedulerStats,
+               iteration_stats: IterationStats):
         """Log Stats to standard output."""
 
         self._track_iteration_stats(iteration_stats)
 
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
-        now = time.monotonic()
-        if not self._local_interval_elapsed(now):
-            return
+        self.last_scheduler_stats = scheduler_stats
 
+    def log(self):
+        now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(
             self.num_generation_tokens, now)
 
         self._reset(now)
+
+        scheduler_stats = self.last_scheduler_stats
 
         # Format and print output.
         logger.info(
@@ -147,7 +148,7 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_request_success: Dict[FinishReason,
+        self.counter_request_success: dict[FinishReason,
                                            prometheus_client.Counter] = {}
         counter_request_success_base = prometheus_client.Counter(
             name="vllm:request_success_total",
@@ -274,8 +275,8 @@ class PrometheusStatLogger(StatLoggerBase):
             labelnames=metrics_info.keys()).labels(**metrics_info)
         info_gauge.set(1)
 
-    def log(self, scheduler_stats: SchedulerStats,
-            iteration_stats: IterationStats):
+    def record(self, scheduler_stats: SchedulerStats,
+               iteration_stats: IterationStats):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
@@ -338,14 +339,14 @@ class PrometheusStatLogger(StatLoggerBase):
                 prometheus_client.REGISTRY.unregister(collector)
 
 
-def build_buckets(mantissa_lst: List[int], max_value: int) -> List[int]:
+def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
     """
     Builds a list of buckets with increasing powers of 10 multiplied by
     mantissa values until the value exceeds the specified maximum.
 
     """
     exponent = 0
-    buckets: List[int] = []
+    buckets: list[int] = []
     while True:
         for m in mantissa_lst:
             value = m * 10**exponent
@@ -356,7 +357,7 @@ def build_buckets(mantissa_lst: List[int], max_value: int) -> List[int]:
         exponent += 1
 
 
-def build_1_2_5_buckets(max_value: int) -> List[int]:
+def build_1_2_5_buckets(max_value: int) -> list[int]:
     """
     Example:
     >>> build_1_2_5_buckets(100)
@@ -365,7 +366,7 @@ def build_1_2_5_buckets(max_value: int) -> List[int]:
     return build_buckets([1, 2, 5], max_value)
 
 
-def build_cudagraph_buckets(vllm_config: VllmConfig) -> List[int]:
+def build_cudagraph_buckets(vllm_config: VllmConfig) -> list[int]:
     if not vllm_config.model_config.enforce_eager:
         buckets = vllm_config.compilation_config.\
             cudagraph_capture_sizes.copy()
