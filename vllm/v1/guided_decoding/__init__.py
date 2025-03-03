@@ -35,14 +35,6 @@ class GuidedDecodingOptions(enum.Enum):
 GuidedDecodingKey = Tuple[GuidedDecodingOptions, str]
 
 
-def apply_bitmask(
-    logits: torch.Tensor,
-    vocab_mask: torch.Tensor,
-    indices: List[int],
-) -> None:
-    xgr.apply_token_bitmask_inplace(logits, vocab_mask, indices=indices)
-
-
 @dataclass(slots=True, unsafe_hash=True)  # type: ignore[call-overload]
 class Grammar:
     # NOTE: This would be a generic-enough class for

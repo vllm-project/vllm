@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import xgrammar as xgr
 
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
@@ -28,7 +29,6 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
-from vllm.v1.guided_decoding import apply_bitmask
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
@@ -975,11 +975,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_bitmask = sorted_bitmask
 
             # TODO: compatibility with spec decode
-            apply_bitmask(
+            xgr.apply_token_bitmask_inplace(
                 logits,
                 grammar_bitmask.to(self.device, non_blocking=True),
-                list(req_id_indices.values()),
-            )
+                indices=list(req_id_indices.values()))
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
