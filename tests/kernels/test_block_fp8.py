@@ -38,14 +38,12 @@ K = [256, 4096, 5120, 3884, 13824, 16384]
 
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
-#M_moe = [1, 7, 83, 512, 2048]
-M_moe = [1, 2, 8, 84, 512] #, 2048]
+M_moe = [1, 2, 7, 83, 512, 2048]
 N_moe = [128, 256, 4608]  # [128, 4608, 13824]
 K_moe = [256, 512, 7168]  # [256, 7168, 13824]
 BLOCK_SIZE = [[128, 128]]
-#E = [8, 24]  # [8, 24, 128, 256]
-E = [2] #, 8] #, 16]  # [8, 24, 128, 256]
-TOP_KS = [1]  # [1, 2, 6]
+E = [2, 8, 16] # 24   # [8, 24, 128, 256]
+TOP_KS = [1, 2]  # [1, 2, 6]
 OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
 
@@ -226,11 +224,11 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 
 
 def p(s, t):
-    print(f"{s}: {t.shape}, {t.dtype}")
+    #print(f"{s}: {t.shape}, {t.dtype}")
     pass
 
 def pp(x):
-    print(x)
+    #print(x)
     pass
 
 @pytest.mark.parametrize(
@@ -505,9 +503,9 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
 
-    # only aligned sizes
-    if (N % 128 != 0 or K % 128 != 0):
-        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
+    # only aligned sizes or supported topk
+    if (N % 128 != 0 or K % 128 != 0 or topk > 1):
+        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}, {topk}")
 
     pp(f"\nTEST M={M}, N={N}, K={K}, E/num_groups={E}, topk={topk}, block_size={block_size}, dtype={dtype}")
 
