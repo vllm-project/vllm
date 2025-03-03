@@ -155,10 +155,6 @@ class Scheduler:
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
-            # Guided decoding related.
-            if request.use_guided_decoding:
-                guided_decoding_request_ids[request.request_id] = req_index
-
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
                 self._try_schedule_encoder_inputs(request,
@@ -203,6 +199,8 @@ class Scheduler:
             # Schedule the request.
             scheduled_running_reqs.append(request)
             self.scheduled_req_ids.add(request.request_id)
+            if request.use_guided_decoding:
+                guided_decoding_request_ids[request.request_id] = req_index
             req_to_new_block_ids[request.request_id] = [
                 b.block_id for b in new_blocks
             ]
