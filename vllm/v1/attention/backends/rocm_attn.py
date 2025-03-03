@@ -37,10 +37,6 @@ class ROCmAttentionBackend(AttentionBackend):
         return FlashAttentionMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["FlashAttentionMetadataBuilder"]:
-        return FlashAttentionMetadataBuilder
-
-    @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
