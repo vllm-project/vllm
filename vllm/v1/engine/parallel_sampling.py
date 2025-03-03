@@ -112,4 +112,8 @@ class ParentRequest:
 
         # We're done aggregating
         self.output_aggregator = None
+
+        # Parent completion output list must be sorted by index
+        request_output.outputs = sorted(request_output.outputs,
+                                        key=lambda x: x.index)
         return request_output
