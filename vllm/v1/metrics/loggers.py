@@ -21,15 +21,19 @@ _LOCAL_LOGGING_INTERVAL_SEC = 5.0
 class StatLoggerBase(ABC):
 
     @abstractmethod
-    def log(self, scheduler_stats: SchedulerStats,
-            iteration_stats: IterationStats):
+    def record(self, scheduler_stats: SchedulerStats,
+               iteration_stats: IterationStats):
         ...
+
+    def log(self):  # noqa
+        pass
 
 
 class LoggingStatLogger(StatLoggerBase):
 
     def __init__(self):
         self._reset(time.monotonic())
+        self.last_scheduler_stats = SchedulerStats()
 
     def _reset(self, now):
         self.last_log_time = now
@@ -41,11 +45,6 @@ class LoggingStatLogger(StatLoggerBase):
         # Prefix cache metrics. TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
 
-    def _local_interval_elapsed(self, now: float) -> bool:
-        # Log every _LOCAL_LOGGING_INTERVAL_SEC.
-        elapsed_time = now - self.last_log_time
-        return elapsed_time > _LOCAL_LOGGING_INTERVAL_SEC
-
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
         self.num_prompt_tokens.append(iteration_stats.num_prompt_tokens)
@@ -56,23 +55,25 @@ class LoggingStatLogger(StatLoggerBase):
         # Compute summary metrics for tracked stats
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
-    def log(self, scheduler_stats: SchedulerStats,
-            iteration_stats: IterationStats):
+    def record(self, scheduler_stats: SchedulerStats,
+               iteration_stats: IterationStats):
         """Log Stats to standard output."""
 
         self._track_iteration_stats(iteration_stats)
 
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
-        now = time.monotonic()
-        if not self._local_interval_elapsed(now):
-            return
+        self.last_scheduler_stats = scheduler_stats
 
+    def log(self):
+        now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(
             self.num_generation_tokens, now)
 
         self._reset(now)
+
+        scheduler_stats = self.last_scheduler_stats
 
         # Format and print output.
         logger.info(
@@ -274,8 +275,8 @@ class PrometheusStatLogger(StatLoggerBase):
             labelnames=metrics_info.keys()).labels(**metrics_info)
         info_gauge.set(1)
 
-    def log(self, scheduler_stats: SchedulerStats,
-            iteration_stats: IterationStats):
+    def record(self, scheduler_stats: SchedulerStats,
+               iteration_stats: IterationStats):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
