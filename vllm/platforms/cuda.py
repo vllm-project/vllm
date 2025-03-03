@@ -151,6 +151,11 @@ class CudaPlatformBase(Platform):
                 " is currently the only block size supported by the kernel.")
 
     @classmethod
+    def empty_cache(cls) -> None:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    @classmethod
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
