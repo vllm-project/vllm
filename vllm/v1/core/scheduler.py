@@ -252,7 +252,7 @@ class Scheduler:
                         request.status = RequestStatus.WAITING
                     else:
                         guided_req = self.waiting.popleft()
-                        waiting_for_fsm.append(guided_req)
+                        waiting_for_fsm.appendleft(guided_req)
                         continue
 
                 # Check that adding the request still respects the max_loras
