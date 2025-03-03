@@ -357,9 +357,6 @@ class OutputProcessor:
             req_stats=req_state.stats)
         self.lora_states.finish_request(req_state)
 
-        if req_state.parent_req is None:
-            iteration_stats.max_num_generation_tokens_iter.append(
-                req_state.stats.num_generation_tokens)
-        else:
-            req_state.parent_req.observe_max_num_generation_tokens(
-                iteration_stats, req_state.stats.num_generation_tokens)
+        ParentRequest.observe_finished_request(
+            req_state.parent_req, iteration_stats,
+            req_state.stats.num_generation_tokens)

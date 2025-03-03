@@ -131,12 +131,24 @@ class ParentRequest:
                                         key=lambda x: x.index)
         return request_output
 
-    def observe_max_num_generation_tokens(self,
-                                          iteration_stats: IterationStats,
-                                          num_generation_tokens: int):
+    def observe_num_generation_tokens(self, num_generation_tokens: int):
         self.max_num_generation_tokens = max(num_generation_tokens,
                                              self.max_num_generation_tokens)
-        if not self.child_requests:
-            # All child requests have finished, we can now record the max
+        return self.max_num_generation_tokens
+
+    @staticmethod
+    def observe_finished_request(parent_req: Optional['ParentRequest'],
+                                 iteration_stats: IterationStats,
+                                 num_generation_tokens: int):
+
+        n_param = parent_req.n if parent_req is not None else 1
+
+        if parent_req is not None:
+            num_generation_tokens = parent_req.observe_num_generation_tokens(
+                num_generation_tokens)
+
+        # Child requests finished, we can now record to iteration stats
+        if parent_req is None or not parent_req.child_requests:
             iteration_stats.max_num_generation_tokens_iter.append(
-                self.max_num_generation_tokens)
+                num_generation_tokens)
+            iteration_stats.n_params_iter.append(n_param)

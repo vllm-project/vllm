@@ -199,6 +199,13 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=build_1_2_5_buckets(max_model_len),
                 labelnames=labelnames).labels(*labelvalues)
 
+        self.histogram_n_request = \
+            prometheus_client.Histogram(
+                name="vllm:request_params_n",
+                documentation="Histogram of the n request parameter.",
+                buckets=[1, 2, 5, 10, 20],
+                labelnames=labelnames).labels(*labelvalues)
+
         #
         # Histogram of timing intervals
         #
@@ -327,6 +334,8 @@ class PrometheusStatLogger(StatLoggerBase):
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
             self.histogram_max_num_generation_tokens_request.observe(
                 max_gen_tokens)
+        for n_param in iteration_stats.n_params_iter:
+            self.histogram_n_request.observe(n_param)
         for ttft in iteration_stats.time_to_first_tokens_iter:
             self.histogram_time_to_first_token.observe(ttft)
         for tpot in iteration_stats.time_per_output_tokens_iter:
