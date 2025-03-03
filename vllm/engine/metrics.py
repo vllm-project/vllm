@@ -74,31 +74,51 @@ class Metrics:
             ],
             multiprocess_mode="livemostrecent",
         )
+
+        # Deprecated in 0.8 - KV cache offloading is not used in V1
+        # TODO: in 0.9, only enable if show_hidden_metrics=True
         self.gauge_scheduler_swapped = self._gauge_cls(
             name="vllm:num_requests_swapped",
-            documentation="Number of requests swapped to CPU.",
+            documentation=(
+                "Number of requests swapped to CPU. "
+                "DEPRECATED: KV cache offloading is not used in V1"),
             labelnames=labelnames,
             multiprocess_mode="sum")
+
         #   KV Cache Usage in %
         self.gauge_gpu_cache_usage = self._gauge_cls(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames,
             multiprocess_mode="sum")
+
+        # Deprecated in 0.8 - KV cache offloading is not used in V1
+        # TODO: in 0.9, only enable if show_hidden_metrics=True
         self.gauge_cpu_cache_usage = self._gauge_cls(
             name="vllm:cpu_cache_usage_perc",
-            documentation="CPU KV-cache usage. 1 means 100 percent usage.",
+            documentation=(
+                "CPU KV-cache usage. 1 means 100 percent usage. "
+                "DEPRECATED: KV cache offloading is not used in V1"),
             labelnames=labelnames,
             multiprocess_mode="sum")
-        #   Prefix caching block hit rate
+
+        # Deprecated in 0.8 - KV cache offloading is not used in V1
+        # TODO: in 0.9, only enable if show_hidden_metrics=True
         self.gauge_cpu_prefix_cache_hit_rate = self._gauge_cls(
             name="vllm:cpu_prefix_cache_hit_rate",
-            documentation="CPU prefix cache block hit rate.",
+            documentation=(
+                "CPU prefix cache block hit rate. "
+                "DEPRECATED: KV cache offloading is not used in V1"),
             labelnames=labelnames,
             multiprocess_mode="sum")
+
+        # Deprecated in 0.8 - replaced by queries+hits counters in V1
+        # TODO: in 0.9, only enable if show_hidden_metrics=True
         self.gauge_gpu_prefix_cache_hit_rate = self._gauge_cls(
             name="vllm:gpu_prefix_cache_hit_rate",
-            documentation="GPU prefix cache block hit rate.",
+            documentation=("GPU prefix cache block hit rate. "
+                           "DEPRECATED: use vllm:gpu_prefix_cache_queries and "
+                           "vllm:gpu_prefix_cache_queries in V1"),
             labelnames=labelnames,
             multiprocess_mode="sum")
 
