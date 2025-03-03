@@ -197,8 +197,6 @@ class BenchmarkDataset(ABC):
                              self.DEFAULT_NUM_REQUESTS)
         self.input_len = input_len
         self.output_len = output_len
-        if self.num_requests is None:
-            raise ValueError("num_requests must be provided for sampling.")
 
         self.model = model
 
