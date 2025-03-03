@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 import numpy
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.platforms import current_platform
@@ -303,9 +304,16 @@ def apply_gptq_marlin_linear(
         input_size_per_partition: int,
         is_k_full: bool,
         bias: Optional[torch.Tensor] = None,
+        use_atomic_add: Optional[bool] = None,
         use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
+
+    if use_atomic_add is None:
+        use_atomic_add = envs.VLLM_MARLIN_USE_ATOMIC_ADD
+
+    if output_size_per_partition > 2048:
+        use_atomic_add = False
 
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   weight,
