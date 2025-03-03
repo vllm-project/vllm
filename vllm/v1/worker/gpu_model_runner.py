@@ -858,6 +858,45 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def _apply_grammar_bitmask(self, scheduler_output: "SchedulerOutput",
+                               logits: torch.Tensor):
+        # Serialization of np.ndarray is much more efficient than a tensor,
+        # so we receive it in that format.
+        grammar_bitmask = torch.from_numpy(scheduler_output.grammar_bitmask)
+
+        # We receive the guided decoding bitmask from the scheduler, but the
+        # indices of the requests in the batch may not match the indices of
+        # the bitmask since the scheduler doesn't know how the gpu runner is
+        # ordering the requests in the batch. We need to sort the bitmask to
+        # match the order of the requests used here.
+        req_id_indices: dict[str, int] = {}
+        indices_match = True
+        for req_id in self.input_batch.req_ids:
+            mask_index = scheduler_output.guided_decoding_request_ids.get(
+                req_id)
+            if mask_index is None:
+                # not a guided decoding request
+                continue
+            batch_index = self.input_batch.req_id_to_index[req_id]
+            if batch_index != mask_index:
+                indices_match = False
+            req_id_indices[req_id] = batch_index
+
+        if not indices_match:
+            # Sort the bitmask to match the order of the requests
+            sorted_bitmask = torch.zeros_like(grammar_bitmask)
+            for req_id, batch_index in req_id_indices.items():
+                orig_index = scheduler_output.guided_decoding_request_ids[
+                    req_id]
+                sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
+            grammar_bitmask = sorted_bitmask
+
+        # TODO: compatibility with spec decode
+        xgr.apply_token_bitmask_inplace(logits,
+                                        grammar_bitmask.to(self.device,
+                                                           non_blocking=True),
+                                        indices=list(req_id_indices.values()))
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -944,42 +983,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Apply guided decoding bitmasks if present
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        if grammar_bitmask is not None:
-            grammar_bitmask = torch.from_numpy(grammar_bitmask)
-            # We receive the guided decoding bitmask from the scheduler, but the
-            # indices of the requests in the batch may not match the indices of
-            # the bitmask since the scheduler doesn't know how the gpu runner is
-            # ordering the requests in the batch. We need to sort the bitmask to
-            # match the order of the requests used here.
-            req_id_indices: dict[str, int] = {}
-            indices_match = True
-            for req_id in self.input_batch.req_ids:
-                mask_index = scheduler_output.guided_decoding_request_ids.get(
-                    req_id)
-                if mask_index is None:
-                    # not a guided decoding request
-                    continue
-                batch_index = self.input_batch.req_id_to_index[req_id]
-                if batch_index != mask_index:
-                    indices_match = False
-                req_id_indices[req_id] = batch_index
-
-            sorted_bitmask: Optional[torch.Tensor] = None
-            if not indices_match:
-                # Sort the bitmask to match the order of the requests
-                sorted_bitmask = torch.zeros_like(grammar_bitmask)
-                for req_id, batch_index in req_id_indices.items():
-                    orig_index = scheduler_output.guided_decoding_request_ids[
-                        req_id]
-                    sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
-                grammar_bitmask = sorted_bitmask
-
-            # TODO: compatibility with spec decode
-            xgr.apply_token_bitmask_inplace(
-                logits,
-                grammar_bitmask.to(self.device, non_blocking=True),
-                indices=list(req_id_indices.values()))
+        if scheduler_output.grammar_bitmask is not None:
+            self._apply_grammar_bitmask(scheduler_output, logits)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
