@@ -9,6 +9,7 @@ from transformers import FalconMamba2Config
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
+from vllm.forward_context import get_forward_context
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
@@ -135,7 +136,6 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
@@ -144,7 +144,6 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
     ):
         hidden_states = self.mamba(
             hidden_states,
-            attn_metadata,
             mamba_cache_params,
             sequence_idx,
             ssm_in_multiplier,
@@ -234,16 +233,14 @@ class FalconMamba2AttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        k = k * self.key_multiplier
+
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        output, _ = self.o_proj(attn_output) 
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
         output = output * self.attn_out_multiplier
         return output
 
@@ -251,16 +248,12 @@ class FalconMamba2AttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         **kwargs,
     ):
         hidden_states = self.self_attention(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         return hidden_states, residual
 
@@ -315,8 +308,6 @@ class FalconMamba2ParallelHybrid(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
@@ -330,8 +321,6 @@ class FalconMamba2ParallelHybrid(nn.Module):
         attn_hidden, residuals = self.self_attn(
             positions=positions,
             hidden_states=hidden_states * self.attention_in_multiplier,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
             residual=residual,
             **kwargs,
         )
@@ -341,7 +330,6 @@ class FalconMamba2ParallelHybrid(nn.Module):
         # residual, mamba_cache_params, and sequence_idx.
         ssm_hidden, residuals = self.mamba(
             hidden_states=hidden_states,
-            attn_metadata=attn_metadata,
             residual=residual,
             mamba_cache_params=mamba_cache_params,
             sequence_idx=sequence_idx,
@@ -413,8 +401,6 @@ class FalconMamba2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -424,6 +410,7 @@ class FalconMamba2Model(nn.Module):
         # proper continuous batching computation including
         # chunked prefill
         seq_idx = None
+        attn_metadata = get_forward_context().attn_metadata
         if attn_metadata.num_prefills > 0:
             seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
             for i, (srt, end) in enumerate(
@@ -448,14 +435,11 @@ class FalconMamba2Model(nn.Module):
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            kv_cache = kv_caches[i]
             layer_mamba_cache_params = mamba_cache_params.at_layer_idx(i)
 
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
                 residual=residual,
                 mamba_cache_params=layer_mamba_cache_params,
                 sequence_idx=seq_idx,
@@ -549,8 +533,6 @@ class FalconMamba2ForCausalLM(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
@@ -566,8 +548,6 @@ class FalconMamba2ForCausalLM(
         hidden_states = self.model(
             input_ids,
             positions,
-            kv_caches,
-            attn_metadata,
             mamba_cache_params,
             intermediate_tensors,
             inputs_embeds,
@@ -587,7 +567,7 @@ class FalconMamba2ForCausalLM(
 
         conv_state_shape, temporal_state_shape = None, None
 
-        intermediate_size = self.config.mamba_expand * hidden_size
+        intermediate_size = int(self.config.mamba_expand * self.config.hidden_size) if self.config.mamba_d_ssm is None else self.config.mamba_d_ssm
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
