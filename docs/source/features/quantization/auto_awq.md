@@ -3,7 +3,7 @@
 # AutoAWQ
 
 To create a new 4-bit quantized model, you can leverage [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
-Quantizing reduces the model's precision from FP16 to INT4 which effectively reduces the file size by ~70%.
+Quantization reduces the model's precision from BF16/FP16 to INT4 which effectively reduces the total model memory footprint.
 The main benefits are lower latency and memory usage.
 
 You can quantize your own models by installing AutoAWQ or picking one of the [6500+ models on Huggingface](https://huggingface.co/models?sort=trending&search=awq).
