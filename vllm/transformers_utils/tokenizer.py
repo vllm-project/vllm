@@ -15,6 +15,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.transformers_utils.config import model_overwrite
 from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
                                                     TokenizerRegistry)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
@@ -144,6 +145,9 @@ def get_tokenizer(
 ) -> AnyTokenizer:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
     """
+
+    tokenizer_name = model_overwrite(tokenizer_name)
+
     if VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.

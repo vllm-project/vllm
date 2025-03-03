@@ -24,6 +24,7 @@ from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
+from vllm import envs
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
@@ -246,6 +247,8 @@ def get_config(
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
+
+    model = model_overwrite(model)
 
     is_gguf = check_gguf_file(model)
     if is_gguf:
@@ -758,3 +761,37 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
         return resolve_obj_by_qualname(function_name)()
     else:
         return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
+
+
+@cache
+def model_overwrite(model: str):
+    """
+    Use model_overwrite to redirect the model name to a local folder
+    while keeping the model name in the test file without being hardcoded.
+
+    :param model: hf model name
+    :return: maybe overwrite to a local folder
+    """
+
+    model_overwrite_path = envs.VLLM_MODEL_OVERWRITE_PATH
+
+    if not model_overwrite_path:
+        return model
+
+    import pathlib
+
+    if not pathlib.Path(model_overwrite_path).exists():
+        return model
+
+    model_overwrite_dict = {}
+    with open(model_overwrite_path) as f:
+        for line in f.readlines():
+            model_name, overwrite_name = line.split("\t")
+            model_overwrite_dict[model_name] = overwrite_name.strip()
+
+    if model in model_overwrite_dict:
+        new_model = model_overwrite_dict[model]
+        logger.info("model overwrite: [ %s ] -> [ % ]", model, new_model)
+        model = new_model
+
+    return model
