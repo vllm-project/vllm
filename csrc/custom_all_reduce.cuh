@@ -191,8 +191,7 @@ DINLINE void start_sync(const RankSignals& sg, Signal* self_sg, int rank) {
   if (threadIdx.x < ngpus) {
 #if !defined(USE_ROCM)
     auto peer_counter_ptr = &sg.signals[threadIdx.x]->start[blockIdx.x][rank];
-    auto self_counter_ptr =
-        &self_sg->peer_counter[val % 2][blockIdx.x][threadIdx.x];
+    auto self_counter_ptr = &self_sg->start[blockIdx.x][threadIdx.x];
     // Write the expected counter value to peer and wait for correct value
     // from peer.
     st_flag_volatile(peer_counter_ptr, flag);
@@ -226,16 +225,18 @@ DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
   // the memory model.
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
 #if !defined(USE_ROCM)
-  auto peer_counter_ptr = &sg.signals[threadIdx.x]->end[blockIdx.x][rank];
-  auto self_counter_ptr = &self_sg->end[blockIdx.x][threadIdx.x];
-  // Write the expected counter value to peer and wait for correct value from
-  // peer.
-  if constexpr (!final_sync) {
-    st_flag_release(peer_counter_ptr, val);
-    while (ld_flag_acquire(self_counter_ptr) != val);
-  } else {
-    st_flag_volatile(peer_counter_ptr, val);
-    while (ld_flag_volatile(self_counter_ptr) != val);
+  if (threadIdx.x < ngpus) {
+    auto peer_counter_ptr = &sg.signals[threadIdx.x]->end[blockIdx.x][rank];
+    auto self_counter_ptr = &self_sg->end[blockIdx.x][threadIdx.x];
+    // Write the expected counter value to peer and wait for correct value from
+    // peer.
+    if constexpr (!final_sync) {
+      st_flag_release(peer_counter_ptr, flag);
+      while (ld_flag_acquire(self_counter_ptr) != flag);
+    } else {
+      st_flag_volatile(peer_counter_ptr, flag);
+      while (ld_flag_volatile(self_counter_ptr) != flag);
+    }
   }
   if constexpr (!final_sync) __syncthreads();
 #else
