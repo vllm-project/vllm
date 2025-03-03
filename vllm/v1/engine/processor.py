@@ -83,7 +83,7 @@ class Processor:
 
         # Allowed token ids.
         if (params.allowed_token_ids is not None
-                and not all(0 <= tid < self.model_config.vocab_size
+                and not all(0 <= tid < self.model_config.get_vocab_size()
                             for tid in params.allowed_token_ids)):
             raise ValueError(
                 "allowed_token_ids contains out-of-vocab token id")
@@ -92,12 +92,22 @@ class Processor:
         self,
         params: SamplingParams,
     ) -> None:
-        # Best of.
+        # Best of not yet supported.
         if params.best_of:
-            raise ValueError("VLLM V1 does not support best_of.")
-        # Bad words.
+            raise ValueError("VLLM V1 does not yet support best_of.")
+        # Bad words not yet supported.
         if params.bad_words:
-            raise ValueError("VLLM V1 does not support bad_words.")
+            raise ValueError("VLLM V1 does not yet support bad_words.")
+        # Skip detokenization not yet supported.
+        if not params.detokenize:
+            raise ValueError("VLLM V1 does not yet support detokenize=False.")
+        # Logits processors not supported.
+        if params.logits_processors:
+            raise ValueError("VLLM V1 does not yet support per request "
+                             "logits processors.")
+        # Allowed token ids is not supported.
+        if params.allowed_token_ids:
+            raise ValueError("VLLM V1 does not yet support allowed token ids.")
 
     def _validate_params(
         self,

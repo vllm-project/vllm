@@ -95,3 +95,49 @@ def test_bad_words(model):
 
     with pytest.raises(ValueError):
         _ = model.generate(PROMPT, SamplingParams(bad_words=["Hello"]))
+
+
+def test_detokenize(model):
+    """Check that we reject detokenize=False."""
+
+    with pytest.raises(ValueError):
+        _ = model.generate(PROMPT, SamplingParams(detokenize=False))
+
+
+def test_logits_processor(model):
+    """Check that we reject logits processor."""
+
+    # This sample logits processor gives infinite score to the i-th token,
+    # where i is the length of the input sequence.
+    # We therefore expect the output token sequence to be [0, 1, 2, ...]
+    def pick_ith(token_ids, logits):
+        logits[len(token_ids)] = float("inf")
+        return logits
+
+    with pytest.raises(ValueError):
+        _ = model.generate(PROMPT,
+                           SamplingParams(logits_processors=[pick_ith]))
+
+
+def test_allowed_token_ids(model):
+    """Check that we can use allowed_token_ids."""
+
+    # This does not currently work due to incorrect implementation.
+    # TOKEN_ID = 10
+    # allowed_token_ids = [TOKEN_ID]
+    # output = model.generate(PROMPT, SamplingParams(
+    #     allowed_token_ids=allowed_token_ids))
+    # assert output[0].outputs[0].token_ids[-1] == TOKEN_ID
+
+    # Reject all allowed token ids
+    with pytest.raises(ValueError):
+        _ = model.generate(PROMPT, SamplingParams(allowed_token_ids=[10]))
+
+    # Reject negative token id.
+    with pytest.raises(ValueError):
+        _ = model.generate(PROMPT, SamplingParams(allowed_token_ids=[-1]))
+
+    # Reject out of vocabulary.
+    with pytest.raises(ValueError):
+        _ = model.generate(PROMPT,
+                           SamplingParams(allowed_token_ids=[10000000]))
