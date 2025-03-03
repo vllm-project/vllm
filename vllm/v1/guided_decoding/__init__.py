@@ -33,7 +33,6 @@ class GuidedDecodingOptions(enum.Enum):
 
 
 GuidedDecodingKey = Tuple[GuidedDecodingOptions, str]
-MAX_ROLLBACK_TOKENS = 100
 
 
 def apply_bitmask(
@@ -57,7 +56,6 @@ class Grammar:
     vocab_size: int
     matcher: xgr.GrammarMatcher = field(hash=False)
     ctx: xgr.CompiledGrammar = field(hash=False)
-    max_rollback_tokens: int = field(default=MAX_ROLLBACK_TOKENS)
     num_processed_tokens: int = field(default_factory=lambda: 0,
                                       repr=False,
                                       hash=False,
@@ -89,11 +87,9 @@ class Grammar:
         self.matcher.reset()
 
     def __copy__(self):
-        return Grammar(matcher=xgr.GrammarMatcher(
-            self.ctx, max_rollback_tokens=self.max_rollback_tokens),
+        return Grammar(matcher=xgr.GrammarMatcher(self.ctx),
                        vocab_size=self.vocab_size,
-                       ctx=self.ctx,
-                       max_rollback_tokens=self.max_rollback_tokens)
+                       ctx=self.ctx)
 
 
 class GuidedDecodingManager:
@@ -192,15 +188,9 @@ class GuidedDecodingManager:
             raise ValueError(
                 f"grammar is not of valid supported types. ({request_type!s})")
 
-        max_rollback_tokens = MAX_ROLLBACK_TOKENS
-        if self.vllm_config.speculative_config:
-            max_rollback_tokens = self.vllm_config.speculative_config\
-                                      .num_lookahead_slots + 1
-        return Grammar(matcher=xgr.GrammarMatcher(
-            ctx, max_rollback_tokens=max_rollback_tokens),
+        return Grammar(matcher=xgr.GrammarMatcher(ctx),
                        vocab_size=self.vocab_size,
-                       ctx=ctx,
-                       max_rollback_tokens=max_rollback_tokens)
+                       ctx=ctx)
 
     def setup_grammars(self):
         with self._requests_lock:
