@@ -1545,7 +1545,7 @@ __global__ void Marlin(
       if (c_gl_wr < c_gl_wr_end) {
         if (use_atomic_add) {
           scalar_t2* C_half2 = reinterpret_cast<scalar_t2*>(&C[c_gl_wr]);
-          scalar_t2* sh_red_half2 = 
+          scalar_t2* sh_red_half2 =
               reinterpret_cast<scalar_t2*>(&sh_red[c_sh_rd]);
   #pragma unroll
           for (int a = 0; a < 4; a++) {
