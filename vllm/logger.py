@@ -189,8 +189,9 @@ def get_used_hpu_mem_MB():
     """Get HPU used memory: MiB."""
     import torch
     import numpy as np
+    import habana_frameworks.torch as htorch
     from habana_frameworks.torch.hpu import memory_stats
-
+    htorch.core.mark_step()
     torch.hpu.synchronize()
     mem_stats = memory_stats()
     used_hpu_mem = np.round(mem_stats["InUse"] / 1024**2, 3)
