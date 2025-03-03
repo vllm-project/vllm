@@ -371,6 +371,8 @@ def get_requests(args, tokenizer):
     sample_kwargs = {}
 
     if args.dataset is None or args.dataset_name == "random":
+        common_kwargs["range_ratio"] = args.random_range_ratio
+        common_kwargs["prefix_len"] = args.prefix_len
         dataset_cls = RandomDataset
     elif args.dataset_name == "sharegpt":
         dataset_cls = ShareGPTDataset
@@ -531,14 +533,22 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="Split of the HF dataset.")
+    # random dataset
+    parser.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=1.0,
+        help="Range of sampled ratio of input/output length, "
+        "used only for RandomDataSet.",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
     if args.dataset is None:
-        assert args.input_len is not None
-        assert args.output_len is not None
+        # for random dataset, the default sampling setting is in benchmark_dataset.RandomDataset
+        print("When dataset is not set, it will default to random dataset")
     else:
         assert args.input_len is None
     if args.enable_lora:

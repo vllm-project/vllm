@@ -187,14 +187,14 @@ class BenchmarkDataset(ABC):
         self.data = data  # For datasets that require pre-loading
         self.dataset_path = dataset_path
         self.random_seed = (random_seed
-                            if random_seed is None else self.DEFAULT_SEED)
+                            if random_seed is not None else self.DEFAULT_SEED)
 
         # LoRA related
         self.enable_lora_tokenizer = enable_lora_tokenizer
         self.lora_path = lora_path
         self.max_loras = max_loras
 
-        self.num_requests = (num_requests if num_requests is None else
+        self.num_requests = (num_requests if num_requests is not None else
                              self.DEFAULT_NUM_REQUESTS)
         self.input_len = input_len
         self.output_len = output_len
@@ -309,13 +309,13 @@ class RandomDataset(BenchmarkDataset):
     ) -> None:
         super().__init__(**kwargs)
         self.prefix_len = (prefix_len
-                           if prefix_len is None else self.DEFAULT_PREFIX_LEN)
-        self.range_ratio = (range_ratio if range_ratio is None else
+                           if prefix_len is not None else self.DEFAULT_PREFIX_LEN)
+        self.range_ratio = (range_ratio if range_ratio is not None else
                             self.DEFAULT_RANGE_RATIO)
         self.input_len = (input_len
-                          if input_len is None else self.DEFAULT_INPUT_LEN)
+                          if input_len is not None else self.DEFAULT_INPUT_LEN)
         self.output_len = (output_len
-                           if output_len is None else self.DEFAULT_OUTPUT_LEN)
+                           if output_len is not None else self.DEFAULT_OUTPUT_LEN)
 
     def sample(self, for_online_benchmark: bool = False) -> list:
         vocab_size = self.tokenizer.vocab_size
@@ -447,12 +447,12 @@ class SonnetDataset(BenchmarkDataset):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.prefix_len = (prefix_len
-                           if prefix_len is None else self.DEFAULT_PREFIX_LEN)
-        self.input_len = (input_len
-                          if input_len is None else self.DEFAULT_INPUT_LEN)
-        self.output_len = (output_len
-                           if output_len is None else self.DEFAULT_OUTPUT_LEN)
+        self.prefix_len = (self.DEFAULT_PREFIX_LEN
+                           if prefix_len is None else prefix_len)
+        self.input_len = (self.DEFAULT_INPUT_LEN
+                          if input_len is None else input_len)
+        self.output_len = (self.DEFAULT_OUTPUT_LEN
+                           if output_len is None else output_len)
         if self.enable_lora_tokenizer:
             raise NotImplementedError("LoRA is not supported in SonnetDataset")
         if self.data is None:
@@ -482,6 +482,7 @@ class SonnetDataset(BenchmarkDataset):
         base_fmt = self.tokenizer.apply_chat_template(
             base_msg, add_generation_prompt=True, tokenize=False)
         base_offset = len(self.tokenizer(base_fmt).input_ids)
+        print(base_offset, self.input_len)
         if self.input_len <= base_offset:
             raise ValueError(
                 f"'input_len' must be higher than the base prompt length "
@@ -641,9 +642,9 @@ class HuggingFaceDataset(BenchmarkDataset):
                 continue
 
             mm_content = process_image(
-                item.get("image"),
+                item["image"],
                 return_multi_modal_data_dict=not for_online_benchmark,
-            )
+            ) if "image" in item else None
             sampled_requests.append(
                 self.create_sample(
                     prompt,
@@ -679,7 +680,7 @@ class VisionArenaDataset(BenchmarkDataset):
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
         self.output_len = (output_len
-                           if output_len is None else self.DEFAULT_OUTPUT_LEN)
+                           if output_len is not None else self.DEFAULT_OUTPUT_LEN)
 
         if self.dataset_path != VISION_ARENA_DATASET_PATH:
             raise ValueError(f"Only support Vision Arena dataset.\
