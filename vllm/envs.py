@@ -60,12 +60,12 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
-    VLLM_TEST_FORCE_FP8_MARLIN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
@@ -147,6 +147,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_PRECOMPILED":
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
         os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+
+    # Whether to force using nightly wheel in python build.
+    # This is used for testing the nightly wheel in python build.
+    "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL":
+    lambda: bool(int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
+                 ),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
