@@ -2,7 +2,6 @@
 import asyncio
 import time
 from pathlib import Path
-from typing import List
 
 import pytest
 from huggingface_hub import snapshot_download
@@ -53,8 +52,8 @@ def v1(run_with_both_engines_lora):
     pass
 
 
-def get_lora_requests() -> List[LoRARequest]:
-    lora_requests: List[LoRARequest] = [
+def get_lora_requests() -> list[LoRARequest]:
+    lora_requests: list[LoRARequest] = [
         LoRARequest(lora_name=f"{i}",
                     lora_int_id=i,
                     lora_path=LORA_MODULE_DOWNLOAD_PATH)
@@ -64,7 +63,7 @@ def get_lora_requests() -> List[LoRARequest]:
 
 
 async def requests_processing_time(llm,
-                                   lora_requests: List[LoRARequest]) -> float:
+                                   lora_requests: list[LoRARequest]) -> float:
 
     sampling_params = SamplingParams(n=1,
                                      temperature=0.0,
@@ -107,7 +106,7 @@ async def test_add_lora():
 
     download_and_prepare_lora_module()
 
-    lora_requests: List[LoRARequest] = get_lora_requests()
+    lora_requests: list[LoRARequest] = get_lora_requests()
 
     max_loras = len(set([lr.lora_int_id for lr in lora_requests]))
     # Create engine in eager-mode. Due to high max_loras, the CI can

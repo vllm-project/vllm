@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import weakref
-from typing import List
 
 import pytest
 
 from vllm import LLM, PoolingParams, PoolingRequestOutput
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
+MODEL_NAME = "intfloat/multilingual-e5-small"
 
 PROMPTS = [
     "Hello, my name is",
@@ -45,8 +44,8 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
-def assert_outputs_equal(o1: List[PoolingRequestOutput],
-                         o2: List[PoolingRequestOutput]):
+def assert_outputs_equal(o1: list[PoolingRequestOutput],
+                         o2: list[PoolingRequestOutput]):
     assert [o.outputs for o in o1] == [o.outputs for o in o2]
 
 

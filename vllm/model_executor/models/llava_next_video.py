@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -21,7 +21,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
@@ -183,12 +184,12 @@ class LlavaNextVideoMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values_videos=MultiModalFieldConfig.batched("video"))
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         video_token_id = hf_config.video_token_index
 

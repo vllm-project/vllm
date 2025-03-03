@@ -472,7 +472,7 @@ pyyaml==6.0.2
     #   vocos
 rapidfuzz==3.12.1
     # via jiwer
-ray==2.40.0
+ray==2.43.0
     # via -r requirements-test.in
 redis==5.2.0
     # via tensorizer

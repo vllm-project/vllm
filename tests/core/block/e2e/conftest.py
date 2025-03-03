@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Iterable, Optional
+from collections.abc import Iterable
+from typing import Callable, Optional
 
 import pytest
 
