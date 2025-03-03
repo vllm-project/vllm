@@ -148,14 +148,14 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA):
         # Attention modifications (assumes 1 attention op per hidden layer)
         num_heads = model_config.get_num_attention_heads(parallel_config)
         head_size = model_config.get_head_size()
-        num_kv_heads = model_config.get_num_kv_heads()
+        num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.attention_instances = [
             Attention(
                 num_heads=num_heads,
                 head_size=head_size,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_flash_attention_forward
-                scale=config.head_size**-0.5,
+                scale=head_size**-0.5,
                 num_kv_heads=num_kv_heads,
                 cache_config=cache_config,
                 quant_config=self.quant_config,
