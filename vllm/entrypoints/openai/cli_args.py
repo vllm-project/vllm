@@ -8,7 +8,8 @@ purposes.
 import argparse
 import json
 import ssl
-from typing import List, Optional, Sequence, Union, get_args
+from collections.abc import Sequence
+from typing import Optional, Union, get_args
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
@@ -33,7 +34,7 @@ class LoRAParserAction(argparse.Action):
         if isinstance(values, str):
             raise TypeError("Expected values to be a list")
 
-        lora_list: List[LoRAModulePath] = []
+        lora_list: list[LoRAModulePath] = []
         for item in values:
             if item in [None, '']:  # Skip if item is None or empty string
                 continue
@@ -69,7 +70,7 @@ class PromptAdapterParserAction(argparse.Action):
         if isinstance(values, str):
             raise TypeError("Expected values to be a list")
 
-        adapter_list: List[PromptAdapterPath] = []
+        adapter_list: list[PromptAdapterPath] = []
         for item in values:
             name, path = item.split('=')
             adapter_list.append(PromptAdapterPath(name, path))
