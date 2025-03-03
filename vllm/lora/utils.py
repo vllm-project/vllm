@@ -7,7 +7,7 @@ from typing import List, Optional, Set, Tuple, Type, Union
 import huggingface_hub
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    HFValidationError, RepositoryNotFoundError)
-from torch import nn
+from torch import Tensor, nn
 from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
@@ -66,20 +66,23 @@ def from_layer(layer: nn.Module,
                                       lora_config=lora_config,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
-            instance_layer = lora_cls(layer)
-            if layer.__class__.__name__ == "HFCompatibleLinear":
-                # HACK:  Make the forward method compatible with the original
-                # forward method of the instance_layer.
-                original_forward = instance_layer.forward
+            # Handle HFCompatibleLinear
+            if hasattr(layer, "hf_wrapper"):
 
-                def new_forward(input):
-                    input = input.squeeze(0)
-                    return original_forward(input)[0]  # noqa: B023
+                class HFCompatibleLoRA(lora_cls):
+                    __class__ = lora_cls
+                    __wrapper_class__ = "HFCompatibleLoRA"
 
-                instance_layer.forward = new_forward
-            instance_layer.create_lora_weights(max_loras, lora_config,
-                                               model_config)
-            return instance_layer
+                    def forward(self, input: Tensor) -> Tensor:
+                        return super().forward(input.squeeze(0))[0]
+
+                lora_cls = HFCompatibleLoRA
+
+            lora_layer = lora_cls(layer)
+            lora_layer.create_lora_weights(max_loras, lora_config,
+                                           model_config)
+
+            return lora_layer
     return layer
 
 

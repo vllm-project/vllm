@@ -101,10 +101,8 @@ def replace_linear_class(
         """
         Wrapper class that removes `output_bias` from returned output.
         """
-        # NOTE: The LoRA layer needs to use `parent_cls`.
-        @property
-        def parent_cls(self) -> type:
-            return vllm_linear_cls
+        __class__ = vllm_linear_cls
+        __wrapper_class__ = "HFCompatibleLinear"
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return super().forward(input)[0]
