@@ -862,7 +862,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                logits: torch.Tensor):
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
-        grammar_bitmask = torch.from_numpy(scheduler_output.grammar_bitmask)
+        grammar_bitmask = scheduler_output.grammar_bitmask
+        if grammar_bitmask is None:
+            return
 
         # We receive the guided decoding bitmask from the scheduler, but the
         # indices of the requests in the batch may not match the indices of
@@ -884,12 +886,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not indices_match:
             # Sort the bitmask to match the order of the requests
-            sorted_bitmask = torch.zeros_like(grammar_bitmask)
+            sorted_bitmask = np.zeros_like(grammar_bitmask)
             for req_id, batch_index in req_id_indices.items():
                 orig_index = scheduler_output.guided_decoding_request_ids[
                     req_id]
                 sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
             grammar_bitmask = sorted_bitmask
+
+        grammar_bitmask = torch.from_numpy(grammar_bitmask)
 
         # TODO: compatibility with spec decode
         xgr.apply_token_bitmask_inplace(logits,
