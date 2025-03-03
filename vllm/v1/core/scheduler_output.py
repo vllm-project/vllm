@@ -3,10 +3,10 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-if TYPE_CHECKING:
-    import numpy as np
-    import numpy.typing as npt
+import numpy as np
+import numpy.typing as npt
 
+if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.base import PlaceholderRange
