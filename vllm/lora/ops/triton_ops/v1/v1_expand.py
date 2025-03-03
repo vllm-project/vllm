@@ -170,7 +170,7 @@ def _v1_expand(
     assert inputs.size(0) == len(lora_b_weights)
     assert output_tensor.is_contiguous()
 
-    # metadata sanity check
+    # metadata sanity check.
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(
         0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
