@@ -118,6 +118,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
+        self.cuda_graph_capture_time = 0.0
         if self.is_multimodal_model:
             # NOTE: Initialized client is only used for processing dummy
             # multimodal data into multimodal kwargs for GPU memory profiling.
@@ -1063,9 +1064,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.device)
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
+        self.model_load_time = time_after_load - time_before_load
         logger.info("Loading model weights took %.4f GB and %.6f seconds",
                     self.model_memory_usage / float(2**30),
-                    time_after_load - time_before_load)
+                    self.model_load_time)
 
     def _get_prompt_logprobs_dict(
         self,
@@ -1350,6 +1352,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
+        self.cuda_graph_capture_time = elapsed_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
