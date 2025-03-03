@@ -10,7 +10,8 @@ import asyncio
 import json
 import ssl
 from argparse import Namespace
-from typing import Any, AsyncGenerator, Optional
+from collections.abc import AsyncGenerator
+from typing import Any, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse

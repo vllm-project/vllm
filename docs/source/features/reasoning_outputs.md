@@ -76,7 +76,13 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
 }
 ```
 
-Please note that it is not compatible with the OpenAI Python client library. You can use the `requests` library to make streaming requests.
+Please note that it is not compatible with the OpenAI Python client library. You can use the `requests` library to make streaming requests. You could checkout the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+
+## Limitations
+
+- The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
+- It is not compatible with [`tool_calling`](#tool_calling).
+- The reasoning content is not available for all models. Check the model's documentation to see if it supports reasoning.
 
 ## How to support a new reasoning model
 
@@ -117,7 +123,7 @@ class ExampleParser(ReasoningParser):
 
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from a complete model-generated string.
 
@@ -132,20 +138,41 @@ class ExampleParser(ReasoningParser):
             The request object that was used to generate the model_output.
 
         Returns:
-        Tuple[Optional[str], Optional[str]]
+        tuple[Optional[str], Optional[str]]
             A tuple containing the reasoning content and the content.
         """
 ```
 
-After defining the reasoning parser, you can use it by specifying the `--reasoning-parser` flag when making a request to the chat completion endpoint.
+Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in `vllm/model_executor/guided_decoding/reasoner/deepseek_reasoner.py`.
+
+```python
+@dataclass
+class DeepSeekReasoner(Reasoner):
+    """
+    Reasoner for DeepSeek R series models.
+    """
+    start_token_id: int
+    end_token_id: int
+
+    start_token: str = "<think>"
+    end_token: str = "</think>"
+
+    @classmethod
+    def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
+        return cls(start_token_id=tokenizer.encode(
+            "<think>", add_special_tokens=False)[0],
+                   end_token_id=tokenizer.encode("</think>",
+                                                 add_special_tokens=False)[0])
+
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        return self.end_token_id in input_ids
+```
+
+The structured output engine like xgrammar will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
+
+Finally, you can enable reasoning for the model by using the `--enable-reasoning` and `--reasoning-parser` flags.
 
 ```bash
 vllm serve <model_tag> \
     --enable-reasoning --reasoning-parser example
 ```
-
-## Limitations
-
-- The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
-- It is not compatible with the [`structured_outputs`](#structured_outputs) and [`tool_calling`](#tool_calling) features.
-- The reasoning content is not available for all models. Check the model's documentation to see if it supports reasoning.

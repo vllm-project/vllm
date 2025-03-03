@@ -84,7 +84,7 @@ async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
-    # test List[str]
+    # test list[str]
     input_texts = [
         "The cat sat on the mat.", "A feline was resting on a rug.",
         "Stars twinkle brightly in the night sky."
@@ -107,7 +107,7 @@ async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
     assert poolings.usage.prompt_tokens == 25
     assert poolings.usage.total_tokens == 25
 
-    # test List[List[int]]
+    # test list[list[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
                     [25, 32, 64, 77]]
     response = requests.post(
