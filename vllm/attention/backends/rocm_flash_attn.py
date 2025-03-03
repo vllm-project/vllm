@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_PARTITION_SIZE_ROCM = 512
+_PARTITION_SIZE_ROCM = 256
 _GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
 _ON_NAVI = "gfx1" in _GPU_ARCH
 _ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
