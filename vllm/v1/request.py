@@ -149,7 +149,7 @@ class Request:
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
 
-    @property
+    @functools.cached_property
     def use_guided_decoding(self) -> bool:
         return self.sampling_params.guided_decoding is not None
 
