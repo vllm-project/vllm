@@ -871,7 +871,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # the bitmask since the scheduler doesn't know how the gpu runner is
         # ordering the requests in the batch. We need to sort the bitmask to
         # match the order of the requests used here.
-        req_id_indices: dict[str, int] = {}
+        guided_req_batch_indices: dict[str, int] = {}
         indices_match = True
         for req_id in self.input_batch.req_ids:
             mask_index = scheduler_output.guided_decoding_request_ids.get(
@@ -882,12 +882,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             batch_index = self.input_batch.req_id_to_index[req_id]
             if batch_index != mask_index:
                 indices_match = False
-            req_id_indices[req_id] = batch_index
+            guided_req_batch_indices[req_id] = batch_index
 
         if not indices_match:
             # Sort the bitmask to match the order of the requests
             sorted_bitmask = np.zeros_like(grammar_bitmask)
-            for req_id, batch_index in req_id_indices.items():
+            for req_id, batch_index in guided_req_batch_indices.items():
                 orig_index = scheduler_output.guided_decoding_request_ids[
                     req_id]
                 sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
@@ -899,7 +899,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         xgr.apply_token_bitmask_inplace(logits,
                                         grammar_bitmask.to(self.device,
                                                            non_blocking=True),
-                                        indices=list(req_id_indices.values()))
+                                        indices=list(
+                                            guided_req_batch_indices.values()))
 
     @torch.inference_mode()
     def execute_model(
