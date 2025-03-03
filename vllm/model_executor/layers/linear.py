@@ -2,7 +2,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import List, Optional, Type
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -151,7 +151,7 @@ class TiedWeightLinearMethod(UnquantizedLinearMethod):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         ...
@@ -161,7 +161,7 @@ class QuantizationConfigOverride(QuantizationConfig):
     """Config class to inject a specific LinearMethod.
     """
 
-    def __init__(self, cls: Type[LinearMethodBase]):
+    def __init__(self, cls: type[LinearMethodBase]):
         self.cls = cls
 
     def get_quant_method(self, layer: torch.nn.Module,

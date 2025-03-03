@@ -259,7 +259,6 @@ class GPTBigCodeModel(nn.Module):
 class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
-    supported_lora_modules = ["c_fc", "c_proj", "wte", "lm_head", "c_attn"]
     # LoRA specific attributes
     embedding_modules = {
         "wte": "input_embeddings",
