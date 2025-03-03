@@ -149,3 +149,14 @@ def test_priority(model):
     # Reject all allowed token ids
     with pytest.raises(ValueError):
         _ = model.generate(PROMPT, priority=[1])
+
+
+def test_seed(model):
+    """Check that seed impacts randomness."""
+
+    out_1 = model.generate(PROMPT, SamplingParams(seed=42))
+    out_2 = model.generate(PROMPT, SamplingParams(seed=42))
+    out_3 = model.generate(PROMPT, SamplingParams(seed=43))
+
+    assert out_1[0].outputs[0].text == out_2[0].outputs[0].text
+    assert out_1[0].outputs[0].text != out_3[0].outputs[0].text
