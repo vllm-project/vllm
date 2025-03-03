@@ -11,19 +11,39 @@ cd vllm;  pip install -r requirements-hpu.txt; VLLM_TARGET_DEVICE=hpu pip instal
 huggingface-cli download --local-dir ${YOUR_PATH}/DeepSeek-R1 deepseek-ai/DeepSeek-R1
 ```
 
-# Option 1. run with dynamic quantization
+# Option 1. run with runtime dequantize with block-based scale
 > expect new DynamicMOE kernel ready in few weeks.
 > Current Performance is worse than static quantization due to lack of dynamic MOE support.
 ## step 1. run example
 ```
-python scripts/run_example_tp.py --model ${YOUR_PATH}/DeepSeek-R1
+VLLM_ENABLE_RUNTIME_DEQUANT=1 python scripts/run_example_tp.py --model ${YOUR_PATH}/DeepSeek-R1
 ```
-## step 2. run benchmark
+## step 2. run lm_eval
 ```
-bash scripts/benchmark-dynamicfp8-i1k-o1k-ep8-bestperf.sh
+VLLM_ENABLE_RUNTIME_DEQUANT=1 python scripts/run_lm_eval.py -l 64 --batch_size 1 --ep_size 1
+{"gsm8k": {"alias": "gsm8k", "exact_match,strict-match": 0.96875, "exact_match_stderr,strict-match": 0.021921011700381302, "exact_match,flexible-extract": 0.96875, "exact_match_stderr,flexible-extract": 0.021921011700381302}}{"e2e time(secs)": 938.2986768169999}
 ```
 
-# Option 2. run with static quantization
+# Option 2. run with dynamic quantization
+> expect new DynamicMOE kernel ready in few weeks.
+> Current Performance is worse than static quantization due to lack of dynamic MOE support.
+## step 1. run example
+```
+# if you're testing with patched kernel
+# use VLLM_DMOE_DYNAMIC_SCALE=1 to enable dynamic scaling supported DynamicMOE
+VLLM_DMOE_DYNAMIC_SCALE=1 python scripts/run_example_tp.py --model ${YOUR_PATH}/DeepSeek-R1
+```
+## step 2. run lm_eval
+```
+VLLM_DMOE_DYNAMIC_SCALE=1 python scripts/run_lm_eval.py -l 64 --batch_size 1
+{"gsm8k": {"alias": "gsm8k", "exact_match,strict-match": 0.96875, "exact_match_stderr,strict-match": 0.021921011700381302, "exact_match,flexible-extract": 0.96875, "exact_match_stderr,flexible-extract": 0.021921011700381302}}{"e2e time(secs)": 938.2986768169999}
+```
+## step 3. run benchmark
+```
+VLLM_DMOE_DYNAMIC_SCALE=1 bash scripts/benchmark-dynamicfp8-i1k-o1k-ep8-bestperf.sh
+```
+
+# Option 3. run with static quantization
 > current best performance
 ## step 1. Prepare static quantization model
 ```

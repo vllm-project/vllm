@@ -5,7 +5,7 @@ import os
 import json
 import time
 
-model_path = "/data/models/DeepSeek-R1-static/"
+model_path = "/data/models/DeepSeek-R1/"
 #model_path = "/mnt/workdisk/dohayon/Projects/R1/DeepSeek-R1-fp8/"
 # model_path = "deepseek-ai/DeepSeek-V2-Lite"
 
@@ -16,8 +16,8 @@ parser.add_argument("--task", type=str, default="gsm8k", help="The model path.")
 parser.add_argument("--tokenizer", type=str, default=model_path, help="The model path.")
 parser.add_argument("--tp_size", type=int, default=8, help="Tensor Parallelism size.")
 parser.add_argument("--ep_size", type=int, default=8, help="Expert Parallelism size.")
-parser.add_argument("-l", "--limit", type=int, default=256, help="test request counts.")
-parser.add_argument("--batch_size", type=int, default=128, help="The batch size.")
+parser.add_argument("-l", "--limit", type=int, default=64, help="test request counts.")
+parser.add_argument("--batch_size", type=int, default=1, help="The batch size.")
 args = parser.parse_args()
 
 os.environ["VLLM_SKIP_WARMUP"] = "true"
@@ -30,10 +30,11 @@ else:
     os.environ["VLLM_MOE_N_SLICE"] = "4"
     os.environ["VLLM_EP_SIZE"] = "1"
 
-os.environ["VLLM_MLA_DISABLE_REQUANTIZATION"] = "0"
+os.environ["VLLM_MLA_DISABLE_REQUANTIZATION"] = "1"
 os.environ["PT_HPU_WEIGHT_SHARING"] = "0"
 
-os.environ['VLLM_DMOE_DYNAMIC_SCALE']='1'
+#os.environ['VLLM_DMOE_DYNAMIC_SCALE']='1'
+#os.environ['VLLM_ENABLE_RUNTIME_DEQUANT']='1'
 
 if __name__ == "__main__":
 

@@ -230,6 +230,28 @@ def apply_block_fp8_linear_hpu_dynamic(
     return output.to(dtype=input.dtype).view(*output_shape)
 
 
+def apply_block_fp8_linear_hpu_dequant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    original_M: Optional[torch.Tensor] = None,
+    original_N: Optional[torch.Tensor] = None,
+    do_unpad: bool = False,
+) -> torch.Tensor:
+    assert input_scale is None
+    # View input as 2D matrix for fp8 methods
+    input_2d = input.view(-1, input.shape[-1])
+    original_M = original_M.data.item()
+    original_N = original_N.data.item()
+    weight = dequant_block_fp8_weight_naive(weight, weight_scale, block_size, input.dtype, original_M, original_N, do_unpad)
+    output = torch.nn.functional.linear(input_2d, weight, bias=None)
+    if bias is not None:
+        output = output + bias
+    return output.to(dtype=input.dtype).view(*input.shape[:-1], -1)
+
 def input_to_float8(
         x: torch.Tensor,
         dtype: Optional[torch.dtype] = None
