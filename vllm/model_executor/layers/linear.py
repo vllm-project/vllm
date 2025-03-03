@@ -146,7 +146,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if USE_ROCM_AITER_LINEAR:
-            return rocm_aiter_tgemm.mm(x, layer.weigt, bias)
+            return rocm_aiter_tgemm.mm(x, layer.weight, bias)
 
         return F.linear(x, layer.weight, bias)
 

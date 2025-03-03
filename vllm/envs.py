@@ -80,7 +80,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_BSCALED_MOE: bool = True
     VLLM_ROCM_USE_AITER_NORM: bool = True
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = True
-    VLLM_ROCM_USE_CUSTOM_PAGED_ATTN: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -547,15 +546,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
      ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_NORM", "True").lower() in
      ("true", "1")),
+
+    # use aiter paged attention if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_PAGED_ATTN":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN",
-                                         "True").lower() in ("true", "1")),
-
-    # use rocm custom paged attention.
-    "VLLM_ROCM_USE_CUSTOM_PAGED_ATTN":
-    lambda: (os.getenv("VLLM_ROCM_USE_CUSTOM_PAGED_ATTN", "False").lower() in
-             ("true", "1")),
+                                         "False").lower() in ("false", "0")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":

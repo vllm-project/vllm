@@ -126,6 +126,7 @@ class PagedAttention:
         elif "fp8" in kv_cache_dtype:
             key_cache = key_cache.view(torch.float8_e4m3fnuz)
             value_cache = value_cache.view(torch.float8_e4m3fnuz)
+
         rocm_aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables,
                               seq_lens, max_num_blocks_per_seq, k_scale,
                               v_scale, output)
