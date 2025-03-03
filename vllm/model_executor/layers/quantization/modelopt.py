@@ -6,8 +6,9 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
-from vllm._custom_ops import (cutlass_fp4_gemm,
-                              quantize_to_fp4)
+from vllm._custom_ops import (scaled_fp4_quant,
+                              cutlass_scaled_fp4_mm,
+                              cutlass_scaled_mm_supports_fp4)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -17,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -237,7 +239,7 @@ def cutlass_fp4_supported() -> bool:
     capability_tuple = current_platform.get_device_capability()
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
-    return ops.cutlass_scaled_mm_supports_fp4(capability)
+    return cutlass_scaled_mm_supports_fp4(capability)
 
 class ModelOptNvFp4LinearMethod(LinearMethodBase):
     """Linear method for Model Optimizer NVFP4.
@@ -317,8 +319,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.register_parameter("weight_scale", weight_scale)
 
-    def swizzle_weight_scaling_factor(self,
-                                       scales: torch.tensor):
+    def swizzle_blockscale(self, scales: torch.tensor):
         # Pad and blockwise interleave weight_scale
         if scales.ndim == 2:
             scales = scales.unsqueeze(0)
@@ -341,7 +342,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         input_scale_2 = layer.input_scale.max().to(torch.float32)
         weight_scale_2 = layer.weight_scale_2.max().to(torch.float32)
 
-        layer.input_scale = Parameter(input_scale_2, requires_grad=False)
+        layer.input_scale = Parameter(1/ input_scale_2, requires_grad=False)
 
         layer.weight_scale_2 = Parameter(weight_scale_2, requires_grad=False)
         layer.alpha = Parameter(layer.input_scale * layer.weight_scale_2,
@@ -356,8 +357,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         # blockscale_interleave_fp4 takes int8 as input
         # int8_ws = layer.weight_scale.view(torch.int8).contiguous()
-        swizzled_weight_scale = 
-                 self.swizzle_weight_scaling_factors(layer.weight_scale)
+        swizzled_weight_scale = self.swizzle_blockscale(
+                                                layer.weight_scale)
         # swizzled_weight_scale = swizzled_weight_scale.reshape(
         #     int8_ws.shape).view(torch.float8_e4m3fn)
         layer.weight_scale_swizzled = Parameter(
@@ -378,7 +379,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_shape = [x_m, w_n]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        qinput, x_sf_1 = scaled_fp4_quant(x, 1 / layer.input_scale)
+        qinput, x_sf_1 = scaled_fp4_quant(x, layer.input_scale)
 
         # validate dtypes of quantized input, weight and weight_sf
         assert (qinput.dtype == torch.uint8)
