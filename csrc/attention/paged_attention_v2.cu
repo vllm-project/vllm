@@ -148,11 +148,11 @@ void paged_attention_v2_launcher(
       blocksparse_vert_stride, blocksparse_block_size,                        \
       blocksparse_head_sliding_step);
 
-#define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
-  if (is_block_sparse) {                                                   \
-    CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
-  } else {                                                                 \
-    CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
+#define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, KV_DTYPE) \
+  if (is_block_sparse) {                                            \
+    CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, true);       \
+  } else {                                                          \
+    CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, false);      \
   }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
