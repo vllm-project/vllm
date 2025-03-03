@@ -328,6 +328,7 @@ def apply_gptq_marlin_linear(
                                   size_k=input_size_per_partition,
                                   is_k_full=is_k_full,
                                   has_zp=False,
+                                  use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
 
