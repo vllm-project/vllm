@@ -55,3 +55,7 @@ class NeuronPlatform(Platform):
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Neuron.")
         return False
+
+    @classmethod
+    def use_all_gather(cls) -> bool:
+        return True
