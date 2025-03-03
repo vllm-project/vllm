@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -40,7 +41,7 @@ _PAD_SLOT_ID = 1_000_000_000
 INVALID_TOKEN_ID = -1
 
 
-class TPUModelRunner:
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -410,6 +411,9 @@ class TPUModelRunner:
                                                    + 1].to(self.device)
         seq_lens = self.seq_lens_cpu[:padded_total_num_scheduled_tokens].to(
             self.device)
+        
+        if self.lora_config is not None:
+            self.set_active_loras(self.input_batch, num_scheduled_tokens_per_req)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -529,6 +533,12 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
+        if self.lora_config:
+            model = self.load_lora_model(model,
+                                         self.model_config,
+                                         self.scheduler_config,
+                                         self.lora_config,
+                                         self.device)
         model = model.eval()
         xm.mark_step()
         xm.wait_device_ops()
@@ -571,12 +581,15 @@ class TPUModelRunner:
             num_seqs=num_tokens,
         )
 
-        torch._dynamo.mark_dynamic(input_ids, 0)
-        torch._dynamo.mark_dynamic(position_ids, 0)
-        torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
-        torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
-        torch._dynamo.mark_dynamic(attn_metadata.query_start_loc, 0)
-        torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
+        if self.lora_config is not None: # TODO: Remove this condition
+            torch._dynamo.config.capture_dynamic_output_shape_ops = True
+        else:
+            torch._dynamo.mark_dynamic(input_ids, 0)
+            torch._dynamo.mark_dynamic(position_ids, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.query_start_loc, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
@@ -590,7 +603,8 @@ class TPUModelRunner:
         start = time.perf_counter()
         num_tokens = 16
         while True:
-            self.dummy_run(self.kv_caches, num_tokens)
+            with self.maybe_profile_with_lora(self.lora_config, np.array([num_tokens], dtype=np.int32)):
+                self.dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()

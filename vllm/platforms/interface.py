@@ -343,6 +343,18 @@ class Platform:
                 or parallel_config.distributed_executor_backend
                 == "external_launcher")
 
+    @classmethod
+    def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:
+        """
+        Return the platform specific values for (-inf, inf)
+        """
+        return float("-inf"), float("inf")
+
+    @classmethod
+    def can_update_inplace(cls) -> bool:
+        """Checks if the platform allows inplace memory updates"""
+        return True
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
