@@ -181,10 +181,13 @@ class Metrics:
             "Histogram of time spent in DECODE phase for request.",
             labelnames=labelnames,
             buckets=request_latency_buckets)
+        # Deprecated in 0.8 - duplicates vllm:request_queue_time_seconds:
+        # TODO: in 0.9, only enable if show_hidden_metrics=True
         self.histogram_time_in_queue_request = self._histogram_cls(
             name="vllm:time_in_queue_requests",
-            documentation=
-            "Histogram of time the request spent in the queue in seconds.",
+            documentation=(
+                "Histogram of time the request spent in the queue in seconds. "
+                "DEPRECATED: use vllm:request_queue_time_seconds instead."),
             labelnames=labelnames,
             buckets=request_latency_buckets)
         self.histogram_model_forward_time_request = self._histogram_cls(
