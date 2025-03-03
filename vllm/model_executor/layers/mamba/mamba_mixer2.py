@@ -379,6 +379,8 @@ class MambaMixer2(CustomOp):
                                         n_groups,
                                         eps=rms_norm_eps)
 
+        
+
     def forward_native(self, hidden_states: torch.Tensor,
                        conv_state: torch.Tensor, ssm_state: torch.Tensor):
         pass
@@ -388,7 +390,7 @@ class MambaMixer2(CustomOp):
         hidden_states: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
-        ssm_in_multiplier:float = 1.0,
+        mup_vector: Optional[torch.Tensor] = None,
     ):
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
@@ -409,7 +411,9 @@ class MambaMixer2(CustomOp):
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
-        projected_states = projected_states * ssm_in_multiplier
+
+        if mup_vector is not None:
+            projected_states = projected_states * mup_vector
 
         gate, hidden_states_B_C, dt = torch.split(
             projected_states,

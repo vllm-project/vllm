@@ -88,12 +88,15 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        self.tp_size = get_tensor_model_parallel_world_size()
 
+        self.d_ssm = (int(config.mamba_expand * config.hidden_size) if config.mamba_d_ssm is None else config.mamba_d_ssm) 
+        
         self.mamba = MambaMixer2(
             hidden_size=config.hidden_size,
             ssm_state_size=config.mamba_d_state,
             conv_kernel_size=config.mamba_d_conv,
-            intermediate_size=int(config.mamba_expand * config.hidden_size) if config.mamba_d_ssm is None else config.mamba_d_ssm,
+            intermediate_size=self.d_ssm,
             use_conv_bias=config.mamba_conv_bias,
             use_bias=config.mamba_proj_bias,
             n_groups=config.mamba_n_groups,
@@ -105,30 +108,31 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
             quant_config=quant_config,
             use_rms_norm=config.mamba_rms_norm
         )
+        # n_groups is overriden later by `MambaMixer2`
+        self.groups_time_state_size = (self.mamba.n_groups * config.mamba_d_state) 
         self.zxbcdt_multipliers = config.ssm_multipliers
+        self._init_mup_vector()
 
     def _init_mup_vector(self):
         vector_shape = (
-            2 * self.d_ssm + 2 * self.groups_time_state_size + self.config.num_heads
-        )
-        mup_vector = torch.ones(1, 1, vector_shape)
+            2 * self.d_ssm + 2 * self.groups_time_state_size + self.config.mamba_n_heads
+        ) // self.tp_size
+        mup_vector = torch.ones(1, vector_shape)
 
-        mup_vector[:, :, : self.d_ssm] *= self.zxbcdt_multipliers[0]
+        mup_vector[:, : self.d_ssm // self.tp_size] *= self.zxbcdt_multipliers[0]
 
-        mup_vector[:, :, self.d_ssm : 2 * self.d_ssm] *= self.zxbcdt_multipliers[1]
+        mup_vector[:, (self.d_ssm // self.tp_size): (2 * self.d_ssm // self.tp_size)] *= self.zxbcdt_multipliers[1]
         mup_vector[
-            :, :, 2 * self.d_ssm : 2 * self.d_ssm + self.groups_time_state_size
+            :, (2 * self.d_ssm)  // self.tp_size : (2 * self.d_ssm + self.groups_time_state_size)  // self.tp_size
         ] *= self.zxbcdt_multipliers[2]
         mup_vector[
             :,
-            :,
-            2 * self.d_ssm
-            + self.groups_time_state_size : 2 * self.d_ssm
-            + 2 * self.groups_time_state_size,
+            (2 * self.d_ssm + self.groups_time_state_size)  // self.tp_size : (2 * self.d_ssm
+            + 2 * self.groups_time_state_size)  // self.tp_size,
         ] *= self.zxbcdt_multipliers[3]
 
         mup_vector[
-            :, :, 2 * self.d_ssm + 2 * self.groups_time_state_size :
+            :, (2 * self.d_ssm + 2 * self.groups_time_state_size)  // self.tp_size:
         ] *= self.zxbcdt_multipliers[4]
 
         self.register_buffer("mup_vector", mup_vector, persistent=False)
@@ -139,14 +143,13 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
-        ssm_in_multiplier: float = 1.0,
         **kwargs,
     ):
         hidden_states = self.mamba(
             hidden_states,
             mamba_cache_params,
             sequence_idx,
-            ssm_in_multiplier,
+            mup_vector=self.mup_vector
         )
         return hidden_states, residual
 
@@ -227,7 +230,6 @@ class FalconMamba2AttentionDecoderLayer(nn.Module):
             prefix=f"{prefix}.attn",
         )
         self.key_multiplier = config.key_multiplier
-        self.attn_out_multiplier = config.attention_out_multiplier
 
     def self_attention(
         self,
@@ -237,11 +239,11 @@ class FalconMamba2AttentionDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        k = k * self.key_multiplier
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
-        output = output * self.attn_out_multiplier
         return output
 
     def forward(
@@ -296,7 +298,9 @@ class FalconMamba2ParallelHybrid(nn.Module):
         )
         self.ssm_out_multiplier = config.ssm_out_multiplier
         self.ssm_in_multiplier = config.ssm_in_multiplier
+
         self.attention_in_multiplier = config.attention_in_multiplier
+        self.attn_out_multiplier = config.attention_out_multiplier
 
         self.feed_forward = FalconMamba2MLP(config)
 
@@ -318,7 +322,7 @@ class FalconMamba2ParallelHybrid(nn.Module):
         # Process input through the attention branch.
         # FalconMamba2AttentionDecoderLayer expects positions, hidden_states,
         # kv_cache, attn_metadata, and residual.
-        attn_hidden, residuals = self.self_attn(
+        attn_hidden, _ = self.self_attn(
             positions=positions,
             hidden_states=hidden_states * self.attention_in_multiplier,
             residual=residual,
@@ -328,19 +332,20 @@ class FalconMamba2ParallelHybrid(nn.Module):
         # Process input through the SSM branch.
         # FalconMamba2SSMDecoderLayer expects hidden_states, attn_metadata, 
         # residual, mamba_cache_params, and sequence_idx.
-        ssm_hidden, residuals = self.mamba(
-            hidden_states=hidden_states,
+        ssm_hidden, _ = self.mamba(
+            hidden_states=hidden_states * self.ssm_in_multiplier,
             residual=residual,
             mamba_cache_params=mamba_cache_params,
             sequence_idx=sequence_idx,
-            ssm_in_multiplier=self.ssm_in_multiplier,
             **kwargs,
         )
 
         # Sum the outputs from both branches.
         # We assume both branches produce outputs of the same
         # dimensionality (config.hidden_size).
-        hidden_states = attn_hidden + (ssm_hidden * self.ssm_out_multiplier)
+        hidden_states = (attn_hidden * self.attn_out_multiplier) + (ssm_hidden * self.ssm_out_multiplier)
+        hidden_states = hidden_states + residual
+
         # feed-forward
         residual = hidden_states
         hidden_states = self.pre_ff_layernorm(hidden_states)
