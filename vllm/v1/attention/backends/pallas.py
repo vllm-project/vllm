@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Optional
 
 import torch
 # Required to register custom ops.
@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 
+# These are the 2 tunable parameters of the paged attention Pallas kernel.
 NUM_QUERIES_PER_BLOCK = 16
 NUM_KV_PAGES_PER_BLOCK = 128
 
@@ -22,15 +23,15 @@ class PallasAttentionBackend(AttentionBackend):
         return "PALLAS_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["PallasAttentionBackendImpl"]:
+    def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["PallasMetadata"]:
+    def get_metadata_cls() -> type["PallasMetadata"]:
         return PallasMetadata
 
     @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
+    def get_state_cls() -> type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -39,7 +40,7 @@ class PallasAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (num_kv_heads, num_blocks, block_size, head_size)
 
     @staticmethod
@@ -77,10 +78,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -120,7 +121,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
         attn_metadata: PallasMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -154,6 +155,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
         query = query * self.scale
+        # use_kernel switches between using kernel or reference implementation
+        # (non kernel: https://github.com/pytorch/xla/blob/cee0820e78fc9675e2d0511db891fd44342e890d/torch_xla/experimental/custom_kernel.py#L890).
+        use_kernel = False
         output = torch.ops.xla.ragged_paged_attention(
             query,
             key_cache,
@@ -164,7 +168,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             attn_metadata.num_seqs,
             num_kv_pages_per_block=NUM_KV_PAGES_PER_BLOCK,
             num_queries_per_block=NUM_QUERIES_PER_BLOCK,
-            use_kernel=False,
+            use_kernel=use_kernel,
         )
 
         return output.reshape(num_tokens, hidden_size)
