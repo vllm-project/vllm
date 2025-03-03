@@ -51,14 +51,6 @@ class RayWorkerMetaData:
 class RayDistributedExecutor(DistributedExecutorBase):
     """Ray-based distributed executor"""
 
-    # These env vars are used at installation time, therefore are NOT copied
-    # from the driver to the workers
-    INSTALL_TIME_ENV_VARS = {
-        "VLLM_TARGET_DEVICES", "MAX_JOBS", "NVCC_THREADS",
-        "VLLM_USE_PRECOMPILED", "CMAKE_BUILD_TYPE", "VERBOSE",
-        "VLLM_CONFIG_ROOT"
-    }
-
     # These env vars are worker-specific, therefore are NOT copied
     # from the driver to the workers
     WORKER_SPECIFIC_ENV_VARS = {
@@ -339,8 +331,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Environment variables to copy from driver to workers
         env_vars_to_copy = [
             v for v in envs.environment_variables
-            if v not in self.INSTALL_TIME_ENV_VARS and v not in self.
-            WORKER_SPECIFIC_ENV_VARS and v not in self.non_carry_over_env_vars
+            if v not in self.WORKER_SPECIFIC_ENV_VARS
+            and v not in self.non_carry_over_env_vars
         ]
 
         # Copy existing env vars to each worker's args
@@ -355,6 +347,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         logger.info(
             "Copying the following environment variables to workers: %s",
             [v for v in env_vars_to_copy if v in os.environ])
+        logger.info(
+            "If certain env vars should NOT be copied to workers, add them to "
+            "%s file", self.non_carry_over_env_vars_file)
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
