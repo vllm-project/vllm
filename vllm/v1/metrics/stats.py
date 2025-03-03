@@ -66,6 +66,7 @@ class FinishedRequestStats:
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
+    max_tokens_param: Optional[int] = None
     queued_time: float = 0.0
     prefill_time: float = 0.0
     inference_time: float = 0.0
@@ -81,6 +82,8 @@ class IterationStats:
         self.num_prompt_tokens = 0
         self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
+        self.max_num_generation_tokens_iter: list[int] = []
+        self.n_params_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
         self.time_per_output_tokens_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
@@ -150,6 +153,7 @@ class IterationStats:
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      num_prompt_tokens: int,
+                                     max_tokens_param: Optional[int],
                                      req_stats: RequestStateStats):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
@@ -173,6 +177,7 @@ class IterationStats:
                                  e2e_latency=e2e_latency,
                                  num_prompt_tokens=num_prompt_tokens,
                                  num_generation_tokens=req_stats.num_generation_tokens,
+                                 max_tokens_param=max_tokens_param,
                                  queued_time=queued_time,
                                  prefill_time=prefill_time,
                                  inference_time=inference_time,
