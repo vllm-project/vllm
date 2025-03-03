@@ -72,6 +72,8 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& out, torch::Tensor const& a,
                                         azp, bias);
 }
 
+#if defined CUDA_VERSION && CUDA_VERSION >= 12800
+
 void cutlass_scaled_mm_sm100(torch::Tensor& c, torch::Tensor const& a,
                              torch::Tensor const& b,
                              torch::Tensor const& a_scales,
@@ -92,3 +94,5 @@ void cutlass_scaled_mm_sm100(torch::Tensor& c, torch::Tensor const& a,
               "Currently, only fp8 gemm is implemented for Blackwell");
   vllm::cutlass_scaled_mm_sm100_fp8(c, a, b, a_scales, b_scales, bias);
 }
+
+#endif
