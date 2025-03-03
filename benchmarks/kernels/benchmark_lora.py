@@ -711,7 +711,7 @@ class BenchmarkTensors:
             })
         return {'kwargs_list': kwargs_list}
 
-    def as_v1_shrink_kwargs(self) -> Dict[str, Any]:
+    def as_v1_shrink_kwargs(self) -> dict[str, Any]:
         assert self.v1_kernel_meta is not None
         self.sanity_check()
         self.to_device(self.input.device)
@@ -746,7 +746,7 @@ class BenchmarkTensors:
             'scaling': 1.0,
         }
 
-    def as_v1_expand_kwargs(self, add_inputs: bool) -> Dict[str, Any]:
+    def as_v1_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
         assert self.v1_kernel_meta is not None
         self.sanity_check()
         self.to_device(self.input.device)
