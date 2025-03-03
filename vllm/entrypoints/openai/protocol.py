@@ -115,6 +115,7 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: Optional[int] = None
+    cache_hit_ratio: Optional[float] = None
 
 
 class UsageInfo(OpenAIBaseModel):

@@ -639,7 +639,9 @@ class OpenAIServingChat(OpenAIServing):
                                         completion_tokens)
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens)
+                        cached_tokens=num_cached_tokens,
+                        cache_hit_ratio=num_cached_tokens /
+                        num_prompt_tokens if num_prompt_tokens > 0 else 0.0)
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -836,7 +838,9 @@ class OpenAIServingChat(OpenAIServing):
                           num_generated_tokens)
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens)
+                cached_tokens=final_res.num_cached_tokens,
+                cache_hit_ratio=final_res.num_cached_tokens /
+                num_prompt_tokens if num_prompt_tokens > 0 else 0.0)
 
         request_metadata.final_usage_info = usage
 
