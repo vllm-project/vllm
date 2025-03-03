@@ -221,11 +221,12 @@ class UltravoxMultiModalProcessor(
         # Each audio can be split into multiple chunks.
         # chunks_start_idx[i] indicates the start index of the chunks
         # belonging to the i-th audio.
-        chunks_start_idx: torch.Tensor = torch.cumsum(
-            out_mm_kwargs["audio_num_chunks"], dim=0, dtype=torch.int32)
+        num_chunks = out_mm_kwargs.get("audio_num_chunks", torch.zeros(0))
+        chunks_start_idx: torch.Tensor = torch.cumsum(num_chunks,
+                                                      dim=0,
+                                                      dtype=torch.int32)
         chunks_start_idx = torch.cat(
             [torch.tensor([0], dtype=torch.int32), chunks_start_idx])
-        out_mm_kwargs.pop("audio_num_chunks", None)
 
         def get_replacement_ultravox(item_idx: int):
             start = chunks_start_idx[item_idx]
