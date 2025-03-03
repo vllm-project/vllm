@@ -54,8 +54,11 @@ class Grammar:
                                       init=False)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
-        # NOTE: accept_token will determines whether we accept this token
-        # and will also update the machine state
+        """Accepts a list of tokens and advances the FSM.
+
+        Returns True if the FSM was advanced successfully.
+        Returns False if the FSM failed to advance.
+        """
         for token in tokens:
             self.num_processed_tokens += 1
             if not self.matcher.accept_token(token):
