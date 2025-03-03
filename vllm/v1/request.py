@@ -5,7 +5,7 @@ import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
-from typing import TYPE_CHECKING, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -30,10 +30,10 @@ class Request:
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: List[int],
-        multi_modal_inputs: Optional[List["MultiModalKwargs"]],
-        multi_modal_hashes: Optional[List[str]],
-        multi_modal_placeholders: Optional[List["PlaceholderRange"]],
+        prompt_token_ids: list[int],
+        multi_modal_inputs: Optional[list["MultiModalKwargs"]],
+        multi_modal_hashes: Optional[list[str]],
+        multi_modal_placeholders: Optional[list["PlaceholderRange"]],
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         arrival_time: float,
@@ -48,7 +48,7 @@ class Request:
         self.status = (RequestStatus.WAITING_FOR_FSM
                        if sampling_params.guided_decoding is not None else
                        RequestStatus.WAITING)
-        self.events: List[EngineCoreEvent] = []
+        self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
         assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
@@ -56,15 +56,15 @@ class Request:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
-        self._output_token_ids: List[int] = []
-        self._all_token_ids: List[int] = self.prompt_token_ids.copy()
-        self.spec_token_ids: List[int] = []
+        self._output_token_ids: list[int] = []
+        self._all_token_ids: list[int] = self.prompt_token_ids.copy()
+        self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
         self.mm_inputs = multi_modal_inputs or []
-        self.mm_hashes: List[str] = multi_modal_hashes or []
+        self.mm_hashes: list[str] = multi_modal_hashes or []
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
@@ -104,7 +104,7 @@ class Request:
             EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
                                       timestamp))
 
-    def take_events(self) -> Optional[List[EngineCoreEvent]]:
+    def take_events(self) -> Optional[list[EngineCoreEvent]]:
         if not self.events:
             return None
         events, self.events = self.events, []
@@ -112,7 +112,7 @@ class Request:
 
     def append_output_token_ids(
         self,
-        token_ids: Union[int, List[int]],
+        token_ids: Union[int, list[int]],
     ) -> None:
         if isinstance(token_ids, int):
             token_ids = [token_ids]

@@ -74,7 +74,7 @@ class Example:
         path (Path): The path to the main directory or file.
         category (str): The category of the document.
         main_file (Path): The main file in the directory.
-        other_files (list[Path]): List of other files in the directory.
+        other_files (list[Path]): list of other files in the directory.
         title (str): The title of the document.
 
     Methods:

@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import time
 from collections import deque
-from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from collections.abc import Iterable
+from typing import Optional, Union
+
+import numpy as np
 
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
@@ -19,9 +23,6 @@ from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-
-if TYPE_CHECKING:
-    import numpy as np
 
 logger = init_logger(__name__)
 
@@ -64,24 +65,24 @@ class Scheduler:
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
-        self.requests: Dict[str, Request] = {}
+        self.requests: dict[str, Request] = {}
         # Priority queues for requests.
-        self.waiting: Deque[Request] = deque()
-        self.running: List[Request] = []
+        self.waiting: deque[Request] = deque()
+        self.running: list[Request] = []
         # The requests that have been scheduled and are being executed
         # by the executor.
-        self.scheduled_req_ids: Set[str] = set()
+        self.scheduled_req_ids: set[str] = set()
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
-        self.finished_req_ids: Set[str] = set()
+        self.finished_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         # Request id -> CachedRequestData
-        self._cached_reqs_data: Dict[str, CachedRequestData] = {}
+        self._cached_reqs_data: dict[str, CachedRequestData] = {}
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -103,7 +104,7 @@ class Scheduler:
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
-    def schedule(self) -> "SchedulerOutput":
+    def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -115,10 +116,10 @@ class Scheduler:
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
-        scheduled_new_reqs: List[Request] = []
-        scheduled_resumed_reqs: List[Request] = []
-        scheduled_running_reqs: List[Request] = []
-        preempted_reqs: List[Request] = []
+        scheduled_new_reqs: list[Request] = []
+        scheduled_resumed_reqs: list[Request] = []
+        scheduled_running_reqs: list[Request] = []
+        preempted_reqs: list[Request] = []
 
         # NOTE: guided_decoding_request_ids maps
         # guided request's (request that use structured decoding)
@@ -126,16 +127,16 @@ class Scheduler:
         # This will helps us determine to slice the grammar bitmask
         # and only applies valid mask for requests that
         # uses structured decoding.
-        guided_decoding_request_ids: Dict[str, int] = {}
+        guided_decoding_request_ids: dict[str, int] = {}
 
-        req_to_new_block_ids: Dict[str, List[int]] = {}
-        num_scheduled_tokens: Dict[str, int] = {}
+        req_to_new_block_ids: dict[str, list[int]] = {}
+        num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
-        scheduled_encoder_inputs: Dict[str, List[int]] = {}
+        scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
-        scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
+        scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -230,7 +231,7 @@ class Scheduler:
                 encoder_budget = new_encoder_budget
 
         # Record the LoRAs in scheduled_running_reqs
-        requested_loras: Set[int] = set()
+        requested_loras: set[int] = set()
         if self.lora_config:
             requested_loras = set(
                 req.lora_request.lora_int_id for req in scheduled_running_reqs
@@ -434,9 +435,9 @@ class Scheduler:
         request: Request,
         num_scheduled_tokens: int,
         num_scheduled_spec_tokens: int,
-        new_block_ids: List[int],
+        new_block_ids: list[int],
         resumed_from_preemption: bool,
-    ) -> "CachedRequestData":
+    ) -> CachedRequestData:
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         num_computed_tokens = request.num_computed_tokens
@@ -463,7 +464,7 @@ class Scheduler:
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_budget: int,
-    ) -> Tuple[List[int], int, int]:
+    ) -> tuple[list[int], int, int]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
@@ -483,7 +484,7 @@ class Scheduler:
         if not request.has_encoder_inputs():
             return [], num_new_tokens, encoder_budget
 
-        encoder_inputs_to_schedule: List[int] = []
+        encoder_inputs_to_schedule: list[int] = []
         mm_positions = request.mm_positions
         assert mm_positions is not None
         assert len(mm_positions) > 0
@@ -529,8 +530,8 @@ class Scheduler:
 
     def update_from_output(
         self,
-        scheduler_output: "SchedulerOutput",
-        model_runner_output: "ModelRunnerOutput",
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
     ) -> EngineCoreOutputs:
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
@@ -538,8 +539,8 @@ class Scheduler:
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        new_running: List[Request] = []
-        outputs: List[EngineCoreOutput] = []
+        new_running: list[Request] = []
+        outputs: list[EngineCoreOutput] = []
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -599,7 +600,7 @@ class Scheduler:
 
             stopped = False
             new_logprobs = None
-            new_token_ids: List[int] = []
+            new_token_ids: list[int] = []
 
             # Handle guided decoding FSM advancement if applicable
             # NOTE: For all requests that uses guided decoding, the grammar
