@@ -202,8 +202,8 @@ class OutputProcessor:
     def add_request(
         self,
         request: EngineCoreRequest,
-        parent_req: Optional[ParentRequest],
-        request_index: int,
+        parent_req: Optional[ParentRequest] = None,
+        request_index: int = 0,
         queue: Optional[asyncio.Queue[RequestOutput]] = None,
     ) -> None:
         request_id = request.request_id
