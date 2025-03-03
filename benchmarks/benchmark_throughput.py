@@ -388,13 +388,11 @@ def get_requests(args, tokenizer):
                 "openai-chat backend not supported for sonnet dataset.")
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
-    elif args.dataset_name == "hf" and \
-        args.dataset == VISION_ARENA_DATASET_PATH and args.hf_subset is None:
-        dataset_cls = VisionArenaDataset
-        common_kwargs["dataset_split"] = args.hf_split
-        common_kwargs["dataset_subset"] = args.hf_subset
     elif args.dataset_name == "hf":
-        dataset_cls = HuggingFaceDataset
+        if args.dataset == VISION_ARENA_DATASET_PATH and args.hf_subset is None:
+            dataset_cls = VisionArenaDataset
+        else:
+            dataset_cls = HuggingFaceDataset
         common_kwargs["dataset_split"] = args.hf_split
         common_kwargs["dataset_subset"] = args.hf_subset
     else:
@@ -521,7 +519,7 @@ if __name__ == "__main__":
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.")
     parser.add_argument("--prefix-len",
-                        type=str,
+                        type=int,
                         default=None,
                         help="Number of prefix tokens per request")
     # HF
@@ -547,7 +545,8 @@ if __name__ == "__main__":
     if args.tokenizer is None:
         args.tokenizer = args.model
     if args.dataset is None:
-        # for random dataset, the default sampling setting is in benchmark_dataset.RandomDataset
+        # for random dataset, the default sampling
+        # setting is in benchmark_dataset.RandomDataset
         print("When dataset is not set, it will default to random dataset")
     else:
         assert args.input_len is None

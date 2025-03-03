@@ -308,14 +308,14 @@ class RandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.prefix_len = (prefix_len
-                           if prefix_len is not None else self.DEFAULT_PREFIX_LEN)
+        self.prefix_len = (prefix_len if prefix_len is not None else
+                           self.DEFAULT_PREFIX_LEN)
         self.range_ratio = (range_ratio if range_ratio is not None else
                             self.DEFAULT_RANGE_RATIO)
         self.input_len = (input_len
                           if input_len is not None else self.DEFAULT_INPUT_LEN)
-        self.output_len = (output_len
-                           if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        self.output_len = (output_len if output_len is not None else
+                           self.DEFAULT_OUTPUT_LEN)
 
     def sample(self, for_online_benchmark: bool = False) -> list:
         vocab_size = self.tokenizer.vocab_size
@@ -679,8 +679,8 @@ class VisionArenaDataset(BenchmarkDataset):
         super().__init__(**kwargs)
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
-        self.output_len = (output_len
-                           if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        self.output_len = (output_len if output_len is not None else
+                           self.DEFAULT_OUTPUT_LEN)
 
         if self.dataset_path != VISION_ARENA_DATASET_PATH:
             raise ValueError(f"Only support Vision Arena dataset.\
