@@ -236,7 +236,7 @@ When a preemption occurs during prefill (assuming such an event
 is possible), we consider the preemption as affecting the
 time-to-first-token and prefill intervals.
 
-:::{image} /assets/design/v1/metrics/intervals-2.png
+:::{image} /assets/design/v1/metrics/intervals-3.png
 :alt: Interval calculations - preempted prefill
 :::
 
