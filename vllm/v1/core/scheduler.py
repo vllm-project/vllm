@@ -242,7 +242,7 @@ class Scheduler:
         if not preempted_reqs:
             # Use a temporary deque to collect requests that need to be skipped
             # and put back at the head of the waiting queue later
-            still_waiting: deque[Request] = deque()
+            waiting_for_fsm: deque[Request] = deque()
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
@@ -254,7 +254,7 @@ class Scheduler:
                         request.status = RequestStatus.WAITING
                     else:
                         guided_req = self.waiting.popleft()
-                        still_waiting.append(guided_req)
+                        waiting_for_fsm.append(guided_req)
                         continue
 
                 # Check that adding the request still respects the max_loras
@@ -345,8 +345,8 @@ class Scheduler:
                     encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
-        if still_waiting:
-            self.waiting = still_waiting + self.waiting
+        if waiting_for_fsm:
+            self.waiting.extendleft(waiting_for_fsm)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
