@@ -45,7 +45,7 @@ K_moe = [256, 512, 7168]  # [256, 7168, 13824]
 BLOCK_SIZE = [[128, 128]]
 #E = [8, 24]  # [8, 24, 128, 256]
 E = [2] #, 8] #, 16]  # [8, 24, 128, 256]
-TOP_KS = [1]  # [1, 2, 6]
+TOP_KS = [2]  # [1, 2, 6]
 OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
 
