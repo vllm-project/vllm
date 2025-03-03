@@ -16,8 +16,6 @@ This example demonstrates how to generate chat completions from reasoning models
 using the OpenAI Python client library.
 """
 
-from enum import Enum
-
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -34,24 +32,14 @@ models = client.models.list()
 model = models.data[0].id
 
 
-# Guided decoding by JSON using Pydantic schema
-class CarType(str, Enum):
-    sedan = "sedan"
-    suv = "SUV"
-    truck = "Truck"
-    coupe = "Coupe"
+class People(BaseModel):
+    name: str
+    age: int
 
 
-class CarDescription(BaseModel):
-    brand: str
-    model: str
-    car_type: CarType
+json_schema = People.model_json_schema()
 
-
-json_schema = CarDescription.model_json_schema()
-
-prompt = ("Generate a JSON with the brand, model and car_type of"
-          "the most iconic car from the 90's, think in 100 tokens")
+prompt = ("Generate a JSON with the name and age of one random person.")
 completion = client.chat.completions.create(
     model=model,
     messages=[{
@@ -60,5 +48,5 @@ completion = client.chat.completions.create(
     }],
     extra_body={"guided_json": json_schema},
 )
-print("content", completion.choices[0].message.content)
 print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+print("content: ", completion.choices[0].message.content)
