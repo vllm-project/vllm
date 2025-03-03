@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Optional
 
 import torch
 
@@ -25,21 +25,21 @@ class FlashMLABackend(MLACommonBackend):
         return "FLASHMLA_VLLM_V1"
 
     @staticmethod
-    def get_metadata_cls() -> Type["FlashMLAMetadata"]:
+    def get_metadata_cls() -> type["FlashMLAMetadata"]:
         return FlashMLAMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["FlashMLAMetadataBuilder"]:
+    def get_builder_cls() -> type["FlashMLAMetadataBuilder"]:
         return FlashMLAMetadataBuilder
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashMLAImpl"]:
+    def get_impl_cls() -> type["FlashMLAImpl"]:
         return FlashMLAImpl
 
 
 @dataclass
 class FlashMLAMetadata(MLACommonMetadata):
-    decode_tile_scheduler_metadata: Optional[Tuple[torch.Tensor,
+    decode_tile_scheduler_metadata: Optional[tuple[torch.Tensor,
                                                    torch.Tensor]] = None
     decode_num_splits: Optional[torch.Tensor] = None
 
@@ -76,10 +76,10 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             head_size: int,
             scale: float,
             num_kv_heads: int,
-            alibi_slopes: Optional[List[float]],
+            alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[Dict[str, Any]],
+            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             # MLA Specific Arguments

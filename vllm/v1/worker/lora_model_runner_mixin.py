@@ -4,7 +4,6 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
-from typing import Set, Tuple
 
 import numpy as np
 import torch.nn as nn
@@ -57,9 +56,9 @@ class LoRAModelRunnerMixin:
         )
         return self.lora_manager.create_lora_manager(model)
 
-    def _set_active_loras(self, prompt_lora_mapping: Tuple[int, ...],
-                          token_lora_mapping: Tuple[int, ...],
-                          lora_requests: Set[LoRARequest]) -> None:
+    def _set_active_loras(self, prompt_lora_mapping: tuple[int, ...],
+                          token_lora_mapping: tuple[int, ...],
+                          lora_requests: set[LoRARequest]) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
 
@@ -74,10 +73,10 @@ class LoRAModelRunnerMixin:
     def set_active_loras(self, input_batch: InputBatch,
                          num_scheduled_tokens: np.ndarray) -> None:
 
-        prompt_lora_mapping: Tuple[int, ...]  # of size input_batch.num_reqs
-        token_lora_mapping: Tuple[int,
+        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
+        token_lora_mapping: tuple[int,
                                   ...]  # of size np.sum(num_scheduled_tokens)
-        lora_requests: Set[LoRARequest]
+        lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = \
                             input_batch.make_lora_inputs(num_scheduled_tokens)
         return self._set_active_loras(prompt_lora_mapping, token_lora_mapping,
@@ -105,7 +104,7 @@ class LoRAModelRunnerMixin:
                                            num_scheduled_tokens)
 
             # Make dummy lora requests
-            lora_requests: Set[LoRARequest] = {
+            lora_requests: set[LoRARequest] = {
                 LoRARequest(lora_name=f"warmup_{lora_id}",
                             lora_int_id=lora_id,
                             lora_path="/not/a/real/path")
@@ -143,7 +142,7 @@ class LoRAModelRunnerMixin:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.pin_adapter(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()

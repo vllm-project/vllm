@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import AsyncGenerator, Mapping
 from copy import copy
-from typing import (AsyncGenerator, Dict, List, Mapping, Optional, Protocol,
-                    Tuple, Union)
+from typing import Optional, Protocol, Union
 
 from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
@@ -137,7 +137,7 @@ class ParallelSamplingRequest:
                                              key=lambda x: x.index)
         return self.request_output
 
-    def get_child_info(self, index: int) -> Tuple[str, SamplingParams]:
+    def get_child_info(self, index: int) -> tuple[str, SamplingParams]:
         """Get child request ID and sampling params.
         
         Args:
@@ -237,9 +237,9 @@ class SyncParallelSamplingManager:
 
     def __init__(self):
         # Parent req ID -> parent request manager
-        self.parent_reqs: Dict[str, ParallelSamplingRequest] = {}
+        self.parent_reqs: dict[str, ParallelSamplingRequest] = {}
         # Child req ID -> (child req index, parent req ID)
-        self.child_reqs: Dict[str, Tuple[int, str]] = {}
+        self.child_reqs: dict[str, tuple[int, str]] = {}
 
     def _register_parent_request(self, req: ParallelSamplingRequest) -> None:
         """Register parallel sampling parent request."""
@@ -299,8 +299,8 @@ class SyncParallelSamplingManager:
 
     def step(
         self,
-        outputs: List[RequestOutput],
-    ) -> List[RequestOutput]:
+        outputs: list[RequestOutput],
+    ) -> list[RequestOutput]:
         """Build parallel sampling request outputs.
         
         Extract child request outputs, aggregate them
@@ -355,7 +355,7 @@ async def generate_parallel_sampling_async(
     parent_req = ParallelSamplingRequest(request_id, sampling_params)
 
     # Aggregate generators for n child requests
-    gens: List[AsyncGenerator[RequestOutput, None]] = []
+    gens: list[AsyncGenerator[RequestOutput, None]] = []
     for idx in range(parent_req.n):
         child_req_id, child_params = parent_req.get_child_info(idx)
         child_gen = generate(

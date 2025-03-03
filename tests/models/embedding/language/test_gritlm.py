@@ -3,7 +3,6 @@
 import importlib.util
 import math
 from array import array
-from typing import List
 
 import openai
 import pytest
@@ -81,14 +80,14 @@ async def client_generate(server_generate: RemoteOpenAIServer):
         yield async_client
 
 
-def run_llm_encode(llm: vllm.LLM, queries: List[str],
-                   instruction: str) -> List[float]:
+def run_llm_encode(llm: vllm.LLM, queries: list[str],
+                   instruction: str) -> list[float]:
     outputs = llm.encode([instruction + q for q in queries], )
     return [output.outputs.embedding for output in outputs]
 
 
-async def run_client_embeddings(client: vllm.LLM, queries: List[str],
-                                instruction: str) -> List[float]:
+async def run_client_embeddings(client: vllm.LLM, queries: list[str],
+                                instruction: str) -> list[float]:
     outputs = await client.embeddings.create(
         model=MODEL_NAME,
         input=[instruction + q for q in queries],
@@ -123,7 +122,7 @@ def get_test_data():
     return queries, q_instruction, documents, d_instruction
 
 
-def validate_embed_output(q_rep: List[float], d_rep: List[float]):
+def validate_embed_output(q_rep: list[float], d_rep: list[float]):
     cosine_sim_q0_d0 = 1 - cosine(q_rep[0], d_rep[0])
     assert math.isclose(cosine_sim_q0_d0, 0.609, abs_tol=0.001)
 

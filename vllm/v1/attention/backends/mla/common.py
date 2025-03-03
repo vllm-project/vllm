@@ -195,8 +195,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Tuple,
-                    Type, TypeVar)
+from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar
 
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
@@ -250,11 +249,11 @@ class MLACommonBackend(AttentionBackend):
         return "TRITON_MLA_VLLM_V1"
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return MLACommonMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["MLACommonMetadataBuilder"]:
+    def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
         return MLACommonMetadataBuilder
 
     @staticmethod
@@ -263,11 +262,11 @@ class MLACommonBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,  # assumed to be 1 for MLA
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [576]
 
     @staticmethod
@@ -317,8 +316,8 @@ class MLACommonMetadata:
     has_context: bool = False
     context_chunk_cu_seq_lens: Optional[torch.Tensor] = None
     context_chunk_starts: Optional[torch.Tensor] = None
-    context_chunk_seq_tot: Optional[List[int]] = None
-    context_chunk_max_seq_lens: Optional[List[int]] = None
+    context_chunk_seq_tot: Optional[list[int]] = None
+    context_chunk_max_seq_lens: Optional[list[int]] = None
     chunked_prefill_workspace: Optional[torch.Tensor] = None
 
     def __post_init__(self):
@@ -538,10 +537,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]],
+        blocksparse_params: Optional[dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
         # MLA Specific Arguments
@@ -634,7 +633,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         #
         # returns input_group_shape, weight_group_shape
         def get_scale_group_shapes_for_fp8(layer: LinearBase) -> \
-            Tuple[Tuple[int, int], Tuple[int, int]]:
+            tuple[tuple[int, int], tuple[int, int]]:
             if isinstance(layer.quant_method, Fp8LinearMethod):
                 if layer.quant_method.block_quant:
                     weight_block_size = \

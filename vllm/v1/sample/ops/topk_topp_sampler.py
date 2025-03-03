@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -54,7 +54,7 @@ class TopKTopPSampler(nn.Module):
     def forward_native(
         self,
         logits: torch.Tensor,
-        generators: Dict[int, torch.Generator],
+        generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
     ) -> torch.Tensor:
@@ -66,7 +66,7 @@ class TopKTopPSampler(nn.Module):
     def forward_cuda(
         self,
         logits: torch.Tensor,
-        generators: Dict[int, torch.Generator],
+        generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
     ) -> torch.Tensor:
@@ -117,7 +117,7 @@ def apply_top_k_top_p(
 
 def random_sample(
     probs: torch.Tensor,
-    generators: Dict[int, torch.Generator],
+    generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
     """Randomly sample from the probabilities.
 
@@ -143,7 +143,7 @@ def flashinfer_sample(
     probs: torch.Tensor,
     k: Optional[torch.Tensor],
     p: Optional[torch.Tensor],
-    generators: Dict[int, torch.Generator],
+    generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
     """Sample from the probabilities using FlashInfer.
 

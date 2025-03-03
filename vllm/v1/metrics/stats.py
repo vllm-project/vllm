@@ -2,7 +2,7 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
@@ -39,8 +39,8 @@ class SchedulerStats:
 
 @dataclass
 class LoRAStats:
-    waiting_requests: Set[str] = field(default_factory=set)
-    running_requests: Set[str] = field(default_factory=set)
+    waiting_requests: set[str] = field(default_factory=set)
+    running_requests: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -81,11 +81,11 @@ class IterationStats:
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
         self.num_preempted_reqs = 0
-        self.finished_requests: List[FinishedRequestStats] = []
-        self.time_to_first_tokens_iter: List[float] = []
-        self.time_per_output_tokens_iter: List[float] = []
-        self.waiting_lora_adapters: Dict[str, int] = {}
-        self.running_lora_adapters: Dict[str, int] = {}
+        self.finished_requests: list[FinishedRequestStats] = []
+        self.time_to_first_tokens_iter: list[float] = []
+        self.time_per_output_tokens_iter: list[float] = []
+        self.waiting_lora_adapters: dict[str, int] = {}
+        self.running_lora_adapters: dict[str, int] = {}
 
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
@@ -132,7 +132,7 @@ class IterationStats:
         if num_new_generation_tokens > 0:
             req_stats.last_token_ts = engine_core_timestamp
 
-    def update_from_events(self, req_id: str, events: List["EngineCoreEvent"],
+    def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
                            is_prefilling: bool, req_stats: RequestStateStats,
                            lora_stats: Optional[LoRAStats]):
         # Avoid circular dependency
@@ -185,7 +185,7 @@ class LoRARequestStates:
     """Per-LoRA request state stats."""
 
     def __init__(self):
-        self.lora_name_to_stats: Dict[str, LoRAStats] = {}
+        self.lora_name_to_stats: dict[str, LoRAStats] = {}
 
     def get_stats(self, req_state: 'RequestState') -> Optional[LoRAStats]:
         if req_state.lora_name is None:

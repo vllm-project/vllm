@@ -4,7 +4,7 @@ import json
 import pathlib
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -53,10 +53,10 @@ class OpenAIServingModels:
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        base_model_paths: List[BaseModelPath],
+        base_model_paths: list[BaseModelPath],
         *,
-        lora_modules: Optional[List[LoRAModulePath]] = None,
-        prompt_adapters: Optional[List[PromptAdapterPath]] = None,
+        lora_modules: Optional[list[LoRAModulePath]] = None,
+        prompt_adapters: Optional[list[PromptAdapterPath]] = None,
     ):
         super().__init__()
 
@@ -65,7 +65,7 @@ class OpenAIServingModels:
         self.engine_client = engine_client
 
         self.static_lora_modules = lora_modules
-        self.lora_requests: List[LoRARequest] = []
+        self.lora_requests: list[LoRARequest] = []
         self.lora_id_counter = AtomicCounter(0)
 
         self.prompt_adapter_requests = []

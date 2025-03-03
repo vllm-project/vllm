@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Optional, Union
 
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
@@ -18,8 +18,8 @@ from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
 @dataclass
 class OutputProcessorOutput:
 
-    request_outputs: List[RequestOutput]
-    reqs_to_abort: List[str]
+    request_outputs: list[RequestOutput]
+    reqs_to_abort: list[str]
 
 
 class RequestState:
@@ -30,7 +30,7 @@ class RequestState:
         lora_name: Optional[str],
         output_kind: RequestOutputKind,
         prompt: Optional[str],
-        prompt_token_ids: List[int],
+        prompt_token_ids: list[int],
         logprobs_processor: LogprobsProcessor,
         detokenizer: IncrementalDetokenizer,
         arrival_time: float,
@@ -90,7 +90,7 @@ class OutputProcessor:
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
-        self.request_states: Dict[str, RequestState] = {}
+        self.request_states: dict[str, RequestState] = {}
         self.lora_states = LoRARequestStates()
 
     def is_request_active(self, request_id: str) -> bool:
@@ -104,7 +104,7 @@ class OutputProcessor:
 
     def abort_requests(
         self,
-        request_ids: List[str],
+        request_ids: list[str],
     ) -> None:
         for request_id in request_ids:
             req_state = self.request_states.pop(request_id, None)
@@ -130,7 +130,7 @@ class OutputProcessor:
 
     def process_outputs(
         self,
-        engine_core_outputs: List[EngineCoreOutput],
+        engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: Optional[float] = None,
         iteration_stats: Optional[IterationStats] = None,
     ) -> OutputProcessorOutput:
@@ -158,8 +158,8 @@ class OutputProcessor:
         **********************************************************
         """
 
-        request_outputs: List[RequestOutput] = []
-        reqs_to_abort: List[str] = []
+        request_outputs: list[RequestOutput] = []
+        reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
@@ -265,7 +265,7 @@ class OutputProcessor:
     @staticmethod
     def _make_request_output(
         request_state: RequestState,
-        new_token_ids: List[int],
+        new_token_ids: list[int],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
     ) -> Optional[RequestOutput]:

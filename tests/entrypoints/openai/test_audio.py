@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List
-
 import openai
 import pytest
 import pytest_asyncio
@@ -41,7 +39,7 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_audio() -> Dict[str, str]:
+def base64_encoded_audio() -> dict[str, str]:
     return {
         audio_url: encode_audio_base64(*fetch_audio(audio_url))
         for audio_url in TEST_AUDIO_URLS
@@ -107,7 +105,7 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
 async def test_single_chat_session_audio_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, audio_url: str,
-        base64_encoded_audio: Dict[str, str]):
+        base64_encoded_audio: dict[str, str]):
 
     messages = [{
         "role":
@@ -165,7 +163,7 @@ async def test_single_chat_session_audio_base64encoded(
 @pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
 async def test_single_chat_session_input_audio(
         client: openai.AsyncOpenAI, model_name: str, audio_url: str,
-        base64_encoded_audio: Dict[str, str]):
+        base64_encoded_audio: dict[str, str]):
     messages = [{
         "role":
         "user",
@@ -255,7 +253,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
     )
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta
@@ -277,7 +275,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
 async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
                                           model_name: str, audio_url: str,
-                                          base64_encoded_audio: Dict[str,
+                                          base64_encoded_audio: dict[str,
                                                                      str]):
     messages = [{
         "role":
@@ -315,7 +313,7 @@ async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
     )
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta
@@ -337,7 +335,7 @@ async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
 async def test_multi_audio_input(client: openai.AsyncOpenAI, model_name: str,
                                  audio_url: str,
-                                 base64_encoded_audio: Dict[str, str]):
+                                 base64_encoded_audio: dict[str, str]):
 
     messages = [{
         "role":

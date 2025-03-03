@@ -123,7 +123,7 @@ class ExampleParser(ReasoningParser):
 
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from a complete model-generated string.
 
@@ -138,7 +138,7 @@ class ExampleParser(ReasoningParser):
             The request object that was used to generate the model_output.
 
         Returns:
-        Tuple[Optional[str], Optional[str]]
+        tuple[Optional[str], Optional[str]]
             A tuple containing the reasoning content and the content.
         """
 ```

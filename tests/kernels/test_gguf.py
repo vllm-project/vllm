@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
-from typing import List
 
 import pytest
 import torch
@@ -16,7 +15,7 @@ GGUF_SAMPLE = snapshot_download("Isotr0py/test-gguf-sample")
 
 def get_gguf_sample_tensors(
         hidden_size: int,
-        quant_type: GGMLQuantizationType) -> List[ReaderTensor]:
+        quant_type: GGMLQuantizationType) -> list[ReaderTensor]:
     sample_dir = GGUF_SAMPLE
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename

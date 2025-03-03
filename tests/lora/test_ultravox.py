@@ -3,7 +3,6 @@
 import shutil
 from os import path
 from tempfile import TemporaryDirectory
-from typing import List, Tuple
 
 import torch
 from huggingface_hub import snapshot_download
@@ -86,8 +85,8 @@ def test_ultravox_lora(vllm_runner):
                 dtype="bfloat16",
                 max_model_len=1024,
         ) as vllm_model:
-            ultravox_outputs: List[Tuple[
-                List[int], str]] = vllm_model.generate_greedy(
+            ultravox_outputs: list[tuple[
+                list[int], str]] = vllm_model.generate_greedy(
                     [
                         _get_prompt(0, PROMPT, VLLM_PLACEHOLDER,
                                     ULTRAVOX_MODEL_NAME)
@@ -108,7 +107,7 @@ def test_ultravox_lora(vllm_runner):
             dtype="bfloat16",
             max_model_len=1024,
     ) as vllm_model:
-        llama_outputs: List[Tuple[List[int], str]] = (
+        llama_outputs: list[tuple[list[int], str]] = (
             vllm_model.generate_greedy(
                 [_get_prompt(0, PROMPT, VLLM_PLACEHOLDER, LLMA_MODEL_NAME)],
                 256,

@@ -4,7 +4,7 @@
 Run `pytest tests/kernels/test_triton_scaled_mm.py`.
 """
 import importlib
-from typing import Optional, Type
+from typing import Optional
 
 import pytest
 import torch
@@ -18,7 +18,7 @@ def scaled_mm_torch(a: torch.Tensor,
                     b: torch.Tensor,
                     scale_a: torch.Tensor,
                     scale_b: torch.Tensor,
-                    out_dtype: Type[torch.dtype],
+                    out_dtype: type[torch.dtype],
                     bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     out = torch.mm(a.to(torch.float32), b.to(torch.float32))
     out = scale_a * out

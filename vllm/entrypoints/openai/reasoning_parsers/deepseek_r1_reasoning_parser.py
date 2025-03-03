@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
-from typing import Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -122,7 +123,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str]]:
 
         # DeepSeek R1 doesn't generate <think> now.
         # Thus we assume the reasoning content is always at the start.

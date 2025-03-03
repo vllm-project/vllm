@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for H2OVL's multimodal preprocessing kwargs."""
-from typing import Mapping, Optional
+from collections.abc import Mapping
+from typing import Optional
 
 import pytest
 from PIL import Image

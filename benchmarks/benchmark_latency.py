@@ -7,7 +7,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -22,7 +22,7 @@ from vllm.utils import FlexibleArgumentParser
 
 
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                     results: Dict[str, Any]) -> None:
+                                     results: dict[str, Any]) -> None:
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={"latency": results["latencies"]},
@@ -57,7 +57,7 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_prompts: List[PromptType] = [{
+    dummy_prompts: list[PromptType] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
