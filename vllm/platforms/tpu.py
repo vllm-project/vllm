@@ -119,3 +119,7 @@ class TpuPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.tpu_communicator.TpuCommunicator"  # noqa
+
+    @classmethod
+    def use_all_gather(cls) -> bool:
+        return True
