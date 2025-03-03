@@ -385,7 +385,9 @@ def get_requests(args, tokenizer):
             sample_kwargs["return_prompt_formatted"] = True
         else:
             raise NotImplementedError(
-                "openai-chat backend not supported for sonnet dataset.")
+                # TODO (jenniferzhoa): Add support
+                "Throughput testing using any backend other than openai-chat \
+                is not yet supported for the Sonnet dataset.")
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
