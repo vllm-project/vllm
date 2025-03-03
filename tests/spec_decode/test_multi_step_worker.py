@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from typing import Dict, List
 from unittest.mock import MagicMock
 
 import pytest
@@ -221,7 +220,7 @@ def test_same_output_for_multi_step():
 
     # Run single-step repeatedly.
     zero_kv_cache(worker.cache_engine)
-    single_step_output: List[SamplerOutput] = []
+    single_step_output: list[SamplerOutput] = []
     continuations = [[1] for _ in prompts]
     set_random_seed(seed)
 
@@ -243,15 +242,15 @@ def test_same_output_for_multi_step():
             continuations[i].append(seq_group_output.samples[0].output_token)
 
     # Get token ids and logprobs for comparison.
-    multi_step_output_logprobs: List[List[Dict[int,
+    multi_step_output_logprobs: list[list[dict[int,
                                                Logprob]]] = [[]
                                                              for _ in prompts]
-    single_step_output_logprobs: List[List[Dict[int,
+    single_step_output_logprobs: list[list[dict[int,
                                                 Logprob]]] = [[]
                                                               for _ in prompts]
 
-    multi_step_output_token_ids: List[List[int]] = [[] for _ in prompts]
-    single_step_output_token_ids: List[List[int]] = [[] for _ in prompts]
+    multi_step_output_token_ids: list[list[int]] = [[] for _ in prompts]
+    single_step_output_token_ids: list[list[int]] = [[] for _ in prompts]
     for i, _ in enumerate(prompts):
         for multi_step, single_step in zip(multi_step_output,
                                            single_step_output):
@@ -336,7 +335,7 @@ def test_multi_step_with_batch_expansion_correct_output():
     # will simulate the bonus token case with the second token
     # being the bonus token.
     zero_kv_cache(worker.cache_engine)
-    single_step_output: List[SamplerOutput] = []
+    single_step_output: list[SamplerOutput] = []
     set_random_seed(seed)
     for _ in range(num_steps):
         seq_group_metadata_list = create_seq_group_metadata_from_prompts(
@@ -430,7 +429,7 @@ def test_multi_step_with_batch_expansion_incorrect_output():
     # will simulate the bonus token case with the second token
     # being the bonus token.
     zero_kv_cache(worker.cache_engine)
-    single_step_output: List[SamplerOutput] = []
+    single_step_output: list[SamplerOutput] = []
     set_random_seed(seed)
     for _ in range(num_steps):
         seq_group_metadata_list = create_seq_group_metadata_from_prompts(
