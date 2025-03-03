@@ -66,7 +66,7 @@ git checkout dev/ds_r1
 python setup.py pt develop
 ```
 
-- vLLM https://github.com/yiliu30/vllm-fork/tree/p22-rebase-kvcache-tc
+- vLLM https://github.com/yiliu30/vllm-fork/tree/dev/yi/ds_r1
 
 ```
 git clone https://github.com/yiliu30/vllm-fork.git vllm
