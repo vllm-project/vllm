@@ -368,7 +368,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         embeddings_tensor: Optional[torch.Tensor],
         lora_bias: Optional[torch.Tensor] = None,
     ):
-        # Except for QKVParallelLinearWithLora and
+        # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
         # store weights in a tuple of size 1. These two layers will
         # override this function.
@@ -693,7 +693,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 and len(packed_modules_list) == 2)
 
 
-class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
+class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """
     ColumnParallelLinear layer that is specifically designed for
     qkv_proj. Certain models, such as chatglm3 and baichuan-7b,
@@ -761,7 +761,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             packed_modules_list) == 1
 
 
-class MergedQKVParallelLinearWithLora(MergedColumnParallelLinearWithLoRA):
+class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
     """MergedColumnParallelLinear layer that is composed of 3 sublayers (slices)
     packed together in qkv proj fashion
     (q_proj + k_proj + v_proj -> qkv_proj).
@@ -1135,7 +1135,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return False
 
 
-class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
+class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
     """Implements RoPE-scaled embeddings with linear scaling for
     multiple LoRA adapters with a specialized kernel.
 
