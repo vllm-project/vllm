@@ -138,14 +138,15 @@ def _fused_moe_gguf(
         # TODO get real block size
         BLOCK_SIZE = 4
 
-        sorted_token_ids, expert_ids, _ = moe_align_block_size(
-            topk_ids, BLOCK_SIZE, E)
+        sorted_token_ids, expert_ids, num_tokens_post_padded = \
+                moe_align_block_size(topk_ids, BLOCK_SIZE, E)
         out = ops.ggml_moe_a8(x, w1, sorted_token_ids, expert_ids,
-                              qweight_type, N, top_k, num_tokens)
+                              num_tokens_post_padded, qweight_type, N, top_k,
+                              num_tokens)
         out = act(out)
         out = ops.ggml_moe_a8(out, w2, sorted_token_ids, expert_ids,
-                              qweight_type2, w2.shape[1], 1,
-                              num_tokens * top_k)
+                              num_tokens_post_padded, qweight_type2,
+                              w2.shape[1], 1, num_tokens * top_k)
         out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
             topk_weights.view(num_tokens, top_k, 1))
         ops.moe_sum(out, out_hidden_states)

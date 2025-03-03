@@ -153,8 +153,9 @@ torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
 
 torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W,
                           torch::Tensor sorted_token_ids,
-                          torch::Tensor expert_ids, int64_t type, int64_t row,
-                          int64_t top_k, int64_t tokens);
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t type,
+                          int64_t row, int64_t top_k, int64_t tokens);
 
 torch::Tensor ggml_moe_get_block_size(int64_t type);
 

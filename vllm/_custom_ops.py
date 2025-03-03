@@ -437,6 +437,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         W: torch.Tensor,
         sorted_token_ids: torch.Tensor,
         expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
         quant_type: int,
         row: torch.SymInt,
         top_k: torch.SymInt,
@@ -919,13 +920,15 @@ def ggml_moe_a8(
     W: torch.Tensor,
     sorted_token_ids: torch.Tensor,
     expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
     quant_type: int,
     row: int,
     top_k: int,
     tokens: int,
 ) -> torch.Tensor:
     return torch.ops._C.ggml_moe_a8(X, W, sorted_token_ids, expert_ids,
-                                    quant_type, row, top_k, tokens)
+                                    num_tokens_post_padded, quant_type, row,
+                                    top_k, tokens)
 
 
 def ggml_moe_get_block_size(quant_type: int) -> torch.Tensor:

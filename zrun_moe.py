@@ -27,38 +27,57 @@ def _fused_moe_gguf(
     qweight_type2: int,
     act,
 ) -> torch.Tensor:
+    out_hidden_states = torch.empty_like(x)
 
     num_tokens, _ = x.shape
     E, N, _ = w1.shape
     top_k = topk_ids.shape[1]
-    out_hidden_states = torch.empty_like(x)
     # TODO get real block size
     BLOCK_SIZE = 4
 
-    sorted_token_ids, expert_ids, _ = moe_align_block_size(
-        topk_ids, BLOCK_SIZE, E)
-    print(sorted_token_ids, sorted_token_ids.shape)
-    print(expert_ids, expert_ids.shape)
+    sorted_token_ids, expert_ids, num_tokens_post_padded = \
+        moe_align_block_size(topk_ids, BLOCK_SIZE, E)
     out = my_extension.ggmp_moe_a8(x, w1, sorted_token_ids, expert_ids,
-                                   qweight_type, N, top_k, num_tokens)
-    print("out 1 ", out, out.shape)
+                                   num_tokens_post_padded, qweight_type, N,
+                                   top_k, num_tokens)
     out = act(out)
-    print("out silu ", out, out.shape)
     out = my_extension.ggmp_moe_a8(out, w2, sorted_token_ids, expert_ids,
-                                   qweight_type2, w2.shape[1], top_k,
-                                   num_tokens)
-    print("out 2 ", out, out.shape)
-    ops.moe_sum(out.reshape(num_tokens, top_k, w2.shape[1]), out_hidden_states)
+                                   num_tokens_post_padded, qweight_type2,
+                                   w2.shape[1], 1, num_tokens * top_k)
+    out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
+        topk_weights.view(num_tokens, top_k, 1))
+    ops.moe_sum(out, out_hidden_states)
+    # num_tokens, _ = x.shape
+    # E, N, _ = w1.shape
+    # top_k = topk_ids.shape[1]
+    # out_hidden_states = torch.empty_like(x)
+    # # TODO get real block size
+    # BLOCK_SIZE = 4
+    #
+    # sorted_token_ids, expert_ids, _ = moe_align_block_size(
+    #     topk_ids, BLOCK_SIZE, E)
+    # print(sorted_token_ids, sorted_token_ids.shape)
+    # print(expert_ids, expert_ids.shape)
+    # out = my_extension.ggmp_moe_a8(x, w1, sorted_token_ids, expert_ids,
+    #                                qweight_type, N, top_k, num_tokens)
+    # print("out 1 ", out, out.shape)
+    # out = act(out)
+    # print("out silu ", out, out.shape)
+    # out = my_extension.ggmp_moe_a8(out, w2, sorted_token_ids, expert_ids,
+    #                                qweight_type2, w2.shape[1], top_k,
+    #                                num_tokens)
+    # print("out 2 ", out, out.shape)
     return out_hidden_states
 
 
-# x = torch.randn(2048, 7168, device="cuda", dtype=torch.float16)
+# x = torch.randn(num_tokens, 7168, device="cuda", dtype=torch.float16)
+num_tokens = 8
 y = torch.arange(7168, device="cuda", dtype=torch.float16) * 0.01
 print(y)
-x = torch.vstack([y for _ in range(2048)])
+x = torch.vstack([y for _ in range(num_tokens)])
 print(x, x.shape)
-# y = torch.arange(2048, device="cuda", dtype=float16) * 0.01
-# x = torch.ones(2048, 7168, device="cuda", dtype=torch.float16)
+# y = torch.arange(num_tokens, device="cuda", dtype=float16) * 0.01
+# x = torch.ones(num_tokens, 7168, device="cuda", dtype=torch.float16)
 act = SiluAndMul()
 
 state = torch.load("state.pt")
@@ -68,9 +87,9 @@ w2_qweight = state["w2_qweight"].to("cuda")
 
 w13_qweight_type = 10
 w2_qweight_type = 11
-topk_weights = torch.randn(2048, 8, device="cuda", dtype=torch.float16)
-# topk_ids = torch.randint(0, 256, (2048, 8), device="cuda")
-topk_ids = torch.ones(2048, 8, device="cuda", dtype=torch.int64) * 255
+topk_weights = torch.randn(num_tokens, 8, device="cuda", dtype=torch.float16)
+topk_ids = torch.randint(0, 256, (num_tokens, 8), device="cuda")
+# topk_ids = torch.ones(num_tokens, 8, device="cuda", dtype=torch.int64) * 255
 print(topk_ids)
 
 final_hidden_states = torch.empty_like(x)
@@ -101,4 +120,7 @@ for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
 print(out_toks)
 print(final_hidden_states)
 print(final_hidden_states_kern)
-# assert torch.allclose(final_hidden_states, final_hidden_states_kernk)
+assert torch.allclose(final_hidden_states,
+                      final_hidden_states_kern,
+                      atol=1e-1,
+                      rtol=1e-2)
