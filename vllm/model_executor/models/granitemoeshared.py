@@ -28,7 +28,7 @@ from vllm.sequence import IntermediateTensors
 
 from . import mixtral
 from .granitemoe import GraniteMoeAttention, GraniteMoeMoE
-from .interfaces import SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import make_layers, maybe_prefix
 
 
@@ -208,7 +208,7 @@ class GraniteMoeSharedModel(nn.Module):
         return hidden_states
 
 
-class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA):
+class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
