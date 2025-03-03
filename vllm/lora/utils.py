@@ -37,7 +37,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
-_all_lora_classes: set[BaseLayerWithLoRA] = {
+_all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -68,8 +68,9 @@ def from_layer(layer: nn.Module,
                                       model_config=model_config):
             if hasattr(layer, "__wrapper_class__"
                        ) and layer.__wrapper_class__ == "HFCompatibleLinear":
+                HFCompatibleLoRABase = lora_cls  # type: type[BaseLayerWithLoRA]
 
-                class HFCompatibleLoRA(lora_cls):
+                class HFCompatibleLoRA(HFCompatibleLoRABase):
                     __class__ = lora_cls
                     __wrapper_class__ = "HFCompatibleLoRA"
 
