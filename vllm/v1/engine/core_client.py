@@ -18,8 +18,8 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
-                        make_zmq_socket)
+from vllm.utils import (get_open_zmq_inproc_path, get_open_zmq_ipc_path,
+                        kill_process_tree, make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
@@ -202,11 +202,11 @@ class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
     circular reference back to the client object."""
 
-    ctx: Union[zmq.Context, zmq.asyncio.Context] = None
+    ctx: Union[zmq.Context] = None
     output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
     input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
     proc_handle: Optional[BackgroundProcHandle] = None
-    output_queue_thread: Optional[Thread] = None
+    shutdown_path: Optional[str] = None
 
     def __call__(self):
         """Clean up background resources."""
@@ -219,10 +219,13 @@ class BackgroundResources:
             self.output_socket.close(linger=0)
         if self.input_socket is not None:
             self.input_socket.close(linger=0)
-        if self.output_queue_thread is not None:
-            self.output_queue_thread.join()
-        if self.ctx is not None:
-            self.ctx.destroy(linger=0)
+        if self.shutdown_path is not None:
+            # We must ensure that the sync output socket is
+            # closed cleanly in its own thread.
+            with self.ctx.socket(zmq.PAIR) as shutdown_sender:
+                shutdown_sender.connect(self.shutdown_path)
+                # Send shutdown signal.
+                shutdown_sender.send(b'')
 
 
 class MPClient(EngineCoreClient):
@@ -264,28 +267,23 @@ class MPClient(EngineCoreClient):
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
-        self.ctx = (
-            zmq.asyncio.Context()  # type: ignore[attr-defined]
-            if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
+        sync_ctx = zmq.Context()
+        self.ctx = zmq.asyncio.Context(sync_ctx) if asyncio_mode else sync_ctx
 
         # This will ensure resources created so far are closed
         # when the client is garbage collected,  even if an
         # exception is raised mid-construction.
-        self.resources = BackgroundResources(ctx=self.ctx)
+        self.resources = BackgroundResources(ctx=sync_ctx)
         self._finalizer = weakref.finalize(self, self.resources)
 
-        # Paths and sockets for IPC.
-        output_path = get_open_zmq_ipc_path()
+        # Paths for IPC.
+        self.output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
-        self.resources.output_socket = make_zmq_socket(self.ctx, output_path,
-                                                       zmq.constants.PULL)
-        self.resources.input_socket = make_zmq_socket(self.ctx, input_path,
-                                                      zmq.constants.PUSH)
 
         # Start EngineCore in background process.
         self.resources.proc_handle = BackgroundProcHandle(
             input_path=input_path,
-            output_path=output_path,
+            output_path=self.output_path,
             process_name="EngineCore",
             target_fn=EngineCoreProc.run_engine_core,
             process_kwargs={
@@ -294,6 +292,9 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
+        # Create input socket.
+        self.resources.input_socket = make_zmq_socket(self.ctx, input_path,
+                                                      zmq.constants.PUSH)
         self.input_socket = self.resources.input_socket
         self.utility_results: dict[int, AnyFuture] = {}
 
@@ -327,30 +328,48 @@ class SyncMPClient(MPClient):
 
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
-        output_socket = self.resources.output_socket
+        ctx = self.ctx
+        output_path = self.output_path
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
 
+        shutdown_path = get_open_zmq_inproc_path()
+        self.resources.shutdown_path = shutdown_path
+
         def process_outputs_socket():
+            shutdown_socket = ctx.socket(zmq.PAIR)
+            shutdown_socket.bind(shutdown_path)
+            out_socket = make_zmq_socket(ctx, output_path, zmq.constants.PULL)
             try:
+                poller = zmq.Poller()
+                poller.register(shutdown_socket)
+                poller.register(out_socket)
                 while True:
-                    output_socket.poll()
-                    (frame, ) = output_socket.recv_multipart(copy=False)
+                    socks = poller.poll()
+                    if not socks:
+                        continue
+                    if len(socks) == 2 or socks[0][0] == shutdown_socket:
+                        # shutdown signal, exit thread.
+                        break
+
+                    (frame, ) = out_socket.recv_multipart(copy=False)
                     outputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
                     else:
                         outputs_queue.put_nowait(outputs)
-            except zmq.error.ZMQError:
-                # Expected when the class is GC'd / during process termination.
-                pass
+            finally:
+                # Close sockets.
+                shutdown_socket.close(linger=0)
+                out_socket.close(linger=0)
 
         # Process outputs from engine in separate thread.
-        self.resources.output_queue_thread = Thread(
-            target=process_outputs_socket, name="EngineCoreOutputQueueThread")
-        self.resources.output_queue_thread.start()
+        self.output_queue_thread = Thread(target=process_outputs_socket,
+                                          name="EngineCoreOutputQueueThread",
+                                          daemon=True)
+        self.output_queue_thread.start()
 
     def get_output(self) -> EngineCoreOutputs:
         return self.outputs_queue.get()
@@ -429,10 +448,13 @@ class AsyncMPClient(MPClient):
         # Perform IO in separate task to parallelize as much as possible.
         # Avoid task having direct reference back to the client.
         self.outputs_queue = asyncio.Queue()
-        output_socket = self.resources.output_socket
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
+        output_path = self.output_path
+        output_socket = make_zmq_socket(self.ctx, output_path,
+                                        zmq.constants.PULL)
+        self.resources.output_socket = output_socket
 
         async def process_outputs_socket():
             while True:
