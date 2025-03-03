@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from concurrent.futures import Future
-from typing import List, Type, Union
+from typing import Union
 
 import torch
 import torch.distributed as dist
@@ -22,8 +22,8 @@ class Executor(ExecutorBase):
     For methods shared by v0 and v1, define them in ExecutorBase"""
 
     @staticmethod
-    def get_class(vllm_config: VllmConfig) -> Type["Executor"]:
-        executor_class: Type[Executor]
+    def get_class(vllm_config: VllmConfig) -> type["Executor"]:
+        executor_class: type[Executor]
         parallel_config = vllm_config.parallel_config
         distributed_executor_backend = (
             parallel_config.distributed_executor_backend)
@@ -53,7 +53,7 @@ class Executor(ExecutorBase):
         return executor_class
 
     def initialize_from_config(self,
-                               kv_cache_configs: List[KVCacheConfig]) -> None:
+                               kv_cache_configs: list[KVCacheConfig]) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
@@ -69,7 +69,7 @@ class Executor(ExecutorBase):
         # operators can be applied to all workers.
         return min(output)
 
-    def get_kv_cache_specs(self) -> List[KVCacheSpec]:
+    def get_kv_cache_specs(self) -> list[KVCacheSpec]:
         output = self.collective_rpc("get_kv_cache_spec")
         return output
 

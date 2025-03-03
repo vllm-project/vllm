@@ -2,7 +2,7 @@
 
 import math
 import time
-from typing import Dict, List, Optional
+from typing import Optional
 
 import pytest
 
@@ -112,12 +112,12 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
 
 
 def _validate_logprobs(
-    gen_tokens: Dict[str, List[int]],
-    gen_logprobs: Dict[str, Optional[SampleLogprobs]],
-    gen_prompt_logprobs: Dict[str, Optional[PromptLogprobs]],
-    gen_cumulative_logprob: Dict[str, float],
+    gen_tokens: dict[str, list[int]],
+    gen_logprobs: dict[str, Optional[SampleLogprobs]],
+    gen_prompt_logprobs: dict[str, Optional[PromptLogprobs]],
+    gen_cumulative_logprob: dict[str, float],
     dtv: DummyOutputProcessorTestVectors,
-    request_id_list: List[str],
+    request_id_list: list[str],
     num_sample_logprobs: Optional[int],
     num_prompt_logprobs: Optional[int],
 ) -> None:

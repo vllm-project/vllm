@@ -5,7 +5,7 @@ import argparse
 import os
 import signal
 import sys
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
@@ -23,7 +23,7 @@ def _register_signal_handlers():
     signal.signal(signal.SIGTSTP, signal_handler)
 
 
-def _interactive_cli(args: argparse.Namespace) -> Tuple[str, OpenAI]:
+def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
     _register_signal_handlers()
 
     base_url = args.url
@@ -43,7 +43,7 @@ def _interactive_cli(args: argparse.Namespace) -> Tuple[str, OpenAI]:
 
 def chat(system_prompt: Optional[str], model_name: str,
          client: OpenAI) -> None:
-    conversation: List[ChatCompletionMessageParam] = []
+    conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
 
@@ -100,7 +100,7 @@ class ChatCommand(CLISubcommand):
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
         system_prompt = args.system_prompt
-        conversation: List[ChatCompletionMessageParam] = []
+        conversation: list[ChatCompletionMessageParam] = []
         if system_prompt is not None:
             conversation.append({"role": "system", "content": system_prompt})
 
@@ -168,5 +168,5 @@ class CompleteCommand(CLISubcommand):
         return complete_parser
 
 
-def cmd_init() -> List[CLISubcommand]:
+def cmd_init() -> list[CLISubcommand]:
     return [ChatCommand(), CompleteCommand()]

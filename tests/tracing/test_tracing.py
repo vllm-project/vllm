@@ -2,8 +2,9 @@
 
 import os
 import threading
+from collections.abc import Iterable
 from concurrent import futures
-from typing import Callable, Dict, Iterable, Literal
+from typing import Callable, Literal
 
 import grpc
 import pytest
@@ -25,7 +26,7 @@ FieldName = Literal['bool_value', 'string_value', 'int_value', 'double_value',
 
 
 def decode_value(value: AnyValue):
-    field_decoders: Dict[FieldName, Callable] = {
+    field_decoders: dict[FieldName, Callable] = {
         "bool_value": (lambda v: v.bool_value),
         "string_value": (lambda v: v.string_value),
         "int_value": (lambda v: v.int_value),

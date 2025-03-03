@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
-
 import pytest
 from transformers import AutoTokenizer
 
@@ -180,7 +178,7 @@ def test_reasoning(
 ):
     output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
-    output_tokens: List[str] = [
+    output_tokens: list[str] = [
         tokenizer.convert_tokens_to_string([token]) for token in output
     ]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(

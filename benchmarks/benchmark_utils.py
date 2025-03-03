@@ -4,12 +4,12 @@ import argparse
 import json
 import math
 import os
-from typing import Any, Dict, List
+from typing import Any
 
 
 def convert_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                        metrics: Dict[str, List],
-                                        extra_info: Dict[str, Any]) -> List:
+                                        metrics: dict[str, list],
+                                        extra_info: dict[str, Any]) -> list:
     """
     Save the benchmark results in the format used by PyTorch OSS benchmark with
     on metric per record
@@ -64,6 +64,6 @@ class InfEncoder(json.JSONEncoder):
         return super().iterencode(self.clear_inf(o), *args, **kwargs)
 
 
-def write_to_json(filename: str, records: List) -> None:
+def write_to_json(filename: str, records: list) -> None:
     with open(filename, "w") as f:
         json.dump(records, f, cls=InfEncoder)

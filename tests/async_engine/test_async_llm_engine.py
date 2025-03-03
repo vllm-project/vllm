@@ -6,7 +6,7 @@ import uuid
 from asyncio import CancelledError
 from copy import copy
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import pytest
 import pytest_asyncio
@@ -254,7 +254,7 @@ async def test_output_kinds(async_engine, stop):
         params.output_kind = RequestOutputKind.DELTA
 
         prompt_tokens = None
-        output_tokens: List[int] = []
+        output_tokens: list[int] = []
         output_text = ""
         output_count = 0
         final_output = None

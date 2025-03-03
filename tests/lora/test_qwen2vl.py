@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Optional
 
 import pytest
 from packaging.version import Version
@@ -20,7 +20,7 @@ class TestConfig:
     max_loras: int = 2
     max_lora_rank: int = 16
     max_model_len: int = 4096
-    mm_processor_kwargs: Optional[Dict[str, int]] = None
+    mm_processor_kwargs: Optional[dict[str, int]] = None
 
     def __post_init__(self):
         if self.mm_processor_kwargs is None:
@@ -57,11 +57,11 @@ class Qwen2VLTester:
         )
 
     def run_test(self,
-                 images: List[ImageAsset],
-                 expected_outputs: List[str],
+                 images: list[ImageAsset],
+                 expected_outputs: list[str],
                  lora_id: Optional[int] = None,
                  temperature: float = 0,
-                 max_tokens: int = 5) -> List[str]:
+                 max_tokens: int = 5) -> list[str]:
 
         sampling_params = vllm.SamplingParams(
             temperature=temperature,

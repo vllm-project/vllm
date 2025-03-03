@@ -193,7 +193,7 @@ class Step(BaseModel):
 
 
 class MathResponse(BaseModel):
-    steps: List[Step]
+    steps: list[Step]
     final_answer: str
 
 

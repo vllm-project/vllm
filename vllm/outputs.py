@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
+from collections.abc import MutableSequence
+from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
-from typing import Dict, Generic, List, MutableSequence, Optional
-from typing import Sequence as GenericSequence
-from typing import Union
+from typing import Generic, Optional, Union
 
 import torch
 from typing_extensions import TypeVar, deprecated
@@ -109,14 +109,14 @@ class RequestOutput:
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: Optional[List[int]],
+        prompt_token_ids: Optional[list[int]],
         prompt_logprobs: Optional[PromptLogprobs],
-        outputs: List[CompletionOutput],
+        outputs: list[CompletionOutput],
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
-        encoder_prompt_token_ids: Optional[List[int]] = None,
+        encoder_prompt_token_ids: Optional[list[int]] = None,
         num_cached_tokens: Optional[int] = None,
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
@@ -139,9 +139,9 @@ class RequestOutput:
         cls,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: Optional[List[int]],
+        prompt_token_ids: Optional[list[int]],
         text: str,
-        token_ids: List[int],
+        token_ids: list[int],
         logprobs: Optional[SampleLogprobs],
         prompt_logprobs: Optional[PromptLogprobs],
         cumulative_logprob: Optional[float],
@@ -189,7 +189,7 @@ class RequestOutput:
     @classmethod
     def from_seq_group(
         cls, seq_group: SequenceGroup, use_cache: bool,
-        seq_id_to_seq_group: Dict[str, SequenceGroupBase]
+        seq_id_to_seq_group: dict[str, SequenceGroupBase]
     ) -> Optional["RequestOutput"]:
         finished = seq_group.is_finished()
 
@@ -363,12 +363,12 @@ class PoolingRequestOutput(Generic[_O]):
     Args:
         request_id (str): A unique identifier for the pooling request.
         outputs (PoolingOutput): The pooling results for the given input.
-        prompt_token_ids (List[int]): A list of token IDs used in the prompt.
+        prompt_token_ids (list[int]): A list of token IDs used in the prompt.
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
     def __init__(self, request_id: str, outputs: _O,
-                 prompt_token_ids: List[int], finished: bool):
+                 prompt_token_ids: list[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished
@@ -407,7 +407,7 @@ class RequestOutputFactory:
 
     @staticmethod
     def create(seq_group: SequenceGroup,
-               seq_id_to_seq_group: Dict[str, SequenceGroupBase],
+               seq_id_to_seq_group: dict[str, SequenceGroupBase],
                use_cache: bool = False):
         if seq_group.pooled_data is not None:
             return PoolingRequestOutput.from_seq_group(seq_group)

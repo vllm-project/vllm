@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import List, Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional
 
 import pytest
 
@@ -28,8 +28,8 @@ class EPTestOptions(NamedTuple):
 
 @dataclass
 class EPTestSettings:
-    parallel_setups: List[ParallelSetup]
-    distributed_backends: List[str]
+    parallel_setups: list[ParallelSetup]
+    distributed_backends: list[str]
     task: TaskOption
     test_options: EPTestOptions
 

@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-from typing import List, Tuple
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 
 
-def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
+def create_test_prompts() -> list[tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
     return [
         ("A robot may not injure a human being",
@@ -24,7 +23,7 @@ def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
 
 
 def process_requests(engine: LLMEngine,
-                     test_prompts: List[Tuple[str, SamplingParams]]):
+                     test_prompts: list[tuple[str, SamplingParams]]):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
 
@@ -34,7 +33,7 @@ def process_requests(engine: LLMEngine,
             engine.add_request(str(request_id), prompt, sampling_params)
             request_id += 1
 
-        request_outputs: List[RequestOutput] = engine.step()
+        request_outputs: list[RequestOutput] = engine.step()
 
         for request_output in request_outputs:
             if request_output.finished:

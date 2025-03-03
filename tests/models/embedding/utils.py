@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Sequence
+from collections.abc import Sequence
 
 import torch
 import torch.nn.functional as F
@@ -8,8 +8,8 @@ import torch.nn.functional as F
 
 def check_embeddings_close(
     *,
-    embeddings_0_lst: Sequence[List[float]],
-    embeddings_1_lst: Sequence[List[float]],
+    embeddings_0_lst: Sequence[list[float]],
+    embeddings_1_lst: Sequence[list[float]],
     name_0: str,
     name_1: str,
     tol: float = 1e-3,

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from typing import List
 
 import pytest
 import ray
@@ -133,7 +132,7 @@ def test_metric_counter_generation_tokens_multi_step(
     "served_model_name",
     [None, [], ["ModelName0"], ["ModelName0", "ModelName1", "ModelName2"]])
 def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
-                                   served_model_name: List[str]) -> None:
+                                   served_model_name: list[str]) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      disable_log_stats=False,

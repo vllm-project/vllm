@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List, Union
+from typing import Union
 
 from torch.nn import CosineSimilarity
 
@@ -10,12 +10,12 @@ from vllm.transformers_utils.tokenizer import (PreTrainedTokenizer,
 
 def _cosine_similarity(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    embed_1: List[PoolingRequestOutput],
-    embed_2: List[PoolingRequestOutput],
-) -> List[PoolingRequestOutput]:
+    embed_1: list[PoolingRequestOutput],
+    embed_2: list[PoolingRequestOutput],
+) -> list[PoolingRequestOutput]:
 
     scorer = CosineSimilarity(0)
-    scores: Union[List[PoolingRequestOutput]] = []
+    scores: Union[list[PoolingRequestOutput]] = []
 
     for emb_1, emb_2 in zip(embed_1, embed_2):
         pair_score = scorer(emb_1.outputs.data, emb_2.outputs.data)
@@ -38,8 +38,8 @@ def _cosine_similarity(
 
 
 def _validate_score_input_lens(
-    texts_1: Union[List[str], List[dict]],
-    texts_2: Union[List[str], List[dict]],
+    texts_1: Union[list[str], list[dict]],
+    texts_2: Union[list[str], list[dict]],
 ):
     if len(texts_1) > 1 and len(texts_1) != len(texts_2):
         raise ValueError("Input lengths must be either 1:1, 1:N or N:N")

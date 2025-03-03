@@ -2,7 +2,7 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import numpy as np
 import torch
@@ -24,16 +24,16 @@ if TYPE_CHECKING:
 class CachedRequestState:
 
     req_id: str
-    prompt_token_ids: List[int]
+    prompt_token_ids: list[int]
     prompt: Optional[str]
-    mm_inputs: List[MultiModalKwargs]
-    mm_positions: List["PlaceholderRange"]
+    mm_inputs: list[MultiModalKwargs]
+    mm_positions: list["PlaceholderRange"]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: List[int]
+    block_ids: list[int]
     num_computed_tokens: int
-    output_token_ids: List[int]
+    output_token_ids: list[int]
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
@@ -63,8 +63,8 @@ class InputBatch:
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
 
-        self._req_ids: List[Optional[str]] = []
-        self.req_id_to_index: Dict[str, int] = {}
+        self._req_ids: list[Optional[str]] = []
+        self.req_id_to_index: dict[str, int] = {}
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
         # Find a way to reduce the CPU memory usage.
@@ -106,8 +106,8 @@ class InputBatch:
                                                   device="cpu",
                                                   pin_memory=pin_memory)
         self.temperature_cpu = self.temperature_cpu_tensor.numpy()
-        self.greedy_reqs: Set[str] = set()
-        self.random_reqs: Set[str] = set()
+        self.greedy_reqs: set[str] = set()
+        self.random_reqs: set[str] = set()
 
         self.top_p = torch.empty((max_num_reqs, ),
                                  dtype=torch.float32,
@@ -117,7 +117,7 @@ class InputBatch:
                                             device="cpu",
                                             pin_memory=pin_memory)
         self.top_p_cpu = self.top_p_cpu_tensor.numpy()
-        self.top_p_reqs: Set[str] = set()
+        self.top_p_reqs: set[str] = set()
 
         self.top_k = torch.empty((max_num_reqs, ),
                                  dtype=torch.int32,
@@ -127,7 +127,7 @@ class InputBatch:
                                             device="cpu",
                                             pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
-        self.top_k_reqs: Set[str] = set()
+        self.top_k_reqs: set[str] = set()
 
         self.min_p = torch.empty((max_num_reqs, ),
                                  dtype=torch.float32,
@@ -137,7 +137,7 @@ class InputBatch:
                                             device="cpu",
                                             pin_memory=pin_memory)
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
-        self.min_p_reqs: Set[str] = set()
+        self.min_p_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ),
@@ -150,7 +150,7 @@ class InputBatch:
             pin_memory=pin_memory)
         self.frequency_penalties_cpu = \
             self.frequency_penalties_cpu_tensor.numpy()
-        self.frequency_penalties_reqs: Set[str] = set()
+        self.frequency_penalties_reqs: set[str] = set()
 
         # Presence penalty related data structures
         self.presence_penalties = torch.empty((max_num_reqs, ),
@@ -162,7 +162,7 @@ class InputBatch:
                                                          pin_memory=pin_memory)
         self.presence_penalties_cpu = self.presence_penalties_cpu_tensor.numpy(
         )
-        self.presence_penalties_reqs: Set[str] = set()
+        self.presence_penalties_reqs: set[str] = set()
 
         # Repetition penalty related data structures
         self.repetition_penalties = torch.empty((max_num_reqs, ),
@@ -175,43 +175,43 @@ class InputBatch:
             pin_memory=pin_memory)
         self.repetition_penalties_cpu = \
             self.repetition_penalties_cpu_tensor.numpy()
-        self.repetition_penalties_reqs: Set[str] = set()
+        self.repetition_penalties_reqs: set[str] = set()
 
         # req_index -> (min_tokens, stop_token_ids)
-        self.min_tokens: Dict[int, Tuple[int, Set[int]]] = {}
+        self.min_tokens: dict[int, tuple[int, set[int]]] = {}
 
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
-        self.lora_id_to_request_ids: Dict[int, Set[str]] = {}
-        self.lora_id_to_lora_request: Dict[int, LoRARequest] = {}
+        self.lora_id_to_request_ids: dict[int, set[str]] = {}
+        self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
-        self.generators: Dict[int, torch.Generator] = {}
+        self.generators: dict[int, torch.Generator] = {}
 
-        self.num_logprobs: Dict[str, int] = {}
+        self.num_logprobs: dict[str, int] = {}
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
-        self.num_prompt_logprobs: Dict[str, int] = {}
+        self.num_prompt_logprobs: dict[str, int] = {}
 
-        self.logit_bias: List[Optional[Dict[int,
+        self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
-        self.has_allowed_token_ids: Set[str] = set()
+        self.has_allowed_token_ids: set[str] = set()
         self.allowed_token_ids_mask: Optional[torch.Tensor] = None
         self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
 
-        self.req_output_token_ids: List[Optional[List[int]]] = []
+        self.req_output_token_ids: list[Optional[list[int]]] = []
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
 
     @property
-    def req_ids(self) -> List[str]:
+    def req_ids(self) -> list[str]:
         # None elements should only be present transiently
         # while performing state updates to the batch.
-        return cast(List[str], self._req_ids)
+        return cast(list[str], self._req_ids)
 
     def add_request(
         self,
@@ -417,7 +417,7 @@ class InputBatch:
             self.logit_bias[i2], self.logit_bias[i1]
         self.block_table.swap_row(i1, i2)
 
-    def condense(self, empty_req_indices: List[int]) -> None:
+    def condense(self, empty_req_indices: list[int]) -> None:
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
@@ -550,7 +550,7 @@ class InputBatch:
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
-            output_token_ids=cast(List[List[int]], self.req_output_token_ids),
+            output_token_ids=cast(list[list[int]], self.req_output_token_ids),
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
@@ -577,7 +577,7 @@ class InputBatch:
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray
-    ) -> Tuple[Tuple[int, ...], Tuple[int, ...], Set[LoRARequest]]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
         datastructures used to activate the current LoRAs.
@@ -593,7 +593,7 @@ class InputBatch:
         prompt_lora_mapping = tuple(req_lora_mapping)
         token_lora_mapping = tuple(
             req_lora_mapping.repeat(num_scheduled_tokens))
-        active_lora_requests: Set[LoRARequest] = set(
+        active_lora_requests: set[LoRARequest] = set(
             self.lora_id_to_lora_request.values())
 
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests

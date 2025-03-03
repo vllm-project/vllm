@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for rejection sampling."""
-from typing import List, Tuple
 
 import pytest
 import torch
@@ -416,8 +415,8 @@ def test_rejection_sampling_approximates_target_distribution(
         draft_and_target_probs_equal)
 
     sample_sizes = [10, 100, 1_000, 10_000, 100_000]
-    distance_wrt_reference: List[float] = []
-    distance_wrt_target: List[float] = []
+    distance_wrt_reference: list[float] = []
+    distance_wrt_target: list[float] = []
 
     for num_samples in sample_sizes:
         (reference_vs_rejsample_dist,
@@ -452,7 +451,7 @@ def test_rejection_sampling_approximates_target_distribution(
             expected_improvement_multiplier)
 
 
-def get_ratio_first_to_last(elements: List[float]) -> float:
+def get_ratio_first_to_last(elements: list[float]) -> float:
     return elements[0] / elements[-1]
 
 
@@ -477,7 +476,7 @@ class _CorrectnessTestHelper:
 
     def generate_probs_for_test(
         self, draft_and_target_probs_equal: bool
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         draft_probs, target_probs = (F.softmax(
             torch.rand(self.vocab_size, dtype=torch.float32),
             dim=-1,
@@ -499,7 +498,7 @@ class _CorrectnessTestHelper:
     def run_and_compare_distributions(self, draft_probs: torch.Tensor,
                                       target_probs: torch.Tensor,
                                       reference_probs: torch.Tensor,
-                                      num_samples: int) -> Tuple[float, float]:
+                                      num_samples: int) -> tuple[float, float]:
         # Sample using rejection sampling.
         rej_sample_probs = self._estimate_rejection_sampling_pdf(
             draft_probs, target_probs, num_samples)

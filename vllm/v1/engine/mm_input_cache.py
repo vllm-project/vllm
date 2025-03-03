@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from vllm.config import ModelConfig
 from vllm.envs import VLLM_MM_INPUT_CACHE_SIZE
@@ -68,10 +68,10 @@ class MMInputCacheClient:
     def process_inputs(
         self,
         mm_data: MultiModalDataDict,
-        mm_hashes: Optional[List[str]],
-        mm_processor_kwargs: Optional[Dict[str, Any]],
-        precomputed_mm_inputs: Optional[List[MultiModalKwargs]],
-    ) -> List[MultiModalKwargs]:
+        mm_hashes: Optional[list[str]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+        precomputed_mm_inputs: Optional[list[MultiModalKwargs]],
+    ) -> list[MultiModalKwargs]:
         if precomputed_mm_inputs is None:
             image_inputs = mm_data["image"]
             if not isinstance(image_inputs, list):
@@ -88,7 +88,7 @@ class MMInputCacheClient:
         # Process each image input separately, so that later we can schedule
         # them in a fine-grained manner.
         # Apply caching (if enabled) and reuse precomputed inputs (if provided)
-        ret_inputs: List[MultiModalKwargs] = []
+        ret_inputs: list[MultiModalKwargs] = []
         for input_id in range(num_inputs):
             if self.mm_debug_cache_hit_ratio_steps is not None:
                 self.cache_hit_ratio(self.mm_debug_cache_hit_ratio_steps)
@@ -133,9 +133,9 @@ class MMInputCacheServer:
 
     def get_and_update(
         self,
-        mm_inputs: List[Optional[MultiModalKwargs]],
-        mm_hashes: List[str],
-    ) -> List[MultiModalKwargs]:
+        mm_inputs: list[Optional[MultiModalKwargs]],
+        mm_hashes: list[str],
+    ) -> list[MultiModalKwargs]:
         assert len(mm_inputs) == len(mm_hashes)
 
         if not self.use_cache:

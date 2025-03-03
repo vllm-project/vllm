@@ -28,12 +28,12 @@ import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
+                             Iterable, Iterator, Mapping)
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
-from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
-                    Dict, Generator, Generic, Iterator, List, Literal,
-                    NamedTuple, Optional, Tuple, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
+                    Optional, TypeVar, Union)
 from uuid import uuid4
 
 import cloudpickle
@@ -400,7 +400,7 @@ def _next_task(iterator: AsyncGenerator[T, None],
 
 async def merge_async_iterators(
     *iterators: AsyncGenerator[T,
-                               None], ) -> AsyncGenerator[Tuple[int, T], None]:
+                               None], ) -> AsyncGenerator[tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
     This method handle the case where some iterators finish before others.
@@ -433,7 +433,7 @@ async def merge_async_iterators(
 
 
 async def collect_from_async_generator(
-        iterator: AsyncGenerator[T, None]) -> List[T]:
+        iterator: AsyncGenerator[T, None]) -> list[T]:
     """Collect all items from an async generator into a list."""
     items = []
     async for item in iterator:
@@ -560,7 +560,7 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     return None
 
 
-def update_environment_variables(envs: Dict[str, str]):
+def update_environment_variables(envs: dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
@@ -569,7 +569,7 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst: List[T], chunk_size: int):
+def chunk_list(lst: list[T], chunk_size: int):
     """Yield successive chunk_size chunks from lst."""
     for i in range(0, len(lst), chunk_size):
         yield lst[i:i + chunk_size]
@@ -642,7 +642,7 @@ def create_kv_caches_with_random_flash(
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: int = 0,
     device: Optional[str] = "cuda",
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
@@ -650,8 +650,8 @@ def create_kv_caches_with_random_flash(
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     scale = head_size**-0.5
 
-    key_caches: List[torch.Tensor] = []
-    value_caches: List[torch.Tensor] = []
+    key_caches: list[torch.Tensor] = []
+    value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
         key_value_cache = torch.empty(size=key_value_cache_shape,
@@ -679,7 +679,7 @@ def create_kv_caches_with_random(
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: int = 0,
     device: Optional[str] = "cuda",
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
 
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
@@ -693,7 +693,7 @@ def create_kv_caches_with_random(
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
-    key_caches: List[torch.Tensor] = []
+    key_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=torch_dtype,
@@ -708,7 +708,7 @@ def create_kv_caches_with_random(
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
-    value_caches: List[torch.Tensor] = []
+    value_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=torch_dtype,
@@ -754,7 +754,7 @@ class DeviceMemoryProfiler:
 
 
 def make_ndarray_with_pad(
-    x: List[List[T]],
+    x: list[list[T]],
     pad: T,
     dtype: npt.DTypeLike,
     *,
@@ -779,7 +779,7 @@ def make_ndarray_with_pad(
 
 
 def make_tensor_with_pad(
-    x: List[List[T]],
+    x: list[list[T]],
     pad: T,
     dtype: torch.dtype,
     *,
@@ -831,7 +831,7 @@ def is_list_of(
     typ: Union[type[T], tuple[type[T], ...]],
     *,
     check: Literal["first", "all"] = "first",
-) -> TypeIs[List[T]]:
+) -> TypeIs[list[T]]:
     if not isinstance(value, list):
         return False
 
@@ -843,8 +843,8 @@ def is_list_of(
     assert_never(check)
 
 
-JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
-                 Tuple["JSONTree[T]", ...], T]
+JSONTree = Union[dict[str, "JSONTree[T]"], list["JSONTree[T]"],
+                 tuple["JSONTree[T]", ...], T]
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
 
@@ -859,7 +859,7 @@ def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
         return func(value)
 
 
-def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
+def flatten_2d_lists(lists: list[list[T]]) -> list[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
 
@@ -1226,7 +1226,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return value
 
-    def _pull_args_from_config(self, args: List[str]) -> List[str]:
+    def _pull_args_from_config(self, args: list[str]) -> list[str]:
         """Method to pull arguments specified in the config file
         into the command-line args variable.
 
@@ -1291,7 +1291,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return args
 
-    def _load_config_file(self, file_path: str) -> List[str]:
+    def _load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -1313,9 +1313,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                               %s supplied", extension)
 
         # only expecting a flat dictionary of atomic types
-        processed_args: List[str] = []
+        processed_args: list[str] = []
 
-        config: Dict[str, Union[int, str]] = {}
+        config: dict[str, Union[int, str]] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -1399,7 +1399,7 @@ def resolve_mm_processor_kwargs(
     *,
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
     those who are not explicit keywords to the given callable (of one is
     given; otherwise no filtering is done), then merges the kwarg dicts,
@@ -1440,7 +1440,7 @@ def get_allowed_kwarg_only_overrides(
     *,
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Given a callable which has one or more keyword only params and a dict
     mapping param names to values, drop values that can be not be kwarg
@@ -1531,9 +1531,9 @@ class AtomicCounter:
 # Adapted from: https://stackoverflow.com/a/47212782/5082708
 class LazyDict(Mapping[str, T], Generic[T]):
 
-    def __init__(self, factory: Dict[str, Callable[[], T]]):
+    def __init__(self, factory: dict[str, Callable[[], T]]):
         self._factory = factory
-        self._dict: Dict[str, T] = {}
+        self._dict: dict[str, T] = {}
 
     def __getitem__(self, key: str) -> T:
         if key not in self._dict:
@@ -1552,9 +1552,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[Type[T], _V]):
+class ClassRegistry(UserDict[type[T], _V]):
 
-    def __getitem__(self, key: Type[T]) -> _V:
+    def __getitem__(self, key: type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -1584,8 +1584,8 @@ def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def weak_ref_tensors(
-    tensors: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]
-) -> Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]:
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -1857,7 +1857,7 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
     op_name: str,
     op_func: Callable,
-    mutates_args: List[str],
+    mutates_args: list[str],
     fake_impl: Optional[Callable] = None,
     target_lib: Optional[Library] = None,
     dispatch_key: str = "CUDA",
@@ -2177,8 +2177,8 @@ def get_mp_context():
 
 
 def bind_kv_cache(
-        ctx: Dict[str, Any],
-        kv_cache: List[List[torch.Tensor]],  # [virtual_engine][layer_index]
+        ctx: dict[str, Any],
+        kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -2210,8 +2210,8 @@ def bind_kv_cache(
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
 
 
-def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
-               kwargs: Dict[str, Any]) -> Any:
+def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],
+               kwargs: dict[str, Any]) -> Any:
     """
     Run a method of an object with the given arguments and keyword arguments.
     If the method is string, it will be converted to a method using getattr.
@@ -2263,7 +2263,7 @@ def import_pynvml():
     return pynvml
 
 
-def warn_for_unimplemented_methods(cls: Type[T]) -> Type[T]:
+def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
     """
     A replacement for `abc.ABC`.
     When we use `abc.ABC`, subclasses will fail to instantiate

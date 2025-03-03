@@ -2,8 +2,9 @@
 
 import json
 import re
+from collections.abc import Sequence
 from json import JSONDecoder
-from typing import Dict, List, Sequence, Union
+from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -40,10 +41,10 @@ class Llama3JsonToolParser(ToolParser):
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode
-        self.prev_tool_call_arr: List[Dict] = []
+        self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.streamed_args_for_tool: List[str] = [
+        self.streamed_args_for_tool: list[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "<|python_tag|>"
         self.bot_token_id = tokenizer.encode(self.bot_token,
@@ -78,7 +79,7 @@ class Llama3JsonToolParser(ToolParser):
                 start_idx += end_idx + len('; ')
                 function_call_arr.append(obj)
 
-            tool_calls: List[ToolCall] = [
+            tool_calls: list[ToolCall] = [
                 ToolCall(
                     type="function",
                     function=FunctionCall(
@@ -152,7 +153,7 @@ class Llama3JsonToolParser(ToolParser):
                 return None
 
             # select as the current tool call the one we're on the state at
-            current_tool_call: Dict = tool_call_arr[self.current_tool_id] \
+            current_tool_call: dict = tool_call_arr[self.current_tool_id] \
                 if len(tool_call_arr) > 0 else {}
 
             # case -- if no tokens have been streamed for the tool, e.g.

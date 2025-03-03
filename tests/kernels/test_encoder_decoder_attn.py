@@ -243,7 +243,7 @@ def _decoder_attn_setup(
     test_pt: TestPoint,
     test_rsrcs: TestResources,
     block_base_addr: int = 0,
-) -> Tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
+) -> tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
     '''
     Set up test vectors & data structures for self-attention test.
 
@@ -421,7 +421,7 @@ def _enc_dec_cross_attn_setup_reuses_query(
     test_pt: TestPoint,
     test_rsrcs: TestResources,
     block_base_addr: int = 0,
-) -> Tuple[PhaseTestParameters, PhaseTestParameters]:
+) -> tuple[PhaseTestParameters, PhaseTestParameters]:
     '''
     Set up test vectors & data structures for cross-attention test.
 
