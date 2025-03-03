@@ -449,8 +449,8 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
     #print(f"FIRST GEMM {a_q.shape}")
 
     # m_indices maps to expert_ids
-    m_indices = torch.arange(0, M, dtype=torch.int)
-    m_indices = m_indices.unsqueeze(-1).expand(M, topk).contiguous().view(-1)
+    m_indices = torch.arange(0, topk, dtype=torch.int)
+    m_indices = m_indices.unsqueeze(-1).expand(topk, M).contiguous().view(-1)
     p("m_indices", m_indices)
     pp(m_indices)
     p("topk_ids", topk_ids)
@@ -499,6 +499,7 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
     itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+    #itertools.product([512], [128], [256], [2], [1], [[128, 128]], DTYPES, SEEDS))
     #itertools.product([2], [256], [512], [2], [1], [[128, 128]], DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
