@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -63,6 +64,17 @@ class RayDistributedExecutor(DistributedExecutorBase):
     WORKER_SPECIFIC_ENV_VARS = {
         "VLLM_HOST_IP", "VLLM_HOST_PORT", "LOCAL_RANK", "CUDA_VISIBLE_DEVICES"
     }
+
+    config_home = envs.VLLM_CONFIG_ROOT
+    # This file contains a list of env vars that should not be copied
+    # from the driver to the Ray workers.
+    non_carry_over_env_vars_file = os.path.join(
+        config_home, "ray_non_carry_over_env_vars.json")
+    if os.path.exists(non_carry_over_env_vars_file):
+        with open(non_carry_over_env_vars_file) as f:
+            non_carry_over_env_vars = set(json.load(f))
+    else:
+        non_carry_over_env_vars = set()
 
     uses_ray: bool = True
 
@@ -327,8 +339,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Environment variables to copy from driver to workers
         env_vars_to_copy = [
             v for v in envs.environment_variables
-            if v not in self.INSTALL_TIME_ENV_VARS
-            and v not in self.WORKER_SPECIFIC_ENV_VARS
+            if v not in self.INSTALL_TIME_ENV_VARS and v not in self.
+            WORKER_SPECIFIC_ENV_VARS and v not in self.non_carry_over_env_vars
         ]
 
         # Copy existing env vars to each worker's args
@@ -338,6 +350,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 if name in os.environ:
                     args[name] = os.environ[name]
 
+        logger.info("non_carry_over_env_vars from config: %s",
+                    self.non_carry_over_env_vars)
         logger.info(
             "Copying the following environment variables to workers: %s",
             [v for v in env_vars_to_copy if v in os.environ])
