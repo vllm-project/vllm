@@ -206,6 +206,13 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=[1, 2, 5, 10, 20],
                 labelnames=labelnames).labels(*labelvalues)
 
+        self.histogram_max_tokens_request = \
+            prometheus_client.Histogram(
+                name="vllm:request_params_max_tokens",
+                documentation="Histogram of the max_tokens request parameter.",
+                buckets=build_1_2_5_buckets(max_model_len),
+                labelnames=labelnames).labels(*labelvalues)
+
         #
         # Histogram of timing intervals
         #
@@ -357,6 +364,8 @@ class PrometheusStatLogger(StatLoggerBase):
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
                 finished_request.num_generation_tokens)
+            self.histogram_max_tokens_request.observe(
+                finished_request.max_tokens_param)
 
         if self.gauge_lora_info is not None:
             running_lora_adapters = \
