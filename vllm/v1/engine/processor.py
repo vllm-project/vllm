@@ -55,11 +55,8 @@ class Processor:
 
     def _validate_logprobs(
         self,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams,
     ) -> None:
-        if not isinstance(params, SamplingParams):
-            return
-
         max_logprobs = self.model_config.max_logprobs
         # Validate sample logprobs.
         if params.logprobs and params.logprobs > max_logprobs:
@@ -79,23 +76,49 @@ class Processor:
             raise ValueError("Prefix caching with prompt logprobs not yet "
                              "supported on VLLM V1.")
 
+    def _validate_sampling_params(
+        self,
+        params: SamplingParams,
+    ) -> None:
+
+        # Allowed token ids.
+        if (params.allowed_token_ids is not None
+                and not all(0 <= tid < self.model_config.vocab_size
+                            for tid in params.allowed_token_ids)):
+            raise ValueError(
+                "allowed_token_ids contains out-of-vocab token id")
+
+    def _validate_supported_sampling_params(
+        self,
+        params: SamplingParams,
+    ) -> None:
+        # Best of.
+        if params.best_of is not None:
+            raise ValueError("VLLM V1 does not support best_of.")
+        # Bad words.
+        if params.bad_words is not None:
+            raise ValueError("VLLM V1 does not support bad_words.")
+
+    def _validate_params(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+    ):
+        """
+        Validate supported SamplingParam.
+        Should raise ValueError if unsupported for API Server.
+        """
+
+        if not isinstance(params, SamplingParams):
+            raise ValueError("V1 does not yet support Pooling models.")
+
+        self._validate_logprobs(params)
+        self._validate_sampling_params(params)
+        self._validate_supported_sampling_params(params)
+
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
-
-    def _validate_allowed_token_ids(
-        self,
-        params: Union[SamplingParams, PoolingParams],
-    ) -> None:
-        if not isinstance(params, SamplingParams):
-            return
-        if params.allowed_token_ids is None:
-            return
-        if not all(0 <= tid < self.model_config.vocab_size
-                   for tid in params.allowed_token_ids):
-            raise ValueError(
-                "allowed_token_ids contains out-of-vocab token id")
 
     def process_inputs(
         self,
@@ -112,9 +135,8 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
-        self._validate_logprobs(params)
         self._validate_lora(lora_request)
-        self._validate_allowed_token_ids(params)
+        self._validate_params(params)
 
         if arrival_time is None:
             arrival_time = time.time()
