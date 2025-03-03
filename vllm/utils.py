@@ -1754,6 +1754,31 @@ def is_navi3() -> bool:
     return archName is not None and "gfx11" in archName
 
 
+@cache
+def aiter_moe_enabled() -> bool:
+    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_MOE
+
+
+@cache
+def aiter_2stage_moe_enabled() -> bool:
+    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_2STAGE_MOE
+
+
+@cache
+def aiter_paged_attn_enabled() -> bool:
+    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_PAGED_ATTN
+
+
+@cache
+def aiter_linear_enabled() -> bool:
+    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_LINEAR
+
+
+@cache
+def aiter_norm_enabled() -> bool:
+    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_NORM
+
+
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]
 ) -> Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]:

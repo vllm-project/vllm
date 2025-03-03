@@ -225,12 +225,8 @@ class RocmPlatform(Platform):
                                         or envs.VLLM_USE_AITER_MOE
                                         or envs.VLLM_USE_AITER_NORM
                                         or envs.VLLM_USE_AITER_PAGED_ATTN):
-            logger.info("Aiter main switch - VLLM_USE_AITER is not set,"
+            logger.info("Aiter main switch (VLLM_USE_AITER) is not set."
                         " Disabling individual Aiter components")
-            envs.VLLM_USE_AITER_LINEAR = False
-            envs.VLLM_USE_AITER_MOE = False
-            envs.VLLM_USE_AITER_NORM = False
-            envs.VLLM_USE_AITER_PAGED_ATTN = False
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

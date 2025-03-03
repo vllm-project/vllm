@@ -116,7 +116,7 @@ ENV TOKENIZERS_PARALLELISM=false
 ENV HIP_FORCE_DEV_KERNARG=1
 
 # Enable Aiter. Make sure this only exists on the aiter branch.
-ENV VLLM_USE_AITER=1
+# ENV VLLM_USE_AITER=1
 
 CMD ["/bin/bash"]
 

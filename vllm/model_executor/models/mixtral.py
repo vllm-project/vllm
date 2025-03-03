@@ -28,7 +28,6 @@ import torch
 from torch import nn
 from transformers import MixtralConfig
 
-from vllm import envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -48,6 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.utils import aiter_linear_enabled
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (is_pp_missing_parameter,
@@ -85,7 +85,7 @@ class MixtralMoE(nn.Module):
             params_dtype=params_dtype,
             quant_config=None,
             prefix=f"{prefix}.gate",
-            out_dtype=torch.float32 if envs.VLLM_USE_AITER_LINEAR else None,
+            out_dtype=torch.float32 if aiter_linear_enabled() else None,
         )
 
         self.experts = FusedMoE(num_experts=num_experts,

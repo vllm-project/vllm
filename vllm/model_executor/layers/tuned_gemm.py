@@ -10,9 +10,9 @@ import torch.nn.functional as F
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.platforms import current_platform
-from vllm.utils import is_mi250, is_navi
+from vllm.utils import aiter_linear_enabled, is_mi250, is_navi
 
-if envs.VLLM_USE_AITER_LINEAR:
+if aiter_linear_enabled():
     from aiter.tuned_gemm import tgemm as aiter_tgemm
 
 support_tuned_gemms = False
@@ -105,7 +105,7 @@ class TunedGemm:
         scale_b: torch.Tensor,
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        if envs.VLLM_USE_AITER_LINEAR:
+        if aiter_linear_enabled():
             return aiter_tgemm.mm(inp,
                                   weight.t(),
                                   otype=out_dtype,

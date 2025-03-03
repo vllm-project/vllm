@@ -15,9 +15,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import aiter_moe_enabled, direct_register_custom_op
 
-if envs.VLLM_USE_AITER_MOE:
+if aiter_moe_enabled():
     import aiter
 
 logger = init_logger(__name__)
@@ -950,7 +950,7 @@ def fused_topk(
                                         dtype=torch.int32,
                                         device=hidden_states.device)
 
-    if envs.VLLM_USE_AITER_MOE:
+    if aiter_moe_enabled():
         aiter.topk_softmax(topk_weights, topk_ids, token_expert_indicies,
                            gating_output.float(), renormalize)
     else:

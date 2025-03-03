@@ -11,7 +11,6 @@ import vllm.envs as envs
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.envs import VLLM_USE_AITER_MOE
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
@@ -19,8 +18,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
+from vllm.utils import aiter_moe_enabled
 
-if VLLM_USE_AITER_MOE:
+if aiter_moe_enabled():
     from aiter import ck_moe
     from aiter.ops.shuffle import shuffle_weight
 
@@ -101,7 +101,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
-        if envs.VLLM_USE_AITER_MOE:
+        if aiter_moe_enabled():
             layer.w13_weight = torch.nn.Parameter(shuffle_weight(
                 layer.w13_weight.data),
                                                   requires_grad=False)
@@ -189,7 +189,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        if VLLM_USE_AITER_MOE:
+        if aiter_moe_enabled():
             return ck_moe(hidden_states=x,
                           w1=layer.w13_weight,
                           w2=layer.w2_weight,
