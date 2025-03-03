@@ -179,6 +179,7 @@ class DeepseekV3MoE(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor
+        show_mem_info(logger, f"{self._prefix}: after experts")
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.ep_size == 1 and self.tp_size > 1:
