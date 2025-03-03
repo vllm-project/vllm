@@ -302,7 +302,6 @@ class CustomAllreduce:
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
         """The main allreduce API that provides support for cuda graph."""
         # When custom allreduce is disabled, this will be None.
-        print(f"CA is disabled: {self.disabled}")
         if self.disabled or not self.should_custom_ar(input):
             return None
         if self._IS_CAPTURING:
