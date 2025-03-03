@@ -280,7 +280,7 @@ class CudaPlatformBase(Platform):
     @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
-        Usage of this function is discouraged in favor of device. In most cases 
+        Usage of this function is discouraged in favor of device. In most cases
         it’s better to use `vllm.current_platform.device_control_env_var` 
         environmental variable.
         """
