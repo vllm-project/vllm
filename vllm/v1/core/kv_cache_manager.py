@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections import defaultdict
-from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -52,20 +53,20 @@ class KVCacheManager:
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: DefaultDict[str,
-                                        List[KVCacheBlock]] = defaultdict(list)
+        self.req_to_blocks: defaultdict[str,
+                                        list[KVCacheBlock]] = defaultdict(list)
 
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
-        self.req_to_block_hashes: DefaultDict[
-            str, List[BlockHashType]] = defaultdict(list)
+        self.req_to_block_hashes: defaultdict[
+            str, list[BlockHashType]] = defaultdict(list)
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
         # data for reempted ones.
-        self.num_cached_block: Dict[str, int] = {}
+        self.num_cached_block: dict[str, int] = {}
         self.prefix_cache_stats = PrefixCacheStats()
 
     @property
@@ -88,7 +89,7 @@ class KVCacheManager:
         return stats
 
     def get_computed_blocks(
-            self, request: Request) -> Tuple[List[KVCacheBlock], int]:
+            self, request: Request) -> tuple[list[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -136,8 +137,8 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[List[KVCacheBlock]] = None
-    ) -> Optional[List[KVCacheBlock]]:
+        new_computed_blocks: Optional[list[KVCacheBlock]] = None
+    ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
         Args:
