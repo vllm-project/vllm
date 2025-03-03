@@ -26,7 +26,7 @@ def serve_parser():
     return make_arg_parser(parser)
 
 
-### Tests for Lora module parsing
+### Tests for LoRA module parsing
 def test_valid_key_value_format(serve_parser):
     # Test old format: name=path
     args = serve_parser.parse_args([

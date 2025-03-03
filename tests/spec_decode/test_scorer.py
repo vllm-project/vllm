@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from typing import List
 
 import pytest
 import torch
@@ -15,7 +14,7 @@ from vllm.worker.worker import Worker
 from .utils import create_batch, create_worker
 
 
-def create_proposal(propose_lens: List[int], vocab_size: int,
+def create_proposal(propose_lens: list[int], vocab_size: int,
                     device: str) -> SpeculativeProposals:
     batch_size = len(propose_lens)
     max_propose_len = max(propose_lens)

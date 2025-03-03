@@ -12,8 +12,42 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "vllm"
+authors = [{name = "vLLM Team"}]
+license = { "file"= "LICENSE" }
+readme = "README.md"
+description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
+classifiers = [
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+requires-python = ">=3.9"
+dynamic = [ "version", "dependencies", "optional-dependencies"]
+
+[project.urls]
+Homepage="https://github.com/vllm-project/vllm"
+Documentation="https://vllm.readthedocs.io/en/latest/"
+Slack="http://slack.vllm.ai/"
+
+[project.scripts]
+vllm = "vllm.entrypoints.cli.main:main"
+
 [tool.setuptools_scm]
-# version_file = "vllm/_version.py" # currently handled by `setup.py:get_version()`
+# no extra settings needed, presence enables setuptools-scm
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["benchmarks", "csrc", "docs", "examples", "tests*"]
+namespaces = false
 
 [tool.yapfignore]
 ignore_patterns = [
@@ -31,6 +65,32 @@ exclude = [
 [tool.ruff.lint.per-file-ignores]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+# Python 3.8 typing. TODO: Remove these excludes after v1.0.0
+"vllm/adapter_commons/**/*.py" = ["UP006", "UP035"]
+"vllm/attention/**/*.py" = ["UP006", "UP035"]
+"vllm/compilation/**/*.py" = ["UP006", "UP035"]
+"vllm/core/**/*.py" = ["UP006", "UP035"]
+"vllm/device_allocator/**/*.py" = ["UP006", "UP035"]
+"vllm/distributed/**/*.py" = ["UP006", "UP035"]
+"vllm/engine/**/*.py" = ["UP006", "UP035"]
+"vllm/executor/**/*.py" = ["UP006", "UP035"]
+"vllm/inputs/**/*.py" = ["UP006", "UP035"]
+"vllm/logging_utils/**/*.py" = ["UP006", "UP035"]
+"vllm/lora/**/*.py" = ["UP006", "UP035"]
+"vllm/model_executor/**/*.py" = ["UP006", "UP035"]
+"vllm/multimodal/**/*.py" = ["UP006", "UP035"]
+"vllm/platforms/**/*.py" = ["UP006", "UP035"]
+"vllm/plugins/**/*.py" = ["UP006", "UP035"]
+"vllm/profiler/**/*.py" = ["UP006", "UP035"]
+"vllm/prompt_adapter/**/*.py" = ["UP006", "UP035"]
+"vllm/spec_decode/**/*.py" = ["UP006", "UP035"]
+"vllm/third_party/**/*.py" = ["UP006", "UP035"]
+"vllm/transformers_utils/**/*.py" = ["UP006", "UP035"]
+"vllm/triton_utils/**/*.py" = ["UP006", "UP035"]
+"vllm/usage/**/*.py" = ["UP006", "UP035"]
+"vllm/vllm_flash_attn/**/*.py" = ["UP006", "UP035"]
+"vllm/assets/**/*.py" = ["UP006", "UP035"]
+"vllm/worker/**/*.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
 select = [
@@ -57,8 +117,6 @@ ignore = [
     "B007",
     # f-string format
     "UP032",
-    # Python 3.8 typing
-    "UP006", "UP035",
     # Can remove once 3.10+ is the minimum Python version
     "UP007",
 ]

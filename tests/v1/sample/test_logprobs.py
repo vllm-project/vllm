@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from typing import List, Tuple
 
 import pytest
 import torch
@@ -46,8 +45,8 @@ def hf_model(hf_runner):
 
 def _repeat_logprob_config(
     test_prompts,
-    logprob_prompt_logprob_list: List[Tuple],
-) -> List[Tuple]:
+    logprob_prompt_logprob_list: list[tuple],
+) -> list[tuple]:
     """Ensure each test prompt has a logprob config.
     
     A logprob config specifies the optional (i.e.
@@ -74,7 +73,7 @@ def _repeat_logprob_config(
                              tuples
     
     Returns:
-      List of
+      list of
       (optional num sample logprob,optional num prompt logprob)
       tuples which is either identical to
       `logprob_prompt_logprob_list`, or else repeats
@@ -177,7 +176,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                                for r in range(1, num_top_logprobs + 1))
 
             output_text = vllm_result.outputs[0].text
-            output_string_from_most_likely_tokens_lst: List[str] = []
+            output_string_from_most_likely_tokens_lst: list[str] = []
             for top_logprobs in vllm_result.outputs[0].logprobs:
                 top_logprob = next(iter(top_logprobs.values()))
                 output_string_from_most_likely_tokens_lst.append(

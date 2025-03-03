@@ -15,17 +15,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only IBM/NASA Prithvi Geospatial model."""
-from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (IsAttentionFree,
-                                                   SupportsMultiModal)
+                                                   SupportsMultiModal,
+                                                   SupportsV0Only)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -33,7 +34,7 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, MultiModalKwargs)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            PoolingSequenceGroupOutput)
@@ -45,7 +46,7 @@ class PrithviGeoSpatialMAEProcessingInfo(BaseProcessingInfo):
         return {"image": None}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        pass
+        return {"image": 0}
 
 
 class PrithviGeoSpatialMAEInputBuilder(
@@ -79,20 +80,13 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             location_coords=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
-        pass
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        pass
+    ) -> Sequence[PromptUpdate]:
+        return []
 
     def apply(
         self,
@@ -118,10 +112,11 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     PrithviGeoSpatialMAEMultiModalProcessor,
     info=PrithviGeoSpatialMAEProcessingInfo,
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
-class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
+class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
+                           SupportsV0Only):
     """ Prithvi Masked Autoencoder"""
 
-    def _instantiate_model(self, config: dict) -> nn.Module | None:
+    def _instantiate_model(self, config: dict) -> Optional[nn.Module]:
 
         # We might be able/need to support different tasks with this same model
         if config["task_args"]["task"] == "SemanticSegmentationTask":
@@ -154,12 +149,12 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
             vllm_config.model_config.hf_config.to_dict()["pretrained_cfg"])
         if self.model is None:
             raise ValueError(
-                "Unsupported task."
-                "Only SemanticSegmentationTask is supported for now"
+                "Unsupported task. "
+                "Only SemanticSegmentationTask is supported for now "
                 "by PrithviGeospatialMAE.")
 
     def _parse_and_validate_multimodal_data(
-            self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor | None]:
+            self, **kwargs) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
         pixel_values = kwargs.pop("pixel_values", None)
         if not isinstance(pixel_values, torch.Tensor):
@@ -181,8 +176,6 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,

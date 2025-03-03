@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
-
 import pytest  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig
@@ -48,7 +46,7 @@ def test_scheduler_schedule_simple_encoder_decoder():
     cache_config.num_cpu_blocks = 16  # enc and dec prompts per seq_group
     cache_config.num_gpu_blocks = 16  # enc and dec prompts per seq_group
     scheduler = Scheduler(scheduler_config, cache_config, None)
-    running: List[SequenceGroup] = []
+    running: list[SequenceGroup] = []
 
     # Add seq groups to scheduler.
     req_id_list = []

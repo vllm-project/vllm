@@ -305,6 +305,150 @@ def test_eagle_disable_queue(vllm_runner, common_llm_kwargs,
                                   batch_size, output_len, seed)
 
 
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": "float16",
+
+        # Main model
+        "model_name": "meta-llama/Llama-2-7b-chat-hf",
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "yuhuili/EAGLE-llama2-chat-7B",
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+    },
+])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
+@pytest.mark.parametrize("batch_size", [1, 5])
+@pytest.mark.parametrize("seed", [1])
+def test_llama2_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
+                                             per_test_common_llm_kwargs,
+                                             baseline_llm_kwargs,
+                                             test_llm_kwargs, batch_size: int,
+                                             output_len: int, seed: int):
+
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  output_len,
+                                  seed,
+                                  temperature=0.0)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": "float16",
+
+        # Main model
+        "model_name": "meta-llama/Meta-Llama-3-8B-Instruct",
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+    },
+])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
+@pytest.mark.parametrize("batch_size", [1, 5])
+@pytest.mark.parametrize("seed", [1])
+def test_llama3_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
+                                             per_test_common_llm_kwargs,
+                                             baseline_llm_kwargs,
+                                             test_llm_kwargs, batch_size: int,
+                                             output_len: int, seed: int):
+
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  output_len,
+                                  seed,
+                                  temperature=0.0)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": "float16",
+
+        # Main model
+        "model_name": "Qwen/Qwen2-7B-Instruct",
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "yuhuili/EAGLE-Qwen2-7B-Instruct",
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+    },
+])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
+@pytest.mark.parametrize("batch_size", [1, 5])
+@pytest.mark.parametrize("seed", [1])
+def test_qwen2_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
+                                            per_test_common_llm_kwargs,
+                                            baseline_llm_kwargs,
+                                            test_llm_kwargs, batch_size: int,
+                                            output_len: int, seed: int):
+
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  output_len,
+                                  seed,
+                                  temperature=0.0)
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__])

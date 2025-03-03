@@ -93,9 +93,10 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             ("ExecutorWithExternalLauncher needs deterministic "
             "execution, so it"
             "does not support delay_factor in scheduling")
-        assert not envs.VLLM_USE_V1, \
-            ("V1 architecture cannot guarantee deterministic execution, "
-            "so it is not supported in ExecutorWithExternalLauncher.")
+        if envs.VLLM_USE_V1:
+            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, \
+            ("To get deterministic execution in V1, "
+            "please set VLLM_ENABLE_V1_MULTIPROCESSING=0")
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
                                                rpc_rank=0)
         # engines are launched in torchrun-compatible launchers

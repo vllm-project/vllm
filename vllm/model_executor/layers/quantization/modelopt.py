@@ -28,6 +28,7 @@ class ModelOptFp8Config(QuantizationConfig):
         self,
         is_checkpoint_fp8_serialized: bool = False,
     ) -> None:
+        super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
             logger.warning("Detected ModelOpt fp8 checkpoint. Please note that"
@@ -55,7 +56,7 @@ class ModelOptFp8Config(QuantizationConfig):
         quant_method = quant_config["quant_algo"]
         is_checkpoint_fp8_serialized = ("FP8" in quant_method)
         if not is_checkpoint_fp8_serialized:
-            raise ValueError("ModelOpt currently only supports static FP8"
+            raise ValueError("ModelOpt currently only supports static FP8 "
                              "quantization in vLLM. Please check the "
                              "`hf_quant_config.json` file for your model's "
                              "quant configuration.")

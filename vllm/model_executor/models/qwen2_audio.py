@@ -21,9 +21,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Any, Iterable, List, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import Any, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -33,7 +33,6 @@ from transformers.models.qwen2_audio import (Qwen2AudioConfig,
                                              Qwen2AudioProcessor)
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -44,7 +43,7 @@ from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -93,8 +92,9 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
         *,
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
+        **kwargs: object,
     ) -> Qwen2AudioProcessor:
-        return self.ctx.get_hf_processor(Qwen2AudioProcessor)
+        return self.ctx.get_hf_processor(Qwen2AudioProcessor, **kwargs)
 
     def get_feature_extractor(
         self,
@@ -188,12 +188,12 @@ class Qwen2AudioMultiModalProcessor(
             feature_attention_mask=MultiModalFieldConfig.batched("audio"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
@@ -230,7 +230,7 @@ class Qwen2AudioMultiModalProcessor(
 
             audio_tokens = [audio_token_id] * num_features
 
-            return PromptReplacementDetails(
+            return PromptUpdateDetails(
                 full=[audio_bos_id] + audio_tokens + [audio_eos_id],
                 features=audio_tokens,
             )
@@ -242,16 +242,6 @@ class Qwen2AudioMultiModalProcessor(
                 replacement=get_replacement_qwen2_audio,
             )
         ]
-
-    def _always_apply_prompt_replacements(self) -> bool:
-        # Qwen2-Audio processor will start inserting placeholder tokens
-        # in an upcoming release:
-        # https://github.com/huggingface/transformers/pull/35534
-        # NOTE: `_find_placeholders_by_modality` may incorrectly think that HF
-        # has already performed processing for multi-audio input when the input
-        # audios are short (the corresponding placeholders may take up fewer
-        # tokens than the number of audio items)
-        return not hasattr(self.info.get_hf_processor(), "audio_token")
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -389,8 +379,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -409,8 +397,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
         return hidden_states

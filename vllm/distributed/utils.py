@@ -11,7 +11,11 @@ from collections import deque
 from typing import Any, Deque, Dict, Optional, Sequence, Tuple
 
 import torch
-from torch.distributed import TCPStore
+from torch.distributed import ProcessGroup, TCPStore
+from torch.distributed.distributed_c10d import (Backend, PrefixStore,
+                                                _get_default_timeout,
+                                                is_nccl_available)
+from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -63,8 +67,17 @@ def split_tensor_along_last_dim(
 def get_pp_indices(num_hidden_layers: int, pp_rank: int,
                    pp_size: int) -> Tuple[int, int]:
     """Try to evenly distribute layers across partitions.
+
     If the number of layers is not divisible by the number of partitions,
-    the last partition will have the remaining layers.
+    the remaining layers are evenly distributed across all but the last
+    partition. The last partition is excluded because it often contains an
+    additional norm layer and we are attempting to balance compute.
+
+    If `pp_size > 2` and the number of remaining layers is
+    `0 < x <= pp_size - 2` then the remaining layers are evenly distributed
+    across the middle partitions. The first and last partitions are excluded
+    because they contain the input and output embeddings respectively and we
+    are attempting to reduce maximum memory consumption across partitions.
     """
     partition_list_str = envs.VLLM_PP_LAYER_PARTITION
     if partition_list_str is not None:
@@ -80,15 +93,20 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
         if sum(partitions) != num_hidden_layers:
             raise ValueError(
                 f"{sum(partitions)=} does not match {num_hidden_layers=}.")
-        start_layer = sum(partitions[:pp_rank])
-        end_layer = start_layer + partitions[pp_rank]
     else:
         layers_per_partition = num_hidden_layers // pp_size
-        start_layer = pp_rank * layers_per_partition
-        end_layer = start_layer + layers_per_partition
+        partitions = [layers_per_partition for _ in range(pp_size)]
 
-        if pp_rank == pp_size - 1:
-            end_layer = num_hidden_layers
+        if remaining_layers := num_hidden_layers % pp_size:
+            for i in range(2, remaining_layers + 2):
+                partitions[-i] += 1
+            logger.info("Hidden layers were unevenly partitioned: %s",
+                        ",".join(str(p) for p in partitions))
+            logger.info("This can be manually overridden using the "
+                        "VLLM_PP_LAYER_PARTITION environment variable")
+
+    start_layer = sum(partitions[:pp_rank])
+    end_layer = start_layer + partitions[pp_rank]
 
     return (start_layer, end_layer)
 
@@ -227,3 +245,88 @@ class StatelessProcessGroup:
             world_size=world_size,
             store=store,
             data_expiration_seconds=data_expiration_seconds)
+
+
+def stateless_init_torch_distributed_process_group(
+        host: str, port: int, rank: int, world_size: int,
+        backend: str) -> ProcessGroup:
+    """
+    A replacement for `torch.distributed.init_process_group` that does not
+    pollute the global state. The created ProcessGroup object can be used for
+    some operations such as `allreduce`, because it does not depend on the
+    global rank. However, some operations such as `broadcast` cannot be used
+    because it depends on the global rank.
+
+    # TODO: ask for help from PyTorch team if we need the `broadcast` operation.
+
+    This function is useful when we are not sure about the total number of
+    processes in the process group. For example, we may have process
+    1, 2, ..., 8 who want to communicate, and process 9 might be the same
+    process as process 1, or it might be a different process; process 10
+    might be the same process as process 5, or it might be a different process.
+    In this case, how can we reliably form a communication channel within
+    process 9 and 10, without affecting the communication channel within
+    process 1, 2, ..., 8?
+
+    One possible solution is to figure out if process 9 and 10 are the same
+    as process 1 and 5 beforehand, and then form a communication channel
+    based on the information, adjusting the ranks and world_size etc. However,
+    figuring out the information is not always easy, and it will interfere
+    with the main communication channel.
+
+    Our solution is to always form a communication channel with process 1, 2,
+    ..., 8, and then use this function to form another communication channel
+    with process 9 and 10. This way, regardless of whether process 9 and 10
+    are the same as process 1 and 5, the main communication channel is
+    always formed with process 1, 2, ..., 8, and the additional communication
+    channel is formed with process 9 and 10.
+    """
+    init_method = f"tcp://{host}:{port}"
+    backend = Backend(backend)  # it is basically string
+    timeout = _get_default_timeout(backend)
+
+    store, rank, world_size = next(
+        rendezvous(init_method, rank, world_size, timeout=timeout))
+    store.set_timeout(timeout)
+
+    group_rank = rank
+    group_size = world_size
+
+    # Use a PrefixStore to avoid accidental overrides of keys used by
+    # different systems (e.g. RPC) in case the store is multi-tenant.
+    prefix_store = PrefixStore(init_method, store)
+
+    pg_options = ProcessGroup.Options(backend=backend, timeout=timeout)
+
+    pg: ProcessGroup = ProcessGroup(
+        prefix_store,
+        group_rank,
+        group_size,
+        pg_options,
+    )
+
+    if backend == "gloo":
+        from torch.distributed.distributed_c10d import ProcessGroupGloo
+        backend_class = ProcessGroupGloo(prefix_store,
+                                         group_rank,
+                                         group_size,
+                                         timeout=timeout)
+        backend_type = ProcessGroup.BackendType.GLOO
+        device = torch.device("cpu")
+    elif backend == "nccl":
+        assert is_nccl_available()
+        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
+                                         backend_options)
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
+
+    backend_class._set_sequence_number_for_group()
+
+    pg._register_backend(device, backend_type, backend_class)
+
+    return pg

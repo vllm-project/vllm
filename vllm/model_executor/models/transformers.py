@@ -22,12 +22,13 @@ from torch import nn
 from transformers import AutoModel, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -37,6 +38,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsLoRA, SupportsQuant
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -50,10 +52,9 @@ def vllm_flash_attention_forward(
         value: torch.Tensor,
         attention_mask: torch.Tensor,
         # Transformers kwargs
-        scaling: float = None,
+        scaling: Optional[float] = None,
         # vLLM kwargs
-        attn_metadata: AttentionMetadata = None,
-        attention_instances: list[Attention] = None,
+        attention_instances: Optional[list[Attention]] = None,
         **kwargs):
     self_attn = attention_instances[module.layer_idx]
     if scaling is not None:
@@ -61,12 +62,7 @@ def vllm_flash_attention_forward(
     hidden = query.shape[-2]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    return self_attn.forward(
-        query,
-        key,
-        value,
-        kv_cache=None,  # argument not used
-        attn_metadata=attn_metadata), None
+    return self_attn.forward(query, key, value), None
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
@@ -99,18 +95,16 @@ def replace_linear_class(
     vllm_linear_cls = {
         "colwise": ColumnParallelLinear,
         "rowwise": RowParallelLinear,
-    }.get(style)
-
-    if vllm_linear_cls is None:
-        logger.warning(
-            "Unsupported parallel style value: %s. "
-            "This layer will not be tensor parallelized.", style)
-        return linear
+    }.get(style, ReplicatedLinear)
 
     class HFCompatibleLinear(vllm_linear_cls):
         """
         Wrapper class that removes `output_bias` from returned output.
         """
+        # NOTE: The LoRA layer needs to use `parent_cls`.
+        @property
+        def parent_cls(self) -> type:
+            return vllm_linear_cls
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return super().forward(input)[0]
@@ -119,10 +113,11 @@ def replace_linear_class(
         input_size=linear.in_features,
         output_size=linear.out_features,
         bias=linear.bias is not None,
+        quant_config=quant_config,
     )
 
 
-class TransformersModel(nn.Module):
+class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
@@ -133,10 +128,8 @@ class TransformersModel(nn.Module):
 
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
-        self.quant_config = quant_config
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
 
@@ -162,7 +155,7 @@ class TransformersModel(nn.Module):
                 scale=config.head_dim**-0.5,
                 num_kv_heads=divide(config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
-                quant_config=None,
+                quant_config=self.quant_config,
                 prefix=f"{i}.attn") for i in range(config.num_hidden_layers)
         ]
 
@@ -172,7 +165,7 @@ class TransformersModel(nn.Module):
         # ForCausalLM modifications
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=None,
+                                      quant_config=self.quant_config,
                                       prefix=maybe_prefix(prefix, "lm_head"))
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.get_input_embeddings().weight
@@ -221,8 +214,6 @@ class TransformersModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: list[torch.Tensor],  # argument not used
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -230,7 +221,6 @@ class TransformersModel(nn.Module):
             input_ids[None, ...],
             use_cache=False,
             position_ids=positions[None, ...],
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             attention_instances=self.attention_instances,
             return_dict=False)[0][0, ...]  # we remove batch dimension for now

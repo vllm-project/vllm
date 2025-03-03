@@ -8,7 +8,6 @@ prefill requests are chunked.
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
 import os
-from contextlib import nullcontext
 
 import pytest
 
@@ -94,7 +93,7 @@ def test_models_distributed(
 
     if (model == "meta-llama/Llama-3.2-1B-Instruct"
             and distributed_executor_backend == "ray"):
-        # test ray adag
+        # test Ray Compiled Graph
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
         os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
 
@@ -233,7 +232,6 @@ def test_with_prefix_caching(
 
     max_num_batched_tokens = max_num_seqs = chunk_size
     outputs = {}  # type: ignore
-    check_result = True
     for enable in (True, False):
         with vllm_runner(
                 model,
@@ -245,25 +243,17 @@ def test_with_prefix_caching(
                 enforce_eager=enforce_eager,
                 max_num_seqs=max_num_seqs,
         ) as vllm_model:
-            # It should fail when prefix caching is enable and chunk
-            # size is not a multiple of block size (16).
-            should_fail = chunk_size % 16 != 0 and enable
-            check_result &= not should_fail
             outputs[enable] = []
-            # Send the request one-by-one to ensure the cache is populated.
-            with pytest.raises(ValueError) if should_fail else nullcontext():
-                for prompt in full_prompts:
-                    outputs[enable] += vllm_model.generate_greedy([prompt],
-                                                                  max_tokens)
+            for prompt in full_prompts:
+                outputs[enable] += vllm_model.generate_greedy([prompt],
+                                                              max_tokens)
 
-    # Check results only if we did not expect a failure.
-    if check_result:
-        check_outputs_equal(
-            outputs_0_lst=outputs[False],
-            outputs_1_lst=outputs[True],
-            name_0="w/o prefix caching",
-            name_1="with prefix caching",
-        )
+    check_outputs_equal(
+        outputs_0_lst=outputs[False],
+        outputs_1_lst=outputs[True],
+        name_0="w/o prefix caching",
+        name_1="with prefix caching",
+    )
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])

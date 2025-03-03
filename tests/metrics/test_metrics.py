@@ -1,21 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from typing import List
 
 import pytest
 import ray
 from prometheus_client import REGISTRY
 
+import vllm.envs as envs
 from vllm import EngineArgs, LLMEngine
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
+from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET
 
 MODELS = [
-    "facebook/opt-125m",
+    "distilbert/distilgpt2",
 ]
 
 
@@ -131,7 +132,7 @@ def test_metric_counter_generation_tokens_multi_step(
     "served_model_name",
     [None, [], ["ModelName0"], ["ModelName0", "ModelName1", "ModelName2"]])
 def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
-                                   served_model_name: List[str]) -> None:
+                                   served_model_name: list[str]) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      disable_log_stats=False,
@@ -140,6 +141,8 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
         stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metrics_tag_content = stat_logger.labels["model_name"]
 
+    if envs.VLLM_CI_USE_S3:
+        model = f"{MODEL_WEIGHTS_S3_BUCKET}/{model}"
     if served_model_name is None or served_model_name == []:
         assert metrics_tag_content == model, (
             f"Metrics tag model_name is wrong! expect: {model!r}\n"
@@ -168,9 +171,11 @@ async def test_async_engine_log_metrics_regression(
     when disable_log_stats=False
     (see: https://github.com/vllm-project/vllm/pull/4150#pullrequestreview-2008176678)
     """
-    engine_args = AsyncEngineArgs(model=model,
-                                  dtype=dtype,
-                                  disable_log_stats=disable_log_stats)
+    engine_args = AsyncEngineArgs(
+        model=model,
+        dtype=dtype,
+        disable_log_stats=disable_log_stats,
+    )
     async_engine = AsyncLLMEngine.from_engine_args(engine_args)
     for i, prompt in enumerate(example_prompts):
         results = async_engine.generate(
@@ -182,7 +187,7 @@ async def test_async_engine_log_metrics_regression(
         async for _ in results:
             pass
 
-    assert_metrics(async_engine.engine, disable_log_stats,
+    assert_metrics(model, async_engine.engine, disable_log_stats,
                    len(example_prompts))
 
 
@@ -197,9 +202,11 @@ def test_engine_log_metrics_regression(
     max_tokens: int,
     disable_log_stats: bool,
 ) -> None:
-    engine_args = EngineArgs(model=model,
-                             dtype=dtype,
-                             disable_log_stats=disable_log_stats)
+    engine_args = EngineArgs(
+        model=model,
+        dtype=dtype,
+        disable_log_stats=disable_log_stats,
+    )
     engine = LLMEngine.from_engine_args(engine_args)
     for i, prompt in enumerate(example_prompts):
         engine.add_request(
@@ -210,7 +217,9 @@ def test_engine_log_metrics_regression(
     while engine.has_unfinished_requests():
         engine.step()
 
-    assert_metrics(engine, disable_log_stats, len(example_prompts))
+    if envs.VLLM_CI_USE_S3:
+        model = f"{MODEL_WEIGHTS_S3_BUCKET}/{model}"
+    assert_metrics(model, engine, disable_log_stats, len(example_prompts))
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -277,13 +286,15 @@ def test_metric_spec_decode_interval(
 ) -> None:
     k = 5
 
-    engine_args = EngineArgs(model=model,
-                             dtype=dtype,
-                             disable_log_stats=False,
-                             gpu_memory_utilization=0.4,
-                             speculative_model=model,
-                             num_speculative_tokens=k,
-                             enforce_eager=True)
+    engine_args = EngineArgs(
+        model=model,
+        dtype=dtype,
+        disable_log_stats=False,
+        gpu_memory_utilization=0.4,
+        speculative_model=model,
+        num_speculative_tokens=k,
+        enforce_eager=True,
+    )
 
     engine = LLMEngine.from_engine_args(engine_args)
 
@@ -350,7 +361,7 @@ def test_metric_spec_decode_interval(
         cleanup_dist_env_and_memory()
 
 
-def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
+def assert_metrics(model: str, engine: LLMEngine, disable_log_stats: bool,
                    num_requests: int) -> None:
     if disable_log_stats:
         with pytest.raises(AttributeError):
@@ -361,7 +372,7 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
         # Ensure the count bucket of request-level histogram metrics matches
         # the number of requests as a simple sanity check to ensure metrics are
         # generated
-        labels = {'model_name': engine.model_config.model}
+        labels = {'model_name': model}
         request_histogram_metrics = [
             "vllm:e2e_request_latency_seconds",
             "vllm:request_prompt_tokens",

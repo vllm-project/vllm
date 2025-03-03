@@ -314,7 +314,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
     def long_lora_indices(self) -> torch.Tensor:
         """ 
         This property provides access to the indices used for long context 
-        lora, specifically for LinearScalingRotaryEmbeddingWithLora.
+        lora, specifically for LinearScalingRotaryEmbeddingWithLoRA.
         """
         long_lora_len = self.indices_len[4]
         return self._long_lora_indices[:long_lora_len]

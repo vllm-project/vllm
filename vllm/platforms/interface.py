@@ -34,7 +34,8 @@ class _Backend(enum.Enum):
     TORCH_SDPA = enum.auto()
     OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
-    TRITON_MLA = enum.auto()
+    TRITON_MLA = enum.auto()  # Supported by V1
+    FLASHMLA = enum.auto()  # Supported by V1
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
@@ -321,6 +322,26 @@ class Platform:
         Return the punica wrapper for current platform.
         """
         raise NotImplementedError
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        """
+        Get device specific communicator class for distributed communication.
+        """
+        return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def use_all_gather(cls) -> bool:
+        """
+        Whether to use allgather in LogitsProcessor to gather the logits.
+        """
+        import vllm.envs as envs
+        from vllm.config import get_current_vllm_config
+
+        parallel_config = get_current_vllm_config().parallel_config
+        return (envs.VLLM_USE_V1
+                or parallel_config.distributed_executor_backend
+                == "external_launcher")
 
     @classmethod
     def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:

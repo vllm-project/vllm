@@ -3,7 +3,8 @@
 import asyncio
 import base64
 import time
-from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
+from collections.abc import AsyncGenerator
+from typing import Final, Literal, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -29,7 +30,7 @@ logger = init_logger(__name__)
 def _get_data(
     output: PoolingOutput,
     encoding_format: Literal["float", "base64"],
-) -> Union[List[float], str]:
+) -> Union[list[float], str]:
     if encoding_format == "float":
         return output.data.tolist()
     elif encoding_format == "base64":
@@ -79,7 +80,7 @@ class OpenAIServingPooling(OpenAIServing):
             return self.create_error_response(
                 "dimensions is currently not supported")
 
-        model_name = request.model
+        model_name = self._get_model_name(request.model)
         request_id = f"pool-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
@@ -139,7 +140,7 @@ class OpenAIServingPooling(OpenAIServing):
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             pooling_params = request.to_pooling_params()
 
@@ -174,7 +175,7 @@ class OpenAIServingPooling(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: List[Optional[PoolingRequestOutput]]
+        final_res_batch: list[Optional[PoolingRequestOutput]]
         final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
@@ -182,7 +183,7 @@ class OpenAIServingPooling(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(List[PoolingRequestOutput],
+            final_res_batch_checked = cast(list[PoolingRequestOutput],
                                            final_res_batch)
 
             response = self.request_output_to_pooling_response(
@@ -202,13 +203,13 @@ class OpenAIServingPooling(OpenAIServing):
 
     def request_output_to_pooling_response(
         self,
-        final_res_batch: List[PoolingRequestOutput],
+        final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         created_time: int,
         model_name: str,
         encoding_format: Literal["float", "base64"],
     ) -> PoolingResponse:
-        items: List[PoolingResponseData] = []
+        items: list[PoolingResponseData] = []
         num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):

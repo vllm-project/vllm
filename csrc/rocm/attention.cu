@@ -24,8 +24,7 @@
 #include "../attention/dtype_fp8.cuh"
 #include "../quantization/fp8/amd/quant_utils.cuh"
 
-#if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx940__) || \
-                           defined(__gfx941__) || defined(__gfx942__))
+#if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx942__))
   #define __HIP__MI300_MI250__
 #endif
 

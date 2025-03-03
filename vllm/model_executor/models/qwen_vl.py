@@ -9,9 +9,10 @@ import copy
 import math
 import re
 import unicodedata
+from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from functools import lru_cache, partial
-from typing import (AbstractSet, Callable, Collection, List, Literal, Mapping,
-                    Optional, TypedDict, Union)
+from typing import Callable, List, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -22,7 +23,6 @@ from transformers import (BatchFeature, PretrainedConfig, PreTrainedTokenizer,
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -37,7 +37,7 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -519,11 +519,13 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
 
         return _get_tokenizer_without_image_pad(tokenizer)
 
-    def get_hf_processor(self) -> QwenVLProcessor:
-        tokenizer = self.ctx.tokenizer
-        assert isinstance(tokenizer, PreTrainedTokenizer)
-
-        return QwenVLProcessor(self.get_hf_config(), tokenizer)
+    def get_hf_processor(self, **kwargs: object) -> QwenVLProcessor:
+        return self.ctx.init_processor(
+            QwenVLProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -605,6 +607,14 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             mm_kwargs=mm_kwargs,
         )
 
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -615,12 +625,12 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         tokenizer = self.info.get_tokenizer()
         special_tokens: dict[str,
                              int] = tokenizer.special_tokens  # type: ignore
@@ -637,7 +647,7 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             PromptReplacement(
                 modality="image",
                 target=[img_start_id, img_end_id],
-                replacement=PromptReplacementDetails(
+                replacement=PromptUpdateDetails(
                     full=[img_start_id] + image_tokens + [img_end_id],
                     features=image_tokens,
                 ),
@@ -657,21 +667,6 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
             "w1",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "c_attn",
-        "gate_up_proj",
-        "c_proj",
-        # visual module
-        "out_proj",
-        "in_proj",
-        "c_fc",
-        # resampler
-        "kv_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -771,8 +766,6 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -788,7 +781,6 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors,
-                                         inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
         return hidden_states

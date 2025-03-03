@@ -23,7 +23,6 @@ import torch.nn as nn
 from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
                           ProcessorMixin)
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -39,18 +38,17 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo,
-                                        BoundPromptReplacement,
+                                        BaseProcessingInfo, BoundPromptUpdate,
                                         PlaceholderFeaturesInfo,
-                                        PromptReplacement,
-                                        PromptReplacementDetails)
+                                        PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsQuant
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -313,11 +311,12 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         self,
         *,
         num_crops: Optional[int] = None,
+        **kwargs: object,
     ) -> ProcessorMixin:
         if num_crops is not None:
-            return self.ctx.get_hf_processor(num_crops=num_crops)
+            kwargs["num_crops"] = num_crops
 
-        return self.ctx.get_hf_processor()
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -420,12 +419,12 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
 
@@ -449,7 +448,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
             image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
 
-            return PromptReplacementDetails(
+            return PromptUpdateDetails(
                 full=image_tokens + [bos_token_id],
                 features=image_tokens,
             )
@@ -464,15 +463,15 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             ) for image_token in image_tokens[:num_images]
         ]
 
-    def _apply_prompt_replacements(
+    def _apply_prompt_updates(
         self,
         token_ids: list[int],
-        mm_prompt_repls: Mapping[str, Sequence[BoundPromptReplacement]],
+        mm_prompt_updates: Mapping[str, Sequence[BoundPromptUpdate]],
         mm_item_counts: Mapping[str, int],
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        token_ids, text, placeholders = super()._apply_prompt_replacements(
+        token_ids, text, placeholders = super()._apply_prompt_updates(
             token_ids=token_ids,
-            mm_prompt_repls=mm_prompt_repls,
+            mm_prompt_updates=mm_prompt_updates,
             mm_item_counts=mm_item_counts,
         )
 
@@ -498,7 +497,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor,
                                         info=Phi3VProcessingInfo,
                                         dummy_inputs=Phi3VDummyInputsBuilder)
-class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
+                       SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_embed_tokens.wte": "embed_tokens",
@@ -510,7 +510,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
@@ -520,14 +519,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             config.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "model.embed_tokens"),
         )
 
         # TODO: Optionally initializes this for supporting input embeddings.
         self.vision_embed_tokens = Phi3HDImageEmbedding(
             config,
-            quant_config,
+            self.quant_config,
             prefix=maybe_prefix(prefix, "model.vision_embed_tokens"))
 
         self.language_model = init_vllm_registered_model(
@@ -639,7 +638,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 # 3D tensor
                 return list(torch.unbind(image_data, dim=0))
             raise ValueError(
-                "We expect batched 2D tensors;"
+                "We expect batched 2D tensors; "
                 "this can be either a list of 2D tensors or a single 3D tensor."
             )
 
@@ -671,8 +670,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs: object):
@@ -690,8 +687,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 

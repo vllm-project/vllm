@@ -22,6 +22,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                  device: Union[torch.device, str], **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
+        
+        # PunicaWrapperBase defines some tensors with dtype=torch.int64, which isn't supported by the TPU.
+        # So convert those tensors to int32. 
+        # Not all of them are used by the TPU so only convert the useful ones.
+        self._token_lora_indices = self._token_lora_indices.to(dtype=torch.int32)
 
     def shrink(
         self,
@@ -52,6 +57,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         y_offset: int,
         y_slice_size: int,
+        y_total_size: int,
         add_inputs: bool,
     ) -> torch.Tensor:
         if self.no_lora:
@@ -63,11 +69,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                    x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
                    scale: float, **kwargs) -> Optional[torch.Tensor]:
         """
-        Performs GEMM  for multiple slices of lora_a.
-        When `is_prefill is` true, it indicates that it is currently the
-        prefill stage, and the `_shrink_prefill` function should be called.
-        Otherwise, it is the decode stage, and the _shrink_decode function
-        should be called.
+        Performs GEMM for multiple slices of lora_a.
             
         Semantics:
         for i in range(len(lora_a_stacked)):
@@ -102,7 +104,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                    lora_b_stacked: Tuple[torch.Tensor, ...],
                    lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
                    output_slices: Tuple[int, ...],
-                   offset_start: int = 0,
                    add_inputs=True,
                    **kwargs) -> torch.Tensor:
         """
@@ -137,6 +138,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 lora_b_stacked[slice_idx],
                 offset_left,
                 output_slices[slice_idx],
+                y_total_size=sum(output_slices),
                 add_inputs=add_inputs,
             )
             offset_left += output_slices[slice_idx]

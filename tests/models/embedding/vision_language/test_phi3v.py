@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Type
-
 import pytest
 import torch.nn.functional as F
 
@@ -29,9 +27,9 @@ MODELS = ["TIGER-Lab/VLM2Vec-Full"]
 
 
 def _run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    input_texts: List[str],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    input_texts: list[str],
     input_images: PromptImageInput,
     model: str,
     *,

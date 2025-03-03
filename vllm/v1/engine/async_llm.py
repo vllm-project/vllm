@@ -2,7 +2,8 @@
 
 import asyncio
 import os
-from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
+from collections.abc import AsyncGenerator, Mapping
+from typing import Optional, Union
 
 import numpy as np
 
@@ -24,6 +25,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
@@ -38,7 +40,7 @@ class AsyncLLM(EngineClient):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -53,11 +55,11 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: List[StatLoggerBase] = []
+        self.stat_loggers: list[StatLoggerBase] = []
         if self.log_stats:
             self.stat_loggers.extend([
                 LoggingStatLogger(),
-                PrometheusStatLogger(vllm_config.model_config),
+                PrometheusStatLogger(vllm_config),
             ])
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -143,25 +145,30 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
 
         # 1) Create a new output queue for the request.
-        if self.output_processor.is_request_active(request_id):
-            raise ValueError(f"Request id {request_id} already running.")
         queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
 
-        # 2) Convert Input --> Request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                trace_headers,
-                                                prompt_adapter_request,
-                                                priority)
+        # 2) Fan out child requests (for n>1)
+        parent_req = ParentRequest.from_params(request_id, params)
+        n = params.n if isinstance(params, SamplingParams) else 1
+        for idx in range(n):
+            if parent_req is not None:
+                request_id, params = parent_req.get_child_info(idx)
 
-        # 3) Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, queue)
+            # 3) Convert Input --> Request.
+            request = self.processor.process_inputs(request_id, prompt, params,
+                                                    arrival_time, lora_request,
+                                                    trace_headers,
+                                                    prompt_adapter_request,
+                                                    priority)
 
-        # 4) Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+            # 4) Add the request to OutputProcessor (this process).
+            self.output_processor.add_request(request, parent_req, idx, queue)
 
-        if self.log_requests:
-            logger.info("Added request %s.", request_id)
+            # 5) Add the EngineCoreRequest to EngineCore (separate process).
+            await self.engine_core.add_request_async(request)
+
+            if self.log_requests:
+                logger.info("Added request %s.", request_id)
 
         return queue
 
@@ -361,9 +368,27 @@ class AsyncLLM(EngineClient):
     async def reset_prefix_cache(self) -> None:
         await self.engine_core.reset_prefix_cache_async()
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def sleep(self, level: int = 1) -> None:
+        await self.engine_core.sleep_async(level)
+
+    async def wake_up(self) -> None:
+        await self.engine_core.wake_up_async()
+
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
-        await self.engine_core.add_lora_async(lora_request)
+        return await self.engine_core.add_lora_async(lora_request)
+
+    async def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter."""
+        return await self.engine_core.remove_lora_async(lora_id)
+
+    async def list_loras(self) -> set[int]:
+        """List all registered adapters."""
+        return await self.engine_core.list_loras_async()
+
+    async def pin_lora(self, lora_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return await self.engine_core.pin_lora_async(lora_id)
 
     @property
     def is_running(self) -> bool:

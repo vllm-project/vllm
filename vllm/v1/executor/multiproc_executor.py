@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
 from multiprocessing.process import BaseProcess
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import cloudpickle
 import psutil
@@ -77,7 +77,7 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
-        self.workers: List[WorkerProcHandle] = []
+        self.workers: list[WorkerProcHandle] = []
         for rank in range(self.world_size):
             worker = WorkerProc.make_worker_process(self.vllm_config, rank,
                                                     rank,
@@ -94,8 +94,8 @@ class MultiprocExecutor(Executor):
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       args: tuple = (),
+                       kwargs: Optional[dict] = None) -> list[Any]:
         start_time = time.monotonic()
         kwargs = kwargs or {}
 
@@ -170,7 +170,7 @@ class MultiprocExecutor(Executor):
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
-        if getattr(self, 'shutting_down', False):
+        if not getattr(self, 'shutting_down', False):
             self.shutting_down = True
             for w in self.workers:
                 w.worker_response_mq = None
@@ -208,7 +208,7 @@ class WorkerProc:
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
-        all_kwargs: List[Dict] = [
+        all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
         all_kwargs[rank] = {
@@ -216,9 +216,10 @@ class WorkerProc:
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
+            "is_driver_worker": rank == 0,
         }
         wrapper.init_worker(all_kwargs)
-        self.worker = wrapper.worker
+        self.worker = wrapper
 
         pid = os.getpid()
         _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)

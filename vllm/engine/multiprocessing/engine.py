@@ -20,12 +20,14 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
                                          RPCResetPrefixCacheRequest,
-                                         RPCStartupRequest, RPCStartupResponse,
-                                         RPCUProfileRequest)
+                                         RPCSleepRequest, RPCStartupRequest,
+                                         RPCStartupResponse,
+                                         RPCUProfileRequest, RPCWakeUpRequest)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
+from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
 
@@ -209,6 +211,14 @@ class MQLLMEngine:
             return self.engine.step()
         except SystemExit:
             raise
+        except InputProcessingError as e:
+            # Special case where we handle an error preparing the inputs for
+            # a single request in the batch
+            rpc_err = RPCError(request_id=e.request_id,
+                               is_engine_errored=False,
+                               exception=e.__cause__)
+            self._send_outputs(rpc_err)
+            return []
         except BaseException as e:
             self._set_errored(e)
             rpc_err = RPCError(request_id=None,
@@ -242,6 +252,10 @@ class MQLLMEngine:
                     self._handle_load_adapter_request(request)
                 elif isinstance(request, RPCResetPrefixCacheRequest):
                     self.reset_prefix_cache()
+                elif isinstance(request, RPCSleepRequest):
+                    self.sleep(request.value)
+                elif isinstance(request, RPCWakeUpRequest):
+                    self.wake_up()
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -368,6 +382,12 @@ class MQLLMEngine:
 
     def reset_prefix_cache(self) -> bool:
         return self.engine.reset_prefix_cache()
+
+    def sleep(self, level: int = 1) -> None:
+        self.engine.sleep(level)
+
+    def wake_up(self) -> None:
+        self.engine.wake_up()
 
 
 def signal_handler(*_) -> None:

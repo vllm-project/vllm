@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-from typing import Any, Callable, Iterable, Optional
+from collections.abc import Iterable
+from typing import Any, Callable, Optional
 
 import torch
 import torch.utils.benchmark as TBenchmark

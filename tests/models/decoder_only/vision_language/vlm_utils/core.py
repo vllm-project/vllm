@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Core test implementation to be shared across modalities."""
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from PIL.Image import Image
@@ -17,9 +17,9 @@ from .types import RunnerOutput
 
 def run_test(
     *,
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], List[Union[List[Image], Image]]]],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    inputs: list[tuple[list[str], list[Union[list[Image], Image]]]],
     model: str,
     dtype: str,
     max_tokens: int,
@@ -29,15 +29,15 @@ def run_test(
     max_num_seqs: int,
     hf_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]],
     vllm_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]],
-    auto_cls: Type[_BaseAutoModelClass],
+    auto_cls: type[_BaseAutoModelClass],
     use_tokenizer_eos: bool,
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
     comparator: Callable[..., None],
     get_stop_token_ids: Optional[Callable[[AnyTokenizer], list[int]]],
-    stop_str: Optional[List[str]],
-    limit_mm_per_prompt: Dict[str, int],
-    vllm_runner_kwargs: Optional[Dict[str, Any]],
-    hf_model_kwargs: Optional[Dict[str, Any]],
+    stop_str: Optional[list[str]],
+    limit_mm_per_prompt: dict[str, int],
+    vllm_runner_kwargs: Optional[dict[str, Any]],
+    hf_model_kwargs: Optional[dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
     task: TaskOption = "auto",
     runner_mm_key: str = "images",
@@ -61,7 +61,7 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
 
-    vllm_runner_kwargs_: Dict[str, Any] = {}
+    vllm_runner_kwargs_: dict[str, Any] = {}
     if model_info.tokenizer:
         vllm_runner_kwargs_["tokenizer"] = model_info.tokenizer
     if model_info.tokenizer_mode:
@@ -84,7 +84,7 @@ def run_test(
                      **vllm_runner_kwargs_) as vllm_model:
         tokenizer = vllm_model.model.get_tokenizer()
 
-        vllm_kwargs: Dict[str, Any] = {}
+        vllm_kwargs: dict[str, Any] = {}
         if get_stop_token_ids is not None:
             vllm_kwargs["stop_token_ids"] = get_stop_token_ids(tokenizer)
         if stop_str:

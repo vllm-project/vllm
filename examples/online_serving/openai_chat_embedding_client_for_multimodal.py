@@ -102,7 +102,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         "Script to call a specified VLM through the API. Make sure to serve "
         "the model with --task embed before running this.")
-    parser.add_argument("model",
+    parser.add_argument("--model",
                         type=str,
                         choices=["vlm2vec", "dse_qwen2_vl"],
                         required=True,

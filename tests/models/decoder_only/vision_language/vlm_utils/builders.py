@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Helpers for building inputs that can be leveraged for different test types.
 """
+from collections.abc import Iterable
 from pathlib import PosixPath
-from typing import Callable, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import torch
 
@@ -33,7 +34,7 @@ def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int],
 def get_model_prompts(base_prompts: Iterable[str],
                       img_idx_to_prompt: Optional[Callable[[int], str]],
                       video_idx_to_prompt: Optional[Callable[[int], str]],
-                      prompt_formatter: Callable[[str], str]) -> List[str]:
+                      prompt_formatter: Callable[[str], str]) -> list[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
     to be tested, update the media placeholders and apply the prompt formatting
     to get the test prompt string for this model.
@@ -218,7 +219,7 @@ def build_video_inputs_from_test_info(
     ) for video, prompt in zip(sampled_vids, model_prompts)]
 
 
-def apply_image_size_scaling(image, size: Union[float, Tuple[int, int]],
+def apply_image_size_scaling(image, size: Union[float, tuple[int, int]],
                              size_type: SizeType):
     """Applies a size scaler to one image; this can be a an image size factor,
     which scales the image while maintaining the aspect ratio"""

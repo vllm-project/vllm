@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
@@ -17,15 +17,15 @@ class TestTokenizer(TokenizerBase):
         return TestTokenizer()
 
     @property
-    def all_special_tokens_extended(self) -> List[str]:
+    def all_special_tokens_extended(self) -> list[str]:
         raise NotImplementedError()
 
     @property
-    def all_special_tokens(self) -> List[str]:
+    def all_special_tokens(self) -> list[str]:
         raise NotImplementedError()
 
     @property
-    def all_special_ids(self) -> List[int]:
+    def all_special_ids(self) -> list[int]:
         raise NotImplementedError()
 
     @property
@@ -58,7 +58,7 @@ class TestTokenizer(TokenizerBase):
 
     def __call__(
         self,
-        text: Union[str, List[str], List[int]],
+        text: Union[str, list[str], list[int]],
         text_pair: Optional[str] = None,
         add_special_tokens: bool = False,
         truncation: bool = False,
@@ -66,10 +66,10 @@ class TestTokenizer(TokenizerBase):
     ):
         raise NotImplementedError()
 
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         raise NotImplementedError()
 
-    def get_added_vocab(self) -> Dict[str, int]:
+    def get_added_vocab(self) -> dict[str, int]:
         raise NotImplementedError()
 
     def encode_one(
@@ -77,33 +77,33 @@ class TestTokenizer(TokenizerBase):
         text: str,
         truncation: bool = False,
         max_length: Optional[int] = None,
-    ) -> List[int]:
+    ) -> list[int]:
         raise NotImplementedError()
 
     def encode(self,
                text: str,
-               add_special_tokens: Optional[bool] = None) -> List[int]:
+               add_special_tokens: Optional[bool] = None) -> list[int]:
         raise NotImplementedError()
 
     def apply_chat_template(self,
-                            messages: List["ChatCompletionMessageParam"],
-                            tools: Optional[List[Dict[str, Any]]] = None,
-                            **kwargs) -> List[int]:
+                            messages: list["ChatCompletionMessageParam"],
+                            tools: Optional[list[dict[str, Any]]] = None,
+                            **kwargs) -> list[int]:
         raise NotImplementedError()
 
-    def convert_tokens_to_string(self, tokens: List[str]) -> str:
+    def convert_tokens_to_string(self, tokens: list[str]) -> str:
         raise NotImplementedError()
 
     def decode(self,
-               ids: Union[List[int], int],
+               ids: Union[list[int], int],
                skip_special_tokens: bool = True) -> str:
         raise NotImplementedError()
 
     def convert_ids_to_tokens(
         self,
-        ids: List[int],
+        ids: list[int],
         skip_special_tokens: bool = True,
-    ) -> List[str]:
+    ) -> list[str]:
         raise NotImplementedError()
 
 

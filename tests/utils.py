@@ -11,7 +11,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Optional, Union
 
 import openai
 import pytest
@@ -73,9 +73,9 @@ class RemoteOpenAIServer:
 
     def __init__(self,
                  model: str,
-                 vllm_serve_args: List[str],
+                 vllm_serve_args: list[str],
                  *,
-                 env_dict: Optional[Dict[str, str]] = None,
+                 env_dict: Optional[dict[str, str]] = None,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
@@ -183,7 +183,7 @@ def _test_completion(
     client: openai.OpenAI,
     model: str,
     prompt: str,
-    token_ids: List[int],
+    token_ids: list[int],
 ):
     results = []
 
@@ -297,12 +297,12 @@ def _test_completion_close(
                                            logprobs=5,
                                            temperature=0.0)
 
-    logporbs = completion.choices[0].logprobs.top_logprobs[0]
-    logporbs = {k: round(v, 2) for k, v in logporbs.items()}
+    logprobs = completion.choices[0].logprobs.top_logprobs[0]
+    logprobs = {k: round(v, 2) for k, v in logprobs.items()}
 
     results.append({
         "test": "completion_close",
-        "logprobs": logporbs,
+        "logprobs": logprobs,
     })
 
     return results
@@ -400,10 +400,10 @@ def _test_image_text(
 
 
 def compare_two_settings(model: str,
-                         arg1: List[str],
-                         arg2: List[str],
-                         env1: Optional[Dict[str, str]] = None,
-                         env2: Optional[Dict[str, str]] = None,
+                         arg1: list[str],
+                         arg2: list[str],
+                         env1: Optional[dict[str, str]] = None,
+                         env2: Optional[dict[str, str]] = None,
                          *,
                          method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
@@ -429,8 +429,8 @@ def compare_two_settings(model: str,
 
 
 def compare_all_settings(model: str,
-                         all_args: List[List[str]],
-                         all_envs: List[Optional[Dict[str, str]]],
+                         all_args: list[list[str]],
+                         all_envs: list[Optional[dict[str, str]]],
                          *,
                          method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
@@ -470,7 +470,7 @@ def compare_all_settings(model: str,
 
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt).input_ids
-    ref_results: List = []
+    ref_results: list = []
     for i, (args, env) in enumerate(zip(all_args, all_envs)):
         if can_force_load_format:
             # we are comparing the results and
@@ -481,7 +481,7 @@ def compare_all_settings(model: str,
             # environment variable to force the load format,
             # e.g. in quantization tests.
             args = args + ["--load-format", envs.VLLM_TEST_FORCE_LOAD_FORMAT]
-        compare_results: List = []
+        compare_results: list = []
         results = ref_results if i == 0 else compare_results
         with RemoteOpenAIServer(model,
                                 args,
@@ -582,7 +582,7 @@ def multi_process_parallel(
 
 
 @contextmanager
-def error_on_warning(category: Type[Warning] = Warning):
+def error_on_warning(category: type[Warning] = Warning):
     """
     Within the scope of this context manager, tests will fail if any warning
     of the given category is emitted.
@@ -604,7 +604,7 @@ def get_physical_device_indices(devices):
 
 
 @_nvml()
-def wait_for_gpu_memory_to_clear(devices: List[int],
+def wait_for_gpu_memory_to_clear(devices: list[int],
                                  threshold_bytes: int,
                                  timeout_s: float = 120) -> None:
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
@@ -612,8 +612,8 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
     devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
-        output: Dict[int, str] = {}
-        output_raw: Dict[int, float] = {}
+        output: dict[int, str] = {}
+        output_raw: dict[int, float] = {}
         for device in devices:
             if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
@@ -758,13 +758,13 @@ def multi_gpu_test(*, num_gpus: int):
 
 
 async def completions_with_server_args(
-    prompts: List[str],
+    prompts: list[str],
     model_name: str,
-    server_cli_args: List[str],
+    server_cli_args: list[str],
     num_logprobs: Optional[int],
     max_wait_seconds: int = 240,
     max_tokens: Union[int, list] = 5,
-) -> List[Completion]:
+) -> list[Completion]:
     '''Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
 
@@ -807,7 +807,7 @@ async def completions_with_server_args(
     return outputs
 
 
-def get_client_text_generations(completions: List[Completion]) -> List[str]:
+def get_client_text_generations(completions: list[Completion]) -> list[str]:
     '''Extract generated tokens from the output of a
     request made to an Open-AI-protocol completions endpoint.
     '''
@@ -816,7 +816,7 @@ def get_client_text_generations(completions: List[Completion]) -> List[str]:
 
 
 def get_client_text_logprob_generations(
-        completions: List[Completion]) -> List[TextTextLogprobs]:
+        completions: list[Completion]) -> list[TextTextLogprobs]:
     '''Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
     each :class:`SequenceGroup`

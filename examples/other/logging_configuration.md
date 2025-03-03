@@ -49,7 +49,8 @@ disabled, an error will occur while starting vLLM.
 ### Example 1: Customize vLLM root logger
 
 For this example, we will customize the vLLM root logger to use
-[`python-json-logger`](https://github.com/madzak/python-json-logger) to log to
+[`python-json-logger`](https://github.com/nhairs/python-json-logger)
+(which is part of the container image) to log to
 STDOUT of the console in JSON format with a log level of `INFO`.
 
 To begin, first, create an appropriate JSON logging configuration file:
@@ -80,12 +81,6 @@ To begin, first, create an appropriate JSON logging configuration file:
   },
   "version": 1
 }
-```
-
-Next, install the `python-json-logger` package if it's not already installed:
-
-```bash
-pip install python-json-logger
 ```
 
 Finally, run vLLM with the `VLLM_LOGGING_CONFIG_PATH` environment variable set

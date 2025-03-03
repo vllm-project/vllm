@@ -24,50 +24,7 @@ question_per_audio_count = {
 # Unless specified, these settings have been tested to work on a single L4.
 
 
-# Ultravox 0.5-1B
-def run_ultravox(question: str, audio_count: int):
-    model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [{
-        'role': 'user',
-        'content': "<|audio|>\n" * audio_count + question
-    }]
-    prompt = tokenizer.apply_chat_template(messages,
-                                           tokenize=False,
-                                           add_generation_prompt=True)
-
-    llm = LLM(model=model_name,
-              max_model_len=4096,
-              max_num_seqs=5,
-              trust_remote_code=True,
-              limit_mm_per_prompt={"audio": audio_count})
-    stop_token_ids = None
-    return llm, prompt, stop_token_ids
-
-
-# Qwen2-Audio
-def run_qwen2_audio(question: str, audio_count: int):
-    model_name = "Qwen/Qwen2-Audio-7B-Instruct"
-
-    llm = LLM(model=model_name,
-              max_model_len=4096,
-              max_num_seqs=5,
-              limit_mm_per_prompt={"audio": audio_count})
-
-    audio_in_prompt = "".join([
-        f"Audio {idx+1}: "
-        f"<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
-    ])
-
-    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-              "<|im_start|>user\n"
-              f"{audio_in_prompt}{question}<|im_end|>\n"
-              "<|im_start|>assistant\n")
-    stop_token_ids = None
-    return llm, prompt, stop_token_ids
-
-
+# MiniCPM-O
 def run_minicpmo(question: str, audio_count: int):
     model_name = "openbmb/MiniCPM-o-2_6"
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -94,10 +51,71 @@ def run_minicpmo(question: str, audio_count: int):
     return llm, prompt, stop_token_ids
 
 
+# Qwen2-Audio
+def run_qwen2_audio(question: str, audio_count: int):
+    model_name = "Qwen/Qwen2-Audio-7B-Instruct"
+
+    llm = LLM(model=model_name,
+              max_model_len=4096,
+              max_num_seqs=5,
+              limit_mm_per_prompt={"audio": audio_count})
+
+    audio_in_prompt = "".join([
+        f"Audio {idx+1}: "
+        f"<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
+    ])
+
+    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+              "<|im_start|>user\n"
+              f"{audio_in_prompt}{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# Ultravox 0.5-1B
+def run_ultravox(question: str, audio_count: int):
+    model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [{
+        'role': 'user',
+        'content': "<|audio|>\n" * audio_count + question
+    }]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    llm = LLM(model=model_name,
+              max_model_len=4096,
+              max_num_seqs=5,
+              trust_remote_code=True,
+              limit_mm_per_prompt={"audio": audio_count})
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# Whisper
+def run_whisper(question: str, audio_count: int):
+    assert audio_count == 1, (
+        "Whisper only support single audio input per prompt")
+    model_name = "openai/whisper-large-v3-turbo"
+
+    prompt = "<|startoftranscript|>"
+
+    llm = LLM(model=model_name,
+              max_model_len=448,
+              max_num_seqs=5,
+              limit_mm_per_prompt={"audio": audio_count})
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
-    "ultravox": run_ultravox,
+    "minicpmo": run_minicpmo,
     "qwen2_audio": run_qwen2_audio,
-    "minicpmo": run_minicpmo
+    "ultravox": run_ultravox,
+    "whisper": run_whisper,
 }
 
 

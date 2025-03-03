@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-from typing import Dict, List, Optional
+from typing import Optional
 
 import pytest
 
@@ -14,7 +14,7 @@ from ..utils import compare_all_settings
 @dataclasses.dataclass
 class TestSetting:
     model: str
-    model_args: List[str]
+    model_args: list[str]
     pp_size: int
     tp_size: int
     attn_backend: str
@@ -108,8 +108,8 @@ def test_compile_correctness(test_setting: TestSetting):
     final_args = ["--enforce-eager"] + model_args + ["-pp", str(pp_size)] + \
                 ["-tp", str(tp_size)]
 
-    all_args: List[List[str]] = []
-    all_envs: List[Optional[Dict[str, str]]] = []
+    all_args: list[list[str]] = []
+    all_envs: list[Optional[dict[str, str]]] = []
 
     for level in [
             CompilationLevel.NO_COMPILATION,

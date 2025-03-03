@@ -1,7 +1,7 @@
 #include <cudaTypedefs.h>
 #include "c3x/scaled_mm_kernels.hpp"
 
-#include "core/math.hpp"
+#include "cuda_utils.h"
 
 /*
    This file defines quantized GEMM operations using the CUTLASS 3.x API, for
@@ -33,7 +33,8 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
     auto make_group_shape = [](torch::Tensor const& x,
                                torch::Tensor const& s) -> GroupShape {
       TORCH_CHECK(s.dim() == 2, "cutlass_scaled_mm group scales must be 2D");
-      return {ceil_div(x.size(0), s.size(0)), ceil_div(x.size(1), s.size(1))};
+      return {cuda_utils::ceil_div(x.size(0), s.size(0)),
+              cuda_utils::ceil_div(x.size(1), s.size(1))};
     };
 
     GroupShape a_scale_group_shape = make_group_shape(a, a_scales);

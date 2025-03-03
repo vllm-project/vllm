@@ -45,7 +45,7 @@ To perform the same with an online mode launch the server:
 
 ```bash
 python -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port 8000 --model facebook/opt-6.7b \
-    --seed 42 -tp 1 --speculative_model facebook/opt-125m --use-v2-block-manager \
+    --seed 42 -tp 1 --speculative_model facebook/opt-125m \
     --num_speculative_tokens 5 --gpu_memory_utilization 0.8
 ```
 
@@ -175,7 +175,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 llm = LLM(
     model="meta-llama/Meta-Llama-3-8B-Instruct",
     tensor_parallel_size=4,
-    speculative_model="path/to/modified/eagle/model",
+    speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
     speculative_draft_tensor_parallel_size=1,
 )
 
@@ -190,14 +190,12 @@ for output in outputs:
 
 A few important things to consider when using the EAGLE based draft models:
 
-1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) cannot be
-   used directly with vLLM due to differences in the expected layer names and model definition.
-   To use these models with vLLM, use the [following script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d)
-   to convert them. Note that this script does not modify the model's weights.
-
-   In the above example, use the script to first convert
-   the [yuhuili/EAGLE-LLaMA3-Instruct-8B](https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B) model
-   and then use the converted checkpoint as the draft model in vLLM.
+1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) should
+   be able to be loaded and used directly by vLLM after [PR 12304](https://github.com/vllm-project/vllm/pull/12304).
+   If you are using vllm version before [PR 12304](https://github.com/vllm-project/vllm/pull/12304), please use the
+   [script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model,
+   and specify `speculative_model="path/to/modified/eagle/model"`. If weight-loading problems still occur when using
+   the latest version of vLLM, please leave a comment or raise an issue.
 
 2. The EAGLE based draft models need to be run without tensor parallelism
    (i.e. speculative_draft_tensor_parallel_size is set to 1), although

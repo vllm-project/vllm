@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import IntEnum
-from typing import ClassVar, Dict, List, Optional, Set
+from typing import ClassVar, Optional
 
 import msgspec
 from msgspec import field as msgspec_field
@@ -78,7 +78,7 @@ class RequestStatsUpdate(
                                 ▼
                 FINISHED (All could go to FINISHED)
     """
-    _VALID_TRANSITIONS: ClassVar[Dict[Type, Set[Type]]] = {
+    _VALID_TRANSITIONS: ClassVar[dict[Type, set[Type]]] = {
         Type.ARRIVED: {
             Type.INPUT_PROCESSED,
             Type.FINISHED,
@@ -140,7 +140,7 @@ class RequestStatsUpdate(
     finish_reason: Optional[str] = None
 
     # Non-optional fields for each update type.
-    _REQUIRED_FIELDS: ClassVar[Dict[Type, List[str]]] = {
+    _REQUIRED_FIELDS: ClassVar[dict[Type, list[str]]] = {
         Type.INPUT_PROCESSED: ["num_prompt_tokens", "sampling_params"],
         Type.PREFILLING: ["num_computed_tokens", "num_cached_tokens"],
         Type.DETOKENIZED: ["num_new_tokens"],
@@ -218,13 +218,13 @@ class RequestStats:
     # 2. the request was preempted and resumed. It is equivalent to running
     #    a prefill of the original prefill tokens + generated output tokens
     #    before preemption.
-    prefill_start_ts_s_lst: List[float] = dataclass_field(default_factory=list)
+    prefill_start_ts_s_lst: list[float] = dataclass_field(default_factory=list)
 
     # A list of timestamps when a token is decoded by the engine core.
-    decoding_ts_s_lst: List[float] = dataclass_field(default_factory=list)
+    decoding_ts_s_lst: list[float] = dataclass_field(default_factory=list)
 
     # A sorted list of timestamps for each output token.
-    output_token_ts_s_lst: List[float] = dataclass_field(default_factory=list)
+    output_token_ts_s_lst: list[float] = dataclass_field(default_factory=list)
 
     # First token's timestamp.
     first_token_ts_s: Optional[float] = None
@@ -241,7 +241,7 @@ class RequestStats:
     # metric to measure the impact of preemption other than observation of
     # large P99 TPOT. Ideally we could quantify the impact of preemption by
     # measuring the number of tokens re-computed due to preemption.
-    preempted_ts_s_lst: List[float] = dataclass_field(default_factory=list)
+    preempted_ts_s_lst: list[float] = dataclass_field(default_factory=list)
 
     # Timestamp when the request was finished at the engine core.
     finished_ts_s: Optional[float] = None
@@ -308,7 +308,7 @@ class RequestStats:
         return self.e2e_latency_s - self.first_token_latency_s
 
     @property
-    def output_token_latency_s_lst(self) -> List[float]:
+    def output_token_latency_s_lst(self) -> list[float]:
         if len(self.output_token_ts_s_lst) == 0:
             return []
         latency_s_lst = []
@@ -442,7 +442,7 @@ class EngineCoreStatsSnapshot(
         default_factory=SchedulerStats)
 
     # Per request stats updates.
-    requests_stats_updates: List[RequestStatsUpdate] = msgspec_field(
+    requests_stats_updates: list[RequestStatsUpdate] = msgspec_field(
         default_factory=list)
 
     # Engine core's queue stats.
