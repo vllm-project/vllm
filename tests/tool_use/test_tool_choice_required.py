@@ -10,6 +10,7 @@ from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionToolsParam)
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 
 EXAMPLE_TOOLS = [
     {
@@ -116,7 +117,32 @@ VALID_TOOL_OUTPUTS = [
             "city": "Vienna"
         }
     }], True),
+    ([{
+        "name": "get_forecast",
+        "parameters": {
+            "city": "Vienna",
+            "days": 7
+        }
+    }, {
+        "name": "get_current_weather",
+        "parameters": {
+            "city": "Vienna"
+        }
+    }, {
+        "name": "get_forecast",
+        "parameters": {
+            "city": "Berlin",
+            "days": 7
+        }
+    }, {
+        "name": "get_current_weather",
+        "parameters": {
+            "city": "Berlin"
+        }
+    }], True),
 ]
+
+VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
 
 
 @pytest.mark.parametrize(
@@ -158,6 +184,14 @@ VALID_TOOL_OUTPUTS = [
                     "city": "Vienna",
                     "extra": "value"
                 }
+            }],
+            False),
+        (
+            [{  # tool call where parameters are first cannot be generated
+                "parameters": {
+                    "city": "Vienna"
+                },
+                "name": "get_current_weather"
             }],
             False),
         (
@@ -252,3 +286,52 @@ def test_guided_json_without_parameters(sample_output, should_match,
     _compile_and_check(tools=tools,
                        sample_output=sample_output,
                        should_match=should_match)
+
+
+@pytest.mark.parametrize("output", VALID_TOOLS)
+@pytest.mark.parametrize("empty_params", [False, True])
+@pytest.mark.parametrize("delta_len", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+def test_streaming_output_valid(output, empty_params, delta_len):
+    self = MagicMock()
+
+    output = deepcopy(output)
+    if empty_params:
+        output = [{"name": o["name"], "parameters": {}} for o in output]
+    output_json = json.dumps(output)
+
+    previous_text = ""
+    function_name_returned = False
+    messages = []
+    for i in range(0, len(output_json), delta_len):
+        delta_text = output_json[i:i + delta_len]
+        current_text = previous_text + delta_text
+
+        delta_message, function_name_returned = (
+            OpenAIServingChat.extract_tool_call_required_streaming(
+                self,
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=delta_text,
+                function_name_returned=function_name_returned))
+
+        if delta_message:
+            messages.append(delta_message)
+
+        previous_text = current_text
+
+    assert len(messages) > 0
+    combined_messages = "["
+    for message in messages:
+        if message.tool_calls[0].function.name:
+            if len(combined_messages) > 1:
+                combined_messages += "},"
+
+            combined_messages += '{"name": "' + \
+                message.tool_calls[0].function.name  + \
+                    '", "parameters": ' + \
+                        message.tool_calls[0].function.arguments
+        else:
+            combined_messages += message.tool_calls[0].function.arguments
+    combined_messages += "}]"
+    assert json.loads(combined_messages) == output
+    assert json.dumps(json.loads(combined_messages)) == output_json
