@@ -115,10 +115,6 @@ class Metrics:
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames)
-        self.counter_tokens = self._counter_cls(
-            name="vllm:tokens_total",
-            documentation="Number of prefill plus generation tokens processed.",
-            labelnames=labelnames)
         buckets = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
         if not vllm_config.model_config.enforce_eager:
             buckets = vllm_config.compilation_config.\
