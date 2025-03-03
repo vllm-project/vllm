@@ -76,10 +76,6 @@ if triton.__version__ >= "2.1.0":
         cur_batch_in_all_stop_index = tl.load(B_Start_Loc + cur_batch + 1)
         cur_batch_query_len = (cur_batch_in_all_stop_index -
                                cur_batch_in_all_start_index)
-
-        if cur_batch_query_len == 1:
-            return
-
         cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
 
         # start position inside of the query
