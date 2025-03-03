@@ -3,7 +3,8 @@
 import asyncio
 import logging
 import os
-from typing import AsyncGenerator, List, Mapping, Optional, Set, Type, Union
+from collections.abc import AsyncGenerator, Mapping
+from typing import Optional, Union
 
 import numpy as np
 
@@ -40,7 +41,7 @@ class AsyncLLM(EngineClient):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -55,7 +56,7 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: List[StatLoggerBase] = []
+        self.stat_loggers: list[StatLoggerBase] = []
         if self.log_stats:
             if logger.isEnabledFor(logging.INFO):
                 self.stat_loggers.append(LoggingStatLogger())
@@ -401,7 +402,7 @@ class AsyncLLM(EngineClient):
         """Remove an already loaded LoRA adapter."""
         return await self.engine_core.remove_lora_async(lora_id)
 
-    async def list_loras(self) -> Set[int]:
+    async def list_loras(self) -> set[int]:
         """List all registered adapters."""
         return await self.engine_core.list_loras_async()
 

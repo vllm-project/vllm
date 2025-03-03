@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Optional
 
 import torch
 # Required to register custom ops.
@@ -22,15 +22,15 @@ class PallasAttentionBackend(AttentionBackend):
         return "PALLAS_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["PallasAttentionBackendImpl"]:
+    def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["PallasMetadata"]:
+    def get_metadata_cls() -> type["PallasMetadata"]:
         return PallasMetadata
 
     @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
+    def get_state_cls() -> type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -39,7 +39,7 @@ class PallasAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (num_kv_heads, num_blocks, block_size, head_size)
 
     @staticmethod
@@ -77,10 +77,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -120,7 +120,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
         attn_metadata: PallasMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:

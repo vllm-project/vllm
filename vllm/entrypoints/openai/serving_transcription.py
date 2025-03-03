@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import io
-from typing import AsyncGenerator, Optional, Union, cast
+from collections.abc import AsyncGenerator
+from typing import Optional, Union, cast
 
 from fastapi import Request
 
