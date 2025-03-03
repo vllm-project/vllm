@@ -9,7 +9,7 @@ from vllm.sampling_params import SamplingParams
 from ...utils import check_outputs_equal
 
 # This test is for the hybrid models
-MODELS = ["ai21labs/Jamba-tiny-dev"]
+MODELS = ["ai21labs/Jamba-tiny-dev", "Zyphra/Zamba2-1.2B-instruct"]
 # Bamba at Fp32 is too big for the CI (L4 GPU).
 # MODELS = ["ai21labs/Jamba-tiny-dev", "ibm-ai-platform/Bamba-9B"]
 
@@ -112,7 +112,7 @@ def test_mamba_prefill_chunking_with_parallel_sampling(
 def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
                                 model: str, dtype: str,
                                 max_tokens: int) -> None:
-    # numeric error during prefill chucking produces different generation
+    # numeric error during prefill chunking produces different generation
     # compared to w/o prefill chunking for those examples, removed them for now
     if 'Jamba' in model:
         example_prompts.pop(7)
