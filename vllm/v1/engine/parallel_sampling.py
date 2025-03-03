@@ -6,6 +6,7 @@ from typing import Callable, Optional, Union
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.v1.metrics.stats import IterationStats
 
 
 class ParentRequest:
@@ -18,8 +19,14 @@ class ParentRequest:
     request_id: str
     sampling_params: SamplingParams
 
+    # To track the completion of child requests
+    child_requests: set[str]
+
     # To aggregate child completions when not streaming
     output_aggregator: Optional[RequestOutput]
+
+    # To find the max number of generated tokens across all children
+    max_num_generation_tokens: int
 
     # To efficiently obtain child sampling params
     cached_child_sampling_params: Optional[SamplingParams]
@@ -29,7 +36,9 @@ class ParentRequest:
         self.request_id = request_id
         self.sampling_params = sampling_params
 
+        self.child_requests = set()
         self.output_aggregator = None
+        self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
 
     @classmethod
@@ -82,8 +91,12 @@ class ParentRequest:
         Returns:
           (request ID, sampling_params) tuple
         """
-        return (f"{index}_{self.request_id}",
-                self._get_child_sampling_params(index))
+        child_req_id = f"{index}_{self.request_id}"
+        self.child_requests.add(child_req_id)
+        return (child_req_id, self._get_child_sampling_params(index))
+
+    def finish_child_request(self, req_id: str):
+        self.child_requests.remove(req_id)
 
     @property
     def n(self) -> int:
@@ -117,3 +130,25 @@ class ParentRequest:
         request_output.outputs = sorted(request_output.outputs,
                                         key=lambda x: x.index)
         return request_output
+
+    def observe_num_generation_tokens(self, num_generation_tokens: int):
+        self.max_num_generation_tokens = max(num_generation_tokens,
+                                             self.max_num_generation_tokens)
+        return self.max_num_generation_tokens
+
+    @staticmethod
+    def observe_finished_request(parent_req: Optional['ParentRequest'],
+                                 iteration_stats: IterationStats,
+                                 num_generation_tokens: int):
+
+        n_param = parent_req.n if parent_req is not None else 1
+
+        if parent_req is not None:
+            num_generation_tokens = parent_req.observe_num_generation_tokens(
+                num_generation_tokens)
+
+        # Child requests finished, we can now record to iteration stats
+        if parent_req is None or not parent_req.child_requests:
+            iteration_stats.max_num_generation_tokens_iter.append(
+                num_generation_tokens)
+            iteration_stats.n_params_iter.append(n_param)
