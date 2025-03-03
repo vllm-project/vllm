@@ -18,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
 from vllm.utils import _check_multiproc_method, get_mp_context, run_method
+from vllm.platforms.cuda import set_cpu_affinity
 
 if HAS_TRITON:
     from vllm.triton_utils import maybe_set_triton_cache_manager
@@ -213,6 +214,9 @@ def _run_worker_process(
     rank: int,
 ) -> None:
     """Worker process event loop"""
+
+    # Set CPU affinity
+    set_cpu_affinity()
 
     # Add process-specific prefix to stdout and stderr
     process_name = get_mp_context().current_process().name
