@@ -377,17 +377,11 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "sharegpt":
         dataset_cls = ShareGPTDataset
     elif args.dataset_name == "sonnet":
-        if args.backend != "openai-chat":
-            assert tokenizer.chat_template or tokenizer.default_chat_template, (
-                "Tokenizer/model must have chat template for sonnet dataset.")
-            dataset_cls = SonnetDataset
-            common_kwargs["prefix_len"] = args.prefix_len
-            sample_kwargs["return_prompt_formatted"] = True
-        else:
-            raise NotImplementedError(
-                # TODO (jenniferzhoa): Add support
-                "Throughput testing using any backend other than openai-chat \
-                is not yet supported for the Sonnet dataset.")
+        assert tokenizer.chat_template or tokenizer.default_chat_template, (
+            "Tokenizer/model must have chat template for sonnet dataset.")
+        dataset_cls = SonnetDataset
+        common_kwargs["prefix_len"] = args.prefix_len
+        sample_kwargs["return_prompt_formatted"] = True
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
