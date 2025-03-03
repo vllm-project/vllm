@@ -1,45 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
 # Implements a simple offline inference script for the Phi 3.5 Speech model.
 # Code implemented by Jacob Platin (jacobplatin@microsoft.com)
 
 import soundfile
 
 from vllm import LLM, SamplingParams
-from vllm.utils import FlexibleArgumentParser
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
+from vllm.utils import FlexibleArgumentParser
 
-"""
-Model file: vllm/model_executor/models/phi3o.py
 
-Step 1: Download the following model weights to some location.
-* Base Model Weight: https://github.com/microsoft/MoE/tree/weijian/phio-hf
-* Vision Lora Model Weight: https://llmpretrainingwus3.blob.core.windows.net/users/weijianxu/phio-004-sft-vision-lora-only-from-hf-unified-model
-* Speech Lora Model Weight: https://llmpretrainingwus3.blob.core.windows.net/users/weijianxu/phio-004-sft-speech-lora-only-from-hf-unified-model
-
-Step 2: Run the test
-* Run the followling command with the commandline parameters you want to pass into the script.
-    python examples/offline_inference_phi3s.py
-* You should expect to see the output like:
-    Prompt: '<|user|>\n<|image_1|>\n<|audio_1|>\ntry your best to answer the question<|end|>\n<|assistant|>\n'
-    Generated text: 'Stop'
-"""
 def main_pure_text(args: dict) -> None:
     """
     Main function for the offline inference script.
     """
-    llm = LLM(
-        model=args.model_path,
-        trust_remote_code=True,
-        enforce_eager=True)
+    llm = LLM(model=args.model_path,
+              trust_remote_code=True,
+              enforce_eager=True)
     user_prompt = '<|user|>\n'
     assistant_prompt = '<|assistant|>\n'
     prompt_suffix = '<|end|>\n'
-    prompt = f'{user_prompt}what is the answer for 1+1? Explain it.{prompt_suffix}{assistant_prompt}'
+    prompt = f'{user_prompt}what is the answer for 1+1? Explain'\
+             f' it.{prompt_suffix}{assistant_prompt}'
     print(f'>>> Prompt\n{prompt}')
     # NOTE: soundfile.read will return the audio feature and the sampling rate
-    generate_args = {
-        "prompt": prompt
-    }
+    generate_args = {"prompt": prompt}
     # NOTE: you should use the following settings to ensure parity in HF
     # generate_ids = model.generate(
     #     **inputs,
@@ -68,22 +53,22 @@ def main_with_lora_speech(args: dict, activate_lora_request=True) -> None:
     Main function for the offline inference script.
     """
     wav_paths = [args.wav_path]
-    llm = LLM(
-        model=args.model_path,
-        trust_remote_code=True,
-        enable_lora=activate_lora_request,
-        enforce_eager=True,
-        max_lora_rank=512,
-        lora_extra_vocab_size=0,
-        limit_mm_per_prompt={"audio": len(wav_paths)},
-        max_loras=5)
+    llm = LLM(model=args.model_path,
+              trust_remote_code=True,
+              enable_lora=activate_lora_request,
+              enforce_eager=True,
+              max_lora_rank=512,
+              lora_extra_vocab_size=0,
+              limit_mm_per_prompt={"audio": len(wav_paths)},
+              max_loras=5)
 
     # assert len(wav_paths) == 1, "Only support single audio files for now!"
 
-    prompt = "Generate a comprehensive text transcription of the spoken content."
-    placeholders = "\n".join(
-        f"<|audio_{i}|>" for i in range(1, len(wav_paths) + 1)
-    )
+    prompt = "Generate a comprehensive text transcription of the "\
+        "spoken content."
+    placeholders = "\n".join(f"<|audio_{i}|>"
+                             for i in range(1,
+                                            len(wav_paths) + 1))
     prompt = f"<|user|>\n{placeholders}\n{prompt}<|end|>\n<|assistant|>\n"
 
     # NOTE: soundfile.read will return the audio feature and the sampling rate
@@ -108,36 +93,41 @@ def main_with_lora_speech(args: dict, activate_lora_request=True) -> None:
         max_tokens=200,
     )
 
-    outputs = llm.generate(generate_args, sampling_params=sampling_params, lora_request= [LoRARequest("speech_adapter", 3, args.speech_lora_path)] if activate_lora_request else None)
+    outputs = llm.generate(
+        generate_args,
+        sampling_params=sampling_params,
+        lora_request=[LoRARequest("speech_adapter", 3, args.speech_lora_path)]
+        if activate_lora_request else None)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}")
         print(f"Generated text: {generated_text!r}\n\n")
 
-def main_with_lora_speech_batch(args: dict, activate_lora_request=True) -> None:
+
+def main_with_lora_speech_batch(args: dict,
+                                activate_lora_request=True) -> None:
     """
     Main function for the offline inference script.
     """
     wav_paths = [args.wav_path, args.wav_path]
 
-    llm = LLM(
-        model=args.model_path,
-        trust_remote_code=True,
-        enable_lora=activate_lora_request,
-        enforce_eager=True,
-        max_lora_rank=512,
-        lora_extra_vocab_size=0,
-        limit_mm_per_prompt={"audio": len(wav_paths)},
-        max_loras=5)
-
+    llm = LLM(model=args.model_path,
+              trust_remote_code=True,
+              enable_lora=activate_lora_request,
+              enforce_eager=True,
+              max_lora_rank=512,
+              lora_extra_vocab_size=0,
+              limit_mm_per_prompt={"audio": len(wav_paths)},
+              max_loras=5)
 
     # assert len(wav_paths) == 1, "Only support single audio files for now!"
 
-    prompt = "Based on the attached audio, generate a comprehensive text transcription of the spoken content."
-    placeholders = "\n".join(
-        f"<|audio_{i}|>" for i in range(1, len(wav_paths) + 1)
-    )
+    prompt = "Based on the attached audio, generate a comprehensive text "\
+        "transcription of the spoken content."
+    placeholders = "\n".join(f"<|audio_{i}|>"
+                             for i in range(1,
+                                            len(wav_paths) + 1))
     prompt = f"<|user|>\n{placeholders}\n{prompt}<|end|>\n<|assistant|>\n"
 
     # NOTE: soundfile.read will return the audio feature and the sampling rate
@@ -173,23 +163,23 @@ def main_with_lora_speech_batch(args: dict, activate_lora_request=True) -> None:
     outputs = llm.generate(
         generate_args,
         sampling_params=sampling_params,
-        lora_request= LoRARequest("speech_adapter", 3, args.speech_lora_path)
-            if activate_lora_request else None)
+        lora_request=LoRARequest("speech_adapter", 3, args.speech_lora_path)
+        if activate_lora_request else None)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}")
         print(f"Generated text: {generated_text!r}\n\n")
 
+
 def main_with_lora_vision(args: dict, activate_lora_request=True) -> None:
     """
     Main function for the offline inference script.
     """
-    image_urls=[args.image_url]
+    image_urls = [args.image_url]
     llm = LLM(
         model=args.model_path,
         trust_remote_code=True,
-
         enable_lora=activate_lora_request,
         enforce_eager=True,
         max_lora_rank=512,
@@ -206,7 +196,7 @@ def main_with_lora_vision(args: dict, activate_lora_request=True) -> None:
                              for i, _ in enumerate(image_urls, start=1))
     prompt = f"<|user|>\n{placeholders}\n{prompt}<|end|>\n<|assistant|>\n"
 
-    image_data=[fetch_image(url) for url in image_urls]
+    image_data = [fetch_image(url) for url in image_urls]
 
     # NOTE: soundfile.read will return the audio feature and the sampling rate
     generate_args = {
@@ -233,8 +223,8 @@ def main_with_lora_vision(args: dict, activate_lora_request=True) -> None:
     outputs = llm.generate(
         generate_args,
         sampling_params=sampling_params,
-        lora_request= [LoRARequest("vision_adapter", 3, args.vision_lora_path)] if activate_lora_request else None
-    )
+        lora_request=[LoRARequest("vision_adapter", 3, args.vision_lora_path)]
+        if activate_lora_request else None)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
@@ -242,15 +232,18 @@ def main_with_lora_vision(args: dict, activate_lora_request=True) -> None:
         print(f"Generated text: {generated_text!r}\n\n")
 
 
-def main_with_lora_vision_batch(args: dict, activate_lora_request=True) -> None:
+def main_with_lora_vision_batch(args: dict,
+                                activate_lora_request=True) -> None:
     """
     Main function for the offline inference script.
     """
-    image_urls=[args.image_url, "https://alinasayre.com/wp-content/uploads/2013/10/d67cd-dsc01646.jpg"]
+    image_urls = [
+        args.image_url,
+        "https://alinasayre.com/wp-content/uploads/2013/10/d67cd-dsc01646.jpg"
+    ]
     llm = LLM(
         model=args.model_path,
         trust_remote_code=True,
-
         enable_lora=activate_lora_request,
         enforce_eager=True,
         max_lora_rank=512,
@@ -275,7 +268,13 @@ def main_with_lora_vision_batch(args: dict, activate_lora_request=True) -> None:
         {
             "prompt": prompt,
             "multi_modal_data": {
-                "image": [fetch_image(url) for url in ["https://www.ilankelman.org/stopsigns/australia.jpg", "https://alinasayre.com/wp-content/uploads/2013/10/d67cd-dsc01646.jpg"]],
+                "image": [
+                    fetch_image(url) for url in [
+                        "https://www.ilankelman.org/stopsigns/australia.jpg",
+                        "https://alinasayre.com/wp-content/uploads/2013/10/"\
+                            "d67cd-dsc01646.jpg"
+                    ]
+                ],
             },
         },
         {
@@ -303,9 +302,8 @@ def main_with_lora_vision_batch(args: dict, activate_lora_request=True) -> None:
     outputs = llm.generate(
         generate_args,
         sampling_params=sampling_params,
-        lora_request= LoRARequest("vision_adapter", 3, args.vision_lora_path)
-            if activate_lora_request else None
-    )
+        lora_request=LoRARequest("vision_adapter", 3, args.vision_lora_path)
+        if activate_lora_request else None)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
@@ -313,15 +311,15 @@ def main_with_lora_vision_batch(args: dict, activate_lora_request=True) -> None:
         print(f"Generated text: {generated_text!r}\n\n")
 
 
-def main_with_lora_vision_speech(args: dict, activate_lora_request=True) -> None:
+def main_with_lora_vision_speech(args: dict,
+                                 activate_lora_request=True) -> None:
     """
     Main function for the offline inference script.
     """
-    image_urls=[args.image_url]
+    image_urls = [args.image_url]
     llm = LLM(
         model=args.model_path,
         trust_remote_code=True,
-
         enable_lora=activate_lora_request,
         enforce_eager=True,
         max_lora_rank=512,
@@ -333,15 +331,19 @@ def main_with_lora_vision_speech(args: dict, activate_lora_request=True) -> None
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
-    prompt =  ""
+    prompt = ""
 
     placeholders = "\n".join(f"<|image_{i}|>"
                              for i, _ in enumerate(image_urls, start=1))
-    prompt = f"<|user|>\n{placeholders}\n<|audio_1|>\n{prompt}<|end|>\n<|assistant|>\n"
+    prompt = f"<|user|>\n{placeholders}\n<|audio_1|>\n{prompt}<|end|>"\
+        "\n<|assistant|>\n"
 
-    image_data=[fetch_image(url) for url in image_urls]
+    image_data = [fetch_image(url) for url in image_urls]
 
-    wav_paths = ["/scratch/turing_westus3_prm_data/users/congcongchen/MoE_2/hf-models/phio/examples/what_is_the_traffic_sign_in_the_image.wav"]
+    wav_paths = [
+        "/scratch/turing_westus3_prm_data/users/congcongchen/MoE_2/hf-models"\
+            "/phio/examples/what_is_the_traffic_sign_in_the_image.wav"
+    ]
     # NOTE: soundfile.read will return the audio feature and the sampling rate
     generate_args = {
         "prompt": prompt,
@@ -368,24 +370,28 @@ def main_with_lora_vision_speech(args: dict, activate_lora_request=True) -> None
     outputs = llm.generate(
         generate_args,
         sampling_params=sampling_params,
-        lora_request= [LoRARequest("vision_adapter", 3, args.vision_lora_path)] if activate_lora_request else None
-    )
+        lora_request=[LoRARequest("vision_adapter", 3, args.vision_lora_path)]
+        if activate_lora_request else None)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}")
         print(f"Generated text: {generated_text!r}\n\n")
 
-def main_with_lora_vision_speech_batch(args: dict, activate_lora_request=True) -> None:
+
+def main_with_lora_vision_speech_batch(args: dict,
+                                       activate_lora_request=True) -> None:
     """
     Main function for the offline inference script.
     """
-    image_urls=[args.image_url, "https://alinasayre.com/wp-content/uploads/2013/10/d67cd-dsc01646.jpg"]
+    image_urls = [
+        args.image_url,
+        "https://alinasayre.com/wp-content/uploads/2013/10/d67cd-dsc01646.jpg"
+    ]
     wav_paths = [args.wav_path]
     llm = LLM(
         model=args.model_path,
         trust_remote_code=True,
-
         enable_lora=activate_lora_request,
         enforce_eager=True,
         max_lora_rank=512,
@@ -394,17 +400,20 @@ def main_with_lora_vision_speech_batch(args: dict, activate_lora_request=True) -
 
         # max_model_len=40960,
         # max_num_seqs=5,
-        limit_mm_per_prompt={"image": len(image_urls), "audio": len(wav_paths)},
+        limit_mm_per_prompt={
+            "image": len(image_urls),
+            "audio": len(wav_paths)
+        },
     )
 
-    prompt =  "try your best to answer the question"
+    prompt = "try your best to answer the question"
 
     placeholders = "\n".join(f"<|image_{i}|>"
                              for i, _ in enumerate(image_urls, start=1))
-    prompt = f"<|user|>\n{placeholders}\n<|audio_1|>\n{prompt}<|end|>\n<|assistant|>\n"
+    prompt = f"<|user|>\n{placeholders}\n<|audio_1|>\n{prompt}"\
+        "<|end|>\n<|assistant|>\n"
 
     # image_data=[fetch_image(url) for url in image_urls]
-
 
     # NOTE: soundfile.read will return the audio feature and the sampling rate
     generate_args = [
@@ -413,14 +422,21 @@ def main_with_lora_vision_speech_batch(args: dict, activate_lora_request=True) -
             "multi_modal_data": {
                 "image": [fetch_image(url) for url in image_urls],
                 "audio": [soundfile.read(wav_path) for wav_path in wav_paths],
-                },
+            },
         },
         {
             "prompt": prompt,
             "multi_modal_data": {
-                "image": [fetch_image(url) for url in ["https://alinasayre.com/wp-content/uploads/2013/10/d67cd-dsc01646.jpg", "https://alinasayre.com/wp-content/uploads/2012/01/c3a7c-dsc01668.jpg"]],
+                "image": [
+                    fetch_image(url) for url in [
+                        "https://alinasayre.com/wp-content/uploads/"\
+                            "2013/10/d67cd-dsc01646.jpg",
+                        "https://alinasayre.com/wp-content/uploads/"\
+                            "2012/01/c3a7c-dsc01668.jpg"
+                    ]
+                ],
                 "audio": [soundfile.read(wav_path) for wav_path in wav_paths],
-                },
+            },
         },
     ]
     # NOTE: you should use the following settings to ensure parity in HF
@@ -441,9 +457,8 @@ def main_with_lora_vision_speech_batch(args: dict, activate_lora_request=True) -
     outputs = llm.generate(
         generate_args,
         sampling_params=sampling_params,
-        lora_request= LoRARequest("vision_adapter", 3, args.vision_lora_path)
-          if activate_lora_request else None
-    )
+        lora_request=LoRARequest("vision_adapter", 3, args.vision_lora_path)
+        if activate_lora_request else None)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
@@ -454,13 +469,13 @@ def main_with_lora_vision_speech_batch(args: dict, activate_lora_request=True) -
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description="Demo on using vLLM for offline inference with "
-        "vision language models that support multi-image input"
-    )
+        "vision language models that support multi-image input")
     parser.add_argument(
         "--model-path",
         "-p",
         type=str,
-        default="/scratch/turing_westus3_prm_data/users/congcongchen/phi4-mini-mm",
+        default=
+        "/scratch/turing_westus3_prm_data/users/congcongchen/phi4-mini-mm",
         help="Path to the (HuggingFace) model checkpoint.",
     )
 
@@ -468,7 +483,8 @@ if __name__ == "__main__":
         "--vision-lora-path",
         "-v",
         type=str,
-        default="/scratch/turing_westus3_prm_data/users/congcongchen/phi4-mini-mm/vision-lora",
+        default=
+        "/scratch/turing_westus3_prm_data/users/congcongchen/phi4-mini-mm/vision-lora",
         help="Path to the (HuggingFace) vision lora model checkpoint.",
     )
 
@@ -476,7 +492,8 @@ if __name__ == "__main__":
         "--speech-lora-path",
         "-s",
         type=str,
-        default="/scratch/turing_westus3_prm_data/users/congcongchen/phi4-mini-mm/speech-lora",
+        default=
+        "/scratch/turing_westus3_prm_data/users/congcongchen/phi4-mini-mm/speech-lora",
         help="Path to the (HuggingFace) speech lora model checkpoint.",
     )
 
@@ -493,7 +510,8 @@ if __name__ == "__main__":
         "--image-url",
         "-i",
         type=str,
-        default="https://www.ilankelman.org/stopsigns/australia.jpg",
+        default=
+        "https://alinasayre.com/wp-content/uploads/2013/10/d67cd-dsc01646.jpg",
     )
 
     parser.add_argument(
@@ -508,7 +526,7 @@ if __name__ == "__main__":
     test_type = args.test_type
     if test_type == "language_only":
         main_pure_text(args)
-     ##### Speech + Language #####
+    ##### Speech + Language #####
     elif test_type == "speech_language_with_lora":
         main_with_lora_speech(args)
     elif test_type == "speech_language_with_lora_batch":
