@@ -189,22 +189,17 @@ class InputPreprocessor:
         corresponding token IDs.
         """
         tokenizer = self.get_tokenizer_group()
-        add_special_tokens = None
-        if self.model_config.hf_config.model_type == "whisper":
-            # For Whisper, special tokens should be provided by the user based
-            # on the task and language of their request. Also needed to avoid
-            # appending an EOS token to the prompt which disrupts generation.
-            add_special_tokens = False
 
         if (self.model_config.encoder_config is not None
                 and self.model_config.encoder_config.get(
                     "do_lower_case", False)):
             prompt = prompt.lower()
 
-        return tokenizer.encode(request_id=request_id,
-                                prompt=prompt,
-                                lora_request=lora_request,
-                                add_special_tokens=add_special_tokens)
+        return tokenizer.encode(
+            request_id=request_id,
+            prompt=prompt,
+            lora_request=lora_request,
+        )
 
     async def _tokenize_prompt_async(
         self,
@@ -214,17 +209,11 @@ class InputPreprocessor:
     ) -> List[int]:
         """Async version of :meth:`_tokenize_prompt`."""
         tokenizer = self.get_tokenizer_group()
-        add_special_tokens = None
-        if self.model_config.hf_config.model_type == "whisper":
-            # For Whisper, special tokens should be provided by the user based
-            # on the task and language of their request. Also needed to avoid
-            # appending an EOS token to the prompt which disrupts generation.
-            add_special_tokens = False
         return await tokenizer.encode_async(
             request_id=request_id,
             prompt=prompt,
             lora_request=lora_request,
-            add_special_tokens=add_special_tokens)
+        )
 
     def _can_process_multimodal(self) -> bool:
         model_config = self.model_config
@@ -473,15 +462,8 @@ class InputPreprocessor:
             assert_never(encoder_inputs)  # type: ignore[arg-type]
 
         if decoder_inputs is None:
-            if self.model_config.hf_config.model_type == "whisper":
-                # For Whisper models, the text prompt should go to the decoder.
-                # If no explicit encoder/decoder inputs, then copy the prompt
-                # from the encoder to the decoder. The encoder tokens are later
-                # overridden by the audio features.
-                dec_token_ids = encoder_inputs["prompt_token_ids"].copy()
-            else:
-                dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                    None)
+            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
+                None)
             decoder_inputs = token_inputs(dec_token_ids)
         elif (decoder_inputs["type"] == "token"
               or decoder_inputs["type"] == "multimodal"):
