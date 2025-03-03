@@ -144,8 +144,8 @@ class GuidedDecodingManager:
         key = request.guided_decoding_key
         with self._requests_lock:
             self.requests.add(request)
-        if key in self.request_key_to_grammar:
-            grammar = self.request_key_to_grammar[key]
+        grammar = self.request_key_to_grammar.get(key)
+        if grammar is not None:
             return copy.copy(grammar)
         grammar = self.initialize_grammar(key)
         # If cache is full, remove the least recently used item
