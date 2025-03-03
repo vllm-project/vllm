@@ -513,7 +513,7 @@ def get_open_port() -> int:
         dp_port = envs.VLLM_DP_MASTER_PORT
         while True:
             port = _get_open_port()
-            if port >= dp_port and port < dp_port + 10:
+            if dp_port <= port < dp_port + 10:
                 continue
             return port
     return _get_open_port()
@@ -2143,8 +2143,10 @@ def make_zmq_socket(
 
 @contextlib.contextmanager
 def zmq_socket_ctx(
-        path: str,
-        type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
+    path: str,
+    type: Any,
+    linger: int = 0,
+) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
@@ -2155,7 +2157,7 @@ def zmq_socket_ctx(
         logger.debug("Got Keyboard Interrupt.")
 
     finally:
-        ctx.destroy(linger=0)
+        ctx.destroy(linger=linger)
 
 
 def _check_multiproc_method():
