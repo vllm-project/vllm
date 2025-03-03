@@ -413,7 +413,7 @@ hits per query.
 
 In the case of logging, we expect the user is best served by
 calculating the hit rate over a fixed number of the most recent
-queries.
+queries (the interval is fixed to 1k most recent queries for now).
 
 In the case of Prometheus though, we should take advantage of the
 time-series nature of Prometheus and allow the user to calculate the
