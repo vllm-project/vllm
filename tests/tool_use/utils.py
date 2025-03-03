@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import deepcopy
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from openai.types.chat import (ChatCompletionMessageParam,
                                ChatCompletionToolParam)
@@ -12,14 +12,14 @@ from tests.utils import VLLM_PATH
 
 class ServerConfig(TypedDict, total=False):
     model: str
-    arguments: List[str]
+    arguments: list[str]
     system_prompt: Optional[str]
     supports_parallel: Optional[bool]
     supports_rocm: Optional[bool]
 
 
-def patch_system_prompt(messages: List[Dict[str, Any]],
-                        system_prompt: str) -> List[Dict[str, Any]]:
+def patch_system_prompt(messages: list[dict[str, Any]],
+                        system_prompt: str) -> list[dict[str, Any]]:
     new_messages = deepcopy(messages)
     if new_messages[0]["role"] == "system":
         new_messages[0]["content"] = system_prompt
@@ -28,8 +28,8 @@ def patch_system_prompt(messages: List[Dict[str, Any]],
     return new_messages
 
 
-def ensure_system_prompt(messages: List[Dict[str, Any]],
-                         config: ServerConfig) -> List[Dict[str, Any]]:
+def ensure_system_prompt(messages: list[dict[str, Any]],
+                         config: ServerConfig) -> list[dict[str, Any]]:
     prompt = config.get("system_prompt")
     if prompt:
         return patch_system_prompt(messages, prompt)
@@ -39,9 +39,9 @@ def ensure_system_prompt(messages: List[Dict[str, Any]],
 
 # universal args for all models go here. also good if you need to test locally
 # and change type or KV cache quantization or something.
-ARGS: List[str] = ["--enable-auto-tool-choice", "--max-model-len", "1024"]
+ARGS: list[str] = ["--enable-auto-tool-choice", "--max-model-len", "1024"]
 
-CONFIGS: Dict[str, ServerConfig] = {
+CONFIGS: dict[str, ServerConfig] = {
     "hermes": {
         "model":
         "NousResearch/Hermes-3-Llama-3.1-8B",
@@ -205,7 +205,7 @@ SEARCH_TOOL: ChatCompletionToolParam = {
     }
 }
 
-MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
+MESSAGES_WITHOUT_TOOLS: list[ChatCompletionMessageParam] = [{
     "role":
     "user",
     "content":
@@ -222,14 +222,14 @@ MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
     "Can you tell me a joke please?"
 }]
 
-MESSAGES_ASKING_FOR_TOOLS: List[ChatCompletionMessageParam] = [{
+MESSAGES_ASKING_FOR_TOOLS: list[ChatCompletionMessageParam] = [{
     "role":
     "user",
     "content":
     "What is the weather in Dallas, Texas in Fahrenheit?"
 }]
 
-MESSAGES_WITH_TOOL_RESPONSE: List[ChatCompletionMessageParam] = [{
+MESSAGES_WITH_TOOL_RESPONSE: list[ChatCompletionMessageParam] = [{
     "role":
     "user",
     "content":
@@ -258,7 +258,7 @@ MESSAGES_WITH_TOOL_RESPONSE: List[ChatCompletionMessageParam] = [{
     "cloudy skies and a low chance of rain."
 }]
 
-MESSAGES_ASKING_FOR_PARALLEL_TOOLS: List[ChatCompletionMessageParam] = [{
+MESSAGES_ASKING_FOR_PARALLEL_TOOLS: list[ChatCompletionMessageParam] = [{
     "role":
     "user",
     "content":
@@ -266,7 +266,7 @@ MESSAGES_ASKING_FOR_PARALLEL_TOOLS: List[ChatCompletionMessageParam] = [{
     "Fahrenheit?"
 }]
 
-MESSAGES_WITH_PARALLEL_TOOL_RESPONSE: List[ChatCompletionMessageParam] = [{
+MESSAGES_WITH_PARALLEL_TOOL_RESPONSE: list[ChatCompletionMessageParam] = [{
     "role":
     "user",
     "content":

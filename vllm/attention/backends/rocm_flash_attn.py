@@ -831,7 +831,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                     fp8_out_scale if cpa_fp8_out else None,
-                    _PARTITION_SIZE_ROCM,
                 )
                 if cpa_fp8_out:
                     return out.view(num_seqs, num_heads * head_size)

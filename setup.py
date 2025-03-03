@@ -2,6 +2,7 @@
 
 import ctypes
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -9,7 +10,6 @@ import subprocess
 import sys
 from pathlib import Path
 from shutil import which
-from typing import Dict, List
 
 import torch
 from packaging.version import Version, parse
@@ -54,7 +54,7 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
 
-MAIN_CUDA_VERSION = "12.1"
+MAIN_CUDA_VERSION = "12.4"
 
 
 def is_sccache_available() -> bool:
@@ -78,7 +78,7 @@ class CMakeExtension(Extension):
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
-    did_config: Dict[str, bool] = {}
+    did_config: dict[str, bool] = {}
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
@@ -270,9 +270,32 @@ class repackage_wheel(build_ext):
     """Extracts libraries and other files from an existing wheel."""
 
     def get_base_commit_in_main_branch(self) -> str:
-        import subprocess
+        # Force to use the nightly wheel. This is mainly used for CI testing.
+        if envs.VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL:
+            return "nightly"
 
         try:
+            # Get the latest commit hash of the upstream main branch.
+            resp_json = subprocess.check_output([
+                "curl", "-s",
+                "https://api.github.com/repos/vllm-project/vllm/commits/main"
+            ]).decode("utf-8")
+            upstream_main_commit = json.loads(resp_json)["sha"]
+
+            # Check if the local main branch is up-to-date. This is to ensure
+            # the base commit we found is the most recent commit on the main
+            # branch.
+            local_main_commit = subprocess.check_output(
+                ["git", "rev-parse", "main"]).decode("utf-8").strip()
+            if local_main_commit != upstream_main_commit:
+                raise ValueError(
+                    f"Local main branch ({local_main_commit}) is not "
+                    "up-to-date with upstream main branch "
+                    f"({upstream_main_commit}). Please pull the latest "
+                    "changes from upstream main branch first.")
+
+            # Then get the commit hash of the current branch that is the same as
+            # the upstream main commit.
             current_branch = subprocess.check_output(
                 ["git", "branch", "--show-current"]).decode("utf-8").strip()
 
@@ -280,6 +303,8 @@ class repackage_wheel(build_ext):
                 ["git", "merge-base", "main",
                  current_branch]).decode("utf-8").strip()
             return base_commit
+        except ValueError as err:
+            raise ValueError(err) from None
         except Exception as err:
             logger.warning(
                 "Failed to get the base commit in the main branch. "
@@ -328,6 +353,7 @@ class repackage_wheel(build_ext):
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
+                "vllm/_flashmla_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/vllm_flash_attn/flash_attn_interface.py",
@@ -547,10 +573,10 @@ def get_vllm_version() -> str:
     return version
 
 
-def get_requirements() -> List[str]:
+def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
 
-    def _read_requirements(filename: str) -> List[str]:
+    def _read_requirements(filename: str) -> list[str]:
         with open(get_path(filename)) as f:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []
@@ -570,9 +596,8 @@ def get_requirements() -> List[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if ("vllm-flash-attn" in req
-                    and not (cuda_major == "12" and cuda_minor == "1")):
-                # vllm-flash-attn is built only for CUDA 12.1.
+            if ("vllm-flash-attn" in req and cuda_major != "12"):
+                # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
             modified_requirements.append(req)
@@ -613,6 +638,11 @@ if _is_cuda():
         # FA3 requires CUDA 12.0 or later
         ext_modules.append(
             CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
+        # Optional since this doesn't get built (produce an .so file) when
+        # not targeting a hopper system
+        ext_modules.append(
+            CMakeExtension(name="vllm._flashmla_C", optional=True))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():

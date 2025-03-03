@@ -31,7 +31,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              DbrxConfig, DeepseekVLV2Config,
                                              EAGLEConfig, ExaoneConfig,
-                                             Grok1Config, H2OVLChatConfig,
+                                             H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
@@ -78,7 +78,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "solar": SolarConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
-    "grok-1": Grok1Config,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 

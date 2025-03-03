@@ -2,7 +2,8 @@
 
 import time
 from collections import deque
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
@@ -57,24 +58,24 @@ class Scheduler:
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
-        self.requests: Dict[str, Request] = {}
+        self.requests: dict[str, Request] = {}
         # Priority queues for requests.
-        self.waiting: Deque[Request] = deque()
-        self.running: List[Request] = []
+        self.waiting: deque[Request] = deque()
+        self.running: list[Request] = []
         # The requests that have been scheduled and are being executed
         # by the executor.
-        self.scheduled_req_ids: Set[str] = set()
+        self.scheduled_req_ids: set[str] = set()
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
-        self.finished_req_ids: Set[str] = set()
+        self.finished_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         # Request id -> CachedRequestData
-        self._cached_reqs_data: Dict[str, CachedRequestData] = {}
+        self._cached_reqs_data: dict[str, CachedRequestData] = {}
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -108,19 +109,19 @@ class Scheduler:
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
-        scheduled_new_reqs: List[Request] = []
-        scheduled_resumed_reqs: List[Request] = []
-        scheduled_running_reqs: List[Request] = []
-        preempted_reqs: List[Request] = []
+        scheduled_new_reqs: list[Request] = []
+        scheduled_resumed_reqs: list[Request] = []
+        scheduled_running_reqs: list[Request] = []
+        preempted_reqs: list[Request] = []
 
-        req_to_new_block_ids: Dict[str, List[int]] = {}
-        num_scheduled_tokens: Dict[str, int] = {}
+        req_to_new_block_ids: dict[str, list[int]] = {}
+        num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
-        scheduled_encoder_inputs: Dict[str, List[int]] = {}
+        scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
-        scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
+        scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -164,6 +165,7 @@ class Scheduler:
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
+                    self.request_preempted(preempted_req, scheduled_timestamp)
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
@@ -210,7 +212,7 @@ class Scheduler:
                 encoder_budget = new_encoder_budget
 
         # Record the LoRAs in scheduled_running_reqs
-        requested_loras: Set[int] = set()
+        requested_loras: set[int] = set()
         if self.lora_config:
             requested_loras = set(
                 req.lora_request.lora_int_id for req in scheduled_running_reqs
@@ -281,9 +283,9 @@ class Scheduler:
                 self.waiting.popleft()
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
+                self.request_scheduled(request, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
-                    self.request_scheduled(request, scheduled_timestamp)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
@@ -377,7 +379,7 @@ class Scheduler:
         request: Request,
         num_scheduled_tokens: int,
         num_scheduled_spec_tokens: int,
-        new_block_ids: List[int],
+        new_block_ids: list[int],
         resumed_from_preemption: bool,
     ) -> "CachedRequestData":
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
@@ -406,7 +408,7 @@ class Scheduler:
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_budget: int,
-    ) -> Tuple[List[int], int, int]:
+    ) -> tuple[list[int], int, int]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
@@ -426,7 +428,7 @@ class Scheduler:
         if not request.has_encoder_inputs():
             return [], num_new_tokens, encoder_budget
 
-        encoder_inputs_to_schedule: List[int] = []
+        encoder_inputs_to_schedule: list[int] = []
         mm_positions = request.mm_positions
         assert mm_positions is not None
         assert len(mm_positions) > 0
@@ -481,8 +483,8 @@ class Scheduler:
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        new_running: List[Request] = []
-        outputs: List[EngineCoreOutput] = []
+        new_running: list[Request] = []
+        outputs: list[EngineCoreOutput] = []
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -542,7 +544,7 @@ class Scheduler:
 
             stopped = False
             new_logprobs = None
-            new_token_ids: List[int] = []
+            new_token_ids: list[int] = []
 
             if request.num_computed_tokens >= request.num_tokens:
                 for output_token_id in generated_token_ids:
@@ -673,6 +675,13 @@ class Scheduler:
             return
         request.events.append(
             EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
+                                      timestamp))
+
+    def request_preempted(self, request: Request, timestamp: float):
+        if not self.log_stats:
+            return
+        request.events.append(
+            EngineCoreEvent.new_event(EngineCoreEventType.PREEMPTED,
                                       timestamp))
 
     def make_stats(self) -> Optional[SchedulerStats]:

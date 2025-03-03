@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
-from vllm.utils import is_navi
+from vllm.utils import direct_register_custom_op, is_navi
 
 logger = init_logger(__name__)
 
@@ -80,6 +80,25 @@ def apply_w8a8_block_fp8_linear(
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)
+
+
+def apply_w8a8_block_fp8_linear_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+    return torch.empty(output_shape, dtype=input.dtype, device=input.device)
+
+
+direct_register_custom_op(
+    op_name="apply_w8a8_block_fp8_linear",
+    op_func=apply_w8a8_block_fp8_linear,
+    mutates_args=[],
+    fake_impl=apply_w8a8_block_fp8_linear_fake,
+)
 
 
 # Unify the interface between `apply_w8a8_block_fp8_linear` and
@@ -464,14 +483,14 @@ def get_w8a8_block_fp8_configs(N: int, K: int, block_n: int,
     return None
 
 
-def w8a8_block_fp8_matmul(A: torch.Tensor,
-                          B: torch.Tensor,
-                          As: torch.Tensor,
-                          Bs: torch.Tensor,
-                          block_size: List[int],
-                          output_dtype: torch.dtype = torch.float16,
-                          tune_config=None,
-                          use_default_config=False) -> torch.Tensor:
+def w8a8_block_fp8_matmul(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    block_size: List[int],
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise
     quantization.
     It takes two input tensors `A` and `B` with scales `As` and `Bs`.
@@ -503,22 +522,22 @@ def w8a8_block_fp8_matmul(A: torch.Tensor,
     C_shape = A.shape[:-1] + (N, )
     C = A.new_empty(C_shape, dtype=output_dtype)
 
-    default_config = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": block_size[0],
-        "BLOCK_SIZE_K": block_size[1],
-        "GROUP_SIZE_M": 32,
-        "num_warps": 4,
-        "num_stages": 2,
-    }
-
-    config = default_config if use_default_config else tune_config
-    if config is None:
-        configs = get_w8a8_block_fp8_configs(N, K, block_size[0],
-                                             block_size[1])
-        config = configs[min(
-            configs.keys(),
-            key=lambda x: abs(x - M))] if configs else default_config
+    configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
+    if configs:
+        # Get the optimal config if there is one
+        config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+    else:
+        # Default config
+        # Block-wise quant: BLOCK_SIZE_N must be divisible by block_size[0]
+        # BLOCK_SIZE_K must be divisible by block_size[1]
+        config = {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": block_size[0],
+            "BLOCK_SIZE_K": block_size[1],
+            "GROUP_SIZE_M": 32,
+            "num_warps": 4,
+            "num_stages": 2,
+        }
 
     def grid(META):
         return (triton.cdiv(M, META["BLOCK_SIZE_M"]) *

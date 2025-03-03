@@ -29,8 +29,8 @@ def _test_processing_correctness(
     model_config = ModelConfig(
         model_id,
         task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
         trust_remote_code=model_info.trust_remote_code,
         seed=0,
         dtype="float16",
@@ -83,8 +83,8 @@ def _test_processing_correctness(
     }
 
     tokenizer_encode_kwargs = {}
-    if model_config.hf_config.model_type in ("mllama", "whisper"):
-        # For some encoder-decoder models, tokenizer will always add bos_token
+    if model_config.hf_config.model_type in ("mllama", "whisper", "ultravox"):
+        # For some multimodal models, tokenizer will always add bos_token
         # at the beginning of prompt by default, causing hf_processor outputs
         # incorrect token ids. So we need use `add_special_tokens=False` here
         # to leave bos_token to be added by the processor.
@@ -151,6 +151,7 @@ def _test_processing_correctness(
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
     "deepseek-ai/deepseek-vl2-tiny",
+    "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "THUDM/glm-4v-9b",
     "h2oai/h2ovl-mississippi-800m",
@@ -172,7 +173,7 @@ def _test_processing_correctness(
     "Qwen/Qwen2-VL-2B-Instruct",
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
-    "fixie-ai/ultravox-v0_5-llama-3_2-1b",
+    "fixie-ai/ultravox-v0_4",
     "openai/whisper-large-v3",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])

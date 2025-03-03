@@ -2,7 +2,7 @@
 
 import os
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
-    RANK: int = 0
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -68,20 +67,20 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
-    VLLM_TEST_FORCE_FP8_MARLIN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
-    VLLM_PLUGINS: Optional[List[str]] = None
+    VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_RPD_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_DISABLED_KERNELS: List[str] = []
+    VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = False
     VLLM_MOE_PADDING: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -134,7 +133,7 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
 
 # begin-env-vars-definition
 
-environment_variables: Dict[str, Callable[[], Any]] = {
+environment_variables: dict[str, Callable[[], Any]] = {
 
     # ================== Installation Time Env Vars ==================
 
@@ -158,6 +157,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_PRECOMPILED":
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
         os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+
+    # Whether to force using nightly wheel in python build.
+    # This is used for testing the nightly wheel in python build.
+    "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL":
+    lambda: bool(int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
+                 ),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
@@ -287,11 +292,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_ROCM_FP8_FLASH_ATTN":
     lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
              ("true", "1")),
-
-    # rank of the process in the distributed setting, used to determine
-    # the driver worker
-    "RANK":
-    lambda: int(os.environ.get("RANK", "0")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -423,21 +423,22 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_SPMD_WORKER":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))),
 
-    # If the env var is set, it uses the Ray's compiled DAG API
-    # which optimizes the control plane overhead.
+    # If the env var is set, it uses the Ray's Compiled Graph
+    # (previously known as ADAG) API which optimizes the
+    # control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
 
     # If the env var is set, it uses NCCL for communication in
-    # Ray's compiled DAG. This flag is ignored if
+    # Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
                  ),
 
     # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's compiled DAG. This flag is ignored if
+    # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))

@@ -2,7 +2,7 @@
 
 import time
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Optional
 
 import numpy as np
 import prometheus_client
@@ -35,8 +35,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_log_time = now
 
         # Tracked stats over current local logging interval.
-        self.num_prompt_tokens: List[int] = []
-        self.num_generation_tokens: List[int] = []
+        self.num_prompt_tokens: list[int] = []
+        self.num_generation_tokens: list[int] = []
 
         # Prefix cache metrics. TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
@@ -52,7 +52,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens.append(
             iteration_stats.num_generation_tokens)
 
-    def _get_throughput(self, tracked_stats: List[int], now: float) -> float:
+    def _get_throughput(self, tracked_stats: list[int], now: float) -> float:
         # Compute summary metrics for tracked stats
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
@@ -132,6 +132,11 @@ class PrometheusStatLogger(StatLoggerBase):
             "GPU prefix cache hits, in terms of number of cached blocks.",
             labelnames=labelnames).labels(*labelvalues)
 
+        self.counter_num_preempted_reqs = prometheus_client.Counter(
+            name="vllm:num_preemptions_total",
+            documentation="Cumulative number of preemption from the engine.",
+            labelnames=labelnames).labels(*labelvalues)
+
         self.counter_prompt_tokens = prometheus_client.Counter(
             name="vllm:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
@@ -142,7 +147,7 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_request_success: Dict[FinishReason,
+        self.counter_request_success: dict[FinishReason,
                                            prometheus_client.Counter] = {}
         counter_request_success_base = prometheus_client.Counter(
             name="vllm:request_success_total",
@@ -282,6 +287,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_gpu_prefix_cache_hits.inc(
             scheduler_stats.prefix_cache_stats.hits)
 
+        self.counter_num_preempted_reqs.inc(iteration_stats.num_preempted_reqs)
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(
             iteration_stats.num_generation_tokens)
@@ -289,10 +295,19 @@ class PrometheusStatLogger(StatLoggerBase):
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)
 
+        for ttft in iteration_stats.time_to_first_tokens_iter:
+            self.histogram_time_to_first_token.observe(ttft)
+        for tpot in iteration_stats.time_per_output_tokens_iter:
+            self.histogram_time_per_output_token.observe(tpot)
+
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason].inc()
             self.histogram_e2e_time_request.observe(
                 finished_request.e2e_latency)
+            self.histogram_queue_time_request.observe(
+                finished_request.queued_time)
+            self.histogram_prefill_time_request.observe(
+                finished_request.prefill_time)
             self.histogram_inference_time_request.observe(
                 finished_request.inference_time)
             self.histogram_decode_time_request.observe(
@@ -301,15 +316,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
                 finished_request.num_generation_tokens)
-
-        for ttft in iteration_stats.time_to_first_tokens_iter:
-            self.histogram_time_to_first_token.observe(ttft)
-        for tpot in iteration_stats.time_per_output_tokens_iter:
-            self.histogram_time_per_output_token.observe(tpot)
-        for queue_time in iteration_stats.queue_times_iter:
-            self.histogram_queue_time_request.observe(queue_time)
-        for prefill_time in iteration_stats.prefill_times_iter:
-            self.histogram_prefill_time_request.observe(prefill_time)
 
         if self.gauge_lora_info is not None:
             running_lora_adapters = \
@@ -332,14 +338,14 @@ class PrometheusStatLogger(StatLoggerBase):
                 prometheus_client.REGISTRY.unregister(collector)
 
 
-def build_buckets(mantissa_lst: List[int], max_value: int) -> List[int]:
+def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
     """
     Builds a list of buckets with increasing powers of 10 multiplied by
     mantissa values until the value exceeds the specified maximum.
 
     """
     exponent = 0
-    buckets: List[int] = []
+    buckets: list[int] = []
     while True:
         for m in mantissa_lst:
             value = m * 10**exponent
@@ -350,7 +356,7 @@ def build_buckets(mantissa_lst: List[int], max_value: int) -> List[int]:
         exponent += 1
 
 
-def build_1_2_5_buckets(max_value: int) -> List[int]:
+def build_1_2_5_buckets(max_value: int) -> list[int]:
     """
     Example:
     >>> build_1_2_5_buckets(100)
@@ -359,7 +365,7 @@ def build_1_2_5_buckets(max_value: int) -> List[int]:
     return build_buckets([1, 2, 5], max_value)
 
 
-def build_cudagraph_buckets(vllm_config: VllmConfig) -> List[int]:
+def build_cudagraph_buckets(vllm_config: VllmConfig) -> list[int]:
     if not vllm_config.model_config.enforce_eager:
         buckets = vllm_config.compilation_config.\
             cudagraph_capture_sizes.copy()
