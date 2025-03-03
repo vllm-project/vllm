@@ -715,18 +715,19 @@ class FusedMoE(torch.nn.Module):
         return topk_weights, topk_ids
 
     def naive_multicast(self, x: torch.Tensor,
-                        num_tokens_cumsum: torch.Tensor):
+                        cu_tokens_across_dp_cpu: torch.Tensor):
         assert (len(x.shape) == 2)
-        buffer = torch.empty((num_tokens_cumsum[-1], x.size(1)),
+        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
                              device=x.device,
                              dtype=x.dtype)
 
-        start = 0 if self.dp_rank == 0 else num_tokens_cumsum[self.dp_rank - 1]
-        end = num_tokens_cumsum[self.dp_rank]
+        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
+            self.dp_rank - 1]
+        end = cu_tokens_across_dp_cpu[self.dp_rank]
         buffer[start:end, :].copy_(x)
         for idx in range(get_dp_group().world_size):
-            start = 0 if idx == 0 else num_tokens_cumsum[idx - 1]
-            end = num_tokens_cumsum[idx]
+            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
+            end = cu_tokens_across_dp_cpu[idx]
             get_dp_group().broadcast(buffer[start:end, :], idx)
 
         return buffer
@@ -744,13 +745,13 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
 
         if self.dp_size > 1:
-            cumsum_tokens_across_dp = get_forward_context(
-            ).cumsum_tokens_across_dp
+            cu_tokens_across_dp_cpu = get_forward_context(
+            ).cu_tokens_across_dp_cpu
 
             hidden_states = self.naive_multicast(hidden_states,
-                                                 cumsum_tokens_across_dp)
+                                                 cu_tokens_across_dp_cpu)
             router_logits = self.naive_multicast(router_logits,
-                                                 cumsum_tokens_across_dp)
+                                                 cu_tokens_across_dp_cpu)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -771,9 +772,9 @@ class FusedMoE(torch.nn.Module):
         )
 
         if self.dp_size > 1:
-            start = 0 if self.dp_rank == 0 else cumsum_tokens_across_dp[
+            start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
                 self.dp_rank - 1]
-            end = cumsum_tokens_across_dp[self.dp_rank]
+            end = cu_tokens_across_dp_cpu[self.dp_rank]
 
             all_hidden_states = get_dp_group().all_reduce(final_hidden_states)
             final_hidden_states = all_hidden_states[start:end, :]
@@ -853,7 +854,7 @@ class FusedMoE(torch.nn.Module):
 def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
                 layer_name: str) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
-    self = forward_context.smuggled_layers[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
     assert self.quant_method is not None
 
     return self.forward_impl(hidden_states, router_logits)

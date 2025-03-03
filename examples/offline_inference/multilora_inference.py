@@ -6,7 +6,7 @@ for offline inference.
 Requires HuggingFace credentials for access to Llama2.
 """
 
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from huggingface_hub import snapshot_download
 
@@ -16,7 +16,7 @@ from vllm.lora.request import LoRARequest
 
 def create_test_prompts(
         lora_path: str
-) -> List[Tuple[str, SamplingParams, Optional[LoRARequest]]]:
+) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
     """Create a list of test prompts with their sampling parameters.
 
     2 requests for base model, 4 requests for the LoRA. We define 2
@@ -56,7 +56,7 @@ def create_test_prompts(
 
 
 def process_requests(engine: LLMEngine,
-                     test_prompts: List[Tuple[str, SamplingParams,
+                     test_prompts: list[tuple[str, SamplingParams,
                                               Optional[LoRARequest]]]):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
@@ -70,7 +70,7 @@ def process_requests(engine: LLMEngine,
                                lora_request=lora_request)
             request_id += 1
 
-        request_outputs: List[RequestOutput] = engine.step()
+        request_outputs: list[RequestOutput] = engine.step()
 
         for request_output in request_outputs:
             if request_output.finished:

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from collections.abc import Sequence
 from functools import cached_property
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Type, Union
+from typing import Callable, Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
@@ -25,14 +26,14 @@ class ReasoningParser:
         self.model_tokenizer = tokenizer
 
     @cached_property
-    def vocab(self) -> Dict[str, int]:
+    def vocab(self) -> dict[str, int]:
         # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from a complete model-generated string.
 
@@ -47,7 +48,7 @@ class ReasoningParser:
             The request object that was used to generate the model_output.
 
         Returns:
-        Tuple[Optional[str], Optional[str]]
+        tuple[Optional[str], Optional[str]]
             A tuple containing the reasoning content and the content.
         """
 
@@ -77,10 +78,10 @@ class ReasoningParser:
 
 
 class ReasoningParserManager:
-    reasoning_parsers: Dict[str, Type] = {}
+    reasoning_parsers: dict[str, type] = {}
 
     @classmethod
-    def get_reasoning_parser(cls, name) -> Type:
+    def get_reasoning_parser(cls, name) -> type:
         """
         Get reasoning parser by name which is registered by `register_module`.
 
@@ -94,8 +95,8 @@ class ReasoningParserManager:
 
     @classmethod
     def _register_module(cls,
-                         module: Type,
-                         module_name: Optional[Union[str, List[str]]] = None,
+                         module: type,
+                         module_name: Optional[Union[str, list[str]]] = None,
                          force: bool = True) -> None:
         if not issubclass(module, ReasoningParser):
             raise TypeError("module must be subclass of ReasoningParser, "
@@ -114,9 +115,9 @@ class ReasoningParserManager:
     @classmethod
     def register_module(
             cls,
-            name: Optional[Union[str, List[str]]] = None,
+            name: Optional[Union[str, list[str]]] = None,
             force: bool = True,
-            module: Union[Type, None] = None) -> Union[type, Callable]:
+            module: Union[type, None] = None) -> Union[type, Callable]:
         """
         Register module with the given name or name list. it can be used as a
         decoder(with module as None) or normal function(with module as not 

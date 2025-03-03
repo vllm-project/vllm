@@ -4,7 +4,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -28,13 +28,13 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 @dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
-    smuggled_layers: Dict[str, Any]
+    no_compile_layers: dict[str, Any]
     # TODO: extend to support per-layer dynamic forward context
     attn_metadata: "AttentionMetadata"  # set dynamically for each forward pass
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
-    cumsum_tokens_across_dp: Optional[
-        torch.Tensor] = None  # set dynamically for each forward pass
+    # set dynamically for each forward pass
+    cu_tokens_across_dp_cpu: Optional[torch.Tensor] = None
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -61,7 +61,7 @@ def set_forward_context(attn_metadata: Any,
     need_to_track_batchsize = track_batchsize and attn_metadata is not None
     if need_to_track_batchsize:
         forward_start_time = time.perf_counter()
-    cumsum_tokens_across_dp = None
+    cu_tokens_across_dp_cpu = None
     if vllm_config.parallel_config.data_parallel_size > 1:
         dp_size = vllm_config.parallel_config.data_parallel_size
         dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -82,15 +82,16 @@ def set_forward_context(attn_metadata: Any,
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
-        cumsum_tokens_across_dp = torch.cumsum(num_tokens_tensor, dim=0)
+        cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
 
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
-        smuggled_layers=vllm_config.compilation_config.static_forward_context,
+        no_compile_layers=vllm_config.compilation_config.
+        static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        cumsum_tokens_across_dp=cumsum_tokens_across_dp)
+        cu_tokens_across_dp_cpu=cu_tokens_across_dp_cpu)
     try:
         yield
     finally:
