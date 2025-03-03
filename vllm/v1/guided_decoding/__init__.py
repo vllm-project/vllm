@@ -8,7 +8,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
@@ -32,7 +32,7 @@ class GuidedDecodingOptions(enum.Enum):
     CHOICE = enum.auto()
 
 
-GuidedDecodingKey = Tuple[GuidedDecodingOptions, str]
+GuidedDecodingKey = tuple[GuidedDecodingOptions, str]
 
 
 @dataclass(slots=True, unsafe_hash=True)  # type: ignore[call-overload]
@@ -53,7 +53,7 @@ class Grammar:
                                       hash=False,
                                       init=False)
 
-    def accept_tokens(self, request_id: str, tokens: List[int]) -> bool:
+    def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         # NOTE: accept_token will determines whether we accept this token
         # and will also update the machine state
         for token in tokens:
@@ -111,7 +111,7 @@ class GuidedDecodingManager:
         # compilation, so we set it to half the number of CPUs.
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.requests: Set[Request] = set()
+        self.requests: set[Request] = set()
         self._requests_lock = threading.Lock()
         self._grammar_bitmask = xgr.allocate_token_bitmask(
             self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
@@ -124,7 +124,7 @@ class GuidedDecodingManager:
             return value
         return None
 
-    def remove_requests(self, request_ids: List[str]) -> None:
+    def remove_requests(self, request_ids: list[str]) -> None:
         with self._requests_lock:
             self.requests = {
                 req

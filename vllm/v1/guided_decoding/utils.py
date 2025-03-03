@@ -2,7 +2,6 @@
 
 import json
 import re
-from typing import List
 
 import xgrammar
 
@@ -223,7 +222,7 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
     return '\n'.join(output_lines)
 
 
-def choice_as_grammar(choice: List[str]) -> str:
+def choice_as_grammar(choice: list[str]) -> str:
 
     def escape_ebnf_string(s: str) -> str:
         """Escape special characters in a EBNF string."""

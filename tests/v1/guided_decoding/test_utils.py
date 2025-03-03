@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
-
 from vllm.v1.guided_decoding.utils import (
     has_xgrammar_unsupported_json_features)
 
 
 def test_has_xgrammar_unsupported_json_features():
-    schemas_with_unsupported_features: List[dict] = [{
+    schemas_with_unsupported_features: list[dict] = [{
         "type": "string",
         "pattern": "^[a-zA-Z]+$"
     }, {
