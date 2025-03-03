@@ -25,9 +25,8 @@ logger = init_logger(__name__)
 _PARTITION_SIZE_ROCM = 512
 _GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
 _ON_NAVI = "gfx1" in _GPU_ARCH
-
 _ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
-_ON_GCN5 = any(arch in _GPU_ARCH for arch in ["gfx900", "gfx902", "gfx906"])
+_ON_GCN5 = any(arch in _GPU_ARCH for arch in ["gfx902", "gfx906"])
 
 class ROCmFlashAttentionBackend(AttentionBackend):
 
