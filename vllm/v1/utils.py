@@ -4,8 +4,7 @@ import multiprocessing
 import os
 import weakref
 from collections.abc import Sequence
-from typing import (Any, Callable, Dict, Generic, List, Optional, TypeVar,
-                    Union, overload)
+from typing import Any, Callable, Generic, Optional, TypeVar, Union, overload
 
 import torch
 
@@ -19,7 +18,7 @@ T = TypeVar("T")
 
 class ConstantList(Generic[T], Sequence):
 
-    def __init__(self, x: List[T]) -> None:
+    def __init__(self, x: list[T]) -> None:
         self._x = x
 
     def append(self, item):
@@ -52,10 +51,10 @@ class ConstantList(Generic[T], Sequence):
         ...
 
     @overload
-    def __getitem__(self, s: slice, /) -> List[T]:
+    def __getitem__(self, s: slice, /) -> list[T]:
         ...
 
-    def __getitem__(self, item: Union[int, slice]) -> Union[T, List[T]]:
+    def __getitem__(self, item: Union[int, slice]) -> Union[T, list[T]]:
         return self._x[item]
 
     @overload
@@ -66,7 +65,7 @@ class ConstantList(Generic[T], Sequence):
     def __setitem__(self, s: slice, value: T, /):
         ...
 
-    def __setitem__(self, item: Union[int, slice], value: Union[T, List[T]]):
+    def __setitem__(self, item: Union[int, slice], value: Union[T, list[T]]):
         raise Exception("Cannot set item in a constant list")
 
     def __delitem__(self, item):
@@ -94,7 +93,7 @@ class BackgroundProcHandle:
         output_path: str,
         process_name: str,
         target_fn: Callable,
-        process_kwargs: Dict[Any, Any],
+        process_kwargs: dict[Any, Any],
     ):
         context = get_mp_context()
         reader, writer = context.Pipe(duplex=False)
