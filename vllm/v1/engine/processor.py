@@ -93,10 +93,10 @@ class Processor:
         params: SamplingParams,
     ) -> None:
         # Best of.
-        if params.best_of is not None:
+        if params.best_of:
             raise ValueError("VLLM V1 does not support best_of.")
         # Bad words.
-        if params.bad_words is not None:
+        if params.bad_words:
             raise ValueError("VLLM V1 does not support bad_words.")
 
     def _validate_params(
