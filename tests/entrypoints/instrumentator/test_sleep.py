@@ -85,6 +85,18 @@ def test_sleep_mode():
         assert weights_offloaded == 0
         assert discard_all == 0
 
+        response = requests.post(remote_server.url_for("sleep"), params={"level": "3"})
+        assert response.status_code == 200
+        response = requests.get(remote_server.url_for("is_sleeping"))
+        assert response.status_code == 200
+        assert response.json().get("is_sleeping") is True
+
+        response = requests.post(remote_server.url_for("wake_up"))
+        assert response.status_code == 200
+        response = requests.get(remote_server.url_for("is_sleeping"))
+        assert response.status_code == 200
+        assert response.json().get("is_sleeping") is False
+
 
 def _get_sleep_metrics_from_api(response: requests.Response):
     """Return (awake, weights_offloaded, discard_all)"""
