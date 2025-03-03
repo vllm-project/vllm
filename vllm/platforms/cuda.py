@@ -17,7 +17,6 @@ import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import import_pynvml
-import vllm.envs as envs
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
