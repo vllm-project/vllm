@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import torch
 
 
-@functools.lru_cache(maxsize=100)
+@functools.lru_cache
 def load_v1_op_config(op_type: str,
                       add_inputs: Optional[bool]) -> Optional[Dict]:
     gpu_name = torch.cuda.get_device_name()
@@ -38,7 +38,7 @@ def load_v1_op_config(op_type: str,
     return config_data
 
 
-@functools.lru_cache(maxsize=100)
+@functools.lru_cache
 def get_v1_op_configs(
         op_type: str,
         max_loras: int,
