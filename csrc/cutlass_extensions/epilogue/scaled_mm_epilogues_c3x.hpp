@@ -51,25 +51,23 @@ struct ScaledEpilogueBase {
 
   template <typename T>
   using ColOrScalarLoad = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
-      0 /*Stages*/, TileShape, T,
-      Stride<Int<1>, Int<0>, Int<0>>>;
+      0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>>;
 
   template <typename T>
   using RowOrScalarLoad = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
-      0 /*Stages*/, TileShape, T,
-      Stride<Int<0>, Int<1>, Int<0>>>;
+      0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using ColLoad = cutlass::epilogue::fusion::Sm90ColBroadcast<
-      0 /*Stages*/, TileShape, T, T,
-      Stride<Int<1>, Int<0>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+      0 /*Stages*/, TileShape, T, T, Stride<Int<1>, Int<0>, Int<0>>,
+      128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using RowLoad = cutlass::epilogue::fusion::Sm90RowBroadcast<
-      0 /*Stages*/, TileShape, T, T,
-      Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+      0 /*Stages*/, TileShape, T, T, Stride<Int<0>, Int<1>, Int<0>>,
+      128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   // This utility function constructs the arguments for the load descriptors
   // from a tensor. It can handle both row and column, as well as row/column or
