@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -76,7 +76,7 @@ def lora_path_on_disk(lora_path: str) -> str:
 
 
 # Global cache for LoRA tokenizers.
-lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
+lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 
 def process_image(
@@ -180,7 +180,7 @@ class BenchmarkDataset(ABC):
         output_len: Optional[int] = None,
         dataset_path: Optional[str] = None,
         model: Optional[str] = None,
-        data: Optional[List] = None,
+        data: Optional[list] = None,
         random_seed: int = DEFAULT_SEED,
     ) -> None:
         self.tokenizer = tokenizer
@@ -224,7 +224,7 @@ class BenchmarkDataset(ABC):
             "load_data must be implemented in subclasses.")
 
     def get_random_lora_request(
-        self, ) -> Tuple[Optional[LoRARequest], AnyTokenizer]:
+        self, ) -> tuple[Optional[LoRARequest], AnyTokenizer]:
         """
         Return a tuple (lora_request, tokenizer) for tokenizing requests.  If
         LoRA is enabled, returns the LoRA-specific tokenizer; otherwise, the
@@ -258,7 +258,7 @@ class BenchmarkDataset(ABC):
         for_online_benchmark: bool = False,
     ) -> Union[
             SampleRequest,
-            Tuple[str, int, int, Optional[MultiModalDataDict]],
+            tuple[str, int, int, Optional[MultiModalDataDict]],
     ]:
         """
         Helper to build a sample in either tuple or SampleRequest format.
@@ -277,9 +277,9 @@ class BenchmarkDataset(ABC):
     def sample(
         self,
         for_online_benchmark: bool = False
-    ) -> List[Union[
+    ) -> list[Union[
             SampleRequest,
-            Tuple[str, int, int, Optional[MultiModalDataDict]],
+            tuple[str, int, int, Optional[MultiModalDataDict]],
     ]]:
         """
         Generate sample requests from the dataset.
@@ -317,7 +317,7 @@ class RandomDataset(BenchmarkDataset):
         self.output_len = (output_len
                            if output_len is None else self.DEFAULT_OUTPUT_LEN)
 
-    def sample(self, for_online_benchmark: bool = False) -> List:
+    def sample(self, for_online_benchmark: bool = False) -> list:
         vocab_size = self.tokenizer.vocab_size
         prefix_token_ids = (np.random.randint(
             0, vocab_size, size=self.prefix_len).tolist()
@@ -382,8 +382,8 @@ class ShareGPTDataset(BenchmarkDataset):
         ]
         random.shuffle(self.data)
 
-    def sample(self, for_online_benchmark: bool = False) -> List:
-        samples: List = []
+    def sample(self, for_online_benchmark: bool = False) -> list:
+        samples: list = []
         for entry in self.data:
             if len(samples) >= self.num_requests:
                 break
@@ -468,7 +468,7 @@ class SonnetDataset(BenchmarkDataset):
         self,
         for_online_benchmark: bool = False,
         return_prompt_formatted: bool = False,
-    ) -> List:
+    ) -> list:
         # Calculate average token length for a poem line.
         tokenized_lines = [
             self.tokenizer(line).input_ids for line in self.data
@@ -552,7 +552,7 @@ class BurstGPTDataset(BenchmarkDataset):
         # Convert the dataframe to a list of lists.
         self.data = gpt4_df.values.tolist()
 
-    def sample(self, for_online_benchmark: bool = False) -> List:
+    def sample(self, for_online_benchmark: bool = False) -> list:
         samples = []
         for i in range(self.num_requests):
             input_len = int(self.data[i][2])
@@ -617,7 +617,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self.data = self.data.shuffle(seed=self.random_seed).filter(
             lambda x: len(x["conversations"]) >= 2)
 
-    def sample(self, for_online_benchmark: bool = False) -> List:
+    def sample(self, for_online_benchmark: bool = False) -> list:
         sampled_requests = []
         dynamic_output = self.output_len is None
 
@@ -703,7 +703,7 @@ class VisionArenaDataset(BenchmarkDataset):
         )
         self.data = dataset.shuffle(seed=self.random_seed)
 
-    def sample(self, for_online_benchmark: bool = False) -> List:
+    def sample(self, for_online_benchmark: bool = False) -> list:
         # TODO (jenniferzhao): Add support for offline benchmark sampling
         assert for_online_benchmark, (
             "VisionArenaDataset only support online benchmark sampling "
