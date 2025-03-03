@@ -141,3 +141,18 @@ def test_allowed_token_ids(model):
     with pytest.raises(ValueError):
         _ = model.generate(PROMPT,
                            SamplingParams(allowed_token_ids=[10000000]))
+
+
+def test_priority(model):
+    """Check that we can use allowed_token_ids."""
+
+    # This does not currently work due to incorrect implementation.
+    # TOKEN_ID = 10
+    # allowed_token_ids = [TOKEN_ID]
+    # output = model.generate(PROMPT, SamplingParams(
+    #     allowed_token_ids=allowed_token_ids))
+    # assert output[0].outputs[0].token_ids[-1] == TOKEN_ID
+
+    # Reject all allowed token ids
+    with pytest.raises(ValueError):
+        _ = model.generate(PROMPT, priority=[1])

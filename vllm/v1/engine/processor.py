@@ -147,11 +147,13 @@ class Processor:
 
         self._validate_lora(lora_request)
         self._validate_params(params)
+        if priority != 0:
+            raise ValueError("V1 does not support priority yet.")
+        if trace_headers is not None:
+            raise ValueError("V1 does not support tracing yet.")
 
         if arrival_time is None:
             arrival_time = time.time()
-        assert priority == 0, "vLLM V1 does not support priority at the moment."
-        assert trace_headers is None, "vLLM V1 does not support tracing yet."
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
