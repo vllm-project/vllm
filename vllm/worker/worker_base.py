@@ -16,6 +16,7 @@ from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms.cuda import set_cpu_affinity
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
@@ -24,8 +25,6 @@ from vllm.utils import (enable_trace_function_call_for_thread,
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
-
-from vllm.platforms.cuda import set_cpu_affinity
 
 logger = init_logger(__name__)
 

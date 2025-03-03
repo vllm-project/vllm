@@ -3,8 +3,8 @@
 pynvml. However, it should not initialize cuda context.
 """
 
-import os
 import math
+import os
 from functools import lru_cache, wraps
 from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
                     Union)
@@ -431,6 +431,7 @@ try:
         CudaPlatform.log_warnings()
 except ModuleNotFoundError:
     CudaPlatform.log_warnings()
+
 
 def set_cpu_affinity():
     if nvml_available:
