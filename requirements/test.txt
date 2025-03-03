@@ -126,6 +126,10 @@ encodec==0.1.1
     # via vocos
 evaluate==0.4.3
     # via lm-eval
+exceptiongroup==1.2.2
+    # via
+    #   anyio
+    #   pytest
 fastparquet==2024.11.0
     # via genai-perf
 fastrlock==0.8.2
@@ -759,9 +763,11 @@ typing-extensions==4.12.2
     #   huggingface-hub
     #   librosa
     #   mistral-common
+    #   multidict
     #   pqdm
     #   pydantic
     #   pydantic-core
+    #   rich
     #   torch
     #   typer
 tzdata==2024.2

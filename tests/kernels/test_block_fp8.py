@@ -42,7 +42,7 @@ M_moe = [1, 2, 7, 83, 512, 2048]
 N_moe = [128, 256, 4608]  # [128, 4608, 13824]
 K_moe = [256, 512, 7168]  # [256, 7168, 13824]
 BLOCK_SIZE = [[128, 128]]
-E = [2, 8, 16] # 24   # [8, 24, 128, 256]
+E = [2, 8, 16]  # 24   # [8, 24, 128, 256]
 TOP_KS = [1, 2]  # [1, 2, 6]
 OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
@@ -227,9 +227,11 @@ def p(s, t):
     #print(f"{s}: {t.shape}, {t.dtype}")
     pass
 
+
 def pp(x):
     #print(x)
     pass
+
 
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
@@ -298,7 +300,9 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
                 torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.03
 
+
 #########################################################################################
+
 
 def per_token_cast_to_fp8(
         x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -376,11 +380,16 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 
 # ref_out = torch.einsum('gmk,gnk->gmn', x, y)
 
-def deep_gemm_matmul_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
+
+def deep_gemm_matmul_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
+                                        block_shape):
     """Fused moe with block-wise quantization using native torch."""
     B, D = a.shape
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
-    out = torch.zeros(B * topk, w2.shape[1], dtype=torch.bfloat16, device=a.device)
+    out = torch.zeros(B * topk,
+                      w2.shape[1],
+                      dtype=torch.bfloat16,
+                      device=a.device)
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
     topk_weight, topk_ids = torch.topk(score, topk)
     topk_weight = topk_weight.view(-1)
@@ -393,22 +402,22 @@ def deep_gemm_matmul_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, bloc
         mask = topk_ids == i
         if mask.sum():
             inter_out = torch.empty((a_q[mask].shape[0], w1[i].shape[0]),
-                                    device=a_q.device, dtype=torch.bfloat16)
-            deep_gemm.gemm_fp8_fp8_bf16_nt((a_q[mask].to(dtype=torch.float8_e4m3fn), a_s[mask]),
-                                           (w1[i], w1_s[i]),
-                                           inter_out)
+                                    device=a_q.device,
+                                    dtype=torch.bfloat16)
+            deep_gemm.gemm_fp8_fp8_bf16_nt(
+                (a_q[mask].to(dtype=torch.float8_e4m3fn), a_s[mask]),
+                (w1[i], w1_s[i]), inter_out)
             act_out = SiluAndMul().forward_native(inter_out)
             act_out_q, act_out_s = per_token_group_quant_fp8(act_out, block_k)
             tmp_out = torch.empty((act_out.shape[0], w2[i].shape[0]),
-                                  device=a_q.device, dtype=torch.bfloat16)
+                                  device=a_q.device,
+                                  dtype=torch.bfloat16)
             deep_gemm.gemm_fp8_fp8_bf16_nt((act_out_q, act_out_s),
-                                           (w2[i], w2_s[i]),
-                                           tmp_out)
+                                           (w2[i], w2_s[i]), tmp_out)
             out[mask] = tmp_out
 
     return (out.view(B, -1, w2.shape[1]) *
             topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
-
 
 
 def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
@@ -433,8 +442,7 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
     row_size = max((topk * M) // num_groups, 1)  # 2 *?
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = (
-        moe_align_block_size(topk_ids, M * topk, num_groups, None)
-    )
+        moe_align_block_size(topk_ids, M * topk, num_groups, None))
     m_indices = expert_ids
     #assert m_indices.numel() == num_groups * M * topk
     #pp(f"num_tokens_post_padded = {num_tokens_post_padded}")
@@ -496,9 +504,10 @@ def deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
 # topk > 1 does not work
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
-    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product([512], [128], [256], [2], [1], [[128, 128]], DTYPES, SEEDS))
-    #itertools.product([2], [256], [512], [2], [1], [[128, 128]], DTYPES, SEEDS))
+    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES,
+                      SEEDS))
+#itertools.product([512], [128], [256], [2], [1], [[128, 128]], DTYPES, SEEDS))
+#itertools.product([2], [256], [512], [2], [1], [[128, 128]], DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
@@ -507,7 +516,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     if (N % 128 != 0 or K % 128 != 0 or topk > 1):
         pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}, {topk}")
 
-    pp(f"\nTEST M={M}, N={N}, K={K}, E/num_groups={E}, topk={topk}, block_size={block_size}, dtype={dtype}")
+    pp(f"\nTEST M={M}, N={N}, K={K}, E/num_groups={E}, topk={topk}, block_size={block_size}, dtype={dtype}"
+       )
 
     torch.set_printoptions(profile="full")
 
@@ -529,9 +539,9 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     if False:
         score = torch.empty((M, E), dtype=dtype)
         for i in range(M):
-            score[i] = torch.full((E,), 1.0/(i+1), dtype=dtype)
+            score[i] = torch.full((E, ), 1.0 / (i + 1), dtype=dtype)
         for i in range(score.numel()):
-            score.view(-1)[i] = 1.0/(i+1)
+            score.view(-1)[i] = 1.0 / (i + 1)
     score = torch.zeros((M, E), dtype=dtype)
     p("score", score)
     #pp(score)
@@ -597,8 +607,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                 block_shape=block_size,
             )
 
-            ref_out = deep_gemm_matmul_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
-                                                          topk, block_size)
+            ref_out = deep_gemm_matmul_w8a8_block_fp8_moe(
+                a, w1, w2, w1_s, w2_s, score, topk, block_size)
         else:
             out = deep_gemm_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
                                                topk, block_size)
