@@ -15,6 +15,7 @@ from vllm.distributed import (get_tensor_model_parallel_world_size,
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
+from vllm.logger import rank_debug
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -328,6 +329,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.W_QR = self.W_QR.to(act_dtype)
 
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
+            rank_debug(f"Performing matrix absorption for MLA, {envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION}")
             requantization_enabled = not envs.VLLM_MLA_DISABLE_REQUANTIZATION
             if is_fp8(weight_dtype) and requantization_enabled:
                 # This assumes it wise to requantize using the same group shapes
@@ -386,7 +388,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 self.W_UV_O_scales = W_UV_O_scales.T.contiguous()
             else:
                 self.W_UV_O = W_UV_O.to(act_dtype)
-
+            rank_debug(f"self.W_UV_O: {self.W_UV_O.shape},act_dtype {act_dtype}")
             self.tp_size = get_tensor_model_parallel_world_size()
         else:
             if is_fp8(weight_dtype):
