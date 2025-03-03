@@ -194,12 +194,13 @@ class CudaPlatformBase(Platform):
                 logger.info("Using Triton MLA backend.")
                 return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if use_v1:
-            #logger.info("Using Flash Attention backend on V1 engine.")
-            #return ("vllm.v1.attention.backends.flash_attn."
-            #        "FlashAttentionBackend")
-            logger.info("Using ROCm Attention backend on V1 engine.")
-            return ("vllm.v1.attention.backends.rocm_attn."
-                    "ROCmAttentionBackend")
+            if os.environ.get('VLLM_V1_USE_TRITON_BACKEND', '0') == '1':
+                logger.info("Using ROCm Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends.rocm_attn."
+                        "ROCmAttentionBackend")
+            logger.info("Using Flash Attention backend on V1 engine.")
+            return ("vllm.v1.attention.backends.flash_attn."
+                    "FlashAttentionBackend")
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
