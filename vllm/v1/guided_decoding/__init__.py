@@ -114,10 +114,13 @@ class GuidedDecodingManager:
             self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
 
     def __getitem__(self, key: GuidedDecodingKey) -> Optional[Grammar]:
+        # We need to pop and re-insert the grammar here for LRU cache
+        # of request_key_to_grammar
         if key in self.request_key_to_grammar:
             # Move accessed item to the end (most recently used)
             value = self.request_key_to_grammar.pop(key)
-            self.request_key_to_grammar[key] = value
+            if value is not None:
+                self.request_key_to_grammar[key] = value
             return value
         return None
 
