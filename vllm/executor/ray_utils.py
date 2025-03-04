@@ -83,9 +83,9 @@ try:
 
             execute_model_req = self.input_decoder.decode(serialized_req)
 
-            # TODO(swang): This is needed right now because Ray aDAG executes
-            # on a background thread, so we need to reset torch's current
-            # device.
+            # TODO(swang): This is needed right now because Ray Compiled Graph
+            # executes on a background thread, so we need to reset torch's
+            # current device.
             import torch
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
@@ -114,9 +114,12 @@ try:
 
         def execute_model_ray(
             self,
-            scheduler_output: "SchedulerOutput",
-        ) -> "ModelRunnerOutput":
-            # this method is used to compile ray CG,
+            scheduler_output: Union["SchedulerOutput",
+                                    Tuple["SchedulerOutput",
+                                          "IntermediateTensors"]],
+        ) -> Union["ModelRunnerOutput", Tuple["SchedulerOutput",
+                                              "IntermediateTensors"]]:
+            # This method is used by Ray Compiled Graph to execute the model,
             # and it needs a special logic of self.setup_device_if_necessary()
             self.setup_device_if_necessary()
             assert self.worker is not None, "Worker is not initialized"

@@ -5,6 +5,7 @@ pull_request_rules:
     - or:
       - files~=^[^/]+\.md$
       - files~=^docs/
+      - files~=^examples/
   actions:
     label:
       add:

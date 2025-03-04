@@ -19,7 +19,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding
+from .interfaces import SupportsCrossEncoding, SupportsV0Only
 
 
 def roberta_task_weights_filter(
@@ -191,7 +191,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         assert len(loaded), "Unable to load RobertaEmbeddingModel"
 
 
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
+                                       SupportsV0Only):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
