@@ -255,7 +255,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.text_config.vocab_size
         self.image_token_id = _IMAGE_TOKEN_ID
         self.image_feature_size = config.patch_size**2 * config.num_channels

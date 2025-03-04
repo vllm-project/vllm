@@ -267,7 +267,6 @@ class BaiChuanModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
