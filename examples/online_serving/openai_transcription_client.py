@@ -19,5 +19,10 @@ with open(str(mary_had_lamb), "rb") as f:
         model="openai/whisper-large-v3",
         language="en",
         response_format="text",
-        temperature=0.0)
+        temperature=0.0,
+        extra_body=dict(
+            seed=4419,
+            repetition_penalty=1.3,
+        ),
+    )
     print("transcription result:", transcription)
