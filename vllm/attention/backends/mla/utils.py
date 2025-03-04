@@ -15,7 +15,6 @@ from vllm.distributed import (get_tensor_model_parallel_world_size,
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.logger import rank_debug
 from vllm.logger import ForkedPdb
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod)
@@ -156,6 +155,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
         kv_b_proj: ColumnParallelLinear,
         o_proj: RowParallelLinear,
     ) -> None:
+        # NOTE: Make `MLACommonImpl` an `nn.Module` and `W_UV_O`, `W_Q_UK`, and `W_UK` `nn.Parameter`s,
+        # so that we can transfer them to the accelerator in case they are initialized on the CPU.
         torch.nn.Module.__init__(self)
         self.num_heads = num_heads
         self.head_size = head_size
@@ -332,7 +333,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
         self.W_QR = self.W_QR.to(act_dtype)
 
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            rank_debug(f"Performing matrix absorption for MLA, {envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION}")
             requantization_enabled = not envs.VLLM_MLA_DISABLE_REQUANTIZATION
             if is_fp8(weight_dtype) and requantization_enabled:
                 # This assumes it wise to requantize using the same group shapes
@@ -391,7 +391,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
                 self.W_UV_O_scales = W_UV_O_scales.T.contiguous()
             else:
                 self.W_UV_O = W_UV_O.to(act_dtype)
-            rank_debug(f"self.W_UV_O: {self.W_UV_O.shape},act_dtype {act_dtype}, device: {self.W_UV_O.device}")
             self.W_UV_O = torch.nn.Parameter(self.W_UV_O, requires_grad=False)
             self.W_Q_UK = torch.nn.Parameter(self.W_Q_UK, requires_grad=False)
             self.W_UK = torch.nn.Parameter(self.W_UK, requires_grad=False)
