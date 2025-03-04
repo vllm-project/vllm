@@ -60,12 +60,12 @@ class Grammar:
         Returns False if the FSM failed to advance.
         """
         for token in tokens:
-            self.num_processed_tokens += 1
             if not self.matcher.accept_token(token):
                 logger.error(
                     "Failed to advance FSM for request %s "
                     "for tokens %s. Please file an issue.", request_id, token)
                 return False
+            self.num_processed_tokens += 1
         return True
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> bool:
