@@ -1,46 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
+"""Inference-only GraniteMoeShared model.
 
-# Adapted from
-# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
-# Copyright 2023 The vLLM team.
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
-#
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Inference-only GraniteMoe model."""
+The architecture is the same as granitemoe but with the addition of shared
+experts.
+"""
 from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
-from transformers.models.granitemoe import GraniteMoeConfig
+from transformers.models.granitemoeshared import GraniteMoeSharedConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.distributed import get_pp_group
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (QKVParallelLinear,
-                                               ReplicatedLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -48,145 +27,52 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from . import mixtral
+from .granitemoe import GraniteMoeAttention, GraniteMoeMoE
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import make_layers, maybe_prefix
 
 
-class GraniteMoeMoE(nn.Module):
-    """A tensor-parallel MoE implementation for GraniteMoe that shards each
-    expert across all ranks.
-    Each expert's weights are sharded across all ranks and a fused MoE
-    kernel is used for the forward pass, and finally we reduce the outputs
-    across ranks.
-    """
+class GraniteMoeSharedMLP(nn.Module):
 
-    def __init__(self,
-                 num_experts: int,
-                 top_k: int,
-                 hidden_size: int,
-                 intermediate_size: int,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 tp_size: Optional[int] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: GraniteMoeSharedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
-        self.hidden_size = hidden_size
 
-        # Gate always runs at half / full precision for now.
-        self.gate = ReplicatedLinear(hidden_size,
-                                     num_experts,
-                                     bias=False,
-                                     params_dtype=params_dtype,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
-
-        self.experts = FusedMoE(num_experts=num_experts,
-                                top_k=top_k,
-                                hidden_size=hidden_size,
-                                intermediate_size=intermediate_size,
-                                params_dtype=params_dtype,
-                                reduce_results=True,
-                                renormalize=True,
-                                quant_config=quant_config,
-                                tp_size=tp_size,
-                                prefix=f"{prefix}.experts")
+        self.input_size = config.hidden_size
+        self.hidden_size = config.shared_intermediate_size
+        self.input_linear = MergedColumnParallelLinear(
+            input_size=self.input_size,
+            output_sizes=[self.hidden_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.input_linear")
+        self.output_linear = RowParallelLinear(
+            self.hidden_size,
+            self.input_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.output_linear")
+        if config.hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {config.hidden_act}. "
+                             "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # NOTE: hidden_states can have either 1D or 2D shape.
-        orig_shape = hidden_states.shape
-        hidden_states = hidden_states.view(-1, self.hidden_size)
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states, router_logits)
-        return final_hidden_states.view(orig_shape)
+        hidden_states, _ = self.input_linear(hidden_states)
+        hidden_states = self.act_fn(hidden_states)
+        hidden_states, _ = self.output_linear(hidden_states)
+        return hidden_states
 
 
-class GraniteMoeAttention(nn.Module):
+class GraniteMoeSharedDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        attention_multiplier: Optional[float] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
-        self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
-        else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = (attention_multiplier if attention_multiplier
-                        is not None else self.head_dim**-1)
-        self.rope_theta = rope_theta
-
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=max_position,
-            base=int(self.rope_theta),
-            is_neox_style=True,
-        )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
-
-
-class GraniteMoeDecoderLayer(nn.Module):
-
-    def __init__(
-        self,
-        config: GraniteMoeConfig,
+        config: GraniteMoeSharedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -212,6 +98,13 @@ class GraniteMoeDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.block_sparse_moe")
+        self.shared_mlp = None if \
+            getattr(config, 'shared_intermediate_size', 0) == 0 \
+            else GraniteMoeSharedMLP(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.shared_mlp"
+            )
 
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -235,14 +128,21 @@ class GraniteMoeDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states * self.residual_multiplier
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.block_sparse_moe(hidden_states)
+        if self.shared_mlp is None:
+            hidden_states = self.block_sparse_moe(hidden_states)
+        else:
+            # create a copy since block_sparse_moe modifies in-place
+            moe_hidden_states = hidden_states.clone()
+            moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
+            hidden_states = moe_hidden_states + self.shared_mlp(hidden_states)
+            del moe_hidden_states
         hidden_states = residual + hidden_states * self.residual_multiplier
 
         return hidden_states
 
 
 @support_torch_compile
-class GraniteMoeModel(nn.Module):
+class GraniteMoeSharedModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -252,6 +152,7 @@ class GraniteMoeModel(nn.Module):
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
+        self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -261,12 +162,13 @@ class GraniteMoeModel(nn.Module):
             self.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
+            quant_config=quant_config,
         )
         self.embedding_multiplier = config.embedding_multiplier
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: GraniteMoeDecoderLayer(
+            lambda prefix: GraniteMoeSharedDecoderLayer(
                 config, cache_config, quant_config=quant_config, prefix=prefix
             ),
             prefix=f"{prefix}.layers")
@@ -294,7 +196,8 @@ class GraniteMoeModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
             hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -305,7 +208,7 @@ class GraniteMoeModel(nn.Module):
         return hidden_states
 
 
-class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -331,10 +234,11 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.config = config
         self.lora_config = lora_config
-        self.quant_config = quant_config  # Required by MixtralForCausalLM
+        self.quant_config = quant_config
 
-        self.model = GraniteMoeModel(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(prefix, "model"))
+        self.model = GraniteMoeSharedModel(vllm_config=vllm_config,
+                                           prefix=maybe_prefix(
+                                               prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -347,7 +251,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
-        )
+            prefix=maybe_prefix(prefix, "lm_head"))
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 

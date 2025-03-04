@@ -18,7 +18,7 @@
 """ PyTorch Fuyu model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Literal, Optional, Set, Tuple, TypedDict
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -255,7 +255,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.text_config.vocab_size
         self.image_token_id = _IMAGE_TOKEN_ID
         self.image_feature_size = config.patch_size**2 * config.num_channels
@@ -327,7 +326,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             image_patches_flat)
         return vision_embeddings_flat.split(patches_per_image, dim=0)
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
