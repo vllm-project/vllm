@@ -7,11 +7,12 @@ to launch the vLLM OpenAI API server:
 
 On the client side, run:
     vllm bench serve \
-        --backend <backend> \
+        --endpoint-type <endpoint_type. Default 'openi-comp'> \
+        --label <benchmark result label. Default using endpoint_type> \
         --model <your_model> \
-        --dataset-name random \
-        --request-rate <request_rate> \ # By default <request_rate> is inf
-        --num-prompts <num_prompts> # By default <num_prompts> is 1000
+        --dataset-name <dataset_name. Default 'random'> \
+        --request-rate <request_rate. Default inf> \
+        --num-prompts <num_prompts. Default 1000>
 """
 import argparse
 import asyncio
@@ -244,7 +245,7 @@ def calculate_metrics(
         output_throughput=sum(actual_output_lens) / dur_s,
         total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
         mean_ttft_ms=np.mean(ttfts or 0) *
-        1000,  # ttfts is empty if streaming is not supported by backend
+        1000,  # ttfts is empty if streaming is not supported by the endpoint
         std_ttft_ms=np.std(ttfts or 0) * 1000,
         median_ttft_ms=np.median(ttfts or 0) * 1000,
         percentiles_ttft_ms=[(p, np.percentile(ttfts or 0, p) * 1000)
@@ -270,7 +271,7 @@ def calculate_metrics(
 
 
 async def benchmark(
-    backend: str,
+    endpoint_type: str,
     api_url: str,
     base_url: str,
     model_id: str,
@@ -290,18 +291,18 @@ async def benchmark(
     max_concurrency: Optional[int],
     lora_modules: Optional[list[str]],
 ):
-    if backend in ASYNC_REQUEST_FUNCS:
-        request_func = ASYNC_REQUEST_FUNCS[backend]
+    if endpoint_type in ASYNC_REQUEST_FUNCS:
+        request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     else:
-        raise ValueError(f"Unknown backend: {backend}")
+        raise ValueError(f"Unknown endpoint_type: {endpoint_type}")
 
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
         input_requests[0])
-    if backend != "openai-chat" and test_mm_content is not None:
-        # multi-modal benchmark is only available on OpenAI Chat backend.
-        raise ValueError(
-            "Multi-modal content is only supported on 'openai-chat' backend.")
+    if endpoint_type != "openai-chat" and test_mm_content is not None:
+        # multi-modal benchmark is only available on OpenAI Chat endpoint.
+        raise ValueError("Multi-modal content is only supported on "
+                         "'openai-chat' endpoint_type.")
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
@@ -564,10 +565,17 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
 
 def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
-        "--backend",
+        "--endpoint-type",
         type=str,
-        default="vllm",
+        default="openai-comp",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
+    )
+    parser.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="The label (prefix) of the benchmark results. If not specified, "
+        "the endpoint type will be used as the label.",
     )
     parser.add_argument(
         "--base-url",
@@ -587,8 +595,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--dataset-name",
         type=str,
-        default="sharegpt",
-        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf"],
+        default="random",
+        choices=["random"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
@@ -704,7 +712,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="Specify the filename to save benchmark json results."
         "If not specified, results will be saved in "
-        "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+        "{label}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"  # noqa
         " format.",
     )
     parser.add_argument(
@@ -803,7 +811,8 @@ def main(args: argparse.Namespace):
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    backend = args.backend
+    endpoint_type = args.endpoint_type
+    label = args.label
     model_id = args.model
     model_name = args.served_model_name
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
@@ -845,7 +854,7 @@ def main(args: argparse.Namespace):
 
     benchmark_result = asyncio.run(
         benchmark(
-            backend=backend,
+            endpoint_type=endpoint_type,
             api_url=api_url,
             base_url=base_url,
             model_id=model_id,
@@ -875,7 +884,8 @@ def main(args: argparse.Namespace):
         # Setup
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
         result_json["date"] = current_dt
-        result_json["backend"] = backend
+        result_json["endpoint_type"] = endpoint_type
+        result_json["label"] = label
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
@@ -905,7 +915,8 @@ def main(args: argparse.Namespace):
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
-        file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  #noqa
+        label = label or endpoint_type
+        file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  #noqa
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:

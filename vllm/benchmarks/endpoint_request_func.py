@@ -156,5 +156,5 @@ async def async_request_openai_completions(
 
 # TODO: Add more request functions for different API protocols.
 ASYNC_REQUEST_FUNCS = {
-    "vllm": async_request_openai_completions,
+    "openai-comp": async_request_openai_completions,
 }
