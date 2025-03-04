@@ -165,7 +165,7 @@ class DeepseekV3MoE(nn.Module):
 
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        show_mem_info(logger, f"{self._prefix}: before gate")
+        # show_mem_info(logger, f"{self._prefix}: before gate")
         batch_size, seq_len, hidden_dim = hidden_states.shape
         num_tokens = batch_size * seq_len
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -174,18 +174,18 @@ class DeepseekV3MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         hidden_states = hidden_states.reshape(batch_size, seq_len, hidden_dim)
-        show_mem_info(logger, f"{self._prefix}: shared_output shape {shared_output.shape}, router_logits shape {router_logits.shape}, hidden_states shape {hidden_states.shape}")
-        show_mem_info(logger, f"{self._prefix}: before experts")
+        # show_mem_info(logger, f"{self._prefix}: shared_output shape {shared_output.shape}, router_logits shape {router_logits.shape}, hidden_states shape {hidden_states.shape}")
+        # show_mem_info(logger, f"{self._prefix}: before experts")
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor
-        show_mem_info(logger, f"{self._prefix}: after experts")
+        # show_mem_info(logger, f"{self._prefix}: after experts")
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.ep_size == 1 and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
-        show_mem_info(logger, f"{self._prefix}: before return")
+        # show_mem_info(logger, f"{self._prefix}: before return")
         return final_hidden_states.view(batch_size, seq_len, hidden_dim)
 
 
@@ -600,20 +600,20 @@ class DeepseekV3DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
         # logger.info(f"hidden_states shape : {hidden_states.shape}")
-        show_mem_info(logger, f"{self._prefix}: before self_attn")
+        # show_mem_info(logger, f"{self._prefix}: before self_attn")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        htorch.core.mark_step()
-        show_mem_info(logger, f"{self._prefix}: after self_attn")
+        # htorch.core.mark_step()
+        # show_mem_info(logger, f"{self._prefix}: after self_attn")
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        show_mem_info(logger, f"{self._prefix}: after mlp")
+        # show_mem_info(logger, f"{self._prefix}: after mlp")
         return hidden_states, residual
 
 
