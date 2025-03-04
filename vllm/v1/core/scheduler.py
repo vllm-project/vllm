@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -15,6 +17,7 @@ from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreOutput, EngineCoreOutputs)
+from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -32,12 +35,14 @@ class Scheduler:
         lora_config: Optional[LoRAConfig],
         speculative_config: Optional[SpeculativeConfig],
         log_stats: bool,
+        guided_decoding_manager: GuidedDecodingManager,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.speculative_config = speculative_config
         self.log_stats = log_stats
+        self.guided_decoding_manager = guided_decoding_manager
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -97,7 +102,7 @@ class Scheduler:
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
-    def schedule(self) -> "SchedulerOutput":
+    def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -113,6 +118,14 @@ class Scheduler:
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+
+        # NOTE: guided_decoding_request_ids maps
+        # guided request's (request that use structured decoding)
+        # request_id to the running request index.
+        # This will helps us determine to slice the grammar bitmask
+        # and only applies valid mask for requests that
+        # uses structured decoding.
+        guided_decoding_request_ids: dict[str, int] = {}
 
         req_to_new_block_ids: dict[str, list[int]] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -184,6 +197,8 @@ class Scheduler:
             # Schedule the request.
             scheduled_running_reqs.append(request)
             self.scheduled_req_ids.add(request.request_id)
+            if request.use_guided_decoding:
+                guided_decoding_request_ids[request.request_id] = req_index
             req_to_new_block_ids[request.request_id] = [
                 b.block_id for b in new_blocks
             ]
@@ -221,11 +236,22 @@ class Scheduler:
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
+            # Use a temporary deque to collect requests that need to be skipped
+            # and put back at the head of the waiting queue later
+            waiting_for_fsm: deque[Request] = deque()
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
                 request = self.waiting[0]
+
+                if request.status == RequestStatus.WAITING_FOR_FSM:
+                    if request.grammar and request.is_grammar_ready:
+                        request.status = RequestStatus.WAITING
+                    else:
+                        guided_req = self.waiting.popleft()
+                        waiting_for_fsm.appendleft(guided_req)
+                        continue
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -281,6 +307,9 @@ class Scheduler:
                     break
 
                 self.waiting.popleft()
+                if request.use_guided_decoding:
+                    guided_decoding_request_ids[request.request_id] = req_index
+                req_index += 1
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
                 self.request_scheduled(request, scheduled_timestamp)
@@ -311,6 +340,10 @@ class Scheduler:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_budget = new_encoder_budget
 
+        # Put back any skipped requests at the head of the waiting queue
+        if waiting_for_fsm:
+            self.waiting.extendleft(waiting_for_fsm)
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -331,6 +364,8 @@ class Scheduler:
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
+        grammar_bitmask = self.guided_decoding_manager.grammar_bitmask(
+            self.requests, guided_decoding_request_ids, len(self.running))
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -369,6 +404,8 @@ class Scheduler:
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+            guided_decoding_request_ids=guided_decoding_request_ids,
+            grammar_bitmask=grammar_bitmask,
         )
 
         self.finished_req_ids = set()
@@ -381,7 +418,7 @@ class Scheduler:
         num_scheduled_spec_tokens: int,
         new_block_ids: list[int],
         resumed_from_preemption: bool,
-    ) -> "CachedRequestData":
+    ) -> CachedRequestData:
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         num_computed_tokens = request.num_computed_tokens
@@ -474,8 +511,8 @@ class Scheduler:
 
     def update_from_output(
         self,
-        scheduler_output: "SchedulerOutput",
-        model_runner_output: "ModelRunnerOutput",
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
     ) -> EngineCoreOutputs:
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
@@ -564,6 +601,11 @@ class Scheduler:
                     # NOTE: once we support N tokens per step (spec decode),
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
+
+            if new_token_ids and request.use_guided_decoding:
+                assert request.grammar is not None
+                request.grammar.accept_tokens(request.request_id,
+                                              new_token_ids)
 
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or prompt_logprobs_tensors is not None:

@@ -52,6 +52,9 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
+from vllm.v1.guided_decoding.utils import (
+    has_xgrammar_unsupported_json_features)
+
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
 
@@ -191,7 +194,17 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         requests: list[SampleRequest] = []
         dataset = datasets.load_dataset("NousResearch/json-mode-eval",
                                         split="train")
-        print(f"dataset has {len(dataset)} entries")
+        full_dataset_len = len(dataset)
+
+        def _filter_func(item):
+            import json
+            schema = json.loads(item["schema"])
+            return not has_xgrammar_unsupported_json_features(schema)
+
+        dataset = dataset.filter(_filter_func)
+        num_filtered_out = full_dataset_len - len(dataset)
+        print(f"dataset has {len(dataset)} entries after filtering "
+              f"out {num_filtered_out} entries with unsupported features")
         len_dataset = len(dataset)
         for data_point_idx in range(args.num_prompts):
             idx = data_point_idx
@@ -401,6 +414,8 @@ async def benchmark(
         int(len(input_requests) * guided_decoding_ratio))
 
     test_request = input_requests[0]
+    test_req_extra_body = (prepare_extra_body(test_request)
+                           if 0 in guided_decoding_req_idx else None)
     test_input = RequestFuncInput(
         model=model_id,
         prompt=test_request.prompt,
@@ -408,7 +423,7 @@ async def benchmark(
         prompt_len=test_request.prompt_len,
         output_len=test_request.expected_output_len,
         ignore_eos=ignore_eos,
-        extra_body=prepare_extra_body(test_request),
+        extra_body=test_req_extra_body,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -427,7 +442,7 @@ async def benchmark(
             prompt_len=test_request.prompt_len,
             output_len=test_request.expected_output_len,
             ignore_eos=ignore_eos,
-            extra_body=prepare_extra_body(test_request),
+            extra_body=test_req_extra_body,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:

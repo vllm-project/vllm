@@ -26,6 +26,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -61,6 +62,8 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        self.guided_decoding_manager = GuidedDecodingManager(vllm_config)
+
         # Setup scheduler.
         self.scheduler = Scheduler(
             scheduler_config=vllm_config.scheduler_config,
@@ -69,6 +72,7 @@ class EngineCore:
             lora_config=vllm_config.lora_config,
             speculative_config=vllm_config.speculative_config,
             log_stats=self.log_stats,
+            guided_decoding_manager=self.guided_decoding_manager,
         )
 
         # Setup MM Input Mapper.
@@ -131,6 +135,9 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
+        if req.use_guided_decoding:
+            # Start grammar compilation asynchronously
+            self.guided_decoding_manager.populate_cache(req)
 
         self.scheduler.add_request(req)
 
@@ -151,9 +158,18 @@ class EngineCore:
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         scheduler_output = self.scheduler.schedule()
+
+        # This case may occur when the only unfinished requests are
+        # guided decoding requests where the grammar has not finished
+        # compiling yet, so there's nothing to run.
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            return EngineCoreOutputs(
+                outputs=[], scheduler_stats=self.scheduler.make_stats())
+
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
+
         return engine_core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
