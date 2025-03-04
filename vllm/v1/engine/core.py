@@ -19,11 +19,13 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import get_exception_traceback, zmq_socket_ctx
+from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
+                        zmq_socket_ctx)
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
-from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType, UtilityOutput)
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            FinishReason, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
@@ -62,7 +64,13 @@ class EngineCore:
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
         # Setup scheduler.
-        self.scheduler = Scheduler(
+        if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
+            scheduler_cls = resolve_obj_by_qualname(
+                vllm_config.scheduler_config.scheduler_cls)
+        else:
+            scheduler_cls = Scheduler
+
+        self.scheduler = scheduler_cls(
             scheduler_config=vllm_config.scheduler_config,
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
@@ -150,10 +158,30 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, output)  # type: ignore
+        scheduler_output: SchedulerOutput = self.scheduler.schedule()
+
+        # The spyre scheduler can decide to ignore requests, so they'll be
+        # immediately finished. Build some outputs for those so we can indicate
+        # that they're done.
+        ignored_request_outputs = [
+            EngineCoreOutput(request_id=req_id,
+                             new_token_ids=[],
+                             finish_reason=FinishReason.ABORT)
+            for req_id in scheduler_output.finished_req_ids
+        ]
+
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            output = self.model_executor.execute_model(scheduler_output)
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, output)  # type: ignore
+        else:
+            # All requests were ignored
+            # This case is currently hit by the Spyre plugin if no valid
+            # requests were scheduled
+            engine_core_outputs = EngineCoreOutputs(
+                outputs=[], scheduler_stats=self.scheduler.make_stats())
+        engine_core_outputs.outputs.extend(ignored_request_outputs)
+
         return engine_core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:

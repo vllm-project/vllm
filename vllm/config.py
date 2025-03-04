@@ -3199,6 +3199,10 @@ class CompilationConfig(BaseModel):
         self.bs_to_padded_graph_size[
             self.max_capture_size] = self.max_capture_size
 
+        print("\n@@@@@ Updated! @@@@@@@@@")
+        print(self)
+        print()
+
 
 @dataclass
 class VllmConfig:
@@ -3318,6 +3322,9 @@ class VllmConfig:
         # it should raise an IndexError.
         # the caller should make sure the batch_size is within the range,
         # i.e., batch_size <= self.compilation_config.max_capture_size
+
+        print("\n~~~~~~~~~~PADDING FOR CUDAGRAPH~~~~~~~~~~~~\n")
+
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
     @staticmethod
@@ -3400,6 +3407,8 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
+        print("\n\n\n Setting up config stuff \n\n\n")
+
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
         if envs.VLLM_USE_V1 and self.model_config is not None and \
@@ -3408,13 +3417,16 @@ class VllmConfig:
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time
             # and avoid any potential issues with the inductor.
-            self.compilation_config.custom_ops = ["none"]
-            self.compilation_config.use_cudagraph = True
-            self.compilation_config.use_inductor = True
-            self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.pass_config.enable_fusion = False
-            self.compilation_config.pass_config.enable_noop = False
-            self.compilation_config.level = CompilationLevel.PIECEWISE
+
+            print("\n\n\n ~~NOT~~ Overriding compilation config for V1 \n\n")
+
+            # self.compilation_config.custom_ops = ["none"]
+            # self.compilation_config.use_cudagraph = True
+            # self.compilation_config.use_inductor = True
+            # self.compilation_config.cudagraph_num_of_warmups = 1
+            # self.compilation_config.pass_config.enable_fusion = False
+            # self.compilation_config.pass_config.enable_noop = False
+            # self.compilation_config.level = CompilationLevel.PIECEWISE
 
         self._set_cudagraph_sizes()
 
