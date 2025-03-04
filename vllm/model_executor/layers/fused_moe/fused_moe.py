@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+is_hip = current_platform.is_rocm()
 
 
 @triton.jit
@@ -1164,8 +1165,52 @@ def fused_experts(hidden_states: torch.Tensor,
                   w2_zp: Optional[torch.Tensor] = None,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None,
-                  block_shape: Optional[List[int]] = None) -> torch.Tensor:
+                  block_shape: Optional[List[int]] = None,
+                  expert_mask: torch.Tensor = None
+) -> torch.Tensor:
 
+    if is_hip and envs.VLLM_USE_AITER_MOE:
+        from aiter.fused_moe_bf16_asm import moe_sorting_ck
+
+        local_E = E = w1.shape[0]
+        if expert_mask is not None:
+            E = expert_mask.numel()
+        topk = topk_ids.shape[1]
+        model_dim = w1.shape[-1]
+        dtype = hidden_states.dtype
+        scale_blk_k = block_shape[1]
+
+        (
+            sorted_token_ids,
+            sorted_weight_buf,
+            sorted_expert_ids,
+            num_valid_ids,
+            out_asm,
+        ) = moe_sorting_ck(
+            topk_ids, topk_weights, E, model_dim, dtype, expert_mask=expert_mask
+        )
+
+        a1, a1_scale = per_token_group_quant_fp8(hidden_states, scale_blk_k)
+        aiter.fmoe_fp8_blockscale_g1u1(
+            out_asm,
+            a1,
+            w1,
+            w2,
+            sorted_token_ids,
+            sorted_weight_buf,
+            sorted_expert_ids,
+            num_valid_ids,
+            topk,
+            w1_scale.view(local_E, -1),
+            w2_scale.view(local_E, -1),
+            a1_scale.t().contiguous(),
+            block_shape[0],
+            block_shape[1],
+            None,
+        )
+        return out_asm
+
+    # Not using AITER MoE
     if inplace:
         torch.ops.vllm.inplace_fused_experts(
             hidden_states, w1, w2, topk_weights, topk_ids, activation,

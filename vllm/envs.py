@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_USE_AITER_MOE: bool = False
 
 
 def get_default_cache_root():
@@ -636,6 +637,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+
+    # flag to control if vllm should use AITER MoE
+    "VLLM_USE_AITER_MOE":
+    lambda: (os.environ.get("VLLM_USE_AITER_MOE", "False").lower() in
+             ("true", "1")),
 }
 
 # end-env-vars-definition
