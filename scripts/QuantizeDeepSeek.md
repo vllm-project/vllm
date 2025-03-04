@@ -10,7 +10,7 @@
         - [Exporting Environment Variables](#exporting-environment-variables)
     - [Calibration](#calibration)
     - [Inference with FP8 Models on Two Nodes](#inference-with-fp8-models-on-two-nodes)
-    - [Inference with FP8 Models on a Single Node WIP](#inference-with-fp8-models-on-a-single-node-wip)
+    - [Inference with FP8 Models on a Single Node](#inference-with-fp8-models-on-a-single-node)
         - [Prerequisites](#prerequisites)
         - [Running the Example](#running-the-example)
     - [Accuracy Evaluation WIP](#accuracy-evaluation-wip)
@@ -147,7 +147,7 @@ export QUANT_CONFIG=inc_quant_with_fp8kv_config.json
 python inc_example_two_nodes.py --mode quant --fp8_kvcache
 ```
 
-## Inference with FP8 Models on a Single Node (WIP)
+## Inference with FP8 Models on a Single Node
 
 In this section, we load the BF16 model on DRAM and quantize it to FP8 model using unified measurement results obtained from the two-node calibration.
 
@@ -156,10 +156,9 @@ In this section, we load the BF16 model on DRAM and quantize it to FP8 model usi
 - Hardware: 1x8G3 or 1x8G2(WIP), 2T DRAM
 - Docker: 1.20.0-521
 
+> [!NOTE] The DRAM requirement can be decreased to less than 1T in a few days.
+
 ### Running the Example
-
-Quantize model weights to FP8 and using BF16 KVCache(WIP)
-
 
 - BF16 KVCache
 ```bash
