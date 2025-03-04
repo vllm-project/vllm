@@ -11,6 +11,10 @@ from typing import Any, Optional
 
 import torch
 import uvloop
+from benchmark_dataset import (VISION_ARENA_DATASET_PATH, BurstGPTDataset,
+                               HuggingFaceDataset, RandomDataset,
+                               SampleRequest, ShareGPTDataset, SonnetDataset,
+                               VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from PIL import Image
 from tqdm import tqdm
@@ -27,25 +31,6 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
-
-
-@dataclasses.dataclass
-class SampleRequest:
-    """A class representing a single inference request for benchmarking.
-
-    Attributes:
-        prompt: The input text prompt for the model.
-        prompt_len: The length of the prompt in tokens.
-        expected_output_len: The expected length of the output in tokens.
-        multi_modal_data: Optional dictionary containing multi-modal data (e.g.
-            images).
-        lora_request: Optional LoRARequest specifying the LoRA to use. 
-    """
-    prompt: str
-    prompt_len: int
-    expected_output_len: int
-    multi_modal_data: Optional[MultiModalDataDict] = None
-    lora_request: Optional[LoRARequest] = None
 
 
 def _get_prompt_for_image_model(question: str, *, model: str) -> str:
@@ -369,6 +354,49 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
         write_to_json(pt_file, pt_records)
 
 
+def get_requests(args, tokenizer):
+    # Common parameters for all dataset types.
+    common_kwargs = {
+        "tokenizer": tokenizer,
+        "enable_lora_tokenizer": args.enable_lora,
+        "lora_path": args.lora_path,
+        "max_loras": args.max_loras,
+        "num_requests": args.num_prompts,
+        "input_len": args.input_len,
+        "output_len": args.output_len,
+        "dataset_path": args.dataset,
+        "model": args.model,
+        "random_seed": args.seed,
+    }
+    sample_kwargs = {}
+
+    if args.dataset is None or args.dataset_name == "random":
+        common_kwargs["range_ratio"] = args.random_range_ratio
+        common_kwargs["prefix_len"] = args.prefix_len
+        dataset_cls = RandomDataset
+    elif args.dataset_name == "sharegpt":
+        dataset_cls = ShareGPTDataset
+    elif args.dataset_name == "sonnet":
+        assert tokenizer.chat_template or tokenizer.default_chat_template, (
+            "Tokenizer/model must have chat template for sonnet dataset.")
+        dataset_cls = SonnetDataset
+        common_kwargs["prefix_len"] = args.prefix_len
+        sample_kwargs["return_prompt_formatted"] = True
+    elif args.dataset_name == "burstgpt":
+        dataset_cls = BurstGPTDataset
+    elif args.dataset_name == "hf":
+        if args.dataset == VISION_ARENA_DATASET_PATH and args.hf_subset is None:
+            dataset_cls = VisionArenaDataset
+        else:
+            dataset_cls = HuggingFaceDataset
+        common_kwargs["dataset_split"] = args.hf_split
+        common_kwargs["dataset_subset"] = args.hf_subset
+    else:
+        raise ValueError(f"Unknown dataset name: {args.dataset_name}")
+
+    return dataset_cls(**common_kwargs).sample(**sample_kwargs)
+
+
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -376,48 +404,7 @@ def main(args: argparse.Namespace):
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
-    if args.dataset is None:
-        vocab_size = tokenizer.vocab_size
-        requests = []
-        for _ in range(args.num_prompts):
-
-            request_tokenizer = tokenizer
-            lora_request: Optional[LoRARequest] = None
-            if args.enable_lora:
-                lora_request, lora_tokenizer = get_random_lora_request(args)
-                if lora_tokenizer:
-                    request_tokenizer = lora_tokenizer
-
-            # Synthesize a prompt with the given input length.
-            candidate_ids = [
-                random.randint(0, vocab_size - 1)
-                for _ in range(args.input_len)
-            ]
-            # As tokenizer may add additional tokens like BOS, we need to try
-            # different lengths to get the desired input length.
-            for _ in range(5):  # Max attempts to correct
-                candidate_prompt = request_tokenizer.decode(candidate_ids)
-                tokenized_len = len(request_tokenizer.encode(candidate_prompt))
-
-                if tokenized_len == args.input_len:
-                    break
-
-                # Adjust length based on difference
-                diff = args.input_len - tokenized_len
-                if diff > 0:
-                    candidate_ids.extend([
-                        random.randint(100, vocab_size - 100)
-                        for _ in range(diff)
-                    ])
-                else:
-                    candidate_ids = candidate_ids[:diff]
-            requests.append(
-                SampleRequest(prompt=candidate_prompt,
-                              prompt_len=args.input_len,
-                              expected_output_len=args.output_len,
-                              lora_request=lora_request))
-    else:
-        requests = sample_requests(tokenizer, args)
+    requests = get_requests(args, tokenizer)
 
     is_multi_modal = any(request.multi_modal_data is not None
                          for request in requests)
@@ -475,6 +462,11 @@ if __name__ == "__main__":
                         type=str,
                         choices=["vllm", "hf", "mii"],
                         default="vllm")
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
+        default="sharegpt")
     parser.add_argument("--dataset",
                         type=str,
                         default=None,
@@ -522,14 +514,36 @@ if __name__ == "__main__":
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.")
+    parser.add_argument("--prefix-len",
+                        type=int,
+                        default=None,
+                        help="Number of prefix tokens per request")
+    # HF
+    parser.add_argument("--hf-subset",
+                        type=str,
+                        default=None,
+                        help="Subset of the HF dataset.")
+    parser.add_argument("--hf-split",
+                        type=str,
+                        default=None,
+                        help="Split of the HF dataset.")
+    # random dataset
+    parser.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=1.0,
+        help="Range of sampled ratio of input/output length, "
+        "used only for RandomDataSet.",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
     if args.dataset is None:
-        assert args.input_len is not None
-        assert args.output_len is not None
+        # for random dataset, the default sampling
+        # setting is in benchmark_dataset.RandomDataset
+        print("When dataset is not set, it will default to random dataset")
     else:
         assert args.input_len is None
     if args.enable_lora:
