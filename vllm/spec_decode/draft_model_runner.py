@@ -303,8 +303,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
             if self.return_hidden_states and is_fallback:
                 if use_cuda_graph:
-                    indices = model_input.sampling_metadata.selected_token_indices
-                    output.hidden_states = hidden_states[: len(indices)]
+                    indices = model_input.sampling_metadata\
+                      .selected_token_indices
+                    output.hidden_states = hidden_states[:len(indices)]
                 else:
                     output.hidden_states = hidden_states
 
