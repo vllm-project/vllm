@@ -211,8 +211,9 @@ def test_engine_core_concurrent_batches(monkeypatch):
 
     class DummyExecutor(UniProcExecutor):
 
-        def initialize(self, kv_cache_config: KVCacheConfig) -> None:
-            super().initialize(kv_cache_config)
+        def initialize_from_config(
+                self, kv_cache_configs: list[KVCacheConfig]) -> None:
+            super().initialize_from_config(kv_cache_configs)
 
             # This executor actually can only run 1 batch at a time
             self.semaphore = threading.Semaphore(1)

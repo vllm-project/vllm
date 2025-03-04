@@ -1,23 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from array import array
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
-from vllm.attention import AttentionMetadata
 from vllm.attention.backends.xformers import XFormersImpl
 from vllm.config import ModelConfig, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import PoolerHead
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
-from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            PoolingSequenceGroupOutput)
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+
+from .interfaces import SupportsV0Only
 
 logger = init_logger(__name__)
 
@@ -29,12 +31,7 @@ class GritLMPooler(nn.Module):
 
         self.model_config = model_config
 
-        tokenizer = cached_get_tokenizer(
-            self.model_config.tokenizer,
-            tokenizer_mode=self.model_config.tokenizer_mode,
-            tokenizer_revision=self.model_config.tokenizer_revision,
-            trust_remote_code=self.model_config.trust_remote_code,
-        )
+        tokenizer = cached_tokenizer_from_config(self.model_config)
 
         # Collect the tokens needed for pattern matching.
         # "▁<" is different from "_<". The former uses "▁" to indicate that
@@ -95,8 +92,8 @@ class GritLMPooler(nn.Module):
 
         # Return no instruction in case of missing BOS token.
         if prompt_token_ids[0] != self.token_ids["<s>"]:
-            logger.warning("BOS token not found in prompt,"
-                           "thus using empty string for instruction."
+            logger.warning("BOS token not found in prompt, "
+                           "thus using empty string for instruction. "
                            "GritLM requires BOS token in prompt.")
             return instruction_len
 
@@ -116,8 +113,8 @@ class GritLMPooler(nn.Module):
         if found_embed_pattern_idx != -1:
             instruction_len = found_embed_pattern_idx + len(embed_pattern_ids)
         else:
-            logger.warning("Query instruction not found in prompt,"
-                           "thus using BOS token as instruction instead."
+            logger.warning("Query instruction not found in prompt, "
+                           "thus using BOS token as instruction instead. "
                            "GritLM requires query instruction in prompt.")
             instruction_len = 1
 
@@ -182,7 +179,7 @@ class GritLMPooler(nn.Module):
         return PoolerOutput(outputs=pooled_outputs)
 
 
-class GritLM(LlamaForCausalLM):
+class GritLM(LlamaForCausalLM, SupportsV0Only):
     """This class implements the embedding model for parasail-ai/GritLM-7B-vllm.
 
     The class inherits from LlamaForCausalLM and provides a custom pooling
@@ -222,13 +219,12 @@ class GritLM(LlamaForCausalLM):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
 
         # Change attention to non-causal for pooling tasks.
         if self.runner_type == "pooling":
+            attn_metadata = get_forward_context().attn_metadata
             assert attn_metadata.prefill_metadata.attn_bias is None
             attn_metadata.prefill_metadata.attn_bias = [
                 BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens)
@@ -237,8 +233,6 @@ class GritLM(LlamaForCausalLM):
         return super().forward(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             **kwargs,
         )
 

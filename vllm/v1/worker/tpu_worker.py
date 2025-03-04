@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A TPU worker class."""
 import os
-from typing import Dict, List, Optional
+from typing import Optional
 
 import torch
 import torch.distributed
@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
+from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -36,6 +36,7 @@ class TPUWorker:
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        self.is_driver_worker = is_driver_worker
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -102,7 +103,7 @@ class TPUWorker:
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
-        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
@@ -117,7 +118,7 @@ class TPUWorker:
             else:
                 raise NotImplementedError
 
-        runner_kv_caches: List[torch.Tensor] = []
+        runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
@@ -125,9 +126,7 @@ class TPUWorker:
 
         self.model_runner.dummy_run(
             runner_kv_caches,
-            num_tokens=1,
-            seq_len=self.scheduler_config.max_num_batched_tokens,
-            exec_mode=ExecutionMode.PREFILL,
+            num_tokens=self.scheduler_config.max_num_batched_tokens,
         )
 
         # Synchronize before measuring the memory usage.
@@ -151,7 +150,7 @@ class TPUWorker:
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
-        return output if self.rank == 0 else None
+        return output if self.is_driver_worker else None
 
     def load_model(self) -> None:
         self.model_runner.load_model()
@@ -170,9 +169,8 @@ class TPUWorker:
     def get_kv_cache_spec(self) -> KVCacheSpec:
         return self.model_runner.get_kv_cache_spec()
 
-    def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        kv_cache_config = kv_cache_configs[self.rank]
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def check_health(self) -> None:

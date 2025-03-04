@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -79,6 +80,25 @@ def apply_w8a8_block_fp8_linear(
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)
+
+
+def apply_w8a8_block_fp8_linear_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+    return torch.empty(output_shape, dtype=input.dtype, device=input.device)
+
+
+direct_register_custom_op(
+    op_name="apply_w8a8_block_fp8_linear",
+    op_func=apply_w8a8_block_fp8_linear,
+    mutates_args=[],
+    fake_impl=apply_w8a8_block_fp8_linear_fake,
+)
 
 
 # Unify the interface between `apply_w8a8_block_fp8_linear` and
@@ -162,6 +182,9 @@ def _per_token_group_quant_fp8(
     y_q_ptr,
     y_s_ptr,
     group_size,
+    # Num columns of y
+    y_num_columns,
+    y_row_stride,
     # Avoid to divide zero
     eps,
     # Information for float8
@@ -174,9 +197,14 @@ def _per_token_group_quant_fp8(
     quantization on a tensor.
     This function converts the tensor values into float8 values.
     """
+    groups_per_row = y_num_columns // group_size
+
     # Map the program id to the row of X and Y it should compute.
     g_id = tl.program_id(0)
-    y_ptr += g_id * group_size
+    row = g_id // groups_per_row
+    row_g_id = g_id % groups_per_row
+
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
     y_s_ptr += g_id
 
@@ -202,6 +230,7 @@ def _per_token_group_quant_fp8_colmajor(
     group_size,
     # Num columns of y
     y_num_columns,
+    y_row_stride,
     # Stride from one column to the next of y_s
     y_s_col_stride,
     # Avoid to divide zero
@@ -216,9 +245,14 @@ def _per_token_group_quant_fp8_colmajor(
     quantization on a tensor.
     This function converts the tensor values into float8 values.
     """
+    groups_per_row = y_num_columns // group_size
+
     # Map the program id to the row of X and Y it should compute.
     g_id = tl.program_id(0)
-    y_ptr += g_id * group_size
+    row = g_id // groups_per_row
+    row_g_id = g_id % groups_per_row
+
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
 
     # Convert g_id the flattened block coordinate to 2D so we can index
@@ -267,7 +301,7 @@ def per_token_group_quant_fp8(
     assert (x.shape[-1] % group_size == 0), (
         f"the last dimension of `x` {x.shape[-1]} must be divisible "
         f"by `group_size` {group_size}")
-    assert x.is_contiguous(), "`x` must be contiguous"
+    assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
     finfo = torch.finfo(dtype)
     fp8_min = finfo.min
@@ -295,6 +329,7 @@ def per_token_group_quant_fp8(
             x_s,
             group_size,
             x.shape[1],
+            x.stride(0),
             x_s.stride(1),
             eps,
             fp8_min=fp8_min,
@@ -309,6 +344,8 @@ def per_token_group_quant_fp8(
             x_q,
             x_s,
             group_size,
+            x.shape[1],
+            x.stride(0),
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
@@ -477,7 +514,7 @@ def w8a8_block_fp8_matmul(
     assert triton.cdiv(A.shape[-1], block_k) == As.shape[-1]
     M = A.numel() // A.shape[-1]
 
-    assert B.ndim == 2 and B.is_contiguous() and Bs.ndim == 2
+    assert B.ndim == 2 and Bs.ndim == 2
     N, K = B.shape
     assert triton.cdiv(N, block_n) == Bs.shape[0]
     assert triton.cdiv(K, block_k) == Bs.shape[1]

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from typing import Mapping, Optional, Union
+from collections.abc import Mapping
+from typing import Optional, Union
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
@@ -83,6 +84,19 @@ class Processor:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
 
+    def _validate_allowed_token_ids(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+    ) -> None:
+        if not isinstance(params, SamplingParams):
+            return
+        if params.allowed_token_ids is None:
+            return
+        if not all(0 <= tid < self.model_config.vocab_size
+                   for tid in params.allowed_token_ids):
+            raise ValueError(
+                "allowed_token_ids contains out-of-vocab token id")
+
     def process_inputs(
         self,
         request_id: str,
@@ -100,6 +114,7 @@ class Processor:
 
         self._validate_logprobs(params)
         self._validate_lora(lora_request)
+        self._validate_allowed_token_ids(params)
 
         if arrival_time is None:
             arrival_time = time.time()

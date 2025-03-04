@@ -34,3 +34,27 @@ def test_custom_layer_partition():
     # Wrong number of layers
     with pytest.raises(ValueError):
         _verify("5,5,5,5", 21, 4, [(0, 5), (5, 10), (10, 15), (15, 20)])
+
+
+@pytest.mark.parametrize(
+    "num_hidden_layers,pp_size,pp_rank,indices",
+    [
+        # pp_size 2
+        (2, 2, 0, (0, 1)),
+        (2, 2, 1, (1, 2)),
+        (3, 2, 0, (0, 2)),
+        (3, 2, 1, (2, 3)),
+        # pp_size 3
+        (3, 3, 0, (0, 1)),
+        (3, 3, 1, (1, 2)),
+        (3, 3, 2, (2, 3)),
+        (4, 3, 0, (0, 1)),
+        (4, 3, 1, (1, 3)),
+        (4, 3, 2, (3, 4)),
+        (5, 3, 0, (0, 2)),
+        (5, 3, 1, (2, 4)),
+        (5, 3, 2, (4, 5)),
+    ])
+def test_uneven_auto_partition(num_hidden_layers: int, pp_size: int,
+                               pp_rank: int, indices: tuple[int, int]):
+    assert indices == get_pp_indices(num_hidden_layers, pp_rank, pp_size)

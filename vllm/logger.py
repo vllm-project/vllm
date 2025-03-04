@@ -21,7 +21,7 @@ VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
 VLLM_LOG_FILTER_PATTERNS = envs.VLLM_LOG_FILTER_PATTERNS
 
 _FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
-           "%(filename)s:%(lineno)d] %(message)s")
+           "[%(filename)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
@@ -119,7 +119,7 @@ def _configure_vllm_root_logger() -> None:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
-            raise ValueError("Invalid logging config. Expected Dict, got %s.",
+            raise ValueError("Invalid logging config. Expected dict, got %s.",
                              type(custom_config).__name__)
         logging_config = custom_config
 
