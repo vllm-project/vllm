@@ -196,6 +196,9 @@ def openvino_platform_plugin() -> Optional[str]:
         if is_openvino:
             logger.debug("Confirmed OpenVINO platform is available"
                          " because vLLM is built with OpenVINO.")
+    if not is_openvino:
+        logger.debug("OpenVINO platform is not available because"
+                     " vLLM is not built with OpenVINO.")
 
     return "vllm.platforms.openvino.OpenVinoPlatform" if is_openvino else None
 
