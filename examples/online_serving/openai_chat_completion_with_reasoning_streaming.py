@@ -55,12 +55,12 @@ for chunk in stream:
     elif hasattr(chunk.choices[0].delta, "content"):
         content = chunk.choices[0].delta.content
 
-    if reasoning_content:
+    if reasoning_content is not None:
         if not printed_reasoning_content:
             printed_reasoning_content = True
             print("reasoning_content:", end="", flush=True)
         print(reasoning_content, end="", flush=True)
-    elif content:
+    elif content is not None:
         if not printed_content:
             printed_content = True
             print("\ncontent:", end="", flush=True)
