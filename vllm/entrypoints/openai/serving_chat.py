@@ -24,7 +24,8 @@ from vllm.entrypoints.openai.protocol import (
     RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
                                                        ReasoningParserManager)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
@@ -105,10 +106,11 @@ class OpenAIServingChat(OpenAIServing):
                                 "been registered") from e
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        diff_sampling_param = self.model_config.get_diff_sampling_param()
-        if diff_sampling_param:
+        self.default_sampling_params = (
+            self.model_config.get_diff_sampling_param())
+        if self.default_sampling_params:
             logger.info("Overwriting default chat sampling param with: %s",
-                        diff_sampling_param)
+                        self.default_sampling_params)
 
     async def create_chat_completion(
         self,
@@ -210,17 +212,14 @@ class OpenAIServingChat(OpenAIServing):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
-                # Build default sampling params
-                default_sampling_params = (
-                    self.model_config.get_diff_sampling_param())
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, default_sampling_params)
+                        default_max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
                         default_max_tokens,
                         self.model_config.logits_processor_pattern,
-                        default_sampling_params)
+                        self.default_sampling_params)
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
@@ -846,7 +845,7 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
-            prompt_logprobs=final_res.prompt_logprobs,
+            prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
         )
 
         return response
