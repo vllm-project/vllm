@@ -14,8 +14,11 @@ Alongside each architecture, we include some popular models that use it.
 
 By default, vLLM loads models from [HuggingFace (HF) Hub](https://huggingface.co/models).
 
-To determine whether a given model is supported, you can check the `config.json` file inside the HF repository.
-If the `"architectures"` field contains a model architecture listed below, then it should be supported in theory.
+To determine whether a given model is natively supported, you can check the `config.json` file inside the HF repository.
+If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
+
+Models do not _need_ to be natively supported to be used in vLLM.
+The <project:#transformers-fallback> enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
 
 :::{tip}
 The easiest way to check if your model is really supported at runtime is to run the program below:
@@ -40,46 +43,41 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+(transformers-fallback)=
+
 ### Transformers fallback
 
-`vllm` can fallback to models that are available in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
+vLLM can fallback to model implementations that are available in Transformers. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
 
-To check if the backend is `transformers`, you can simply do this:
+To check if the backend is Transformers, you can simply do this:
 
 ```python 
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
-llm.apply_model(lambda model: print(model.__class__))
+llm.apply_model(lambda model: print(type(model)))
 ```
 
-If it is `TransformersModel` then it means it's based on `transformers`!
+If it is `TransformersModel` then it means it's based on Transformers!
+
+:::{note}
+vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
+:::
 
 #### Supported features
 
-##### Quantization
+The Transformers fallback explicitly supports the following features:
 
-Transformers fallback has supported most of available quantization in vLLM (except GGUF). See [Quantization page](#quantization-index) for more information about supported quantization in vllm.
+- <project:#quantization-index> (except GGUF)
+- <project:#lora-adapter>
+- <project:#distributed-serving> (pipeline parallel coming soon <gh-pr:12832>!)
 
-##### LoRA
+#### Remote code
 
-LoRA hasn't supported on transformers fallback yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
+Earlier we mentioned that the Transformers fallback enables you to run remote code models directly in vLLM.
+If you are interested in this feature, this section is for you!
 
-Usually `transformers` model load weights via the `load_adapters` API, that depends on PEFT. We need to work a bit to either use this api (for now this would result in some weights not being marked as loaded) or replace modules accordingly.
-
-Hints as to how this would look like:
-
-```python
-class TransformersModel(nn.Module, SupportsLoRA):
-  def __init__(*):
-    ...
-    self.model.load_adapter(vllm_config.load_config.model_loader_extra_config["qlora_adapter_name_or_path"])
-```
-
-Blocker is that you need to specify supported lora layers, when we would ideally want to load whatever is inside the checkpoint!
-
-##### Remote code
-
-This fallback also means that any model on the hub that can be used in `transformers` with `trust_remote_code=True` that correctly implements attention can be used in production!
+Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
+Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
 
 ```python 
 from vllm import LLM
@@ -87,16 +85,17 @@ llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of
 llm.apply_model(lambda model: print(model.__class__))
 ```
 
-A model just needs the following two things:
+To make your model compatible with the Transformers fallback, it needs:
 
-```python
+```{code-block} python
+:caption: modeling_my_model.py
+
 from transformers import PreTrainedModel
 from torch import nn
 
 class MyAttention(nn.Module):
 
   def forward(self, hidden_states, **kwargs): # <- kwargs are required
-
     ...
     attention_interface = attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
     attn_output, attn_weights = attention_interface(
@@ -115,8 +114,26 @@ class MyModel(PreTrainedModel):
 Here is what happens in the background:
 
 1. The config is loaded
-2. `MyModel` python class is loaded from the `auto_map`, and we check that the model `_supports_attention_backend`.
-3. The `TransformersModel` backend is used. See `/model_executors/models/transformers`, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
+2. `MyModel` Python class is loaded from the `auto_map`, and we check that the model `_supports_attention_backend`.
+3. The `TransformersModel` backend is used. See <gh-file:vllm/model_executor/models/transformers.py>, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
+
+To make your model compatible with tensor parallel, it needs:
+
+```{code-block} python
+:caption: configuration_my_model.py
+
+from transformers import PretrainedConfig
+
+class MyConfig(PretrainedConfig):
+  base_model_tp_plan = {
+    "layers.*.self_attn.q_proj": "colwise",
+    ...
+  }
+```
+
+:::{tip}
+`base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
+:::
 
 That's it!
 
@@ -279,6 +296,11 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `GraniteMoeForCausalLM`
   * Granite 3.0 MoE, PowerMoE
   * `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc.
+  * ✅︎
+  * ✅︎
+- * `GraniteMoeSharedForCausalLM`
+  * Granite MoE Shared
+  * `ibm-research/moe-7b-1b-active-shared-experts` (test model)
   * ✅︎
   * ✅︎
 - * `GritLM`
@@ -906,7 +928,7 @@ Currently the PaliGemma model series is implemented without PrefixLM attention m
 :::
 
 :::{note}
-To use Qwen2.5-VL series models, you have to install Huggingface `transformers` library from source via `pip install git+https://github.com/huggingface/transformers`.
+To use Qwen2.5-VL series models, you have to install Hugging Face Transformers library from source via `pip install git+https://github.com/huggingface/transformers`.
 :::
 
 ### Pooling Models

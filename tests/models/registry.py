@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
-from typing import AbstractSet, Any, Literal, Mapping, Optional
+from typing import Any, Literal, Optional
 
 import pytest
 from packaging.version import Version
@@ -130,6 +131,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GPTNeoXForCausalLM": _HfExamplesInfo("EleutherAI/pythia-160m"),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
+    "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts",  # noqa: E501
+                                                   min_transformers_version="4.49"),  # noqa: E501
     "Grok1ModelForCausalLM": _HfExamplesInfo("hpcai-tech/grok-1",
                                              trust_remote_code=True),
     "InternLMForCausalLM": _HfExamplesInfo("internlm/internlm-chat-7b",
@@ -211,7 +214,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),  # noqa: E501
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),  # noqa: E501
-    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-large"),
+    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),
     # [Multimodal]
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
@@ -324,7 +327,7 @@ class HfExampleModels:
 
         self.hf_models = hf_models
 
-    def get_supported_archs(self) -> AbstractSet[str]:
+    def get_supported_archs(self) -> Set[str]:
         return self.hf_models.keys()
 
     def get_hf_info(self, model_arch: str) -> _HfExamplesInfo:

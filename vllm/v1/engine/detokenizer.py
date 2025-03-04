@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -17,12 +17,12 @@ class IncrementalDetokenizer:
 
     # Generation data
     output_text: str
-    tokens: List[str]
-    token_ids: List[int]
+    tokens: list[str]
+    token_ids: list[int]
     prompt_len: int
 
     # Stop strings
-    stop: List[str]
+    stop: list[str]
     include_stop_str_in_output: bool
 
     # Metadata for incremental detokenization
@@ -41,7 +41,7 @@ class IncrementalDetokenizer:
     _last_output_text_offset: int = 0
 
     @property
-    def output_token_ids(self) -> List[int]:
+    def output_token_ids(self) -> list[int]:
         return self.token_ids[self.prompt_len:]
 
     @classmethod
@@ -84,7 +84,7 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
         )
 
-    def update(self, new_token_ids: List[int]) -> Optional[str]:
+    def update(self, new_token_ids: list[int]) -> Optional[str]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
