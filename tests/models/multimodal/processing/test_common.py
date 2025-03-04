@@ -175,6 +175,7 @@ def _test_processing_correctness(
     "Qwen/Qwen2-Audio-7B-Instruct",
     "fixie-ai/ultravox-v0_4",
     "openai/whisper-large-v3",
+    "google/paligemma2-3b-ft-docci-448"
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
