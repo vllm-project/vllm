@@ -307,9 +307,9 @@ async def async_request_openai_chat_completions(
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
-    assert api_url.endswith(
-        "chat/completions"
-    ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
+    assert api_url.endswith(("chat/completions", "profile")), (
+        "OpenAI Chat Completions API URL must end with 'chat/completions'"
+        " or 'profile'.")
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         content = [{"type": "text", "text": request_func_input.prompt}]
