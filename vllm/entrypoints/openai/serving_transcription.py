@@ -161,11 +161,12 @@ class OpenAIServingTranscription(OpenAIServing):
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
-        diff_sampling_param = self.model_config.get_diff_sampling_param()
-        if diff_sampling_param:
+        self.default_sampling_params = (
+            self.model_config.get_diff_sampling_param())
+        if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
-                diff_sampling_param)
+                self.default_sampling_params)
 
     async def _preprocess_transcription(
         self,
@@ -273,9 +274,8 @@ class OpenAIServingTranscription(OpenAIServing):
         try:
             # TODO(rob): subtract len of tokenized prompt.
             default_max_tokens = self.model_config.max_model_len
-            default_params = self.model_config.get_diff_sampling_param()
             sampling_params = request.to_sampling_params(
-                default_max_tokens, default_params)
+                default_max_tokens, self.default_sampling_params)
 
             self._log_inputs(
                 request_id,
