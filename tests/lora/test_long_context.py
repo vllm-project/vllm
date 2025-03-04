@@ -28,6 +28,24 @@ sampling_params = SamplingParams(
 )
 
 
+@pytest.fixture(params=[True, False])
+def run_with_both_engines_long_context_lora(request, monkeypatch):
+    # Automatically runs tests twice, once with V1 and once without
+    use_v1 = request.param
+    # Tests decorated with `@skip_v1` are only run without v1
+    skip_v1 = request.node.get_closest_marker("skip_v1")
+
+    if use_v1:
+        if skip_v1:
+            pytest.skip("Skipping test on vllm V1")
+        monkeypatch.setenv('VLLM_USE_V1', '1')
+        monkeypatch.setenv('VLLM_ALLOW_LONG_MAX_MODEL_LEN', '1')
+    else:
+        monkeypatch.setenv('VLLM_USE_V1', '0')
+
+    yield
+
+
 @pytest.fixture(autouse=True)
 def v1(run_with_both_engines_long_context_lora):
     # Simple autouse wrapper to run both engines for each test
@@ -118,7 +136,7 @@ def batched_generate(
     return [outputs[i].outputs[0].text.strip() for i in range(len(outputs))]
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def lora_llm(long_context_infos):
     scaling_factors = [
         context_len_to_scaling_factor[info["context_length"]]
@@ -160,7 +178,6 @@ def test_rotary_emb_replaced(dist_init):
                              enable_lora=True)
     engine_config = engine_args.create_engine_config()
 
-    #model_runner_cls = GPUModelRunner if envs.VLLM_USE_V1 else ModelRunner
     if envs.VLLM_USE_V1:
         model_runner = GPUModelRunner(
             vllm_config=engine_config,
