@@ -788,8 +788,6 @@ def _make_alibi_bias(
             dtype=dtype,
         )[:, :, :, :seq_len].copy_(bias)
         bias.mul_(alibi_slopes[:, None, None])
-        if num_heads != num_kv_heads:
-            bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
         attn_biases.append(LowerTriangularMaskWithTensorBias(bias))
 
     return attn_biases
