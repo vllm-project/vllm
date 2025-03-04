@@ -113,6 +113,7 @@ class DeepseekV2MoE(nn.Module):
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
                                      bias=False,
+                                     params_dtype=torch.float32,
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
@@ -154,7 +155,7 @@ class DeepseekV2MoE(nn.Module):
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.type(torch.float32))
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor
