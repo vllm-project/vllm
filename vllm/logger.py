@@ -10,7 +10,7 @@ from logging import Logger
 from logging.config import dictConfig
 from os import path
 from types import MethodType
-from typing import Any, Dict, Optional, cast
+from typing import Any, Optional, cast
 
 import vllm.envs as envs
 
@@ -24,7 +24,7 @@ _FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
            "[%(filename)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
-DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
+DEFAULT_LOGGING_CONFIG: dict[str, Any] = {
     "formatters": {
         "vllm": {
             "class": "vllm.logging_utils.NewLineFormatter",
