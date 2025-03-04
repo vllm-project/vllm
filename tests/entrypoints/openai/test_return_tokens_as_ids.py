@@ -16,15 +16,16 @@ from .test_completion import zephyr_pa_files  # noqa: F401
 from .test_completion import MODEL_NAME
 
 
-@pytest.fixture(scope="module", params=[True, False])
-def server_fixture(request, args):
+@pytest.fixture(scope="module")
+def server_fixture(request, default_server_args):  # noqa: F811
     use_server_flag = request.param
     if use_server_flag:
-        args_with_flag = args + ["--return-tokens-as-token-ids"]
+        args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]
         with RemoteOpenAIServer(MODEL_NAME, args_with_flag) as remote_server:
             yield (remote_server, True)
     else:
-        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        with RemoteOpenAIServer(MODEL_NAME,
+                                default_server_args) as remote_server:
             yield (remote_server, False)
 
 
