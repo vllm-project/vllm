@@ -292,6 +292,8 @@ class MQLLMEngine:
             # We do not set self._errored = True here, since the error
             # is due to an issue adding this request to the engine,
             # rather than an issue with the engine itself.
+            logger.debug("Failed to add request %s to engine. %s",
+                         request.request_id, e)
             is_errored = self._errored_with is not None
             rpc_err = RPCError(request_id=request_id,
                                is_engine_errored=is_errored,
