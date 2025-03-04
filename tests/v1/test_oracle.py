@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
+
 import pytest
 
+from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 UNSUPPORTED_MODELS_V1 = [
@@ -47,10 +50,41 @@ def test_unsupported_configs(monkeypatch):
                 guided_decoding_backend="lm-format-enforcer:no-fallback",
             ).create_engine_config()
 
+        with pytest.raises(NotImplementedError):
+            AsyncEngineArgs(
+                model=MODEL,
+                preemption_mode="swap",
+            ).create_engine_config()
+
+        with pytest.raises(NotImplementedError):
+            AsyncEngineArgs(
+                model=MODEL,
+                disable_async_output_proc=True,
+            ).create_engine_config()
+
+        with pytest.raises(NotImplementedError):
+            AsyncEngineArgs(
+                model=MODEL,
+                scheduling_policy="priority",
+            ).create_engine_config()
+
+        with pytest.raises(NotImplementedError):
+            AsyncEngineArgs(
+                model=MODEL,
+                num_scheduler_steps=5,
+            ).create_engine_config()
+
+        with pytest.raises(NotImplementedError):
+            AsyncEngineArgs(
+                model=MODEL,
+                scheduler_delay_factor=1.2,
+            ).create_engine_config()
+
 
 def test_enable_by_default_fallback(monkeypatch):
     with monkeypatch.context() as m:
-        m.delenv("VLLM_USE_V1")
+        if os.getenv("VLLM_USE_V1", None):
+            m.delenv("VLLM_USE_V1")
         m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
 
         # Should default to V1 for supported config.
@@ -69,14 +103,18 @@ def test_enable_by_default_fallback(monkeypatch):
 
         # Should fall back to V0 for experimental config.
         vllm_config = AsyncEngineArgs(
-            model=MODEL,
-            enable_lora=True,
-        ).create_engine_config()
+            model=UNSUPPORTED_MODELS_V1[0], ).create_engine_config()
         assert not vllm_config.use_v1
 
-        # Should fall back to V0 for unsupported config.
-        vllm_config = AsyncEngineArgs(
-            model=MODEL,
-            enable_lora=True,
-        ).create_engine_config()
-        assert not vllm_config.use_v1
+
+def test_v1_llm_by_default(monkeypatch):
+    with monkeypatch.context() as m:
+        if os.getenv("VLLM_USE_V1", None):
+            m.delenv("VLLM_USE_V1")
+        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
+
+        # Should default to V1 for supported config.
+        model = LLM(MODEL, enforce_eager=True, gpu_memory_utilization=0.2)
+        assert model.vllm_config.use_v1
+
+        assert hasattr(model.llm_engine, "engine_core")

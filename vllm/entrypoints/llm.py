@@ -4,8 +4,7 @@ import itertools
 import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import (Any, Callable, ClassVar, Optional, Union, cast, overload,
-                    type)
+from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 
 import cloudpickle
 import torch.nn as nn

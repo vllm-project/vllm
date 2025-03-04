@@ -1629,13 +1629,13 @@ class EngineArgs:
                 usage_context]
             logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
-                self.max_num_batched_tokens, usage_context.value)
+                self.max_num_batched_tokens, usage_context.value or "None")
 
         default_max_num_seqs = 1024
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs
             logger.debug("Setting max_num_seqs to %d for %s usage context.",
-                         self.max_num_seqs, usage_context.value)
+                         self.max_num_seqs, usage_context.value or "None")
 
 
 @dataclass
