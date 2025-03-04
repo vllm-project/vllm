@@ -821,6 +821,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Phi4MMForCausalLM`
+  * Phi-4-multimodal
+  * T + I<sup>+</sup> + A<sup>+</sup>
+  * `microsoft/Phi-4-multimodal-instruct`, etc.
+  * ✅︎
+  *
+  * ✅︎
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
@@ -894,6 +901,10 @@ Currently the PaliGemma model series is implemented without PrefixLM attention m
 
 :::{note}
 To use Qwen2.5-VL series models, you have to install Huggingface `transformers` library from source via `pip install git+https://github.com/huggingface/transformers`.
+:::
+
+:::{note}
+Phi4MMForCausalLM doesn't support text + image + audio input.
 :::
 
 ### Pooling Models
