@@ -4,10 +4,9 @@ import asyncio
 import json
 import re
 import time
-from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, List,
-                    Optional)
-from typing import Sequence as GenericSequence
-from typing import Tuple, Union
+from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import Sequence as GenericSequence
+from typing import Callable, Final, Optional, Union
 
 import partial_json_parser
 from fastapi import Request
@@ -144,7 +143,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            model_name = self.models.model_name(lora_request)
+            model_name = self._get_model_name(request.model, lora_request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
@@ -202,7 +201,7 @@ class OpenAIServingChat(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[RequestOutput, None]] = []
+        generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
@@ -286,8 +285,9 @@ class OpenAIServingChat(OpenAIServing):
                 level -= 1
         return level
 
+    @staticmethod
     def _filter_delta_text(delta_text: str,
-                           previous_text: str) -> Tuple[str, bool]:
+                           previous_text: str) -> tuple[str, bool]:
         # remove last '},' of the tool definition stemming from the
         # "name"/"parameters" outer object or closing ']' of the tool list
         # count occurrences of opening and closing curly braces and
@@ -318,7 +318,7 @@ class OpenAIServingChat(OpenAIServing):
         current_text: str,
         delta_text: str,
         function_name_returned: bool,
-    ) -> Tuple[Optional[DeltaMessage], bool]:
+    ) -> tuple[Optional[DeltaMessage], bool]:
         try:
             obj = partial_json_parser.loads(current_text)
         except partial_json_parser.core.exceptions.MalformedJSON:
@@ -394,7 +394,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         model_name: str,
-        conversation: List[ConversationMessage],
+        conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
@@ -422,8 +422,8 @@ class OpenAIServingChat(OpenAIServing):
         should_stream_with_reasoning_parsing = (
             self._should_stream_with_reasoning_parsing(request))
 
-        all_previous_token_ids: Optional[List[List[int]]]
-        function_name_returned: Optional[List[bool]] = None
+        all_previous_token_ids: Optional[list[list[int]]]
+        function_name_returned: Optional[list[bool]] = None
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -456,7 +456,7 @@ class OpenAIServingChat(OpenAIServing):
         # Prepare the tool parser if it's needed
         try:
             if tool_choice_auto and self.tool_parser:
-                tool_parsers: List[Optional[ToolParser]] = [
+                tool_parsers: list[Optional[ToolParser]] = [
                     self.tool_parser(tokenizer)
                 ] * num_choices
             else:
@@ -523,7 +523,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: Union[str, List[Dict[str, str]]] = ""
+                        last_msg_content: Union[str, list[dict[str, str]]] = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
                             last_msg_content = conversation[-1]["content"] or ""
@@ -808,7 +808,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         model_name: str,
-        conversation: List[ConversationMessage],
+        conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
@@ -827,7 +827,7 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res is not None
 
-        choices: List[ChatCompletionResponseChoice] = []
+        choices: list[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -902,7 +902,7 @@ class OpenAIServingChat(OpenAIServing):
                 # the fields of FunctionDefinition are a superset of the
                 # tool call outputs and can be used for parsing
                 tool_calls = TypeAdapter(
-                    List[FunctionDefinition]).validate_json(output.text)
+                    list[FunctionDefinition]).validate_json(output.text)
                 message = ChatMessage(
                     role=role,
                     content="",
@@ -965,7 +965,7 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: Union[str, List[Dict[str, str]]] = ""
+            last_msg_content: Union[str, list[dict[str, str]]] = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
@@ -1006,8 +1006,8 @@ class OpenAIServingChat(OpenAIServing):
         return response
 
     def _get_top_logprobs(
-            self, logprobs: Dict[int, Logprob], top_logprobs: Optional[int],
-            tokenizer: AnyTokenizer) -> List[ChatCompletionLogProb]:
+            self, logprobs: dict[int, Logprob], top_logprobs: Optional[int],
+            tokenizer: AnyTokenizer) -> list[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(token=(token := self._get_decoded_token(
                 p[1],
@@ -1024,12 +1024,12 @@ class OpenAIServingChat(OpenAIServing):
     def _create_chat_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
+        top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
         tokenizer: AnyTokenizer,
         num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
-        logprobs_content: List[ChatCompletionLogProbsContent] = []
+        logprobs_content: list[ChatCompletionLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]

@@ -250,6 +250,15 @@ def _run_worker_process(
     except Exception:
         logger.exception("Worker failed")
 
+    # Flush TunableOp results when TunableOp is enabled and
+    # online (in situ) tuning is enabled.
+    # Offline tuning API (record_untuned_is_enabled()) only
+    # available in PyTorch 2.6 or later.
+    import torch.cuda.tunable as tunable
+    if (tunable.is_enabled() and tunable.tuning_is_enabled()
+            and not tunable.record_untuned_is_enabled()):
+        tunable.write_file()
+
     logger.info("Worker exiting")
 
 
