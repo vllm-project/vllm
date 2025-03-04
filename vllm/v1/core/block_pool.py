@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import defaultdict
 from collections.abc import Iterable
+from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
@@ -50,7 +51,7 @@ class BlockPool:
             int, KVCacheBlock]] = defaultdict(dict)
 
     def get_cached_block(self,
-                         block_hash: BlockHashType) -> KVCacheBlock | None:
+                         block_hash: BlockHashType) -> Optional[KVCacheBlock]:
         """Get a cached block by the block hash, or None if cache miss.
         If there are duplicated blocks, we return the first block in the cache.
 
