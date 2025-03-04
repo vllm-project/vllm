@@ -900,6 +900,48 @@ def scaled_fp8_quant(
     return output, scale
 
 
+# fp8 block
+def per_token_group_quant_fp8(
+    input: torch.Tensor,
+    group_size: int,
+    column_major_scales: bool = False,
+    dtype: Optional[torch.dtype] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Function to perform per-token-group quantization on an input tensor `x`.
+    It converts the tensor values into signed float8 values and returns the
+    quantized tensor along with the scaling factor used for quantization.
+    Args:
+        x: The input tensor with ndim >= 2.
+        group_size: The group size used for quantization.
+        column_major_scales: If True, the scales are in column-major format.
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
+        scaling factor for quantization.
+    """
+    if dtype is None:
+        dtype = (torch.float8_e4m3fnuz
+                 if current_platform.is_rocm() else torch.float8_e4m3fn)
+    assert (input.shape[-1] % group_size == 0), (
+        f"the last dimension of `input` {input.shape[-1]} must be divisible "
+        f"by `group_size` {group_size}")
+    assert input.stride(-1) == 1, "`input` groups must be contiguous"
+
+    output_q = torch.empty_like(input, device=input.device, dtype=dtype)
+    if column_major_scales:
+        shape = (input.shape[-1] // group_size, ) + input.shape[:-1]
+        output_s = torch.empty(shape, device=input.device,
+                               dtype=torch.float32).permute(-1, -2)
+    else:
+        shape = (input.shape[:-1] + (input.shape[-1] // group_size, ))
+        output_s = torch.empty(shape, device=input.device, dtype=torch.float32)
+
+    torch.ops._C.per_token_group_quant_fp8(input, output_q, output_s,
+                                           group_size, column_major_scales)
+
+    return output_q, output_s
+
+
 # gptq allspark
 def allspark_repack_weight(
         qweight: torch.Tensor,
