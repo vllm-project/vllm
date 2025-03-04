@@ -64,6 +64,17 @@ DEVICES = ([
 # stages, so we need to verify this. prefill stage(True) or decode stage(False)
 STAGES = [True, False]
 
+# With the inclusion of V1 tests (look at the run_with_both_engines_lora),
+# the tests in this file run twice, once with the V0 engine and then with
+# the V1 engine.
+# The NUM_RANDOM_SEEDS value was set to 10 before. It is cut to half
+# with the inclusion of V1 tests to maintain the CI test times.
+NUM_RANDOM_SEEDS = 5
+# The VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS value was set to
+# 256 before. It is cut to half with the inclusion of V1 tests to maintain
+# the CI test times.
+VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
+
 
 @pytest.fixture(autouse=True)
 def v1(run_with_both_engines_lora):
@@ -261,7 +272,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 
         return embedding, lora_embedding
 
-    for i in range(10):
+    for i in range(NUM_RANDOM_SEEDS):
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
@@ -373,7 +384,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
 
         return expanded_embedding, lora_embedding
 
-    for i in range(10):
+    for i in range(NUM_RANDOM_SEEDS):
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
@@ -510,7 +521,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
 
         return linear, logits_processor, lora_logits_processor
 
-    for i in range(10):
+    for i in range(NUM_RANDOM_SEEDS):
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
@@ -647,7 +658,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
             assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
-    for i in range(10):
+    for i in range(NUM_RANDOM_SEEDS):
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
@@ -773,7 +784,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
             assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
-    for i in range(10):
+    for i in range(NUM_RANDOM_SEEDS):
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
@@ -920,7 +931,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
-    for i in range(10):
+    for i in range(NUM_RANDOM_SEEDS):
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
@@ -1103,7 +1114,8 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-@pytest.mark.parametrize("seed", list(range(256)))
+@pytest.mark.parametrize(
+    "seed", list(range(VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS)))
 def test_vocab_parallel_embedding_indices(tp_size, seed):
     random.seed(seed)
     vocab_size = random.randint(4000, 64000)
