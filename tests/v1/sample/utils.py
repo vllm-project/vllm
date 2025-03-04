@@ -2,7 +2,7 @@
 
 import re
 from enum import Enum
-from typing import Optional, TypeAlias
+from typing import Optional
 
 from vllm import CompletionOutput
 
@@ -15,7 +15,7 @@ class BatchLogprobsComposition(Enum):
     SAMPLE_PROMPT = 3
 
 
-BatchLogprobsSpecType: TypeAlias = list[tuple[Optional[int], Optional[int]]]
+BatchLogprobsSpecType = list[tuple[Optional[int], Optional[int]]]
 
 
 def get_test_batch(
