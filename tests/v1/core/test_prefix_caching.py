@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """Compare the with and without prefix caching."""
-from typing import List
 
 import pytest
 
@@ -434,7 +433,7 @@ def test_cache_blocks():
 
     # Test that blocks are cached correctly for 2 full blocks from the start.
     blocks = [KVCacheBlock(block_id=i) for i in range(2)]
-    block_hashes: List[BlockHashType] = []
+    block_hashes: list[BlockHashType] = []
 
     block_pool.cache_full_blocks(
         request=req,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import pytest
 
@@ -21,8 +21,8 @@ def vllm_model(vllm_runner):
 def _test_stopping(llm_engine: LLMEngine,
                    expected_output: str,
                    expected_reason: Any,
-                   stop: Optional[List[str]] = None,
-                   stop_token_ids: Optional[List[int]] = None,
+                   stop: Optional[list[str]] = None,
+                   stop_token_ids: Optional[list[int]] = None,
                    include_in_output: bool = False,
                    use_async_output_proc: bool = False) -> None:
     llm_engine.add_request(
