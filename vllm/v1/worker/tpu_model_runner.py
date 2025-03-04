@@ -76,8 +76,8 @@ class TPUModelRunner:
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
-        self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = scheduler_config.max_num_seqs
+        self.max_num_tokens = _get_padded_number(
+            scheduler_config.max_num_batched_tokens, NUM_QUERIES_PER_BLOCK)
         self.max_num_reqs = _get_padded_number(scheduler_config.max_num_seqs,
                                                NUM_QUERIES_PER_BLOCK)
 
@@ -749,7 +749,7 @@ class TPUModelRunner:
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()
-            if num_tokens >= self.scheduler_config.max_num_batched_tokens:
+            if num_tokens >= self.max_num_tokens:
                 break
             num_tokens *= 2
         end = time.perf_counter()
