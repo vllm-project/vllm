@@ -558,10 +558,23 @@ class WorkerWrapperBase:
             worker_class = resolve_obj_by_qualname(
                 self.vllm_config.parallel_config.worker_cls)
         else:
+            logger.warning(
+                "passing worker_cls as a class object is strongly deprecated,"
+                " as the serialization of class objects can be tricky and"
+                " error-prone. To be safe, please keep the class in a separate"
+                " module and pass the qualified name of the class as a string."
+            )
             assert isinstance(self.vllm_config.parallel_config.worker_cls,
                               bytes)
             worker_class = cloudpickle.loads(
                 self.vllm_config.parallel_config.worker_cls)
+        if self.vllm_config.parallel_config.worker_adapter_cls:
+            worker_adapter_class = resolve_obj_by_qualname(
+                self.vllm_config.parallel_config.worker_adapter_cls)
+            if worker_adapter_class not in worker_class.__bases__:
+                # dynamically inherit the worker adapter class
+                worker_class.__bases__ = worker_class.__bases__ + (
+                    worker_adapter_class, )
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
