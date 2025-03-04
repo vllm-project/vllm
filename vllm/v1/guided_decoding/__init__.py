@@ -193,7 +193,6 @@ class GuidedDecodingManager:
                 grammar = self[req.guided_decoding_key]
                 if grammar is not None:
                     req.grammar = copy.copy(grammar)
-                    continue
 
     def grammar_bitmask(self, requests: dict[str, Request],
                         guided_decoding_request_ids: dict[str, int],
