@@ -129,8 +129,8 @@ def cpu_platform_plugin() -> Optional[str]:
     try:
         is_cpu = vllm_version_matches_substr("cpu")
         if not is_cpu:
-            import platform
-            is_cpu = platform.machine().lower().startswith("arm")
+            import sys
+            is_cpu = sys.platform.startswith("darwin")
 
     except Exception:
         pass
