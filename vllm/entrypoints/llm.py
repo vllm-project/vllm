@@ -244,7 +244,7 @@ class LLM:
             engine_args, usage_context=UsageContext.LLM_CLASS)
 
         self.request_counter = Counter()
-        self.default_sampling_params = None
+        self.default_sampling_params: Union[dict[str, Any], None] = None
 
     @staticmethod
     def get_engine_class() -> type[LLMEngine]:
