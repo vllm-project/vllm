@@ -4,7 +4,8 @@ from typing import Any, Dict, List, Optional, Type
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.abstract import (AttentionType,
+                                              is_quantized_kv_cache)
 from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonImpl,
                                                 MLACommonMetadata)
@@ -58,7 +59,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                       "are not implemented for "
                                       "TritonMLAImpl")
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "TritonMLA with FP8 KV cache not yet supported")
 
