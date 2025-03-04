@@ -2,7 +2,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -183,8 +183,9 @@ class LinearBase(torch.nn.Module):
                                                               prefix=prefix)
         self.return_bias = return_bias
 
-    def forward(self,
-                x: torch.Tensor) -> tuple[torch.Tensor, Optional[Parameter]]:
+    def forward(
+        self, x: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         raise NotImplementedError
 
 
@@ -263,8 +264,9 @@ class ReplicatedLinear(LinearBase):
             f"to a parameter of size {param.size()}")
         param.data.copy_(loaded_weight)
 
-    def forward(self,
-                x: torch.Tensor) -> tuple[torch.Tensor, Optional[Parameter]]:
+    def forward(
+        self, x: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
         output = self.quant_method.apply(self, x, bias)
@@ -413,7 +415,9 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
-    def forward(self, input_) -> tuple[torch.Tensor, Optional[Parameter]]:
+    def forward(
+        self, input_
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -1186,7 +1190,9 @@ class RowParallelLinear(LinearBase):
 
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
-    def forward(self, input_) -> tuple[torch.Tensor, Optional[Parameter]]:
+    def forward(
+        self, input_
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
             input_parallel = input_
         else:
