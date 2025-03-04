@@ -60,10 +60,13 @@ static void quantize_row_q8_1_cuda(const scalar_t* x, void* vy, const int kx,
   const int64_t kx_padded = (kx + 512 - 1) / 512 * 512;
   const int block_num_x =
       (kx_padded + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
-  const dim3 num_blocks(block_num_x, ky, 1);
-  const dim3 block_size(CUDA_DEQUANTIZE_BLOCK_SIZE, 1, 1);
-  quantize_q8_1<scalar_t>
-      <<<num_blocks, block_size, 0, stream>>>(x, vy, kx, kx_padded);
+  constexpr int MAX_BLOCK_SIZE = 65535;
+  for(int off = 0; off < ky; off+=MAX_BLOCK_SIZE){
+      const int num_blocks_y = std::min(ky, off + MAX_BLOCK_SIZE) - off;
+      const dim3 num_blocks(block_num_x, num_blocks_y, 1);
+      const dim3 block_size(CUDA_DEQUANTIZE_BLOCK_SIZE, 1, 1);
+      quantize_q8_1<<<num_blocks, block_size, 0, stream>>>(&x[off*kx], (int32_t*)vy+off*(kx_padded/32*9), kx, kx_padded);
+  }
 }
 
 torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
