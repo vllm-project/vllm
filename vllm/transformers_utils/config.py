@@ -725,17 +725,11 @@ def get_hf_text_config(config: PretrainedConfig):
         return config
 
 
-@cache
 def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
     revision: Optional[str] = None,
 ) -> Optional[GenerationConfig]:
-    """
-    This function is cached based on function arguments. This means that if you
-    pass a file path to `model`, changing the file and rerunning will result in
-    the old value being returned.
-    """
     try:
         return GenerationConfig.from_pretrained(
             model,
