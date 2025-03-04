@@ -4,7 +4,7 @@ pynvml. However, it should not initialize cuda context.
 """
 
 import os
-from functools import lru_cache, wraps
+from functools import wraps
 from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
                     Union)
 
@@ -178,7 +178,8 @@ class CudaPlatformBase(Platform):
                         block_size)
                 else:
                     if use_v1:
-                        logger.info("Using FlashMLA backend on V1 engine.")
+                        logger.info_once(
+                            "Using FlashMLA backend on V1 engine.")
                         return ("vllm.v1.attention.backends.mla."
                                 "flashmla.FlashMLABackend")
                     else:
@@ -187,14 +188,14 @@ class CudaPlatformBase(Platform):
                                 "flashmla.FlashMLABackend")
 
             if use_v1:
-                logger.info("Using Triton MLA backend on V1 engine.")
+                logger.info_once("Using Triton MLA backend on V1 engine.")
                 return ("vllm.v1.attention.backends.mla."
                         "triton_mla.TritonMLABackend")
             else:
                 logger.info("Using Triton MLA backend.")
                 return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if use_v1:
-            logger.info("Using Flash Attention backend on V1 engine.")
+            logger.info_once("Using Flash Attention backend on V1 engine.")
             return ("vllm.v1.attention.backends.flash_attn."
                     "FlashAttentionBackend")
         if selected_backend == _Backend.FLASHINFER:
@@ -283,7 +284,6 @@ class CudaPlatformBase(Platform):
 class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def get_device_capability(cls,
                               device_id: int = 0
@@ -297,7 +297,6 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return None
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def has_device_capability(
         cls,
@@ -310,14 +309,12 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return False
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         return cls._get_physical_device_name(physical_device_id)
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
@@ -325,7 +322,6 @@ class NvmlCudaPlatform(CudaPlatformBase):
         return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = device_id_to_physical_device_id(device_id)

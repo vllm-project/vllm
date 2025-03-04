@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from typing import List
 
 import pytest
 
@@ -137,9 +136,9 @@ def prep_prompts(batch_size: int):
     The prompt is just under 10k tokens; sliding window is 4k
     so the answer is outside sliding window, but should still be correct.
     """
-    prompts: List[str] = []
-    answer: List[int] = []
-    indices: List[int] = []
+    prompts: list[str] = []
+    answer: list[int] = []
+    indices: list[int] = []
     random.seed(1)
     for _ in range(batch_size):
         idx = random.randint(30, 90)
@@ -158,7 +157,7 @@ def prep_prompts(batch_size: int):
     return prompts, answer, indices
 
 
-def check_answers(indices: List[int], answer: List[int], outputs: List[str]):
+def check_answers(indices: list[int], answer: list[int], outputs: list[str]):
     answer2 = [int(text[0:2].strip()) for text in outputs]
     print(list(zip(indices, zip(answer, answer2))))
     numok = 0
@@ -170,7 +169,7 @@ def check_answers(indices: List[int], answer: List[int], outputs: List[str]):
     assert frac_ok > 0.7
 
 
-def check_window(prompts: List[str]):
+def check_window(prompts: list[str]):
 
     def inner(llm: LLM):
         sliding_window = llm.llm_engine.model_config.get_sliding_window()
