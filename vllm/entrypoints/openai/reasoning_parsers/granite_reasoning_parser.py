@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
-from typing import Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -53,7 +54,7 @@ class GraniteReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -63,7 +64,7 @@ class GraniteReasoningParser(ReasoningParser):
             request (ChatCompletionReqest): Request being processed.
 
         Returns:
-            Tuple[Optional[str], Optional[str]]: Tuple pair containing the
+            tuple[Optional[str], Optional[str]]: Tuple pair containing the
             reasoning content and non-reasoning content.
         """
         re_match = self.reasoning_regex.findall(model_output)
@@ -123,6 +124,8 @@ class GraniteReasoningParser(ReasoningParser):
                 current_text, reasoning_content, delta_text)
         # We've finished both the start of reasoning and start of response seq.
         else:
+            # This should never happen since we matched on the response
+            assert resp_seq_len is not None
             delta_message = self._get_delta_message_with_both_bounds(
                 delta_text, reasoning_content, content, current_text,
                 resp_seq_len)
@@ -309,7 +312,8 @@ class GraniteReasoningParser(ReasoningParser):
         )
 
     def _get_content_sections(
-            self, current_text: str) -> Tuple[Optional[str], Optional[str]]:
+        self, current_text: str
+    ) -> tuple[Optional[str], Optional[int], Optional[str]]:
         """Parse the text to extract the reasoning content / content
         if we have them.
 
@@ -317,7 +321,7 @@ class GraniteReasoningParser(ReasoningParser):
             current_text (str): The full previous + delta text.
 
         Returns:
-            Tuple[Optional[str], Optional[str], Optional[str]]: Tuple of len 3
+            tuple[Optional[str], Optional[int], Optional[str]]: Tuple of len 3
             containing the reasoning content, the length of the response seq
             (if there is one) and the non-reasoning content.
         """
