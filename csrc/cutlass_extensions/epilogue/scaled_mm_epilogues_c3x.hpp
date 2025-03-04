@@ -22,7 +22,7 @@ struct identity {
   T operator()(T lhs) const { return lhs; }
 };
 
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct TrivialEpilogue {
  private:
   using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
@@ -44,32 +44,30 @@ struct TrivialEpilogue {
  * This class provides the common load descriptors for the
  * ScaledEpilogue[...] classes
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueBase {
  protected:
   using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
 
   template <typename T>
   using ColOrScalarLoad = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<1>, Int<0>, Int<0>>>;
+      0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>>;
 
   template <typename T>
   using RowOrScalarLoad = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<0>, Int<1>, Int<0>>>;
+      0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using ColLoad = cutlass::epilogue::fusion::Sm90ColBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T, T,
-      Stride<Int<1>, Int<0>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+      0 /*Stages*/, TileShape, T, T, Stride<Int<1>, Int<0>, Int<0>>,
+      128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using RowLoad = cutlass::epilogue::fusion::Sm90RowBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T, T,
-      Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+      0 /*Stages*/, TileShape, T, T, Stride<Int<0>, Int<1>, Int<0>>,
+      128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   // This utility function constructs the arguments for the load descriptors
   // from a tensor. It can handle both row and column, as well as row/column or
@@ -116,11 +114,11 @@ struct ScaledEpilogueBase {
    the A and B operands respectively. These scales may be either per-tensor or
    per row or column.
 */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogue
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
@@ -160,11 +158,11 @@ struct ScaledEpilogue
  * The bias tensor must be per-output channel.
  * ScaleA and ScaleB can be per-tensor or per-token/per-channel.
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueBias
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
@@ -203,11 +201,11 @@ struct ScaledEpilogueBias
  * bias is a column vector instead of a row vector. Useful e.g. if we are
  * computing a GEMM via C^T += B^T A^T. This happens in the 2:4 sparse kernels.
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueColumnBias
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
@@ -249,11 +247,11 @@ struct ScaledEpilogueColumnBias
  *
  * This epilogue also supports bias, which remains per-channel.
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueBiasAzp
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
@@ -314,11 +312,11 @@ struct ScaledEpilogueBiasAzp
  *
  * This epilogue also supports bias, which remains per-channel.
  */
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+template <typename ElementAcc, typename ElementD, typename TileShape>
 struct ScaledEpilogueBiasAzpToken
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, TileShape> {
  private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, TileShape>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
   using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
