@@ -78,7 +78,7 @@ class Attention(nn.Module):
                     "not pass a CacheConfig to the Attention layer. "
                     "As a result, we cannot detect whether to use V0 "
                     "or V1 attention. Please set VLLM_USE_V1=0 or "
-                    "VLLM_USE_V1=1 and file and issue on Github so "
+                    "VLLM_USE_V1=1 and file an issue on Github so "
                     "we can address it.")
             use_v1 = envs.VLLM_USE_V1
         if num_kv_heads is None:
