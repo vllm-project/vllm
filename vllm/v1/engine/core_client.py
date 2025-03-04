@@ -88,6 +88,9 @@ class EngineCoreClient(ABC):
     def wake_up(self) -> None:
         raise NotImplementedError
 
+    def is_sleeping(self) -> bool:
+        raise NotImplementedError
+
     def execute_dummy_batch(self) -> None:
         raise NotImplementedError
 
@@ -125,6 +128,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def wake_up_async(self) -> None:
+        raise NotImplementedError
+
+    async def is_sleeping_async(self) -> bool:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -180,6 +186,9 @@ class InprocClient(EngineCoreClient):
 
     def wake_up(self) -> None:
         self.engine_core.wake_up()
+
+    def is_sleeping(self) -> bool:
+        return self.engine_core.is_sleeping()
 
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
@@ -425,6 +434,9 @@ class SyncMPClient(MPClient):
     def wake_up(self) -> None:
         self._call_utility("wake_up")
 
+    def is_sleeping(self) -> bool:
+        return self._call_utility("is_sleeping")
+
     def execute_dummy_batch(self) -> None:
         self._call_utility("execute_dummy_batch")
 
@@ -514,6 +526,9 @@ class AsyncMPClient(MPClient):
 
     async def wake_up_async(self) -> None:
         await self._call_utility_async("wake_up")
+
+    async def is_sleeping_async(self) -> bool:
+        return await self._call_utility_async("is_sleeping")
 
     async def execute_dummy_batch_async(self) -> None:
         await self._call_utility_async("execute_dummy_batch")
