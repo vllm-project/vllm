@@ -1896,6 +1896,7 @@ class SpeculativeConfig:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
         """
+        print('Here speculative_model ' + str(speculative_model))
         if speculative_model is None:
             if num_speculative_tokens is not None:
                 if target_model_config.hf_text_config.model_type \

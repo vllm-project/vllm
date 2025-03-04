@@ -127,15 +127,23 @@ class Scheduler:
 
         # First, schedule the RUNNING requests.
         req_index = 0
+        print('In scheduling...')
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
             if request.request_id in self.scheduled_req_ids:
                 # This request has already been scheduled.
+                print('In scheduling continue...')
                 req_index += 1
                 continue
+            if self.speculative_config is None:
+                print('self.speculative_config.num_lookahead_slots is not set ')
+                num_new_tokens = (request.num_tokens_with_spec -
+                                request.num_computed_tokens)
+            else:
+                print('self.speculative_config.num_lookahead_slots ' + str(self.speculative_config.num_lookahead_slots))
+                num_new_tokens = (request.num_tokens_with_spec -
+                                request.num_computed_tokens) + self.speculative_config.num_lookahead_slots
 
-            num_new_tokens = (request.num_tokens_with_spec -
-                              request.num_computed_tokens)
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
@@ -249,8 +257,19 @@ class Scheduler:
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
-                num_new_tokens = request.num_tokens - num_computed_tokens
+                if self.speculative_config is None:
+                    print('self.speculative_config.num_lookahead_slots is not set ')
+                    num_new_tokens = request.num_tokens - num_computed_tokens
+                else:
+                    print('self.speculative_config.num_lookahead_slots ' + str(self.speculative_config.num_lookahead_slots))
+                    print('request.num_tokens ' + str(request.num_tokens))
+                    print('num_computed_tokens ' + str(num_computed_tokens))
+                    num_new_tokens = request.num_tokens - num_computed_tokens + self.speculative_config.num_lookahead_slots
+                    #num_new_tokens = request.num_tokens - num_computed_tokens
+
+                #num_new_tokens = request.num_tokens - num_computed_tokens
                 if num_new_tokens == 0:
+                    print('Here num_new_tokens == 0')
                     # This happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
                     # the last block. Note that we have to re-compute an entire
@@ -502,7 +521,11 @@ class Scheduler:
                 # When the request's num_computed_tokens catches up
                 # its num_tokens, the request generates output tokens.
                 # Otherwise, we ignore the sampler output for the request.
+                print('request.num_computed_tokens ' + str(request.num_computed_tokens))
+                print('num_tokens_scheduled ' + str(num_tokens_scheduled))
+                print('request.num_tokens ' + str(request.num_tokens))
                 request.num_computed_tokens += num_tokens_scheduled
+                
                 assert request.num_computed_tokens <= request.num_tokens
             else:
                 # num_computed_tokens_step represents the number of tokens

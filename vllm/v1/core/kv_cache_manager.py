@@ -165,6 +165,7 @@ class KVCacheManager:
         if num_tokens == 0:
             raise ValueError("num_tokens must be greater than 0")
 
+        print('new_computed_blocks ' + str(new_computed_blocks))
         new_computed_blocks = new_computed_blocks or []
 
         # The number of computed tokens is the number of computed tokens plus

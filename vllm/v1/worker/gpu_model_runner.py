@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import copy
 import gc
 import time
 import weakref
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, Any
 
 import numpy as np
 import torch
@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel, VllmConfig, SpeculativeConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
@@ -34,9 +34,11 @@ from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.multi_token_proposer import MultiTokenProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
@@ -51,6 +53,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        print('In GPUModelRunner init')
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -58,7 +61,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
+ 
         self.speculative_config = vllm_config.speculative_config
+        if self.speculative_config is not None:
+            print('self.speculative_config ' + str(self.speculative_config.draft_model_config.model))
+        self.spec_decode_vllm_config = None
+        self.spec_decode_model = None
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
@@ -141,20 +149,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Set up speculative decoding.
         self.use_spec_decode = False
+        print('Hi!!!')
         if self.speculative_config:
             self.use_spec_decode = True
             self.rejection_sampler = RejectionSampler()
+            self.spec_decode_vllm_config = None
+            print('Hello!!!')
+            if self._is_ngram_spec_decode(self.speculative_config):
             # TODO: find a better way to check if we are using ngram.
-            assert self.speculative_config.ngram_prompt_lookup_min, \
-                    "Currently, only ngram spec decode is supported in V1."
-            if get_pp_group().is_last_rank:
-                self.drafter = NgramProposer()
-                # Trigger Numba JIT compilation for N-gram proposer.
-                # This usually takes less than 1 second.
-                self.drafter.propose(
-                    np.zeros(1024, dtype=np.int32),
-                    self.speculative_config.ngram_prompt_lookup_min,
-                    self.speculative_config.num_speculative_tokens,
+                assert self.speculative_config.ngram_prompt_lookup_min, \
+                        "Currently, only ngram spec decode is supported in V1."
+                if get_pp_group().is_last_rank:
+                    self.drafter = NgramProposer()
+                    # Trigger Numba JIT compilation for N-gram proposer.
+                    # This usually takes less than 1 second.
+                    self.drafter.propose(
+                        np.zeros(1024, dtype=np.int32),
+                        self.speculative_config.ngram_prompt_lookup_min,
+                        self.speculative_config.num_speculative_tokens,
+                    )
+            else:
+                print('Here!!!')
+                self.spec_decode_vllm_config = self._init_spec_decode_vllm_config(
+                    self.vllm_config, self.speculative_config
                 )
 
         # Request states.
@@ -253,6 +270,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+
+    def _init_spec_decode_vllm_config(
+            self, vllm_config: VllmConfig,
+            speculative_config: SpeculativeConfig) -> VllmConfig:
+        spec_decode_vllm_config = copy.deepcopy(self.vllm_config)
+        spec_decode_vllm_config.model_config = self.speculative_config.draft_model_config
+        spec_decode_vllm_config.quant_config = VllmConfig._get_quantization_config(
+            spec_decode_vllm_config.model_config,
+            vllm_config.load_config,
+        )
+        spec_decode_vllm_config.parallel_config = self.speculative_config.draft_parallel_config  # noqa
+        return spec_decode_vllm_config
+    
+    def _is_ngram_spec_decode(
+        self, speculative_config: SpeculativeConfig) -> bool:
+        print('speculative_config.draft_model_config.model ' + str(speculative_config.draft_model_config.model))
+        #return speculative_config.draft_model_config.model == "[ngram]"
+        print('speculative_config.ngram_prompt_lookup_min ' + str(speculative_config.ngram_prompt_lookup_min))
+        return speculative_config.ngram_prompt_lookup_min is not None
+
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -934,6 +971,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+            print('hidden_states returned shape ' + str(hidden_states.shape))
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
@@ -961,6 +999,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output = self.rejection_sampler(draft_token_ids,
                                                     target_probs,
                                                     sampling_metadata)
+        
+        print('Sampler Output ' + str(sampler_output))
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1003,11 +1043,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 seq.tolist()
                 for seq in sampled_token_ids[valid_mask].split(gen_lens)
             ]
+        
+        print('hidden_states ' + str(hidden_states))
+        print('sample_hidden_states ' + str(sample_hidden_states))
+        print('sampled_token_ids ' + str(sampled_token_ids))
 
         if not self.use_spec_decode:
             spec_token_ids = None
         else:
             spec_token_ids = self.generate_draft_token_ids(
+                hidden_states, input_ids, positions, attn_metadata,
                 valid_sampled_token_ids)
 
         model_runner_output = ModelRunnerOutput(
@@ -1022,6 +1067,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def generate_draft_token_ids(
         self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
         sampled_token_ids: List[List[int]],
     ) -> List[List[int]]:
         # TODO(woosuk): Optimize.
@@ -1037,11 +1086,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             start_idx = self.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
-            drafter_output = self.drafter.propose(
-                self.input_batch.token_ids_cpu[i, :end_idx],
-                self.speculative_config.ngram_prompt_lookup_min,
-                self.speculative_config.num_speculative_tokens,
-            )
+            if self.spec_decode_model is not None:
+                drafter_output = self.drafter.propose(hidden_states, input_ids, positions, attn_metadata)
+            else:
+                drafter_output = self.drafter.propose(
+                    self.input_batch.token_ids_cpu[i, :end_idx],
+                    self.speculative_config.ngram_prompt_lookup_min,
+                    self.speculative_config.num_speculative_tokens,
+                )
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:
@@ -1060,6 +1112,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.lora_config,
                                                   self.device)
             time_after_load = time.perf_counter()
+            if self.spec_decode_vllm_config is not None:
+                logger.info(
+                    "Starting to load model %s...",
+                    self.spec_decode_vllm_config.model_config.model)
+                self.spec_decode_model = get_model(vllm_config=self.spec_decode_vllm_config)
+                self.drafter = MultiTokenProposer(self.spec_decode_model, self.spec_decode_vllm_config)
+
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB and %.6f seconds",
                     self.model_memory_usage / float(2**30),
@@ -1174,6 +1233,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+        if self.spec_decode_vllm_config is not None:
+            model = self.spec_decode_model
+            with set_forward_context(None, self.spec_decode_vllm_config,
+                                    num_tokens=num_tokens):
+                ignore_hidden_states = model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    previous_hidden_states=hidden_states,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+
         return hidden_states
 
     def profile_run(self) -> None:
@@ -1366,6 +1437,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "supported yet.")
 
         kv_caches: Dict[str, torch.Tensor] = {}
+        # Combine the forward contexts
+        combined_forward_context: Dict[str, Any] = self._combine_forward_contexts(
+            self.vllm_config.compilation_config.static_forward_context,
+            self.spec_decode_vllm_config.compilation_config.static_forward_context
+            if self.spec_decode_vllm_config is not None else None
+        )
 
         for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
             tensor_config = kv_cache_config.tensors[layer_name]
@@ -1381,13 +1458,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                     device=self.device)
             else:
                 raise NotImplementedError
-
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
-
+        
+        bind_kv_cache(kv_caches, combined_forward_context, self.kv_caches)
+    
+    
+    def _combine_forward_contexts(
+        self, model_forward_ctx: Dict[str, Any],
+        spec_model_forward_ctx: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        combined_forward_ctx: Dict[str, Any] = model_forward_ctx.copy()
+        if spec_model_forward_ctx is not None:
+            combined_forward_ctx.update(spec_model_forward_ctx)
+        return combined_forward_ctx
+    
     def get_kv_cache_spec(self) -> KVCacheSpec:
+        kv_cache_spec: KVCacheSpec = {}
+        self._update_kv_cache_spec(
+            kv_cache_spec, 
+            self.vllm_config.compilation_config.static_forward_context,
+            self.vllm_config.cache_config.block_size)
+        
+        if self.spec_decode_vllm_config is not None:
+            self._update_kv_cache_spec(
+                kv_cache_spec, 
+                self.spec_decode_vllm_config.compilation_config.static_forward_context,
+                self.spec_decode_vllm_config.cache_config.block_size)
+        return kv_cache_spec
+
+
+    def _update_kv_cache_spec(
+        self, kv_cache_spec: KVCacheSpec, forward_ctx: Dict[str, Any], block_size: int):
         """
         Generates the KVCacheSpec by parsing the kv cache format from each 
         Attention module in the static forward context.
@@ -1395,10 +1494,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             KVCacheSpec: A dictionary mapping layer names to their KV cache 
             format. Layers that do not need KV cache are not included.
         """
-
-        forward_ctx = self.vllm_config.compilation_config.static_forward_context
-        block_size = self.vllm_config.cache_config.block_size
-        kv_cache_spec: KVCacheSpec = {}
         for layer_name, attn_module in forward_ctx.items():
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention, MLA.
@@ -1419,5 +1514,3 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
-
-        return kv_cache_spec
