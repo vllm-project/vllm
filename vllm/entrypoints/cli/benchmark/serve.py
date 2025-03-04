@@ -10,11 +10,8 @@ class BenchmarkServingSubcommand(BenchmarkSubcommandBase):
     """ The `serve` subcommand for vllm bench. """
 
     def __init__(self):
+        self.name = "serve"
         super().__init__()
-
-    @property
-    def name(self) -> str:
-        return "serve"
 
     @property
     def help(self) -> str:

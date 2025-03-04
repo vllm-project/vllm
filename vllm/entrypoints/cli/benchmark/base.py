@@ -9,11 +9,6 @@ class BenchmarkSubcommandBase(CLISubcommand):
     """ The base class of subcommands for vllm bench. """
 
     @property
-    def name(self) -> str:
-        """The name of the subcommand."""
-        raise NotImplementedError
-
-    @property
     def help(self) -> str:
         """The help message of the subcommand."""
         raise NotImplementedError
