@@ -177,7 +177,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
         self.o_proj = o_proj
 
     def _v_up_proj_and_o_proj(self, x):
-        # ForkedPdb().set_trace()
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
             if is_fp8(self.W_UV_O):
                 output_parallel = apply_fp8_linear_generic(
@@ -391,6 +390,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
                 self.W_UV_O_scales = W_UV_O_scales.T.contiguous()
             else:
                 self.W_UV_O = W_UV_O.to(act_dtype)
+            # NOTE: We need transfer them to the accelerator in case they are initialized on the CPU.
             self.W_UV_O = torch.nn.Parameter(self.W_UV_O, requires_grad=False)
             self.W_Q_UK = torch.nn.Parameter(self.W_Q_UK, requires_grad=False)
             self.W_UK = torch.nn.Parameter(self.W_UK, requires_grad=False)
