@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import math
+import random
 import time
 from contextlib import nullcontext
 from datetime import datetime
@@ -42,6 +44,8 @@ def benchmark_config(
     use_int8_w8a16: bool,
     num_iters: int = 100,
     block_quant_shape: List[int] = None,
+    best_time: float = float("inf"),
+    warmup_num_iters = 5
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
@@ -143,13 +147,25 @@ def benchmark_config(
             run()
     torch.cuda.synchronize()
 
-    # Warmup
-    for _ in range(5):
-        graph.replay()
-    torch.cuda.synchronize()
-
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
+
+    # Warmup
+    latencies: list[float] = []
+    for i in range(warmup_num_iters):
+        prepare(i)
+        torch.cuda.synchronize()
+
+        start_event.record()
+        graph.replay()
+        end_event.record()
+        end_event.synchronize()
+        latencies.append(start_event.elapsed_time(end_event))
+
+    avg = sum(latencies) / (warmup_num_iters * 10) * 1000  # us
+
+    if not math.isnan(best_time) and avg > best_time * 1.5:
+        return avg
 
     latencies: list[float] = []
     for i in range(num_iters):
@@ -412,6 +428,7 @@ class BenchmarkWorker:
                                                    shard_intermediate_size,
                                                    hidden_size, search_space,
                                                    is_fp16, topk)
+            random.shuffle(search_space)
 
         with torch.cuda.device(self.device_id) if current_platform.is_rocm(
         ) else nullcontext():
@@ -428,7 +445,9 @@ class BenchmarkWorker:
                         use_fp8_w8a8,
                         use_int8_w8a16,
                         num_iters=20,
-                        block_quant_shape=block_quant_shape)
+                        block_quant_shape=block_quant_shape,
+                        best_time=best_time
+                    )
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
