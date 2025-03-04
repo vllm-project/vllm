@@ -74,7 +74,7 @@ def cuda_platform_plugin() -> Optional[str]:
         finally:
             pynvml.nvmlShutdown()
     except Exception as e:
-        logger.debug("exception %s happens when checking CUDA platform",
+        logger.debug("Exception happens when checking CUDA platform: %s",
                      str(e))
         if "nvml" not in e.__class__.__name__.lower():
             # If the error is not related to NVML, re-raise it.
