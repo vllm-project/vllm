@@ -461,6 +461,7 @@ class DPEngineCoreProc(EngineCoreProc):
         self.dp_group = None if dp_size <= 1 else (
             vllm_config.parallel_config.stateless_init_dp_group())
 
+        # Initialize the engine after setting up environment.
         super().__init__(input_path, output_path, vllm_config, executor_class,
                          log_stats)
 

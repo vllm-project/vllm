@@ -234,6 +234,8 @@ class WorkerProc:
         worker_response_mq_handle = self.worker_response_mq.export_handle()
 
         # Send Readiness signal to EngineCore process.
+        # Set linger here because we want to ensure the message has
+        # been sent before the context is closed.
         with zmq_socket_ctx(ready_path, zmq.constants.PUSH,
                             linger=10000) as ready_socket:
             payload = pickle.dumps(worker_response_mq_handle,
