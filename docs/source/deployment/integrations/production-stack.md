@@ -1,4 +1,4 @@
-v (deployment-production-stack)=
+(deployment-production-stack)=
 
 # Production stack
 
