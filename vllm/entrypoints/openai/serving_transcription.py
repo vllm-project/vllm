@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import BeamSearchParams
 from vllm.utils import PlaceholderModule
 
 try:
@@ -203,14 +204,11 @@ class OpenAIServingTranscription(OpenAIServing):
                 "exceeded.")
 
         prompt = {
-            "encoder_prompt": {
-                "prompt": "",
-                "multi_modal_data": {
-                    "audio": (y, sr),
-                },
+            "prompt":
+            f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}",
+            "multi_modal_data": {
+                "audio": (y, sr),
             },
-            "decoder_prompt":
-            f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
         }
         return cast(PromptType, prompt)
 
@@ -273,22 +271,34 @@ class OpenAIServingTranscription(OpenAIServing):
         try:
             # TODO(rob): subtract len of tokenized prompt.
             default_max_tokens = self.model_config.max_model_len
-            default_params = self.model_config.get_diff_sampling_param()
-            sampling_params = request.to_sampling_params(
-                default_max_tokens, default_params)
+            default_sampling_params = self.model_config.get_diff_sampling_param(
+            )
+            if request.use_beam_search:
+                sampling_params = request.to_beam_search_params(
+                    default_max_tokens, default_sampling_params)
+            else:
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens, default_sampling_params)
 
             self._log_inputs(
                 request_id,
-                prompt['decoder_prompt'],  # type: ignore
+                prompt['prompt'],  # type: ignore
                 params=sampling_params,
                 lora_request=None,
                 prompt_adapter_request=None)
 
-            result_generator = self.engine_client.generate(
-                prompt,
-                sampling_params,
-                request_id,
-            )
+            if isinstance(sampling_params, BeamSearchParams):
+                result_generator = self.engine_client.beam_search(
+                    prompt=prompt,
+                    request_id=request_id,
+                    params=sampling_params,
+                )
+            else:
+                result_generator = self.engine_client.generate(
+                    prompt,
+                    sampling_params,
+                    request_id,
+                )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -296,7 +306,6 @@ class OpenAIServingTranscription(OpenAIServing):
         # TODO(rob): figure out a way to pipe streaming in.
         # Non-streaming response.
         try:
-            assert result_generator is not None
             async for op in result_generator:
                 result = op
             return TranscriptionResponse(text=result.outputs[0].text)
