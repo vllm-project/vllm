@@ -2,7 +2,7 @@
 
 import torch
 
-from vllm.v1.utils import bind_kv_cache
+from vllm.v1.worker.tpu_model_runner import bind_kv_cache
 
 
 def test_bind_kv_cache():

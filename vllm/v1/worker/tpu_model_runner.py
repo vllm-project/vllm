@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
+from collections import defaultdict
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sampling_params import SamplingType
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
@@ -26,7 +28,6 @@ from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -38,6 +39,51 @@ logger = init_logger(__name__)
 # FIXME(woosuk): Find a more reliable way to prevent possible bugs.
 _PAD_SLOT_ID = 1_000_000_000
 INVALID_TOKEN_ID = -1
+
+
+def bind_kv_cache(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, "Attention"],
+    runner_kv_caches: list[torch.Tensor],
+) -> None:
+    """
+    Bind the allocated KV cache to both ModelRunner and forward context so
+    that the KV cache can be used in the forward pass.
+
+    This function:
+      1) Fills the ModelRunner's kv cache list (`runner_kv_caches`) with
+         kv_caches.
+      2) Associates each attention layer in the `forward_context` with its 
+         corresponding KV cache in kv_caches.
+
+    Args:
+        kv_caches: The allocated kv_caches with layer names as keys.
+        forward_context: The global forward context containing all Attention 
+        layers with layer names as keys.
+        runner_kv_caches: The kv_cache declared by ModelRunner.
+    """
+    # Bind kv_caches to ModelRunner
+    assert len(runner_kv_caches) == 0
+
+    # Convert kv_caches dict to a list of tensors in the order of layer_index.
+    index2name = defaultdict(list)
+    for layer_name in kv_caches:
+        index2name[extract_layer_index(layer_name)].append(layer_name)
+
+    for layer_index in sorted(index2name.keys()):
+        layer_names = index2name[layer_index]
+        if len(layer_names) > 1:
+            # One typical case is encoder-decoder model, e.g., bart.
+            # The cross attention and self attention in the same decoder layer
+            # has different layer_name but the same layer_index.
+            raise NotImplementedError
+        layer_name = layer_names[0]
+        runner_kv_caches.append(kv_caches[layer_name])
+
+    # Bind kv_caches to forward context
+    for layer_name, kv_cache in kv_caches.items():
+        # NOTE: Use list because of v0 PP virtual engine.
+        forward_context[layer_name].kv_cache = [kv_cache]
 
 
 class TPUModelRunner:

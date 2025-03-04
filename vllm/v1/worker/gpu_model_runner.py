@@ -34,7 +34,6 @@ from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
@@ -135,7 +134,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: list[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
@@ -1382,10 +1380,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 raise NotImplementedError
 
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+        # Associates each attention layer in the `forward_context` with the
+        # initialized KV cache.
+        forward_context = self.vllm_config.compilation_config \
+            .static_forward_context
+        for layer_name, kv_cache in kv_caches.items():
+            # NOTE: Use list because of v0 PP virtual engine.
+            forward_context[layer_name].kv_cache = [kv_cache]
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
