@@ -29,7 +29,7 @@ To verify that the Intel Gaudi software was correctly installed, run:
 hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
 apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core, habanalabs-thunk and habanalabs-container-runtime are installed
 pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
-pip list | grep neural # verify that neural_compressor is installed
+pip list | grep neural # verify that neural_compressor_pt is installed
 ```
 
 Refer to [Intel Gaudi Software Stack
@@ -109,12 +109,13 @@ If you're observing the following error: `docker: Error response from daemon: Un
 - Inference with [HPU Graphs](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html)
   for accelerating low-batch latency and throughput
 - Attention with Linear Biases (ALiBi)
+- INC quantization
 
 ## Unsupported features
 
 - Beam search
 - LoRA adapters
-- Quantization
+- AWQ quantization
 - Prefill chunking (mixed-batch inferencing)
 
 ## Supported configurations

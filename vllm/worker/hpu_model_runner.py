@@ -291,17 +291,24 @@ def precompute_indices_and_offsets(block_size, slot_mapping, is_prompt):
     return indices, offsets
 
 
-def modify_decoder_layer(module: torch.nn.Module, suffix="DecoderLayer"):
+def modify_decoder_layer(module: torch.nn.Module,
+                         name="",
+                         suffix="DecoderLayer"):
     if module.__class__.__name__.endswith(suffix):
 
         def forward_hook(module, args, output):
             htorch.core.mark_step()
             return output
 
+        def forward_pre_hook(module, input):
+            htorch.core.mark_step()
+
+        if (name == "0"):
+            module.register_forward_pre_hook(forward_pre_hook)
         module.register_forward_hook(forward_hook)
 
     for child_name, child_module in module.named_children():
-        modify_decoder_layer(child_module)
+        modify_decoder_layer(child_module, child_name)
 
 
 class HpuModelAdapter:
@@ -1880,10 +1887,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
 
-    def finish_measurements(self):
-        from neural_compressor.torch.quantization import finalize_calibration
-        finalize_calibration(self.model.model)
-
     def _check_config(self, batch_size, seq_len, is_prompt, warmup_mode):
         cfg = (batch_size, seq_len, is_prompt)
         seen = cfg in self.seen_configs
@@ -2082,18 +2085,12 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         return [output]
 
     def shutdown_inc(self):
-        can_finalize_inc = False
-        from contextlib import suppress
-        with suppress(AttributeError):
-            can_finalize_inc = (self.model_config.quantization == 'inc') and \
-                (self.model.model is not None) and \
-                self.inc_initialized_successfully and \
-                not getattr(self, "_is_inc_finalized", False)
+        can_finalize_inc = (self.model_config.quantization == 'inc') and \
+            (self.model.model is not None) and \
+            self.inc_initialized_successfully and \
+            not getattr(self, "_is_inc_finalized", False)
         if can_finalize_inc:
             from neural_compressor.torch.quantization import (
                 finalize_calibration)
             finalize_calibration(self.model.model)
             self._is_inc_finalized = True
-
-    def __del__(self):
-        self.shutdown_inc()
