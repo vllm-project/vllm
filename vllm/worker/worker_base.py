@@ -571,6 +571,9 @@ class WorkerWrapperBase:
         if self.vllm_config.parallel_config.worker_adapter_cls:
             worker_adapter_class = resolve_obj_by_qualname(
                 self.vllm_config.parallel_config.worker_adapter_cls)
+            logger.info(
+                "Injecting worker adapter class %s"
+                "into worker class %s", worker_adapter_class, worker_class)
             if worker_adapter_class not in worker_class.__bases__:
                 # dynamically inherit the worker adapter class
                 for attr in dir(worker_adapter_class):
