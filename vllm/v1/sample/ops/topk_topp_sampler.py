@@ -95,7 +95,11 @@ def apply_top_k_top_p(
 
     if k is not None:
         # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k.to(torch.long)
+        vocab_size = logits_sort.size(1)
+        # make sure k is in [1, vocab_size-1]
+        k = torch.clamp(k, min=1, max=vocab_size-1)
+
+        top_k_mask = vocab_size - k.to(torch.long)
         # Get all the top_k values.
         top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
         top_k_mask = logits_sort < top_k_mask
