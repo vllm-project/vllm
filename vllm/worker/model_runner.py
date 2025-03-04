@@ -1736,6 +1736,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        swiftkv_kwargs = ({
+            "sampling_metadata": model_input.sampling_metadata
+        } if "SwiftKV" in type(self.model).__name__ else {})
+
         if not bypass_model_exec:
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
@@ -1743,6 +1747,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
+                    **swiftkv_kwargs,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
                     **seqlen_agnostic_kwargs,
